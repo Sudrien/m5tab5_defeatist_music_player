@@ -14,6 +14,7 @@ TODON'Ts:
 
 TODO:
 
+- esp-idf 5.5.5, so m5unified can handle graphics variants
 - microsd hotplug supported
 - exfat format supported for absurdly big files supported
 - usb drive hotplug supported (2.0 speeds, be wary of power requirements)
