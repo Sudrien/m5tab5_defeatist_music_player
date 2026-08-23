@@ -1,0 +1,68 @@
+# Minimal deltas from the ESP32-P4 defaults. Everything not listed here
+# falls back to the IDF default on purpose.
+
+# Pin the target. Without this, anything that deletes sdkconfig (a clean
+# checkout, tools/enable_exfat.sh, idf.py fullclean) regenerates it with
+# IDF's default target of esp32.
+CONFIG_IDF_TARGET="esp32p4"
+
+# Tab5 silicon is ESP32-P4 rev v1.3. Without this the build targets rev
+# v3.1+ and esptool refuses to flash.
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+
+# 16 MB flash; the 2 MB default fails partition table generation.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+
+# Console over the USB-C port.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+
+# MP3 decode buffers live in PSRAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_SPEED_200M=y
+CONFIG_IDF_EXPERIMENTAL_FEATURES=y
+
+# Enabling PSRAM grows the bootloader. Size-optimising it keeps it under
+# 0x6000 so the partition table can stay at 0x8000 and partitions.csv
+# (app0 @ 0x10000) remains valid.
+CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_SIZE=y
+
+# Use the checked-in partitions.csv. Without these two the build silently
+# falls back to the default table and ignores that file.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# Long file names, or every track is a mangled 8.3 name. exFAT also
+# requires LFN.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_CODEPAGE_437=y
+
+# esp_log_level_set() is a no-op without this on IDF v6.
+CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
+
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+CONFIG_FREERTOS_HZ=1000
+
+# --- decode ---------------------------------------------------------
+#
+# minimp3 is float by default. On the classic ESP32 that was
+# disqualifying; the P4 has a single-precision FPU and the float path is
+# both faster and more accurate than minimp3's fixed-point fallback, so
+# it is left on. Nothing to configure -- this note exists so the absence
+# of a MINIMP3_FLOAT define is read as a decision rather than an
+# oversight.
+#
+# esp_audio_codec's decoders want roughly 20 KB of stack in whichever
+# task calls them. play_file() runs on the main task.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
+
+# Do not register esp_audio_codec's MP3 decoder. decoder.c routes every
+# .mp3 to our vendored minimp3 instead, so registering theirs would only
+# add a decoder nothing can reach.
+#
+# This does NOT resolve the mp3dec_init/mp3dec_decode_frame link
+# collision, which was the original reason this line was added. The
+# component ships as a precompiled archive; the Kconfig option controls
+# the registration source, not the archive member, so the duplicate
+# symbols survive it. minimp3_prefix.h is what actually fixes that.
+CONFIG_AUDIO_DECODER_MP3_SUPPORT=n
