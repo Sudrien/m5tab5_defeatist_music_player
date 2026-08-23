@@ -1,0 +1,22 @@
+# ESP-IDF build output
+/build/
+/sdkconfig
+/sdkconfig.old
+/managed_components/
+
+# Vendored by tools/ scripts. Not committed -- run them after cloning:
+#   ./tools/fetch_vendored.sh   (minimp3, pngle)
+#   ./tools/enable_exfat.sh     (patched fatfs)
+/components/minimp3/minimp3.h
+/components/minimp3/minimp3_ex.h
+/components/pngle/pngle.c
+/components/pngle/pngle.h
+/components/pngle/miniz.c
+/components/pngle/miniz.h
+/components/fatfs/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

@@ -1,0 +1,15 @@
+dependencies:
+  idf:
+    version: ">=5.4.2"
+
+  # Everything that is not MP3. Ships as precompiled archives under the
+  # ESPRESSIF MIT licence -- free, but licensed for use on Espressif
+  # silicon only, which is the same caveat the exFAT note carries. P4 has
+  # been supported since v2.0.0.
+  espressif/esp_audio_codec: ">=2.3.0,<2.6.0"
+
+  espressif/esp_lcd_st7121: "^1.0.0"
+
+# minimp3 is NOT here. It is two headers with no component manifest
+# upstream, so it is vendored by tools/fetch_vendored.sh into
+# components/minimp3/ and committed. See README.

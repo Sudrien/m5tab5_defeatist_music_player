@@ -1,0 +1,306 @@
+/*
+ * ID3v2 APIC extraction and display on the Tab5's ST7121 panel.
+ *
+ * The ESP32-P4 has a hardware JPEG codec, so the art is decoded by the
+ * jpeg_decode driver rather than in software -- a 1000x1000 cover takes
+ * a few ms instead of most of a second, which matters because it runs
+ * while audio is already streaming.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#include <stdlib.h>
+#include <string.h>
+
+#include "driver/jpeg_decode.h"
+#include "esp_check.h"
+#include "esp_lcd_mipi_dsi.h"
+#include "esp_lcd_panel_ops.h"
+#include "esp_log.h"
+#include "esp_heap_caps.h"
+
+#include "pngle.h"
+
+#include "albumart.h"
+
+static const char *TAG = "tab5_art";
+
+/* ------------------------------------------------------------------ */
+/* ID3v2 APIC                                                          */
+/* ------------------------------------------------------------------ */
+
+static uint32_t be32(const uint8_t *p)
+{
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
+           ((uint32_t)p[2] << 8)  |  (uint32_t)p[3];
+}
+
+/* v2.4 frame sizes are syncsafe; v2.3 are plain big-endian. Getting
+ * this backwards walks straight off the end of the first frame. */
+static uint32_t syncsafe32(const uint8_t *p)
+{
+    return ((uint32_t)(p[0] & 0x7F) << 21) | ((uint32_t)(p[1] & 0x7F) << 14) |
+           ((uint32_t)(p[2] & 0x7F) << 7)  |  (uint32_t)(p[3] & 0x7F);
+}
+
+/*
+ * Find the first APIC frame holding a JPEG and return a malloc'd copy of
+ * the image bytes. Caller frees.
+ *
+ * APIC payload: encoding byte, MIME string (NUL-terminated latin1),
+ * picture type byte, description (NUL-terminated, two NULs for the
+ * UTF-16 encodings), then the image.
+ */
+esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
+{
+    uint8_t hdr[10];
+
+    *out = NULL;
+    *out_len = 0;
+
+    fseek(f, 0, SEEK_SET);
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || memcmp(hdr, "ID3", 3) != 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const int ver = hdr[3];
+    if (ver < 3) {
+        ESP_LOGD(TAG, "ID3v2.%d predates APIC frames", ver);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (hdr[5] & 0x40) {
+        /* Extended header: skip it. Its own size field is syncsafe in
+         * v2.4 and plain in v2.3, same trap as frame sizes. */
+        uint8_t ext[4];
+        if (fread(ext, 1, 4, f) != 4) return ESP_ERR_INVALID_SIZE;
+        const uint32_t esz = (ver >= 4) ? syncsafe32(ext) : be32(ext);
+        fseek(f, (long)esz - ((ver >= 4) ? 4 : 0), SEEK_CUR);
+    }
+
+    const long tag_end = 10 + (long)syncsafe32(&hdr[6]);
+
+    while (ftell(f) + 10 <= tag_end) {
+        uint8_t fh[10];
+        if (fread(fh, 1, sizeof(fh), f) != sizeof(fh)) break;
+        if (fh[0] == 0) break;                      /* padding */
+
+        const uint32_t fsz = (ver >= 4) ? syncsafe32(&fh[4]) : be32(&fh[4]);
+        if (fsz == 0 || ftell(f) + (long)fsz > tag_end) break;
+
+        if (memcmp(fh, "APIC", 4) != 0) {
+            fseek(f, (long)fsz, SEEK_CUR);
+            continue;
+        }
+
+        uint8_t *frame = malloc(fsz);
+        if (!frame) return ESP_ERR_NO_MEM;
+        if (fread(frame, 1, fsz, f) != fsz) { free(frame); return ESP_ERR_INVALID_SIZE; }
+
+        size_t i = 0;
+        const uint8_t enc = frame[i++];
+        const char *mime = (const char *)&frame[i];
+        while (i < fsz && frame[i]) i++;
+        i++;                                        /* MIME NUL */
+        if (i >= fsz) { free(frame); return ESP_ERR_INVALID_SIZE; }
+        i++;                                        /* picture type */
+
+        /* Description. Encodings 1 and 2 are UTF-16 and terminate with
+         * two NUL bytes on an even boundary. */
+        if (enc == 1 || enc == 2) {
+            while (i + 1 < fsz && !(frame[i] == 0 && frame[i + 1] == 0)) i += 2;
+            i += 2;
+        } else {
+            while (i < fsz && frame[i]) i++;
+            i++;
+        }
+        if (i >= fsz) { free(frame); return ESP_ERR_INVALID_SIZE; }
+
+        const size_t img_len = fsz - i;
+        const bool is_jpeg = img_len > 3 && frame[i] == 0xFF && frame[i + 1] == 0xD8;
+        const bool is_png  = img_len > 8 && memcmp(&frame[i], "\x89PNG\r\n\x1a\n", 8) == 0;
+        if (!is_jpeg && !is_png) {
+            ESP_LOGW(TAG, "APIC is %s, which is neither JPEG nor PNG", mime);
+            free(frame);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+
+        uint8_t *img = malloc(img_len);
+        if (!img) { free(frame); return ESP_ERR_NO_MEM; }
+        memcpy(img, &frame[i], img_len);
+        free(frame);
+
+        ESP_LOGI(TAG, "cover art: %s, %u bytes", mime, (unsigned)img_len);
+        *out = img;
+        *out_len = img_len;
+        return ESP_OK;
+    }
+
+    return ESP_ERR_NOT_FOUND;
+}
+
+/* ------------------------------------------------------------------ */
+/* Decode and draw                                                     */
+/* ------------------------------------------------------------------ */
+
+esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
+                        const uint8_t *jpeg, size_t jpeg_len)
+{
+    esp_err_t ret = ESP_OK;
+    jpeg_decoder_handle_t dec = NULL;
+    uint8_t *in = NULL;
+    uint8_t *rgb = NULL;
+    size_t in_size = 0, rgb_size = 0;
+
+    const jpeg_decode_engine_cfg_t engine = { .timeout_ms = 5000 };
+    ESP_RETURN_ON_ERROR(jpeg_new_decoder_engine(&engine, &dec), TAG, "jpeg engine");
+
+    jpeg_decode_picture_info_t info;
+    ESP_GOTO_ON_ERROR(jpeg_decoder_get_info(jpeg, jpeg_len, &info), cleanup, TAG, "jpeg info");
+    ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32, info.width, info.height);
+
+    /* The decoder DMAs straight out of the input buffer, so the
+     * bitstream has to live in memory it can reach and be padded to the
+     * alignment it asks for -- a plain malloc'd copy is not enough. */
+    const jpeg_decode_memory_alloc_cfg_t in_cfg = {
+        .buffer_direction = JPEG_DEC_ALLOC_INPUT_BUFFER,
+    };
+    in = jpeg_alloc_decoder_mem(jpeg_len, &in_cfg, &in_size);
+    ESP_GOTO_ON_FALSE(in, ESP_ERR_NO_MEM, cleanup, TAG, "jpeg in buf");
+    memcpy(in, jpeg, jpeg_len);
+
+    const jpeg_decode_memory_alloc_cfg_t out_cfg = {
+        .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
+    };
+    const size_t want = (size_t)info.width * info.height * 2;   /* RGB565 */
+    rgb = jpeg_alloc_decoder_mem(want, &out_cfg, &rgb_size);
+    ESP_GOTO_ON_FALSE(rgb, ESP_ERR_NO_MEM, cleanup, TAG, "jpeg out buf");
+
+    const jpeg_decode_cfg_t cfg = {
+        .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
+        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,
+    };
+    uint32_t decoded = 0;
+    ESP_GOTO_ON_ERROR(jpeg_decoder_process(dec, &cfg, in, jpeg_len, rgb, rgb_size, &decoded),
+                      cleanup, TAG, "jpeg decode");
+
+    /* Centre it. Larger than the panel is cropped rather than scaled:
+     * the hardware decoder only offers 1/2, 1/4 and 1/8 scaling, none of
+     * which lands on an arbitrary panel width. */
+    const int iw = (int)info.width, ih = (int)info.height;
+    const int cw = (iw < screen_w) ? iw : screen_w;
+    const int ch = (ih < screen_h) ? ih : screen_h;
+    const int sx = (iw - cw) / 2, sy = (ih - ch) / 2;
+    const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
+
+    uint16_t *fb = NULL;
+    ESP_GOTO_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **)&fb),
+                      cleanup, TAG, "get fb");
+
+    /* Black out, then blit the crop. Writing the panel's own scan buffer
+     * and handing the same pointer back to draw_bitmap is the in-place
+     * path: the driver only writes back the cache for the rectangle it
+     * is given, so nothing else on screen is disturbed. */
+    memset(fb, 0, (size_t)screen_w * screen_h * 2);
+    const uint16_t *src = (const uint16_t *)rgb;
+    for (int y = 0; y < ch; y++) {
+        memcpy(&fb[(dy + y) * screen_w + dx], &src[(sy + y) * iw + sx], (size_t)cw * 2);
+    }
+    ESP_GOTO_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, 0, screen_w, screen_h, fb),
+                      cleanup, TAG, "draw");
+
+cleanup:
+    if (rgb) free(rgb);
+    if (in) free(in);
+    if (dec) jpeg_del_decoder_engine(dec);
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
+/* PNG                                                                 */
+/* ------------------------------------------------------------------ */
+
+/*
+ * pngle streams: it calls back per pixel run rather than handing over a
+ * bitmap, so there is never a full RGBA copy of the image in memory.
+ * That matters here -- a 1400x1400 RGBA buffer is 7.8 MB, and we would
+ * only be throwing most of it away to crop anyway.
+ *
+ * Pixels are written straight into the panel's scan buffer with the
+ * same centre-and-crop arithmetic the JPEG path uses.
+ */
+typedef struct {
+    uint16_t *fb;
+    int screen_w, screen_h;
+    int dx, dy;             /* top-left of the image in screen space */
+} png_ctx_t;
+
+static void png_on_init(pngle_t *pngle, uint32_t w, uint32_t h)
+{
+    png_ctx_t *c = pngle_get_user_data(pngle);
+    ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32" (png)", w, h);
+    c->dx = (c->screen_w - (int)w) / 2;
+    c->dy = (c->screen_h - (int)h) / 2;
+}
+
+static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
+                        uint32_t w, uint32_t h, const uint8_t rgba[4])
+{
+    png_ctx_t *c = pngle_get_user_data(pngle);
+
+    if (rgba[3] == 0) return;                   /* fully transparent */
+    const uint16_t px = (uint16_t)(((rgba[0] & 0xF8) << 8) |
+                                   ((rgba[1] & 0xFC) << 3) |
+                                    (rgba[2] >> 3));
+
+    for (uint32_t yy = 0; yy < h; yy++) {
+        const int sy = c->dy + (int)(y + yy);
+        if (sy < 0 || sy >= c->screen_h) continue;
+        for (uint32_t xx = 0; xx < w; xx++) {
+            const int sx = c->dx + (int)(x + xx);
+            if (sx < 0 || sx >= c->screen_w) continue;
+            c->fb[sy * c->screen_w + sx] = px;
+        }
+    }
+}
+
+static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
+                                   int screen_w, int screen_h,
+                                   const uint8_t *png, size_t png_len)
+{
+    uint16_t *fb = NULL;
+    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **)&fb),
+                        TAG, "get fb");
+    memset(fb, 0, (size_t)screen_w * screen_h * 2);
+
+    pngle_t *p = pngle_new();
+    ESP_RETURN_ON_FALSE(p, ESP_ERR_NO_MEM, TAG, "pngle_new");
+
+    png_ctx_t ctx = { .fb = fb, .screen_w = screen_w, .screen_h = screen_h };
+    pngle_set_user_data(p, &ctx);
+    pngle_set_init_callback(p, png_on_init);
+    pngle_set_draw_callback(p, png_on_draw);
+
+    esp_err_t ret = ESP_OK;
+    const int fed = pngle_feed(p, png, png_len);
+    if (fed < 0) {
+        ESP_LOGE(TAG, "png decode failed: %s", pngle_error(p));
+        ret = ESP_FAIL;
+    }
+    pngle_destroy(p);
+
+    if (ret == ESP_OK) {
+        ret = esp_lcd_panel_draw_bitmap(panel, 0, 0, screen_w, screen_h, fb);
+    }
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
+
+esp_err_t albumart_show(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
+                        const uint8_t *img, size_t img_len)
+{
+    if (img_len > 8 && memcmp(img, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        return albumart_draw_png(panel, screen_w, screen_h, img, img_len);
+    }
+    return albumart_draw(panel, screen_w, screen_h, img, img_len);
+}
