@@ -58,6 +58,25 @@ int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info
 
 void decoder_close(decoder_t *d);
 
+/* Total length in seconds, or 0 when the backend cannot say.
+ *
+ * minimp3_ex knows this because MP3D_SEEK_TO_SAMPLE builds the index up
+ * front. The esp_audio_codec simple decoder does not expose a total --
+ * its info struct carries frame_size, not stream length -- so FLAC, WAV
+ * and the rest return 0 and the seek bar renders empty rather than
+ * lying. */
+uint32_t decoder_duration_sec(decoder_t *d);
+
+/* Jump to a position in seconds. ESP_ERR_NOT_SUPPORTED when the backend
+ * cannot seek, which the caller should treat as "carry on playing", not
+ * as a failure.
+ *
+ * Only minimp3 can. MP3D_SEEK_TO_SAMPLE built a sample-accurate index at
+ * open time, so mp3dec_ex_seek() is exact rather than a byte-offset
+ * guess. The esp_audio_codec simple decoder has no seek entry point at
+ * all -- its parsers are forward-only over a stream. */
+esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec);
+
 /* Largest number of int16 a single decoder_read() can produce. Sized for
  * the worst case across both backends: an MPEG-1 Layer II frame is 1152
  * samples, FLAC blocks reach 4608, and esp_audio_codec's AAC-Plus path

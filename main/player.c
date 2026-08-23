@@ -29,6 +29,7 @@
  */
 
 #include <dirent.h>
+#include <inttypes.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
@@ -57,6 +58,8 @@
 
 #include "albumart.h"
 #include "decoder.h"
+#include "touch.h"
+#include "ui.h"
 
 static const char *TAG = "tab5_mp3";
 
@@ -477,7 +480,7 @@ static esp_err_t es8388_init(void)
     reg_write(s_es8388, 4,  0x3C);
     reg_write(s_es8388, 2,  0x00);  /* release DEM/STM */
 
-    ESP_RETURN_ON_ERROR(es8388_set_volume(70), TAG, "volume");
+    ESP_RETURN_ON_ERROR(es8388_set_volume(50), TAG, "volume");   /* matches s_volume */
     ESP_LOGI(TAG, "ES8388 initialised (0x%02X)", ES8388_ADDR);
     return ESP_OK;
 }
@@ -598,6 +601,88 @@ static void i2s_writer_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* Player state                                                        */
+/* ------------------------------------------------------------------ */
+
+/* Shared between the decode loop and the UI task. Deliberately plain
+ * scalars rather than a mutex-guarded struct: every field is a single
+ * aligned word, the UI only ever reads what the decoder writes and vice
+ * versa, and a torn read here costs one frame of a slightly wrong slider
+ * position. A lock would cost the decoder a blocking call per frame to
+ * protect against that. */
+static volatile bool     s_playing = true;
+static volatile int      s_volume = 50;
+static volatile uint32_t s_pos_sec;
+static volatile uint32_t s_len_sec;
+static volatile bool     s_screen_off;
+static volatile bool     s_want_next;      /* folder button was pressed */
+
+/* Set by the UI, consumed by the decode loop. -1 = nothing pending. Seek
+ * is not implemented yet -- see README -- so the decode loop currently
+ * logs and clears it. */
+static volatile int      s_seek_pct = -1;
+
+/* Written once before the UI task starts, read-only afterwards. */
+static id3_tags_t s_tags;
+static const char *s_display_name = "";
+
+static void ui_task(void *arg)
+{
+    ui_state_t st;
+
+    while (1) {
+        st.title = s_tags.title[0] ? s_tags.title : s_display_name;
+        st.artist = s_tags.artist;
+        st.album = s_tags.album;
+        st.playing = s_playing;
+        st.volume = s_volume;
+        st.pos_sec = s_pos_sec;
+        st.len_sec = s_len_sec;
+        st.screen_off = s_screen_off;
+
+        int tx = 0, ty = 0;
+        const bool down = touch_get(&tx, &ty);
+        const ui_action_t act = ui_touch(&st, down, tx, ty);
+
+        switch (act.kind) {
+        case UI_ACTION_PLAY_PAUSE:
+            s_playing = !s_playing;
+            break;
+        case UI_ACTION_VOLUME:
+            s_volume = act.value;
+            es8388_set_volume((uint8_t)act.value);
+            break;
+        case UI_ACTION_SEEK:
+            s_seek_pct = act.value;
+            break;
+        case UI_ACTION_CHOOSE_FILE:
+            s_want_next = true;
+            break;
+        case UI_ACTION_SCREEN_OFF:
+            s_screen_off = true;
+            backlight_set(0);
+            break;
+        case UI_ACTION_SCREEN_ON:
+            s_screen_off = false;
+            backlight_set(LCD_BRIGHTNESS_PERCENT);
+            break;
+        default:
+            break;
+        }
+
+        /* 50 Hz while a finger is down so drags feel attached to it, 10 Hz
+         * otherwise. Polling the panel at 50 Hz constantly would put a
+         * needless I2C transaction between the decoder and the SD card
+         * forty times a second for nothing. */
+        st.playing = s_playing;
+        st.volume = s_volume;
+        st.screen_off = s_screen_off;
+        ui_draw(&st);
+        vTaskDelay(pdMS_TO_TICKS(down ? 20 : 100));
+    }
+}
+
 /*
  * Decode into the ring until the file runs out.
  *
@@ -629,8 +714,61 @@ static void play_file(const char *path)
     uint32_t cur_rate = 0;
     int cur_chans = 0;
     int blocks = 0;
+    uint64_t frames_out = 0;
+
+    /* Before the first block, so the bar has a scale to draw against from
+     * the very first repaint rather than snapping into place a frame in. */
+    s_pos_sec = 0;
+    s_len_sec = decoder_duration_sec(dec);
+    if (s_len_sec == 0) {
+        ESP_LOGI(TAG, "no duration available; seek bar will stay empty");
+    }
 
     while (1) {
+        /* Pause stalls the decoder, not the writer: the ring drains to
+         * DMA and then i2s_writer_task blocks on an empty buffer, which
+         * is silence without disabling the channel. Disabling it would
+         * be an audible click on every press. */
+        while (!s_playing) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        if (s_want_next) {
+            s_want_next = false;
+            ESP_LOGI(TAG, "file chooser not implemented; stopping this track");
+            break;
+        }
+
+        if (s_seek_pct >= 0) {
+            const int pct = s_seek_pct;
+            s_seek_pct = -1;
+
+            if (s_len_sec == 0) {
+                ESP_LOGI(TAG, "seek ignored: no duration for this format");
+            } else {
+                const uint32_t target = (uint32_t)((uint64_t)s_len_sec * pct / 100);
+                const esp_err_t sr = decoder_seek_sec(dec, target);
+                if (sr == ESP_ERR_NOT_SUPPORTED) {
+                    ESP_LOGI(TAG, "seek ignored: %s cannot seek", "this backend");
+                } else if (sr != ESP_OK) {
+                    ESP_LOGW(TAG, "seek to %" PRIu32 "s failed", target);
+                } else {
+                    /* Drop what is already queued. Without this the ring
+                     * plays out ~0.37 s of the old position after the
+                     * jump, which sounds like the seek was ignored and
+                     * then took effect late. */
+                    if (s_pcm) xStreamBufferReset(s_pcm);
+
+                    /* Re-anchor the position counter, or the clock counts
+                     * on from where it was rather than from the new
+                     * point. */
+                    frames_out = (uint64_t)target * (cur_rate ? cur_rate : 1);
+                    s_pos_sec = target;
+                    ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
+                }
+            }
+        }
+
         decoder_info_t info;
         const int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
         if (n <= 0) break;
@@ -671,6 +809,11 @@ static void play_file(const char *path)
             xStreamBufferSend(s_pcm, pcm, (size_t)n * sizeof(int16_t),
                               portMAX_DELAY);
         }
+        /* Position from samples decoded, not from bytes read: with VBR
+         * the two disagree, and this is the number the slider shows. */
+        frames_out += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
+        if (cur_rate) s_pos_sec = (uint32_t)(frames_out / cur_rate);
+
         blocks++;
     }
 
@@ -723,8 +866,20 @@ void app_main(void)
      * albumart_extract() reads ID3v2 specifically, so this finds nothing
      * in a FLAC (PICTURE metadata block) or an M4A (covr atom). Those are
      * a separate parser each and are not written yet -- see README. */
+    /* Filename without the directory, as the fallback when the tag has no
+     * title. Points into path[], which outlives the UI task. */
+    s_display_name = strrchr(path, '/');
+    s_display_name = s_display_name ? s_display_name + 1 : path;
+
     FILE *af = fopen(path, "rb");
     if (af) {
+        if (id3_read_tags(af, &s_tags) == ESP_OK) {
+            ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
+                     s_tags.title, s_tags.artist, s_tags.album);
+        } else {
+            ESP_LOGI(TAG, "no ID3 text frames; showing the filename");
+        }
+
         uint8_t *jpg = NULL;
         size_t jpg_len = 0;
         if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
@@ -739,6 +894,18 @@ void app_main(void)
     }
 
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
+
+    /* Touch after the panel, always: TP_RST and LCD_RST are released by
+     * the same expander write, so before panel_init() there is nothing on
+     * the bus to talk to. */
+    if (touch_init(s_i2c_bus, LCD_H_RES, LCD_V_RES) != ESP_OK) {
+        ESP_LOGW(TAG, "no touch -- playing through with no controls");
+    }
+    ESP_ERROR_CHECK(ui_init(s_panel, LCD_H_RES, LCD_V_RES));
+    /* After the art is drawn, not before -- this snapshots what the bubble
+     * has to put back. */
+    ui_capture_background();
+    xTaskCreate(ui_task, "ui", 4096, NULL, 4, NULL);
 
     play_file(path);
 

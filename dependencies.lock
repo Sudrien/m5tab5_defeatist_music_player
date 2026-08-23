@@ -35,6 +35,48 @@ dependencies:
     targets:
     - esp32p4
     version: 1.0.1
+  espressif/esp_lcd_touch:
+    component_hash: 3f85a7d95af876f1a6ecca8eb90a81614890d0f03a038390804e5a77e2caf862
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.2.1
+  espressif/esp_lcd_touch_gt911:
+    component_hash: 737bdf29e0823eacf041381e81db2aaf5d378f3b5417df7f415f83319e3e790b
+    dependencies:
+    - name: espressif/esp_lcd_touch
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^1.2.0
+    - name: idf
+      require: private
+      version: '>=5.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.2.1
+  espressif/esp_lcd_touch_st7123:
+    component_hash: c43fd76fb12b4dd1bf30d60e99e4ec150b16e17cafc942a58e6274d4b68e71fe
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.*
+    - name: espressif/esp_lcd_touch
+      registry_url: https://components.espressif.com
+      require: public
+      version: ^1
+    - name: idf
+      require: private
+      version: '>=4.4.2'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.0.2
   idf:
     source:
       type: idf
@@ -42,7 +84,9 @@ dependencies:
 direct_dependencies:
 - espressif/esp_audio_codec
 - espressif/esp_lcd_st7121
+- espressif/esp_lcd_touch_gt911
+- espressif/esp_lcd_touch_st7123
 - idf
-manifest_hash: 53805ac9ef3a0292f54f6794e965d302cb8835df81e4b2ab6ddf098499a959cd
+manifest_hash: e8e3f9f96b1513a77ed13b75fef3655798651f11fd696d3730661c66d6b4c43c
 target: esp32p4
 version: 2.0.0

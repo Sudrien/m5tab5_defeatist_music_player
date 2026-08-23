@@ -131,6 +131,158 @@ This is the opposite call from `components/fatfs/`, which
 that one has no pin, because it is patched from whatever IDF you have
 installed.
 
+### On-screen controls
+
+`ui.c` draws a 150 px transport bar into the panel's scan buffer directly,
+the way `albumart.c` already does. No LVGL, no M5Canvas -- five controls
+is less code than a toolkit to draw them with.
+
+Played portion of the seek bar and the set portion of volume are both a
+thick red bar; the remainder of each is a thin grey line. Dragging either
+raises a ring indicator offset above the finger, so the thing being
+adjusted is never under the hand.
+
+Volume applies live during a drag, because you want to hear it. Seek
+fires once on release -- re-decoding on every poll would thrash the SD
+card.
+
+Hit targets are padded well past the drawn shapes (`HIT_PAD_X`,
+`HIT_PAD_Y`), and buttons are tested before sliders so a button landing
+inside a padded slider box still wins.
+
+With the screen off, a touch only wakes -- it does not also press whatever
+was under it, or one tap would turn the screen straight back off.
+
+### Touch
+
+`touch.c` is a thin wrapper over `esp_lcd_touch`. The probe order and the
+INT handling are lifted from `m5tab5_esp_idf_display_example`, where they
+are confirmed on hardware -- this file adds only a one-point API so ui.c
+does not have to know which controller answered.
+
+Two revisions exist and the touch controller is not named after the panel:
+
+| Revision | Panel | Touch |
+| --- | --- | --- |
+| rev 1 | ILI9881C | GT911, backup address |
+| rev 2 | ST7121 / ST7123 | ST7123 at 0x55 |
+
+So it is probed, ST7123 first then GT911, the same order M5's BSP uses.
+Both driver components are in `idf_component.yml` for that reason.
+
+**The GT911 path drives GPIO 23 low.** There is a pull-up to 3V3 on the
+INT line on rev 1 that otherwise stops the controller responding, so that
+path holds INT low and polls instead of using the interrupt. Driving it
+high is the intuitive thing and it is wrong.
+
+`TP_RST` needs no handling here: it is expander 1 `P5`, already driven
+high by the `PI4IOE1_OUT_SET` value the display path needs. `touch_init()`
+does have to run after `io_expanders_init()`, and waits 200 ms after it,
+because the controller needs a moment once reset is released.
+
+### Sizes are set for 294 PPI
+
+720x1280 on a 5" panel is about 294 PPI, so an 8 px font glyph is 1.4 mm
+tall -- unreadable at arm's length. Everything is scaled for that rather
+than left at values that looked right in a 96 PPI mockup: the title is
+font8x8 at scale 5 (about 3.5 mm, roughly a phone's body text), artist
+and album at scale 3, the MM:SS digits 20x38, the slider thumbs 16 px
+radius, and the bar itself 276 px.
+
+If the bar is ever resized again, two things are load-bearing rather than
+aesthetic:
+
+- `SEEK_X0` has to clear the MM:SS run at both ends. `TIME_W` is derived
+  from the digit metrics, so it moves when they do.
+- `BUBBLE_ABOVE` has to exceed `SEEK_Y`, or the bubble overlaps the bar.
+  That is not cosmetic: the bar is blitted before the bubble is drawn, so
+  any part of the bubble inside it gets written to the framebuffer and
+  never pushed, and shows stale pixels until the next frame clears them.
+
+### Text rows
+
+Title on its own row, artist and album joined on one line underneath,
+both clipped with an ellipsis rather than wrapped. Three stacked rows made
+the bar taller than the artwork could spare and artist is the part people
+actually read, so album shares a line with it.
+
+`id3_read_tags()` lives in `albumart.c` rather than its own file because
+the frame walker it needs is the one `albumart_extract()` already has --
+version-dependent frame sizes, the padding check, the tag-end bound. A
+second copy is the thing that drifts.
+
+The font is `font8x8` (public domain), fetched by `cmake/vendored.cmake`
+like minimp3 and pngle. It is ASCII 0-127, so `id3_text_to_ascii()`
+flattens latin1, UTF-8 and both UTF-16 encodings down to it and turns
+anything above 0x7F into `?`. Visibly wrong beats a mojibake glyph that
+looks deliberate. Accented artist names will show question marks; that is
+the price of not vendoring a Unicode font.
+
+No title in the tag falls back to the filename.
+
+### Time display
+
+Elapsed sits left of the seek bar, total right of it, both drawn as seven
+segments. No font is linked and vendoring one for two timestamps is not
+worth it -- seven segments cover 0-9 and a colon, which is all of MM:SS.
+
+Duration comes from `decoder_duration_sec()`, which only minimp3 can
+answer: `MP3D_SEEK_TO_SAMPLE` builds the index up front so `ex.samples` is
+known. The esp_audio_codec simple decoder exposes `frame_size`, not stream
+length, so FLAC and WAV report 0 -- the total reads `00:00` and the bar
+stays empty rather than inventing a scale.
+
+### The seek bubble reads as a time
+
+Volume shows a percentage, seek shows MM:SS -- a seek bubble reading "46"
+is a unitless number on a bar whose two ends are already clocks. It needs
+`len_sec`, so on a format with no duration it falls back to the
+percentage.
+
+### The finger bubble tracks x only
+
+Following the finger vertically as well put the bubble at a different
+height depending on where in the padded hit box the press landed, which
+reads as the indicator jumping rather than as a value changing. It now
+sits at a fixed height measured from the seek bar, so both sliders raise
+it to the same place.
+
+Erasing it needs `ui_capture_background()`. The bar is cleared wholesale
+every frame, but the bubble deliberately reaches above the bar onto the
+cover art, which is not -- so a strip of the artwork is saved once after
+the cover is drawn and memcpy'd back before each repaint. Without that a
+drag leaves a trail of bubbles across the cover.
+
+### Seek
+
+`decoder_seek_sec()` is MP3-only. `MP3D_SEEK_TO_SAMPLE` built a
+sample-accurate index at open time, so `mp3dec_ex_seek()` lands exactly
+rather than guessing a byte offset. The esp_audio_codec simple decoder has
+no seek entry point -- its parsers are forward-only over a stream -- so
+FLAC and WAV return `ESP_ERR_NOT_SUPPORTED` and the drag is ignored with a
+log line rather than treated as a failure.
+
+Two things happen on a successful seek that are easy to leave out:
+
+- **The ring is reset.** Otherwise ~0.37 s of the old position plays out
+  after the jump, which sounds like the seek was ignored and then took
+  effect late.
+- **`frames_out` is re-anchored.** It is the source of the elapsed clock,
+  so without this the time counts on from where it was instead of from the
+  new point.
+
+`mp3dec_ex_seek()` counts in int16 values across all channels, the same
+units as `ex.samples`. Seeking to `sec * hz` lands at half the intended
+point on stereo.
+
+### What the controls do not do yet
+
+- **The folder button stops the track** instead of opening a chooser.
+  That is the playlist TODO, not a UI one.
+- **No filename on screen.** Seven segments do not spell, and a real font
+  is the price of that row.
+- **Seek on non-MP3 does nothing**, per above.
+
 ### Licensing, since you already care about this for exFAT
 
 - minimp3 is CC0/public domain. No attribution obligation, vendored
