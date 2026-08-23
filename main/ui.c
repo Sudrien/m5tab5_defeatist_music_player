@@ -65,7 +65,7 @@ static const char *TAG = "tab5_ui";
 #define ARTIST_Y    (68)
 #define ALBUM_Y     (100)
 #define SEEK_Y      (174)
-#define SEEK_X0     (132)  /* clears the MM:SS run at either end */
+#define SEEK_X0     (142)  /* clears the MM:SS run at either end */
 #define ROW_Y       (254)
 #define BTN_R       (46)    /* play/pause circle */
 #define ICON_HALF   (26)
@@ -306,7 +306,22 @@ void ui_draw(const ui_state_t *st)
     const int pos_pct = (st->len_sec > 0)
                       ? (int)((st->pos_sec * 100) / st->len_sec)
                       : 0;
-    draw_slider(x0, x1, y, s_drag == 0 ? s_drag_pct : pos_pct);
+    /*
+     * Three states, not two:
+     *   - seekable: full slider with a thumb, draggable
+     *   - known length, not seekable: progress fills, no thumb. Honest --
+     *     the position is real -- and the missing thumb is what says not
+     *     to try dragging it.
+     *   - no length: a bare groove.
+     */
+    if (st->can_seek) {
+        draw_slider(x0, x1, y, s_drag == 0 ? s_drag_pct : pos_pct);
+    } else if (st->len_sec > 0) {
+        gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
+        gfx_fill_rect(x0, y - 3, ((x1 - x0) * pos_pct) / 100, 6, C_FILL);
+    } else {
+        gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
+    }
 
     /* Elapsed left of the bar, total right of it. Total reads 00:00 when
      * the backend could not supply a duration, which is the honest
@@ -324,7 +339,7 @@ void ui_draw(const ui_state_t *st)
      * Album is dimmer than artist rather than the same grey. Three rows
      * of equal weight read as a paragraph; the hierarchy is what makes it
      * scannable at arm's length. */
-    gfx_draw_text(16, s_bar_top + TEXT_Y, st->title, 5, s_w - 32, C_THUMB);
+    gfx_draw_text(16, s_bar_top + TEXT_Y, st->title, 4, s_w - 32, C_THUMB);
     if (st->artist && *st->artist) {
         gfx_draw_text(16, s_bar_top + ARTIST_Y, st->artist, 3, s_w - 32, C_ICON);
     }
@@ -468,6 +483,23 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
         act.value = s_drag_pct;
         return act;
     }
+
+    /*
+     * Seek, but only when there is something to seek within.
+     *
+     * With no duration the bar has no scale, so a drag has nothing to
+     * mean: the bubble showed a bare percentage, the thumb followed the
+     * finger, and on release the player logged "seek ignored" and the
+     * thumb snapped back. That is a control that looks live and is not,
+     * which is worse than one that plainly does nothing.
+     *
+     * The test is seekability, not length. Those came apart the moment
+     * duration.c started reading lengths out of containers: an Ogg has a
+     * full, correct, moving seek bar and no way to seek within it, and
+     * gating on len_sec let the drag through to a player that logged
+     * "seek ignored" and snapped the thumb back.
+     */
+    if (!st->can_seek) return act;
 
     seek_bounds(&x0, &x1, &sy);
     if (x >= x0 - HIT_PAD_X && x <= x1 + HIT_PAD_X &&

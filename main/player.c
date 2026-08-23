@@ -55,10 +55,12 @@
 #include "albumart.h"
 #include "browser.h"
 #include "decoder.h"
+#include "framewalk.h"
 #include "playlist.h"
 #include "storage.h"
 #include "touch.h"
 #include "ui.h"
+#include "waveform.h"
 
 static const char *TAG = "tab5_mp3";
 
@@ -518,6 +520,9 @@ static volatile bool     s_playing = true;
 static volatile int      s_volume = 50;
 static volatile uint32_t s_pos_sec;
 static volatile uint32_t s_len_sec;
+/* Whether a drag would do anything. Not the same question as whether the
+ * length is known -- see decoder_can_seek(). */
+static volatile bool     s_can_seek;
 static volatile bool     s_screen_off;
 
 /*
@@ -547,6 +552,26 @@ static volatile bool     s_open_chooser;
  * is not implemented yet -- see README -- so the decode loop currently
  * logs and clears it. */
 static volatile int      s_seek_pct = -1;
+
+/*
+ * The background envelope scan.
+ *
+ * A whole-song walk, so it does not run before playback -- it runs
+ * alongside it, on the lowest priority task in the program, and the
+ * result is drawn whenever it lands. Nothing here is animated, so a frame
+ * that appears a second in is invisible; a second of silence before the
+ * first note would not be.
+ *
+ * The task computes and does not draw. Drawing happens on the decode loop
+ * for the same reason album art does: one writer to the framebuffer, no
+ * lock. s_wave_ready is the handoff.
+ */
+static char              s_scan_path[512];
+static volatile bool     s_scan_want;
+static volatile bool     s_scan_abort;
+static volatile bool     s_wave_ready;
+static volatile bool     s_wave_framed;   /* cover present, so draw a border */
+static framewalk_t       s_walk;
 
 /* The track being played, its tags, and the filename fallback.
  *
@@ -595,6 +620,7 @@ static void load_track_visuals(const char *path)
      * player having ignored the choice. */
     ui_clear_art();
 
+    bool have_art = false;
     uint8_t *jpg = NULL;
     size_t jpg_len = 0;
     if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
@@ -606,6 +632,8 @@ static void load_track_visuals(const char *path)
         if (serr != ESP_OK) {
             ESP_LOGW(TAG, "cover art failed to decode (%s)",
                      esp_err_to_name(serr));
+        } else {
+            have_art = true;
         }
         free(jpg);
     } else {
@@ -616,6 +644,81 @@ static void load_track_visuals(const char *path)
     /* After the art, not before -- this snapshots what the finger bubble
      * has to put back. */
     ui_capture_background();
+
+    /* Kick the envelope scan for this track. Cancels whatever the scan
+     * task was doing first: on a fast run through a folder the previous
+     * walk is still going, and finishing it would draw the wrong track's
+     * envelope over the right track's cover. */
+    s_scan_abort = true;
+    s_wave_ready = false;
+    s_wave_framed = have_art;
+    snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
+    s_scan_want = true;
+}
+
+/*
+ * Walks the current track and stops when asked.
+ *
+ * Its own FILE*, deliberately: the decoder holds one and this seeks to
+ * EOF and back. Sharing it would be a seek war with the thing producing
+ * the audio.
+ */
+static void scan_task(void *arg)
+{
+    (void)arg;
+    char path[512];
+
+    while (1) {
+        if (!s_scan_want) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+        s_scan_want = false;
+        s_scan_abort = false;
+        snprintf(path, sizeof(path), "%s", s_scan_path);
+
+        FILE *f = fopen(path, "rb");
+        if (!f) continue;
+
+        /* Decline before reading anything. Walking a format with no
+         * parser here is a whole file off the card in exchange for a log
+         * line saying it found nothing -- and it is contention with the
+         * decoder reading the same card for the same track. */
+        if (!framewalk_supports(f)) {
+            ESP_LOGI(TAG, "no frame walker for this format; no envelope");
+            fclose(f);
+            continue;
+        }
+
+        /* The frame layout uses four sides of WAVE_INNER; the fill layout
+         * uses one column per pixel. Asking for the larger of the two
+         * costs nothing and means the mode can change without a rescan. */
+        /* One column per pixel of panel width, both shapes -- the frame
+         * is the same envelope with a square skipped, not a different
+         * layout, so it wants the same column count. */
+        const int cols = LCD_H_RES;
+
+        const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
+        fclose(f);
+
+        /* Loud, because every way this can fail is silent otherwise: an
+         * aborted scan, a format with no per-frame loudness, and a walk
+         * that found no frames at all all end with simply no envelope on
+         * screen and nothing said about it. */
+        if (err != ESP_OK) {
+            ESP_LOGI(TAG, "scan cancelled");
+        } else if (s_scan_abort) {
+            ESP_LOGI(TAG, "scan finished but the track moved on");
+        } else if (!s_walk.has_levels) {
+            ESP_LOGI(TAG, "no per-frame loudness in this format; no envelope");
+        } else if (!s_walk.frames) {
+            ESP_LOGW(TAG, "walk found no frames; no envelope");
+        } else {
+            ESP_LOGI(TAG, "envelope ready: %d columns, %s",
+                     s_walk.columns, s_wave_framed ? "framed" : "fill");
+            s_wave_ready = true;
+        }
+    }
 }
 
 /* Hand a chosen path to the decode loop. */
@@ -691,6 +794,7 @@ static void ui_task(void *arg)
         st.volume = s_volume;
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
+        st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
 
         const bool down = bdown;
@@ -728,6 +832,8 @@ static void ui_task(void *arg)
          * forty times a second for nothing. */
         st.playing = s_playing;
         st.volume = s_volume;
+        st.len_sec = s_len_sec;
+        st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
         ui_draw(&st);
         vTaskDelay(pdMS_TO_TICKS(down ? 20 : 100));
@@ -805,6 +911,7 @@ static track_end_t play_file(const char *path)
     /* Before the first block, so the bar has a scale to draw against from
      * the very first repaint rather than snapping into place a frame in. */
     s_pos_sec = 0;
+    s_can_seek = decoder_can_seek(dec);
     s_len_sec = decoder_duration_sec(dec);
     if (s_len_sec == 0) {
         ESP_LOGI(TAG, "no duration available; seek bar will stay empty");
@@ -831,6 +938,28 @@ static track_end_t play_file(const char *path)
         if (s_repaint_art && !s_pending_ready) {
             s_repaint_art = false;
             load_track_visuals(path);
+        }
+
+        /* The scan landed. Drawn here rather than on the scan task so
+         * there is one writer to the framebuffer. */
+        if (s_wave_ready) {
+            s_wave_ready = false;
+            waveform_draw(&s_walk, s_wave_framed ? WAVE_FRAME : WAVE_FILL,
+                          LCD_V_RES - UI_BAR_H);
+            /* The bubble's saved strip is now stale -- it was captured
+             * before the envelope existed. */
+            ui_capture_background();
+
+            /* The walk counted frames on the way past. For a format that
+             * states its own length this is redundant and is not used;
+             * for raw ADTS, AMR and a Xing-less MP3 it is the only answer
+             * there is, and the bar goes from empty to filled mid-track
+             * rather than staying empty for the whole song. */
+            if (!s_len_sec && s_walk.sec) {
+                s_len_sec = s_walk.sec;
+                ESP_LOGI(TAG, "duration from frame walk: %" PRIu32 "s",
+                         s_len_sec);
+            }
         }
 
         while (!s_playing && !s_pending_ready) {
@@ -1101,6 +1230,11 @@ void app_main(void)
     ESP_ERROR_CHECK(storage_init(s_exp2));
 
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
+
+    /* Lowest priority in the program. It reads a whole file off the same
+     * card the decoder is reading, and the decoder winning every time is
+     * the correct outcome. */
+    xTaskCreate(scan_task, "wave", 4096, NULL, 1, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by
      * the same expander write, so before panel_init() there is nothing on

@@ -29,6 +29,11 @@ typedef struct {
     int      volume;        /* 0..100 */
     uint32_t pos_sec;
     uint32_t len_sec;       /* 0 when unknown -- seek bar renders empty */
+
+    /* Whether a drag would do anything. A track can have a known length
+     * and still not be seekable: duration.c reads Ogg lengths out of the
+     * container, but nothing can seek an Ogg yet. */
+    bool can_seek;
     bool     screen_off;
 } ui_state_t;
 

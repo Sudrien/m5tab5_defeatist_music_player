@@ -30,6 +30,8 @@
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 
+#include "duration.h"
+
 static const char *TAG = "tab5_dec";
 
 /* ------------------------------------------------------------------ */
@@ -51,6 +53,12 @@ struct decoder {
     int in_len;         /* valid bytes in inbuf */
     int in_pos;         /* consumed bytes */
     bool eof;
+
+    /* Container-probed length, for the backends that cannot report one.
+     * Cached rather than recomputed: it seeks the file handle around,
+     * which is cheap but not free, and the answer is fixed. */
+    bool probed;
+    uint32_t probe_sec;
 };
 
 #define ESP_IN_BUF  (8 * 1024)
@@ -345,10 +353,39 @@ int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info
 
 uint32_t decoder_duration_sec(decoder_t *d)
 {
-    if (!d || d->backend != BACKEND_MINIMP3) return 0;
-    if (!d->ex.samples || !d->ex.info.hz || !d->ex.info.channels) return 0;
-    /* ex.samples counts int16 values across all channels, not frames. */
-    return (uint32_t)(d->ex.samples / d->ex.info.channels / d->ex.info.hz);
+    if (!d) return 0;
+
+    if (d->backend == BACKEND_MINIMP3) {
+        if (d->ex.samples && d->ex.info.hz && d->ex.info.channels) {
+            /* ex.samples counts int16 values across all channels, not
+             * frames. */
+            return (uint32_t)(d->ex.samples / d->ex.info.channels /
+                              d->ex.info.hz);
+        }
+        /* No Xing/LAME header and no index: fall through to the probe,
+         * which will find nothing for a bare MP3 but costs one fread. */
+    }
+
+    /* The backup. esp_audio_codec's simple decoder cannot answer this --
+     * frame_size is not stream length and its parsers are forward-only --
+     * but the container states its own length in a fixed place, so read
+     * it there instead. Cached because the UI asks once per track and the
+     * answer cannot change. */
+    if (!d->probed) {
+        d->probed = true;
+        d->probe_sec = duration_probe(d->f);
+    }
+    return d->probe_sec;
+}
+
+bool decoder_can_seek(decoder_t *d)
+{
+    /* minimp3 only, and only once its index exists. esp_audio_codec's
+     * simple decoder has no seek entry point at all -- for Ogg the
+     * mechanism would be a bisection over page granulepos, which is not
+     * written. */
+    return d && d->backend == BACKEND_MINIMP3 &&
+           d->ex.info.hz && d->ex.info.channels;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)

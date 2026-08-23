@@ -244,11 +244,272 @@ Elapsed sits left of the seek bar, total right of it, both drawn as seven
 segments. No font is linked and vendoring one for two timestamps is not
 worth it -- seven segments cover 0-9 and a colon, which is all of MM:SS.
 
-Duration comes from `decoder_duration_sec()`, which only minimp3 can
-answer: `MP3D_SEEK_TO_SAMPLE` builds the index up front so `ex.samples` is
+Duration comes from `decoder_duration_sec()`, which minimp3 answers
+directly and everything else answers through the container probe: `MP3D_SEEK_TO_SAMPLE` builds the index up front so `ex.samples` is
 known. The esp_audio_codec simple decoder exposes `frame_size`, not stream
 length, so FLAC and WAV report 0 -- the total reads `00:00` and the bar
 stays empty rather than inventing a scale.
+
+### Duration comes from the container when the decoder cannot say
+
+`decoder_duration_sec()` was minimp3-only, so FLAC, WAV and Ogg reported
+0 and the bar stayed empty. That is an API ceiling rather than a missing
+feature: esp_audio_codec's simple decoder exposes `frame_size`, not stream
+length, and its parsers are forward-only over a stream.
+
+But the decoder is not the only thing that knows. Every one of these
+formats states its own length in a fixed place, readable with two or three
+`fread()`s and no audio decoded at all. `duration.c` is the backup, called
+only when the backend returns nothing, and cached because the UI asks once
+per track and the answer cannot change.
+
+| Format | Where | Note |
+| --- | --- | --- |
+| FLAC | STREAMINFO, always the first metadata block | 36-bit sample count, packed across byte boundaries |
+| WAV | `data` size / `fmt ` byte rate | chunks are walked, not assumed adjacent |
+| Ogg | granule position of the last page | found by scanning back from EOF |
+| MP4 | `mvhd` duration / timescale | v0 and v1 differ by 12 bytes |
+
+Four things here are the difference between right and plausible:
+
+- **Opus granule is always in 48 kHz units** regardless of the stream's
+  own rate. Dividing by the sample rate in the header is the classic way
+  to get a duration wrong by a constant factor, and `OpusHead` even
+  carries an input-rate field that invites exactly that. The codec is
+  identified from the first page and the divisor chosen from that.
+- **WAV chunks are walked.** Anything that writes LIST/INFO metadata puts
+  it between `fmt ` and `data`, so a probe that assumed `data` at offset
+  36 reads the metadata length as the audio length.
+- **The Ogg window is 64 KB** because the spec caps a page at about that,
+  so the last page's start is always inside it -- one sequential read
+  rather than a walk of the file. It is allocated in PSRAM and freed, not
+  held as a static: 64 KB of internal RAM for one question per track, on a
+  chip with 384 KB of it and a USB host stack next door, is not a trade
+  worth making.
+- **Not file size / bitrate.** Right for CBR, drifts badly on VBR, and a
+  seek bar that lies is worse than one that stays empty -- which is the
+  call the code already made.
+
+The format is sniffed from the magic bytes rather than taken from the
+extension. The caller already chose a decoder by extension; a probe that
+trusted the same wrong extension would return a confident number for a
+mislabelled file instead of nothing.
+
+This does not make those formats seekable. Ogg seeking is the same
+granulepos scan applied as a bisection over page boundaries, which is
+worth doing and is not done here.
+
+### The frame walk, for formats with no length at all
+
+`duration.c` covers the containers that state their own length. Raw ADTS,
+AMR and a CBR MP3 with no Xing header state nothing -- there is no field
+to read, so the only honest answer is to count frames.
+
+`framewalk.c` does one sequential pass reading **only frame headers**.
+Every one of these formats puts its own length in its header, so the walk
+is header, skip, header, and the audio data is never touched. That makes
+it I/O bound rather than CPU bound, which is what makes it cheap enough to
+run while a track plays.
+
+The same pass produces the waveform envelope, which is the reason it is
+one function and not two. On MP3 the loudness is free: `global_gain` sits
+in the side info at a **fixed bit offset**, so it is a constant, not a
+parse -- a real per-granule loudness value read without touching a Huffman
+table. AAC and AMR headers say how long a frame is but nothing about what
+is in it, so those report `has_levels = false` and produce a duration
+only; a waveform there needs a real decode, and whether that is worth it
+is the caller's call.
+
+Details that matter:
+
+- **It is the backstop, not a replacement for `duration.c`.** The probe
+  answers before the first audio block; the walk answers a second or two
+  in. Routing FLAC through here would take a bar that is right immediately
+  and make it right eventually, for nothing. FLAC also cannot be walked
+  cheaply -- the fast path there is SEEKTABLE seeking, which never sees
+  most frames and so cannot count them.
+- **Resampling takes the max per bucket, not the mean.** A mean over
+  twenty frames turns a drum hit into a bump. The transient is the part
+  that makes one track look unlike another.
+- **The ID3v2 tag is skipped by its length field, not walked past.** This
+  was the first version's bug and it is worth stating plainly: the tag
+  holds the album art, and 130 KB of PNG is full of bytes that look like
+  an MP3 sync word. Resyncing a byte at a time through it locks onto
+  noise, parses a nonsense frame length and walks off into the middle of
+  the image -- which on the first real file gave 212 frames and a 4 second
+  duration for a 52 second track. The size field is syncsafe, seven bits
+  per byte with the high bit always clear, so the length can never itself
+  contain a false sync.
+- **The Xing/Info/VBRI frame is skipped, and not counted.** It is a real
+  MP3 frame carrying the seek table rather than audio, and its side info
+  is whatever the encoder left there -- an arbitrary value that became the
+  spike at the start of every MP3 envelope. Skipped without incrementing
+  the frame count, because it is not a frame's worth of playing time
+  either.
+- **Trailing tags end the walk.** ID3v1 is 128 bytes at EOF, APE tags are
+  larger, and the byte-at-a-time resync parsed both into nonsense frames
+  whose side info became the spike at the *end* of the envelope. Same
+  class of bug as the ID3v2 tag at the front, at the other end of the
+  file -- which is the argument for treating "arbitrary bytes adjacent to
+  audio" as a category rather than fixing them one at a time.
+- **The first sync is confirmed by a second one** at exactly the offset
+  the first header states, with a matching sample rate. One valid-looking
+  header proves nothing; two at the stated spacing do. Once locked, the
+  stream is trusted until a header fails to parse.
+- **MP3 frames with a CRC shift the side info by two bytes.** The first
+  version skipped those frames' loudness instead, which meant a file where
+  every frame is protected produced no envelope at all and said only that
+  the format had no per-frame loudness.
+- **Both buffers are PSRAM and freed.** 32 KB of read buffer and 64 KB of
+  per-frame gains, for something that runs once per track.
+- **`abort_flag` is polled every 256 frames**, so a track change cancels a
+  scan that is no longer wanted rather than finishing it into a buffer
+  nobody will read.
+
+Verified against generated files with known frame counts: a 400-frame CBR
+MP3 reports 10 s, a 300-frame ADTS stream 6 s, a 500-frame AMR 10 s. Also
+against a reconstruction of the file that broke it -- 2000 CRC-protected
+64 kbps frames behind a 130 KB ID3v2 tag stuffed with false sync words --
+which now reports 2000 frames, 52 s and a full envelope.
+
+Not yet wired to anything -- `decoder_duration_sec()` still returns 0 for
+these formats, and nothing draws the envelope. That is the next patch.
+
+### Ogg loudness without decoding anything
+
+Vorbis and Opus have no equivalent of MP3's `global_gain`. There is no
+loudness anywhere in the page or packet headers, so an amplitude envelope
+means decoding one packet in N -- minutes of CPU on a long track, and a
+second codec instance live alongside the one making the sound.
+
+The way in is that **both codecs are always VBR**. A VBR encoder spends
+bits where there is something to encode: a silent passage is a handful of
+bytes per packet, a dense one several hundred. Packet size is therefore a
+usable proxy, and it is free -- the segment table already states it.
+
+What this produces is a **bitrate envelope, not an amplitude envelope**.
+Not the same measurement, and worth being honest about: it will not show a
+loud sine wave as loud, because a sine wave is cheap to encode. It rises
+and falls where the music does, which is all a shape drawn 720 px wide can
+convey. The alternative was the format being minutes slower than every
+other one.
+
+Packet sizes are clamped rather than scaled adaptively, because a header
+packet carrying a comment block and embedded cover art would otherwise set
+the ceiling for the whole track.
+
+**Header packets are not columns.** Opus has two and Vorbis three, and the
+big ones -- Vorbis's setup packet of codebooks, and OpusTags carrying the
+comment block and any embedded picture -- are several KB each. They
+clamped to 255, which is why every Ogg drew a full-height spike in its
+first column. The codec is identified before its first page's segments
+are walked, precisely so the header count is known by the time the first
+packet ends.
+
+**The last packet is the end of the stream, not the end of the music.**
+Opus pads its final packet and both codecs can finish short; either way
+the size says nothing about the audio and it landed in the last column as
+a spike. Held at the previous value rather than dropped, so the envelope
+still spans the full width.
+
+Verified against a generated 5000-packet Opus stream: 100 s, exact.
+
+### The envelope, framed or filling
+
+`waveform.c` draws the walk's output two ways: as a band running round the
+cover when there is one, and as a single large envelope across the whole
+artwork area when there is not.
+
+It is drawn **once, when the scan lands**, and then left alone. Not
+animated and not a progress indicator -- which is exactly what lets the
+scan run at whatever pace the card allows instead of having to keep up
+with playback.
+
+- **The scan runs alongside playback, not before it.** A whole-song walk
+  before the first note would be a second of silence; a frame that appears
+  a second in is invisible. `scan_task` is the lowest priority in the
+  program, because it reads the same card the decoder is reading and the
+  decoder winning is the correct outcome.
+- **The task computes, the decode loop draws.** Same rule as album art:
+  one writer to the framebuffer, no lock. `s_wave_ready` is the handoff.
+- **A new track aborts the old scan.** On a fast run through a folder the
+  previous walk is still going, and finishing it would paint the wrong
+  track's envelope around the right track's cover.
+- **Its own `FILE*`.** The decoder holds one and this seeks to EOF;
+  sharing would be a seek war with the thing producing the audio.
+- **The envelope is scaled from the track's own minimum**, not from zero.
+  `global_gain` on a quiet passage is a low number rather than 0, so a
+  straight 0-255 mapping draws every track as a fat band that never
+  touches the inner edge. Rescaling is what makes a quiet track look
+  quiet, and two tracks look different -- the entire point of drawing it.
+- **There is a floor on the drawn thickness.** `global_gain` on a real
+  track occupies a narrow slice of its 0-255 range, so the quiet end of a
+  normalised envelope came out as a one-pixel hairline: present, correct,
+  and invisible from arm's length on a 294 PPI panel. 6 px reads as a
+  band; below that it reads as the feature not working.
+- **One renderer, two shapes.** The envelope is always mirrored about the
+  middle of the artwork area, left to right, one column per pixel of
+  width. The framed case differs only in leaving a 548 px square
+  untouched for the cover to sit in.
+
+  This replaced a band that ran round the cover's perimeter with the
+  song's four quarters on the four sides. It looked deliberate and it was
+  a second layout to reason about, it needed corner gaps to avoid looking
+  broken, and its time axis ran clockwise -- which nothing else on screen
+  does.
+- **The framed envelope is based at the cutout edge, not the centre.**
+  Scaling from the middle looked right on paper and wrong on screen: only
+  the loudest columns reached past the cover, so instead of a frame there
+  were spikes escaping from behind a square. Starting the bar at the
+  square's edge and growing outward gives a band that surrounds the cover
+  continuously and still moves with the track.
+- **The cutout is skipped, not painted.** `albumart.c` has already cleared
+  the area and drawn the cover into exactly that square, so not drawing
+  there is what leaves the picture visible with a black margin -- and it
+  means the envelope never has to know how big the picture is.
+
+The frame also picks up the duration the walk counted, but only when
+nothing else supplied one -- so on a Xing-less MP3 the seek bar goes from
+empty to filled partway through the song rather than staying empty for all
+of it.
+
+**Known limitation:** `WAVE_INNER` is fixed at 548 px rather than derived
+from the cover, because `albumart_show()` does not report the rectangle it
+drew into. A cover larger than 548 px is overdrawn at the edges by the
+frame. The fix is for `albumart_show()` to return its rect, not for
+`waveform.c` to guess.
+
+### Length and seekability are different questions
+
+The first drag guard tested `len_sec`, on the reasoning that a bar with no
+scale has nothing to drag against. That was right until `duration.c`
+landed, and then it was wrong: an Ogg reads its length out of the
+container and has a full, correct, moving seek bar that **nothing can seek
+within**. The drag went through, the thumb followed the finger, and the
+player logged `seek ignored: this backend cannot seek` on release.
+
+So `decoder_can_seek()` is asked separately, and the bar has three states
+rather than two:
+
+| State | Drawn as | Drag |
+| --- | --- | --- |
+| Seekable | full slider with a thumb | yes |
+| Length known, not seekable | groove with progress filled, no thumb | no |
+| No length | bare groove | no |
+
+The middle row is the one worth the extra case. The position is real and
+worth showing; the missing thumb is what says not to try dragging it.
+
+### The walk declines formats it cannot parse
+
+`framewalk_supports()` reads four bytes before the scan task commits to
+anything. Without it, an Ogg was read end to end -- a whole file off the
+card, in contention with the decoder reading the same card for the same
+track -- to produce zero frames and a log line saying so.
+
+Ogg is walked now -- see below. AAC, TS and AMR remain: those state a
+frame length and nothing about the content, so they produce a duration and
+no envelope.
 
 ### The seek bubble reads as a time
 
