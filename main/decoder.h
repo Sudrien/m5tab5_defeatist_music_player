@@ -77,6 +77,18 @@ uint32_t decoder_duration_sec(decoder_t *d);
  * all -- its parsers are forward-only over a stream. */
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec);
 
+/*
+ * Can this backend seek at all?
+ *
+ * Separate from having a duration, which is the mistake the first version
+ * of the drag guard made. Once duration.c started reading lengths out of
+ * containers, an Ogg had a full seek bar and no way to seek within it --
+ * the thumb followed the finger and the player logged "seek ignored" on
+ * release. Length and seekability are two different questions and have to
+ * be asked separately.
+ */
+bool decoder_can_seek(decoder_t *d);
+
 /* Largest number of int16 a single decoder_read() can produce. Sized for
  * the worst case across both backends: an MPEG-1 Layer II frame is 1152
  * samples, FLAC blocks reach 4608, and esp_audio_codec's AAC-Plus path
