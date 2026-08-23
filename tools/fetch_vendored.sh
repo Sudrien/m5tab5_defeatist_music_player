@@ -5,10 +5,12 @@
 #   minimp3  -- MP3 decode (Layers I/II/III, free format, gapless)
 #   pngle    -- streaming PNG decode for cover art
 #
-# Both land under components/ and are meant to be COMMITTED afterwards.
-# Same reasoning as tools/enable_exfat.sh: a build input that is fetched
-# at build time is a build that breaks differently on someone else's
-# machine.
+# You do not normally need to run this: cmake/vendored.cmake fetches the
+# same files, from the same pinned commits, at configure time. This is
+# here for fetching them ahead of a build, or on a machine with network
+# access so they can be carried to one without.
+#
+# The files are gitignored, not committed.
 #
 # --revert removes them.
 #
@@ -20,8 +22,11 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MINIMP3="$ROOT/components/minimp3"
 PNGLE="$ROOT/components/pngle"
 
-MINIMP3_REF=master
-PNGLE_REF=master
+# Same pins as cmake/vendored.cmake. If you change one, change both --
+# CMake verifies a SHA256 per file and will refetch anything this script
+# leaves behind that does not match.
+MINIMP3_REF=ea99364f61c14656440e8d77e9c233ccf3124633
+PNGLE_REF=b1c68193f1d3f8642b3e0e095d457a828038e6fb
 
 if [ "${1:-}" = "--revert" ]; then
     rm -f "$MINIMP3/minimp3.h" "$MINIMP3/minimp3_ex.h"
@@ -51,9 +56,9 @@ fetch "$BASE/miniz.h" "$PNGLE/miniz.h"
 
 cat <<'MSG'
 
-Done. Now commit components/minimp3/ and components/pngle/.
+Done. These files are gitignored -- do not commit them.
 
-Pinned to a branch name, not a tag, because neither project tags
-releases. If reproducibility matters more than freshness to you, replace
-MINIMP3_REF and PNGLE_REF above with commit SHAs.
+Pinned to commits rather than a branch because neither project tags
+releases, and because an unpinned minimp3 can reintroduce the symbol
+collision that components/minimp3/minimp3_prefix.h exists to fix.
 MSG

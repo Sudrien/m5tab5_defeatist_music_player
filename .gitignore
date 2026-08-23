@@ -4,9 +4,9 @@
 /sdkconfig.old
 /managed_components/
 
-# Vendored by tools/ scripts. Not committed -- run them after cloning:
-#   ./tools/fetch_vendored.sh   (minimp3, pngle)
-#   ./tools/enable_exfat.sh     (patched fatfs)
+# minimp3 and pngle: fetched by cmake/vendored.cmake during idf.py build,
+# pinned to commits and SHA256-checked. Nothing to run by hand.
+# fatfs: written by ./tools/enable_exfat.sh, only needed for exFAT cards.
 /components/minimp3/minimp3.h
 /components/minimp3/minimp3_ex.h
 /components/pngle/pngle.c
@@ -14,6 +14,9 @@
 /components/pngle/miniz.c
 /components/pngle/miniz.h
 /components/fatfs/
+
+# Download temporaries from a failed or interrupted vendored fetch.
+*.tmp
 
 # Editor / OS
 .vscode/
