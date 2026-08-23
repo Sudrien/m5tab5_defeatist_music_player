@@ -23,6 +23,7 @@
 #include "pngle.h"
 
 #include "albumart.h"
+#include "gfx.h"
 
 static const char *TAG = "tab5_art";
 
@@ -128,9 +129,15 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
         uint8_t *img = malloc(img_len);
         if (!img) { free(frame); return ESP_ERR_NO_MEM; }
         memcpy(img, &frame[i], img_len);
+
+        /* Logged before the free, not after. `mime` points into frame[],
+         * so the old order read freed memory to print it -- which usually
+         * still showed the right string, because nothing had reused the
+         * block yet, and would have started printing something else the
+         * moment anything did. */
+        ESP_LOGI(TAG, "cover art: %s, %u bytes", mime, (unsigned)img_len);
         free(frame);
 
-        ESP_LOGI(TAG, "cover art: %s, %u bytes", mime, (unsigned)img_len);
         *out = img;
         *out_len = img_len;
         return ESP_OK;
@@ -288,20 +295,26 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     const int sx = (iw - cw) / 2, sy = (ih - ch) / 2;
     const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
 
-    uint16_t *fb = NULL;
-    ESP_GOTO_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **)&fb),
-                      cleanup, TAG, "get fb");
+    /* The shadow, not the panel's buffer. Drawing straight into the
+     * scanned-out buffer is what made the cover appear as a flash of
+     * black followed by a slow fill. */
+    uint16_t *fb = gfx_fb();
+    ESP_GOTO_ON_ERROR(fb ? ESP_OK : ESP_ERR_INVALID_STATE,
+                      cleanup, TAG, "no shadow buffer");
 
-    /* Black out, then blit the crop. Writing the panel's own scan buffer
-     * and handing the same pointer back to draw_bitmap is the in-place
-     * path: the driver only writes back the cache for the rectangle it
-     * is given, so nothing else on screen is disturbed. */
+    /* Black out, then place the crop, then copy the band up once.
+     *
+     * screen_h is the height of the artwork area, not of the panel: the
+     * caller passes the space above the transport bar. Clearing the full
+     * panel height here would blank the bar in the shadow and blit that
+     * over it, so the bar vanished on every track change until the next
+     * ui_draw() put it back. */
     memset(fb, 0, (size_t)screen_w * screen_h * 2);
     const uint16_t *src = (const uint16_t *)rgb;
     for (int y = 0; y < ch; y++) {
         memcpy(&fb[(dy + y) * screen_w + dx], &src[(sy + y) * iw + sx], (size_t)cw * 2);
     }
-    ESP_GOTO_ON_ERROR(esp_lcd_panel_draw_bitmap(panel, 0, 0, screen_w, screen_h, fb),
+    ESP_GOTO_ON_ERROR(gfx_blit_err(0, screen_h),
                       cleanup, TAG, "draw");
 
 cleanup:
@@ -325,6 +338,7 @@ cleanup:
  * same centre-and-crop arithmetic the JPEG path uses.
  */
 typedef struct {
+    bool saw_init;
     uint16_t *fb;
     int screen_w, screen_h;
     int dx, dy;             /* top-left of the image in screen space */
@@ -333,6 +347,7 @@ typedef struct {
 static void png_on_init(pngle_t *pngle, uint32_t w, uint32_t h)
 {
     png_ctx_t *c = pngle_get_user_data(pngle);
+    c->saw_init = true;
     ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32" (png)", w, h);
     c->dx = (c->screen_w - (int)w) / 2;
     c->dy = (c->screen_h - (int)h) / 2;
@@ -363,9 +378,8 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
                                    int screen_w, int screen_h,
                                    const uint8_t *png, size_t png_len)
 {
-    uint16_t *fb = NULL;
-    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **)&fb),
-                        TAG, "get fb");
+    uint16_t *fb = gfx_fb();
+    ESP_RETURN_ON_FALSE(fb, ESP_ERR_INVALID_STATE, TAG, "no shadow buffer");
     memset(fb, 0, (size_t)screen_w * screen_h * 2);
 
     pngle_t *p = pngle_new();
@@ -382,10 +396,25 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
         ESP_LOGE(TAG, "png decode failed: %s", pngle_error(p));
         ret = ESP_FAIL;
     }
+    /* pngle_feed() can consume the whole buffer, return a non-negative
+     * count and never call a single callback -- a truncated or unsupported
+     * stream is not an error to it. That reported success while drawing
+     * nothing: no dimensions logged, no warning, and a black panel where
+     * the cover should be, which is exactly what the first boot showed.
+     *
+     * The init callback firing is the only proof the decoder actually
+     * looked at an image. */
+    if (ret == ESP_OK && !ctx.saw_init) {
+        ESP_LOGW(TAG, "png produced no image (%d of %u bytes consumed)",
+                 fed, (unsigned)png_len);
+        ret = ESP_ERR_INVALID_SIZE;
+    }
     pngle_destroy(p);
 
     if (ret == ESP_OK) {
-        ret = esp_lcd_panel_draw_bitmap(panel, 0, 0, screen_w, screen_h, fb);
+        /* One copy, once, when the whole image is decoded -- rather than
+         * the panel showing the picture arrive scanline by scanline. */
+        ret = gfx_blit_err(0, screen_h);
     }
     return ret;
 }

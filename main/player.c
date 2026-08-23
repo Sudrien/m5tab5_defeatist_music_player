@@ -1,6 +1,6 @@
 /*
- * M5Stack Tab5 (ESP32-P4) -- play the first playable track on the microSD
- * card.
+ * M5Stack Tab5 (ESP32-P4) -- play a chosen track, or a chosen folder,
+ * from the microSD card or a USB drive.
  *
  * Plain ESP-IDF 5.5.x. No M5Unified, no BSP, no ESP-ADF pipeline. Decode
  * goes through decoder.c (minimp3 for MP3, esp_audio_codec for FLAC,
@@ -19,7 +19,8 @@
  *
  *   2. SDMMC IO power is an on-chip LDO, channel 4. Skip
  *      sd_pwr_ctrl_new_on_chip_ldo() and the bus lines have no supply, so
- *      every card reads as absent -- identical to an empty slot.
+ *      every card reads as absent -- identical to an empty slot. That,
+ *      and the USB-A port's VBUS enable, now live in storage.c.
  *
  *   3. The ES8388 needs MCLK running before it will answer sensibly on
  *      I2S. We start the I2S channel (which drives MCLK) before writing
@@ -28,23 +29,18 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <dirent.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "driver/i2c_master.h"
 #include "driver/i2s_std.h"
-#include "driver/sdmmc_host.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_vfs_fat.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "sd_pwr_ctrl_by_on_chip_ldo.h"
-#include "sdmmc_cmd.h"
 
 #include "freertos/stream_buffer.h"
 #include "driver/gpio.h"
@@ -57,7 +53,10 @@
 #include "esp_idf_version.h"
 
 #include "albumart.h"
+#include "browser.h"
 #include "decoder.h"
+#include "playlist.h"
+#include "storage.h"
 #include "touch.h"
 #include "ui.h"
 
@@ -136,22 +135,6 @@ static const char *TAG = "tab5_mp3";
 #define I2S_BCLK_GPIO           (GPIO_NUM_27)
 #define I2S_LRCK_GPIO           (GPIO_NUM_29)
 #define I2S_DOUT_GPIO           (GPIO_NUM_26)   /* DSDIN: P4 -> codec */
-
-/* ---- microSD (SDMMC slot 0, 4-bit) ---- */
-#define SD_CLK_GPIO             (GPIO_NUM_43)
-#define SD_CMD_GPIO             (GPIO_NUM_44)
-#define SD_D0_GPIO              (GPIO_NUM_39)
-#define SD_D1_GPIO              (GPIO_NUM_40)
-#define SD_D2_GPIO              (GPIO_NUM_41)
-#define SD_D3_GPIO              (GPIO_NUM_42)
-#define SD_LDO_CHAN             (4)
-
-/* OCR bit 30, Card Capacity Status. IDF spells it SD_OCR_SDHC_CAP in
- * sd_protocol_defs.h, which sdmmc_cmd.h stopped pulling in on v6 and
- * which has already moved once. The bit is fixed by the SD physical
- * layer spec, so name it here. */
-#define SD_OCR_CCS_BIT          (1UL << 30)
-#define SD_MOUNT                "/sd"
 
 /* Input buffering now lives inside decoder.c -- minimp3_ex does its own
  * over its IO callbacks, and the esp_audio_codec path keeps a sliding
@@ -486,106 +469,25 @@ static esp_err_t es8388_init(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* microSD                                                             */
-/* ------------------------------------------------------------------ */
-
-static sdmmc_card_t *s_card;
-static sd_pwr_ctrl_handle_t s_pwr;
-
-static esp_err_t sd_mount(void)
-{
-    const sd_pwr_ctrl_ldo_config_t ldo = { .ldo_chan_id = SD_LDO_CHAN };
-    ESP_RETURN_ON_ERROR(sd_pwr_ctrl_new_on_chip_ldo(&ldo, &s_pwr), TAG, "sd ldo");
-    ESP_LOGI(TAG, "SDMMC IO power up (LDO ch%d)", SD_LDO_CHAN);
-
-    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
-    host.slot = SDMMC_HOST_SLOT_0;          /* the default is slot 1 */
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
-    host.pwr_ctrl_handle = s_pwr;
-
-    sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
-    slot.width = 4;
-    slot.clk = SD_CLK_GPIO;
-    slot.cmd = SD_CMD_GPIO;
-    slot.d0  = SD_D0_GPIO;
-    slot.d1  = SD_D1_GPIO;
-    slot.d2  = SD_D2_GPIO;
-    slot.d3  = SD_D3_GPIO;
-    /* No card-detect or write-protect line on this board. */
-
-    const esp_vfs_fat_sdmmc_mount_config_t mnt = {
-        .format_if_mount_failed = false,
-        .max_files = 5,
-        .allocation_unit_size = 16 * 1024,
-    };
-
-    const esp_err_t ret = esp_vfs_fat_sdmmc_mount(SD_MOUNT, &host, &slot, &mnt, &s_card);
-    if (ret != ESP_OK) {
-        /* A failed mount leaves the host initialised with its slot GPIOs
-         * checked out; the next attempt then reports
-         * "conflict found for GPIO[42]". Tear it down. */
-        (void)sdmmc_host_deinit();
-        s_card = NULL;
-        if (ret == ESP_FAIL) {
-            ESP_LOGE(TAG, "card present but no mountable filesystem");
-#ifndef CONFIG_FATFS_USE_EXFAT_VENDORED
-            ESP_LOGE(TAG, "if this card is exFAT, run ./tools/enable_exfat.sh");
-#endif
-        } else {
-            ESP_LOGE(TAG, "no card (%s)", esp_err_to_name(ret));
-        }
-        return ret;
-    }
-
-    const uint64_t bytes = (uint64_t)s_card->csd.capacity * s_card->csd.sector_size;
-    ESP_LOGI(TAG, "  %-12s %s", "name", s_card->cid.name);
-    ESP_LOGI(TAG, "  %-12s %s", "type",
-             s_card->is_mmc ? "MMC/eMMC"
-                            : (s_card->ocr & SD_OCR_CCS_BIT) ? "SDHC/SDXC" : "SDSC");
-    ESP_LOGI(TAG, "  %-12s %llu MB", "capacity", bytes / (1024 * 1024));
-    ESP_LOGI(TAG, "  %-12s %d kHz", "speed", s_card->max_freq_khz);
-    ESP_LOGI(TAG, "  %-12s %d-bit", "bus width", s_card->log_bus_width ? 4 : 1);
-    return ESP_OK;
-}
-
-/* First playable file in the root directory. Not recursive, not sorted --
- * FatFs hands entries back in directory order, so "first" means first on
- * the volume. Which extensions count is decoder.c's call, not this
- * file's. */
-static bool find_first_track(char *out, size_t out_len)
-{
-    DIR *d = opendir(SD_MOUNT);
-    if (!d) {
-        ESP_LOGE(TAG, "cannot open %s", SD_MOUNT);
-        return false;
-    }
-    struct dirent *e;
-    bool found = false;
-    while ((e = readdir(d)) != NULL) {
-        if (e->d_type == DT_DIR) continue;
-        if (decoder_supports(e->d_name)) {
-            snprintf(out, out_len, SD_MOUNT "/%s", e->d_name);
-            found = true;
-            break;
-        }
-    }
-    closedir(d);
-    return found;
-}
-
-/* ------------------------------------------------------------------ */
 /* Playback                                                            */
 /* ------------------------------------------------------------------ */
 
 static StreamBufferHandle_t s_pcm;
 static volatile bool s_decode_done;
 
+/* The writer used to outlive the one and only file. Now that play_file()
+ * is called once per track, the ring has to be freed at the end of each
+ * one -- and freeing it while the writer is still inside
+ * xStreamBufferReceive() on it is a use-after-free rather than an error.
+ * So the writer says when it has gone. */
+static volatile bool s_writer_done;
+
 /* Drains the ring into I2S and nothing else, so the only thing it ever
  * blocks on is DMA. */
 static void i2s_writer_task(void *arg)
 {
     uint8_t *buf = heap_caps_malloc(PCM_CHUNK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!buf) { vTaskDelete(NULL); return; }
+    if (!buf) { s_writer_done = true; vTaskDelete(NULL); return; }
 
     while (1) {
         const size_t got = xStreamBufferReceive(s_pcm, buf, PCM_CHUNK_BYTES,
@@ -598,6 +500,7 @@ static void i2s_writer_task(void *arg)
         }
     }
     free(buf);
+    s_writer_done = true;
     vTaskDelete(NULL);
 }
 
@@ -616,22 +519,171 @@ static volatile int      s_volume = 50;
 static volatile uint32_t s_pos_sec;
 static volatile uint32_t s_len_sec;
 static volatile bool     s_screen_off;
-static volatile bool     s_want_next;      /* folder button was pressed */
+
+/*
+ * The chooser hands a path back here.
+ *
+ * s_pending is written by the UI task and read by the decode loop, which
+ * is the one place in this file where a plain scalar is not enough: it is
+ * a buffer, and a decode loop that read it half-written would open a
+ * truncated path. s_pending_ready is the handshake -- written last by the
+ * UI task, cleared first by the decode loop -- so the buffer is only ever
+ * read between a complete write and the acknowledgement.
+ */
+static char              s_pending[512];
+static volatile bool     s_pending_ready;
+
+/* Set by the UI task when the chooser closes, for any reason. The decode
+ * loop repaints the cover art, because the chooser drew over it and the
+ * art is the one thing on screen ui_draw() does not own. */
+static volatile bool     s_repaint_art;
+
+/* Asked for by the decode loop, honoured by the UI task: the chooser is
+ * opened from whichever task polls touch, so there is one writer to the
+ * framebuffer. */
+static volatile bool     s_open_chooser;
 
 /* Set by the UI, consumed by the decode loop. -1 = nothing pending. Seek
  * is not implemented yet -- see README -- so the decode loop currently
  * logs and clears it. */
 static volatile int      s_seek_pct = -1;
 
-/* Written once before the UI task starts, read-only afterwards. */
+/* The track being played, its tags, and the filename fallback.
+ *
+ * s_path was a local in app_main() when there was one file. It is a
+ * static now because s_display_name points into it and the UI task reads
+ * that on every frame -- a local would have gone out of scope the moment
+ * the second track started.
+ *
+ * Written by the decode loop between tracks, while the UI is drawing the
+ * previous track's title. Worst case is one frame of the old name against
+ * the new artwork, which is a frame, not a fault. */
+static char s_path[512];
 static id3_tags_t s_tags;
 static const char *s_display_name = "";
+
+/* Read the tags and put the cover on screen. Was inline in app_main();
+ * it runs once per track now.
+ *
+ * Called from the decode loop rather than the UI task deliberately: it
+ * fopen()s the track and pushes a JPEG through the hardware codec, and
+ * the UI task has 4 KB of stack and a 20 ms period. Doing it here costs
+ * the ring a fraction of its 0.37 s of slack instead. */
+static void load_track_visuals(const char *path)
+{
+    memset(&s_tags, 0, sizeof(s_tags));
+
+    s_display_name = strrchr(path, '/');
+    s_display_name = s_display_name ? s_display_name + 1 : path;
+
+    FILE *af = fopen(path, "rb");
+    if (!af) return;
+
+    if (id3_read_tags(af, &s_tags) == ESP_OK) {
+        ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
+                 s_tags.title, s_tags.artist, s_tags.album);
+    } else {
+        ESP_LOGI(TAG, "no ID3 text frames; showing the filename");
+    }
+
+    /* albumart_extract() reads ID3v2 specifically, so this finds nothing
+     * in a FLAC (PICTURE metadata block) or an M4A (covr atom). Those are
+     * a separate parser each and are not written yet -- see README.
+     *
+     * The area above the bar is cleared either way. Without that, a track
+     * with no art keeps the previous track's cover, which reads as the
+     * player having ignored the choice. */
+    ui_clear_art();
+
+    uint8_t *jpg = NULL;
+    size_t jpg_len = 0;
+    if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
+        /* The artwork area, not the panel: everything below belongs to
+         * the transport bar and must not be cleared from here. */
+        const esp_err_t serr = albumart_show(s_panel, LCD_H_RES,
+                                             LCD_V_RES - UI_BAR_H,
+                                             jpg, jpg_len);
+        if (serr != ESP_OK) {
+            ESP_LOGW(TAG, "cover art failed to decode (%s)",
+                     esp_err_to_name(serr));
+        }
+        free(jpg);
+    } else {
+        ESP_LOGI(TAG, "no cover art in tag");
+    }
+    fclose(af);
+
+    /* After the art, not before -- this snapshots what the finger bubble
+     * has to put back. */
+    ui_capture_background();
+}
+
+/* Hand a chosen path to the decode loop. */
+static void request_track(const char *path)
+{
+    snprintf(s_pending, sizeof(s_pending), "%s", path);
+    s_pending_ready = true;
+}
 
 static void ui_task(void *arg)
 {
     ui_state_t st;
 
     while (1) {
+        int bx = 0, by = 0;
+        const bool bdown = touch_get(&bx, &by);
+
+        /* The chooser, when it is up, is the whole screen and the whole
+         * interaction. It is driven from here rather than from its own
+         * task so there is exactly one writer to the framebuffer -- the
+         * same reason ui_draw() and albumart_show() never overlap. */
+        if (s_open_chooser) {
+            s_open_chooser = false;
+            browser_open(s_path);
+        }
+
+        if (browser_is_open()) {
+            const browser_result_t r = browser_touch(bdown, bx, by);
+            switch (r.kind) {
+            case BROWSER_PLAY_FILE:
+                /* The folder the track came from becomes the list, so
+                 * "play this one" and "then carry on" are one choice
+                 * rather than two. */
+                {
+                    char dir[512];
+                    snprintf(dir, sizeof(dir), "%s", r.path);
+                    char *slash = strrchr(dir, '/');
+                    if (slash && slash != dir) *slash = '\0';
+                    if (playlist_load_dir(dir) == ESP_OK) {
+                        playlist_set_current(playlist_index_of(r.path));
+                    }
+                    request_track(r.path);
+                }
+                browser_close();
+                s_repaint_art = true;
+                break;
+            case BROWSER_PLAY_FOLDER:
+                if (playlist_load_dir(r.path) == ESP_OK && playlist_count() > 0) {
+                    playlist_set_current(0);
+                    request_track(playlist_path(0));
+                } else {
+                    ESP_LOGW(TAG, "nothing playable in %s", r.path);
+                }
+                browser_close();
+                s_repaint_art = true;
+                break;
+            case BROWSER_CANCELLED:
+                browser_close();
+                s_repaint_art = true;
+                break;
+            default:
+                break;
+            }
+            browser_draw();
+            vTaskDelay(pdMS_TO_TICKS(bdown ? 20 : 100));
+            continue;
+        }
+
         st.title = s_tags.title[0] ? s_tags.title : s_display_name;
         st.artist = s_tags.artist;
         st.album = s_tags.album;
@@ -641,9 +693,8 @@ static void ui_task(void *arg)
         st.len_sec = s_len_sec;
         st.screen_off = s_screen_off;
 
-        int tx = 0, ty = 0;
-        const bool down = touch_get(&tx, &ty);
-        const ui_action_t act = ui_touch(&st, down, tx, ty);
+        const bool down = bdown;
+        const ui_action_t act = ui_touch(&st, down, bx, by);
 
         switch (act.kind) {
         case UI_ACTION_PLAY_PAUSE:
@@ -657,7 +708,7 @@ static void ui_task(void *arg)
             s_seek_pct = act.value;
             break;
         case UI_ACTION_CHOOSE_FILE:
-            s_want_next = true;
+            s_open_chooser = true;
             break;
         case UI_ACTION_SCREEN_OFF:
             s_screen_off = true;
@@ -691,10 +742,26 @@ static void ui_task(void *arg)
  * container handling. That also removed the ID3v2-footer and APEv2 bugs
  * the hand-rolled version had, because neither is now our problem.
  */
-static void play_file(const char *path)
+/* Why the track ended. The caller needs to tell "the file finished, go on
+ * to the next one" from "something else was chosen, do not". */
+typedef enum {
+    TRACK_ENDED = 0,    /* end of file, or an unreadable one */
+    TRACK_INTERRUPTED,  /* the chooser picked something else */
+    TRACK_MEDIA_GONE,   /* the card or drive was pulled */
+} track_end_t;
+
+static track_end_t play_file(const char *path)
 {
+    const storage_id_t vol = storage_of_path(path);
+
     decoder_t *dec = decoder_open(path);
-    if (!dec) return;
+    if (!dec) return TRACK_ENDED;
+
+    /* Tell storage.c not to unmount underneath this FILE*. It will still
+     * mark the volume absent the moment the card stops answering -- the
+     * loop below watches for that -- but the unmount itself waits until
+     * the decoder is closed. */
+    storage_hold(vol);
 
     /* Both in PSRAM. The mono-to-stereo scratch is twice the decode
      * buffer and 36 KB of it as a static would be 36 KB of internal RAM
@@ -708,13 +775,32 @@ static void play_file(const char *path)
         free(pcm);
         free(st);
         decoder_close(dec);
-        return;
+        storage_hold(STORAGE_COUNT);
+        return TRACK_ENDED;
     }
 
     uint32_t cur_rate = 0;
     int cur_chans = 0;
     int blocks = 0;
     uint64_t frames_out = 0;
+    track_end_t why = TRACK_ENDED;
+
+    load_track_visuals(path);
+
+    /* Consume any repaint the chooser left pending. It closed a moment
+     * ago and set the flag; the call above has just drawn this track's
+     * cover, so the flag is already satisfied.
+     *
+     * Without this the loop's first pass ran load_track_visuals() a
+     * second time, ~50 ms later -- visible in the log as a duplicated
+     * pair of "no ID3 text frames" / "no cover art" lines per track. The
+     * d001 guard does not catch it: that one skips the repaint when a
+     * track change is still queued, and by this point the change has
+     * happened and s_pending_ready is back to false.
+     *
+     * Cheap today, load-bearing once the waveform scan hangs off this
+     * function: two scans of a whole song per track change. */
+    s_repaint_art = false;
 
     /* Before the first block, so the bar has a scale to draw against from
      * the very first repaint rather than snapping into place a frame in. */
@@ -729,15 +815,44 @@ static void play_file(const char *path)
          * DMA and then i2s_writer_task blocks on an empty buffer, which
          * is silence without disabling the channel. Disabling it would
          * be an audible click on every press. */
-        while (!s_playing) {
+        /* The chooser drew over the artwork and has just closed. Repaint
+         * from here rather than from the UI task -- see
+         * load_track_visuals(). Ahead of the pause wait, because a
+         * chooser opened and dismissed while paused would otherwise
+         * leave the listing on screen until play resumed. */
+        /* Not when a track change is already queued. The chooser sets
+         * both flags on the way out, and the repaint would decode this
+         * track's cover -- a 130 KB PNG -- milliseconds before play_file()
+         * exits and the next track decodes its own. One full decode
+         * thrown away on every switch.
+         *
+         * The cancel case still repaints: nothing is pending there, which
+         * is exactly what distinguishes it. */
+        if (s_repaint_art && !s_pending_ready) {
+            s_repaint_art = false;
+            load_track_visuals(path);
+        }
+
+        while (!s_playing && !s_pending_ready) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
 
-        if (s_want_next) {
-            s_want_next = false;
-            ESP_LOGI(TAG, "file chooser not implemented; stopping this track");
+        /* A choice made while paused has to end the track, or the new
+         * file waits behind a pause the user has already moved on from. */
+        if (s_pending_ready) {
+            why = TRACK_INTERRUPTED;
             break;
         }
+
+        /* The volume this file is on stopped answering. Nothing further
+         * will read; stop before decoder_read() turns it into a stream of
+         * short reads and a log line per frame. */
+        if (vol < STORAGE_COUNT && !storage_present(vol)) {
+            ESP_LOGW(TAG, "media removed; stopping playback");
+            why = TRACK_MEDIA_GONE;
+            break;
+        }
+
 
         if (s_seek_pct >= 0) {
             const int pct = s_seek_pct;
@@ -784,6 +899,7 @@ static void play_file(const char *path)
                 ESP_ERROR_CHECK(i2s_set_rate((uint32_t)info.sample_rate));
                 s_pcm = xStreamBufferCreate(PCM_RING_BYTES, PCM_CHUNK_BYTES);
                 s_decode_done = false;
+                s_writer_done = false;
                 xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
             } else if ((uint32_t)info.sample_rate != cur_rate) {
                 /* i2s_channel_reconfig_std_clock() needs the channel
@@ -819,26 +935,154 @@ static void play_file(const char *path)
 
     s_decode_done = true;
     if (s_pcm) {
-        while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(pdMS_TO_TICKS(10));
+        /* Interrupted rather than finished: what is queued is the old
+         * track, and playing 0.37 s of it after the new one was chosen
+         * sounds like the tap was ignored. Dropped for the same reason
+         * the ring is reset on a seek.
+         *
+         * A track that ended on its own drains, because those last
+         * fractions of a second are the end of the song. */
+        if (why == TRACK_ENDED) {
+            while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(pdMS_TO_TICKS(10));
+        } else {
+            xStreamBufferReset(s_pcm);
+        }
+
+        /* Wait for the writer to leave the buffer before deleting it.
+         * With one file this task never came back here at all; with a
+         * playlist, freeing the ring out from under a blocked
+         * xStreamBufferReceive() is a use-after-free once per track. */
+        while (!s_writer_done) vTaskDelay(pdMS_TO_TICKS(10));
+        vStreamBufferDelete(s_pcm);
+        s_pcm = NULL;
     }
-    ESP_LOGI(TAG, "finished, %d blocks", blocks);
+    /* Why, not just that. "finished" on a track the user skipped out of
+     * reads as the skip having been ignored until the next line arrives. */
+    ESP_LOGI(TAG, "%s, %d blocks",
+             why == TRACK_INTERRUPTED ? "interrupted"
+             : why == TRACK_MEDIA_GONE ? "media gone"
+                                       : "finished", blocks);
 
     free(pcm);
     free(st);
     decoder_close(dec);
+    storage_hold(STORAGE_COUNT);
+
+    s_pos_sec = 0;
+    return why;
 }
 
 /* ------------------------------------------------------------------ */
 
+/*
+ * Pick something to start with, without making the user choose first.
+ *
+ * The first playable file on the first mounted volume, and its folder
+ * becomes the list -- so a card with an album on it plays the album, and
+ * the chooser is for changing your mind rather than for getting started.
+ * Not recursive: a card whose root is nothing but folders opens the
+ * chooser instead, which is the honest answer to "what should I play"
+ * when there is no file to pick.
+ */
+static bool autostart(char *out, size_t out_len)
+{
+    for (int v = 0; v < STORAGE_COUNT; v++) {
+        if (!storage_present((storage_id_t)v)) continue;
+        const char *root = storage_mount_path((storage_id_t)v);
+        if (playlist_load_dir(root) != ESP_OK) continue;
+        if (playlist_count() == 0) continue;
+        playlist_set_current(0);
+        snprintf(out, out_len, "%s", playlist_path(0));
+        return true;
+    }
+    return false;
+}
+
+/*
+ * One track after another, forever.
+ *
+ * This replaced a single play_file() call. The shape is: play what is
+ * queued, then ask the playlist what is next; when nothing is next, put
+ * the chooser up and wait for a tap rather than returning from app_main()
+ * and leaving a lit screen attached to a dead task.
+ */
+static void player_loop(void)
+{
+    bool have = autostart(s_path, sizeof(s_path));
+    if (!have) {
+        ESP_LOGI(TAG, "nothing to play; opening the chooser");
+        s_open_chooser = true;
+    }
+
+    while (1) {
+        if (s_pending_ready) {
+            /* Clear the flag before reading the buffer, so a second
+             * choice made during the copy is not lost silently -- it
+             * simply sets the flag again and is picked up next time
+             * round. */
+            s_pending_ready = false;
+            snprintf(s_path, sizeof(s_path), "%s", s_pending);
+            have = true;
+        }
+
+        if (!have) {
+            /* Idle: no decode loop is running, so the repaint that
+             * normally happens there has to happen here. Otherwise a
+             * chooser dismissed with nothing playing leaves its listing
+             * above the bar until something is chosen. */
+            if (s_repaint_art) {
+                s_repaint_art = false;
+                if (s_path[0]) load_track_visuals(s_path);
+                else           ui_clear_art();
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
+
+        ESP_LOGI(TAG, "playing %s", s_path);
+        const track_end_t why = play_file(s_path);
+        have = false;
+
+        if (why == TRACK_INTERRUPTED) continue;    /* s_pending has the next */
+
+        if (why == TRACK_MEDIA_GONE) {
+            /* The list points at paths on a volume that is no longer
+             * there. Keeping it would offer a next track that cannot be
+             * opened. */
+            playlist_clear();
+            s_open_chooser = true;
+            continue;
+        }
+
+        const char *next = playlist_next(browser_order());
+        if (next) {
+            snprintf(s_path, sizeof(s_path), "%s", next);
+            have = true;
+            continue;
+        }
+
+        /* End of the folder, or single-track mode. Nothing is playing and
+         * nothing is queued, so offer the chooser rather than sit on a
+         * finished track. */
+        ESP_LOGI(TAG, "end of %s", playlist_dir());
+        s_open_chooser = true;
+    }
+}
+
 void app_main(void)
 {
     /* The SD drivers narrate every probe; let this file decide what is
-     * worth printing. Needs CONFIG_LOG_DYNAMIC_LEVEL_CONTROL on v6. */
+     * worth printing. Needs CONFIG_LOG_DYNAMIC_LEVEL_CONTROL on v6.
+     *
+     * The USB stack is the same problem with more tasks: a drive being
+     * enumerated logs a descriptor dump per device at info level. */
     esp_log_level_set("sdmmc_common", ESP_LOG_NONE);
     esp_log_level_set("sdmmc_init", ESP_LOG_NONE);
     esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_NONE);
     esp_log_level_set("SD_HOST", ESP_LOG_NONE);
     esp_log_level_set("ldo", ESP_LOG_ERROR);
+    esp_log_level_set("USBH", ESP_LOG_WARN);
+    esp_log_level_set("Hub", ESP_LOG_WARN);
 
     ESP_ERROR_CHECK(i2c_bus_init());
     ESP_ERROR_CHECK(io_expanders_init());
@@ -850,48 +1094,11 @@ void app_main(void)
     ESP_ERROR_CHECK(i2s_init(44100));
     ESP_ERROR_CHECK(es8388_init());
 
-    ESP_ERROR_CHECK(sd_mount());
-
-    char path[300];
-    if (!find_first_track(path, sizeof(path))) {
-        ESP_LOGE(TAG, "nothing playable in %s", SD_MOUNT);
-        return;
-    }
-    ESP_LOGI(TAG, "playing %s", path);
-
-    /* Cover art, if the tag carries one. Decoded and drawn before
-     * playback starts so the JPEG engine is not competing with the
-     * decoder for PSRAM bandwidth.
-     *
-     * albumart_extract() reads ID3v2 specifically, so this finds nothing
-     * in a FLAC (PICTURE metadata block) or an M4A (covr atom). Those are
-     * a separate parser each and are not written yet -- see README. */
-    /* Filename without the directory, as the fallback when the tag has no
-     * title. Points into path[], which outlives the UI task. */
-    s_display_name = strrchr(path, '/');
-    s_display_name = s_display_name ? s_display_name + 1 : path;
-
-    FILE *af = fopen(path, "rb");
-    if (af) {
-        if (id3_read_tags(af, &s_tags) == ESP_OK) {
-            ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
-                     s_tags.title, s_tags.artist, s_tags.album);
-        } else {
-            ESP_LOGI(TAG, "no ID3 text frames; showing the filename");
-        }
-
-        uint8_t *jpg = NULL;
-        size_t jpg_len = 0;
-        if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
-            if (albumart_show(s_panel, LCD_H_RES, LCD_V_RES, jpg, jpg_len) != ESP_OK) {
-                ESP_LOGW(TAG, "cover art failed to decode");
-            }
-            free(jpg);
-        } else {
-            ESP_LOGI(TAG, "no cover art in tag");
-        }
-        fclose(af);
-    }
+    /* Both volumes, and the poll task that keeps them up to date. Not
+     * ESP_ERROR_CHECK'd on the media itself: an empty slot and an empty
+     * port are a normal way to boot now, and the chooser says so on
+     * screen. */
+    ESP_ERROR_CHECK(storage_init(s_exp2));
 
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
 
@@ -902,13 +1109,15 @@ void app_main(void)
         ESP_LOGW(TAG, "no touch -- playing through with no controls");
     }
     ESP_ERROR_CHECK(ui_init(s_panel, LCD_H_RES, LCD_V_RES));
-    /* After the art is drawn, not before -- this snapshots what the bubble
-     * has to put back. */
     ui_capture_background();
-    xTaskCreate(ui_task, "ui", 4096, NULL, 4, NULL);
+    /* 4 KB was enough when this task only drew the bar. The chooser runs
+     * on it too now, and that reaches opendir()/readdir() through FatFs
+     * and carries a couple of 512-byte path buffers on the way -- so the
+     * old size overflowed on the first folder with a long name in it. */
+    xTaskCreate(ui_task, "ui", 8192, NULL, 4, NULL);
 
-    play_file(path);
-
-    esp_vfs_fat_sdcard_unmount(SD_MOUNT, s_card);
-    ESP_LOGI(TAG, "done");
+    /* Does not return. The volumes are never unmounted from here any
+     * more; storage.c owns that, and it unmounts on removal rather than
+     * on the end of a track. */
+    player_loop();
 }
