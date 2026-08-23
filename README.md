@@ -115,6 +115,22 @@ which does take arbitrary lengths. That is also the better mapping in
 practice: raw headerless Opus is rare on disk and Ogg-encapsulated Opus
 is what everything actually ships.
 
+### Vendored headers are fetched, not committed
+
+minimp3 and pngle are pulled by `cmake/vendored.cmake` during
+`idf.py build`, pinned to commit SHAs with a SHA256 per file. Nothing to
+run first.
+
+The pin is load-bearing rather than tidiness: `minimp3_prefix.h` lists
+every symbol minimp3 exports, and an unpinned upstream that adds one
+brings the link collision back for whoever clones next but not for you.
+`tools/fetch_vendored.sh` carries the same pins for offline use.
+
+This is the opposite call from `components/fatfs/`, which
+`tools/enable_exfat.sh` writes and which is also not committed -- but
+that one has no pin, because it is patched from whatever IDF you have
+installed.
+
 ### Licensing, since you already care about this for exFAT
 
 - minimp3 is CC0/public domain. No attribution obligation, vendored

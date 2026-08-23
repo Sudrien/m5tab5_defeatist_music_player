@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
+# Pull down minimp3 and pngle if they are not here yet. Must run before
+# project.cmake, which scans components/ -- pngle registers pngle.c and
+# miniz.c as SRCS and those files have to exist by the time it looks.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/vendored.cmake)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5tab5_defeatist_music_player)
 
