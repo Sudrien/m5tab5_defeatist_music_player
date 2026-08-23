@@ -1,4 +1,4 @@
-# m5tab5_defeatist_music_player
+# M5Tab5 Defeatist Music Player
 What do you mean no audio over Bluetooth
 
 ## Featues possible and impossible
