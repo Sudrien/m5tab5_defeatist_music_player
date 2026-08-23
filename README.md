@@ -200,10 +200,29 @@ aesthetic:
 
 ### Text rows
 
-Title on its own row, artist and album joined on one line underneath,
-both clipped with an ellipsis rather than wrapped. Three stacked rows made
-the bar taller than the artwork could spare and artist is the part people
-actually read, so album shares a line with it.
+Title, artist and album, a row each, all clipped with an ellipsis rather
+than wrapped.
+
+Artist and album used to share a line, on the grounds that three stacked
+rows made the bar taller than the artwork could spare. That was the wrong
+trade. The joined string was built in a 96 byte buffer from two 64 byte
+tag fields, so anything approaching full length was silently truncated --
+and it happened to truncate the album only because of the argument order.
+An album title of any real length pushed the artist out of the row
+entirely, which is the one part people actually read.
+
+So the bar took the extra row instead: `UI_BAR_H` went from 276 to 316,
+which is one scale-3 row plus the gap that keeps the three from reading as
+a paragraph. It comes out of the cover, which had 1004 rows and now has
+964 -- no change at all to a 500x500 cover, and 20 rows off each end of
+one large enough to be cropped.
+
+The rows are not evenly spaced. The title is scale 5 and needs clearance;
+artist and album are both scale 3 and sit closer to each other than either
+does to the title, so they read as a pair belonging to it. Album is dimmer
+than artist for the same reason -- three rows of equal weight read as a
+block of text, and the hierarchy is what makes it scannable at arm's
+length.
 
 `id3_read_tags()` lives in `albumart.c` rather than its own file because
 the frame walker it needs is the one `albumart_extract()` already has --
@@ -274,13 +293,316 @@ Two things happen on a successful seek that are easy to leave out:
 units as `ex.samples`. Seeking to `sec * hz` lands at half the intended
 point on stereo.
 
+### Two volumes, mounted together
+
+`storage.c` owns the microSD slot and the USB-A port, and both are mounted
+at once rather than one being picked over the other. The chooser needs to
+show a tab per slot and grey the empty one, which is not a question
+"which filesystem is active" can answer.
+
+**USB5V\_EN is P3 of the expander at 0x44**, not a GPIO, and not the
+`EXT5V` on expander 1 that `PI4IOE1_OUT_SET` already drives. Until it is
+high the USB-A port is electrically dead: the host stack installs, the
+class driver registers, and nothing ever enumerates, with no error
+anywhere. Three registers in this order -- direction, out of high-Z, then
+drive -- and the high-Z one is the easy one to miss, exactly as it is for
+`SPK_EN` on the other expander.
+
+`PI4IOE2_IO_DIR` was already 0xB9, whose bit 3 is what distinguishes it
+from M5Unified's 0xB1; that value puts P3 back to an input and the port
+stays dark. `storage.c` re-writes the direction bit anyway rather than
+depending on that constant keeping its value.
+
+Card presence is polled at 1 Hz, because it has to be: the microSD
+connector's detect switch is not wired to the SoC on this board -- M5's
+BSP passes `GPIO_NUM_NC` for it -- so there is no edge to interrupt on.
+`sdmmc_get_status()` is the removal signal, and an empty slot answers it
+by timing out, which is why the poll is a second rather than faster.
+
+A failed mount has to tear the host down (`sdmmc_host_deinit()`) or the
+next attempt reports `conflict found for GPIO[42]`. That was already true
+and already handled; it matters far more now, because the poll retries
+forever rather than once at boot, so a leaked host is a guaranteed failure
+a second later instead of a one-off.
+
+### The USB port is off until there is a reason
+
+VBUS is not brought up at boot. Neither is the host stack -- powering the
+port but leaving the stack uninstalled would spin a drive up and then
+ignore it, which is the worst of both. `storage_usb_enable()` does the
+whole sequence: host stack, class driver, then bus power, in that order,
+so a drive already in the port is enumerated by a stack that exists.
+
+Two things ask for it, and nothing else does:
+
+1. **No card at boot.** A player with nothing to play should look at the
+   other port rather than sit there empty. Boot only, deliberately -- a
+   card pulled later is a removal, not a search for media, and tying it to
+   removal would mean a card reseated twice had powered the port
+   permanently as a side effect. "Card present but unreadable" counts as
+   no card, because nothing mounted either way.
+2. **The USB tab is selected**, which is the user saying the same thing by
+   hand.
+
+It is one-way. Cutting VBUS again would yank a mounted drive out from
+under whatever is reading it, and the saving is a port with nothing
+plugged into it -- which is the state it was already in.
+
+The work happens on the poll task, not on the caller's: three I2C writes
+and a 100 ms settle for the port's inrush, and the two callers are the
+boot path and a touch event. Neither should block on it.
+
+### A greyed tab is still a button
+
+This is the one place the chooser departs from a normal tab strip, and it
+follows from rule 2: if the port is only powered by selecting its tab,
+then the tab has to be selectable while there is nothing behind it. Grey
+means "nothing here yet", not "not a button".
+
+So the underline is drawn for the selected tab whether or not anything is
+mounted -- in grey rather than red when it is empty. A strip with no
+underline at all reads as a lost tap.
+
+The path row carries the reason instead of a path:
+
+| State | Row reads |
+| --- | --- |
+| No card | `no card in the slot` |
+| USB tab, port dark | `tap again to power the USB port` |
+| USB tab, port up, no drive | `USB port on - waiting for a drive` |
+
+`storage_usb_powered()` deliberately reports the *request*, not the
+completed bring-up. The poll task can be a second behind the tap, and for
+that second the row would otherwise tell the user to tap again -- which
+either does nothing or reads as the first tap having missed. For the same
+reason the request flag is cleared only on failure, never on the way in:
+clearing it first leaves a window where neither flag is set and the label
+flickers back mid-bring-up.
+
+One consequence worth stating: **the chooser no longer moves the tab on
+its own.** It used to fall back to whatever else was mounted when the
+shown volume vanished. That would have undone the tap that powered the
+port, about a second before the drive it was waiting for turned up.
+
+### Joining paths is not a snprintf
+
+`storage_join_path()` exists because the obvious version does not build:
+
+    snprintf(out, sizeof(out), "%s%s%s", dir, sep, name);
+
+`dir` and `out` are both 512 bytes, so the concatenation cannot be proven
+to fit and `-Wformat-truncation` says so -- correctly, and as an error
+under the project's warning settings. Silencing it would have been the
+wrong call anyway: a truncated path is a path to a different file, or to
+none, and quietly opening the wrong one is worse than not opening it.
+
+So the join is written out, the arithmetic is the proof, and it returns
+false rather than truncating. Every caller checks. The chooser logs and
+ignores the row; the playlist scan skips the entry and carries on, because
+one unreasonably long filename should not cost you the rest of the album.
+
+It lives in `storage.c` rather than in each caller for the usual reason --
+`browser.c` and `playlist.c` both build paths the same way, and the second
+copy is the one that drifts.
+
+### Unmounting under an open file
+
+Removal is detected by polling, so the interesting case is a card pulled
+mid-track. Calling `esp_vfs_fat_sdcard_unmount()` with a `FILE*` still
+open on the volume is a use-after-free inside FatFs rather than an error
+return.
+
+So the two halves are split. `storage_hold()` marks the volume the decoder
+is reading; on removal that volume is flagged absent immediately -- the
+tab greys, and the decode loop sees its own volume vanish and stops the
+track -- but the unmount itself waits for the release. One poll later,
+with the decoder closed, the unmount happens for real.
+
+The playlist is cleared at the same time. Keeping it would offer a next
+track whose path is on a volume that is no longer there.
+
+### The chooser
+
+`browser.c`, full screen rather than a panel over the artwork. The bar is
+276 px of a 1280 px panel; a chooser that respected the cover would get
+eleven rows in the gap and need scrolling twice as often, and the artwork
+is not information while you are picking something else to play.
+
+It owns no task. `ui_task` drives it -- `browser_touch()` then
+`browser_draw()` -- exactly as it drives the transport bar, so there is
+one writer to the framebuffer and no lock. That is also why the chooser is
+*opened* from the UI task and only *requested* from the decode loop.
+
+A tab for a volume that is not there is drawn greyed, not hidden. A tab
+that disappears when the card is out and reappears when it goes in moves
+the other tab under the finger.
+
+Redraws are gated on a dirty flag plus `storage_generation()`. The flag
+covers taps; the counter covers a drive appearing while the chooser is
+already up, which has to be visible without a touch. Without the gate this
+is a full 720x1280 blit ten times a second against a decoder that wants
+the same PSRAM bandwidth.
+
+Files the decoder cannot open are hidden rather than greyed. A card root
+is mostly `System Volume Information` and stray text files, and a list
+where two thirds of the rows are untappable is a worse list.
+
+Folders sort before files, each run case-insensitively. Mixing them
+alphabetically buries a disc subfolder in the middle of the track list,
+and the two are different kinds of thing to tap.
+
+Scrolling is two page buttons, not a flick. Flick physics needs velocity
+tracking across a poll interval that changes from 20 ms to 100 ms
+depending on whether a finger is down, and the scroll bar down the right
+edge already says where you are.
+
+### Folders are the playlist
+
+`playlist.c` holds one directory's worth of playable files. A folder is
+the unit because a folder is what an album is on disk, and nothing is
+persisted -- the list is rebuilt from the directory each time one is
+chosen, so a file added on a desktop appears the next time that folder is
+opened rather than after a rescan nobody remembers to run.
+
+Tapping a track loads its folder as the list and starts there, so "play
+this one" and "then carry on" are one choice rather than two. `FLDR` plays
+the current folder from the top.
+
+The scan is not recursive. An album with disc subfolders is two choices
+rather than one, which is the honest rendering of what is on the card; a
+recursive scan of a card root is a several-thousand-entry list and a long
+stall on the touch that asked for it. `PLAYLIST_MAX` and `MAX_ENTRIES` cap
+both lists for the same reason -- each entry is a `strdup` on a touch
+event.
+
+Sorting is not optional. FatFs hands entries back in directory order,
+which is creation order on most cards, so an album copied track by track
+is roughly right and an album copied by anything that parallelises is not.
+
+`ONE` / `ALL` / `RND` cycles in the chooser's footer. Shuffle keeps a
+played-bitmap rather than picking uniformly at random, so a twelve-track
+album plays twelve different tracks; the bitmap clears when it fills,
+minus the track just played, so the wrap is a fresh shuffle rather than a
+repeat and never doubles a track across the seam.
+
+### One track after another
+
+`play_file()` returns why it stopped -- ended, interrupted, media gone --
+because the caller has to tell "the file finished, go on to the next" from
+"something else was chosen, do not".
+
+Three things that were free with a single file and are not any more:
+
+- **The PCM ring is per track now.** It used to be created once and never
+  freed, which was correct when the function ran once. Freeing it while
+  `i2s_writer_task` is blocked inside `xStreamBufferReceive()` on it is a
+  use-after-free once per track, so the writer sets a flag on its way out
+  and `play_file()` waits for it.
+- **An interrupted track drops what is queued** rather than draining it.
+  0.37 s of the old song after the tap sounds like the tap was ignored --
+  the same reasoning as resetting the ring on a seek. A track that ended
+  on its own still drains, because those fractions of a second are the end
+  of the song.
+- **The cover is cleared between tracks.** `albumart_show()` draws but
+  never clears, so a track with no art inherited the previous track's
+  cover, which reads as the player having ignored the choice rather than
+  as the file having no picture in it.
+
+`s_path` became a static for the same reason: `s_display_name` points into
+it and the UI task reads that every frame, so a local would have gone out
+of scope the moment the second track started.
+
+The chooser draws over the artwork, so closing it has to repaint. That
+happens on the decode loop rather than the UI task, because it `fopen()`s
+the track and pushes a JPEG through the hardware codec, and the UI task
+has a 20 ms period. It is checked ahead of the pause wait and again in the
+idle path, or a chooser dismissed while paused -- or with nothing playing
+at all -- leaves its listing on screen.
+
+### Nothing to play is a screen, not an exit
+
+`app_main()` used to give up and return when the card had no playable file
+in its root, leaving a lit panel attached to a dead task. It now opens the
+chooser instead, with both tabs greyed if that is the truth, which is at
+least a place to plug something in.
+
+Autostart is still the first playable file in the root of the first
+mounted volume, and its folder becomes the list -- a card with an album on
+it plays the album without anyone choosing anything. A card whose root is
+nothing but folders opens the chooser, which is the honest answer to "what
+should I play" when there is no file to pick.
+
+### One shadow buffer, and the screen stops flashing
+
+Everything is drawn into a PSRAM shadow and copied to the panel a band at
+a time. It used to be written straight into the buffer the DPI peripheral
+scans out of, which meant every intermediate state was displayed:
+
+- the bar cleared to grey a moment before its contents arrived, on every
+  repaint, and
+- far worse, `albumart.c` `memset` the **whole panel** to black and then
+  filled it back in over the length of a PNG decode. A track change was a
+  full-screen black flash by construction.
+
+The old code's comment defended writing the scan buffer in place, on the
+grounds that `draw_bitmap` only writes back the cache for the rectangle it
+is given. That is true and it is not the problem -- the problem is that
+the pixels are live between the `memset` and the last `memcpy`, and the
+panel is reading them the whole time.
+
+Two things follow from the shadow being separate:
+
+- **Every blit is full width.** A full-width band is contiguous in both
+  buffers, so it is one `memcpy` and one `draw_bitmap`. A sub-width
+  rectangle would need a row loop and a stride the driver does not take.
+- **`albumart_show()` is given the artwork height, not the panel height.**
+  It clears what it is given, so passing the full panel would blank the
+  transport bar in the shadow and blit that over it -- the bar would
+  disappear on every track change until the next `ui_draw()` put it back.
+  The caller passes `LCD_V_RES - UI_BAR_H`.
+
+The cost is 1.8 MB of PSRAM and a copy per redraw. The copy is of the band
+actually redrawn, which for the transport bar is 276 rows rather than
+1280.
+
+### Primitives moved to gfx.c
+
+The chooser needs rectangles, circles, seven-segment digits and clipped
+`font8x8` text, which is exactly the set `ui.c` had as statics. They moved
+to `gfx.c` unchanged apart from the name, for the reason the README
+already gives for `id3_read_tags()` living in `albumart.c`: a second copy
+is the thing that drifts.
+
+`gfx.c` also owns the framebuffer lookup and the blit, so `ui.c` and
+`browser.c` both stop caring which panel handle is which.
+
+### Written against the documented API again
+
+The USB half of this has the same caveat the decoder stack carries: it is
+written against the shape of `usb_host` and `espressif/usb_host_msc`
+rather than against a board.
+
+- **Port selection is not configured here.** The Tab5 wires USB-A to the
+  P4's `USB2_OTG` D+/D- -- the high-speed controller, not the
+  USB-Serial/JTAG the USB-C port uses for flashing -- and the default is
+  expected to land there. If nothing enumerates with VBUS confirmed high,
+  this is the first thing to doubt.
+- **Full-speed devices are a known IDF bug**, fixed in 5.4.2. Below that,
+  a full-speed drive fails with `Root port reset failed` every ~2.3 s
+  while high-speed devices work. `idf_component.yml` already floors at
+  5.4.2.
+- **Bus power is 2.0 only.** A drive that wants more than the port will
+  give brown-outs rather than failing to enumerate. Spinning rust needs
+  its own supply.
+
 ### What the controls do not do yet
 
-- **The folder button stops the track** instead of opening a chooser.
-  That is the playlist TODO, not a UI one.
-- **No filename on screen.** Seven segments do not spell, and a real font
-  is the price of that row.
+- **No filename on screen** in the transport bar. Seven segments do not
+  spell, and a real font is the price of that row. The chooser does have
+  one, so the name is a tap away.
 - **Seek on non-MP3 does nothing**, per above.
+- **No next/previous buttons on the bar.** The bar is full at five
+  controls; skipping is a trip through the chooser.
 
 ### Licensing, since you already care about this for exFAT
 
@@ -296,8 +618,10 @@ point on stereo.
 - **Cover art is ID3v2-only.** `albumart_extract()` finds nothing in a
   FLAC (`PICTURE` metadata block) or an M4A (`covr` atom). Separate
   parser each; not written.
-- **Still plays exactly one file and stops.** Hotplug, playlists and
-  screen sleep from the TODO list are untouched by this patch.
+- **Screen sleep** from the TODO list is still just the backlight and the
+  moon button; the panel and the decoder stay up.
+- **exFAT is still a script, not a default.** Both volumes report the same
+  "no mountable filesystem" and point at `tools/enable_exfat.sh`.
 - **`.m4a` is a container.** AAC and ALAC inside it work; Apple's
   protected AAC opens and then fails on the first frame.
 - **Nothing is peak-limited.** The `peaking?` item is still open — note

@@ -9,25 +9,26 @@
 #include <string.h>
 
 #include "esp_check.h"
-#include "esp_lcd_mipi_dsi.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
-#include "font8x8_basic.h"
-
+#include "gfx.h"
 #include "ui.h"
 
 static const char *TAG = "tab5_ui";
 
-/* RGB565. The framebuffer is RGB565 because that is what panel_init()
- * configures and what albumart.c writes. */
-#define RGB(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+/* RGB() and every drawing primitive now live in gfx.c, so the chooser can
+ * use the same ones. Nothing here changed except the names. */
 
 #define C_BG        RGB(0x11, 0x11, 0x11)
 #define C_TRACK     RGB(0x3A, 0x3A, 0x3A)   /* unplayed / unfilled */
 #define C_FILL      RGB(0xD1, 0x3B, 0x2C)   /* played / set volume */
 #define C_THUMB     RGB(0xFF, 0xFF, 0xFF)
 #define C_ICON      RGB(0xCC, 0xCC, 0xCC)
+/* Album row. Dimmer than artist, but its own value rather than reusing
+ * C_TRACK -- that is 0x3A, chosen to be a slider groove that does not
+ * compete with the fill, and it is too dark to read as text. */
+#define C_ALBUM     RGB(0x88, 0x88, 0x88)
 #define C_BUBBLE_BG RGB(0x1A, 0x1A, 0x1A)
 #define C_BUBBLE_ED RGB(0x44, 0x44, 0x44)
 
@@ -46,11 +47,26 @@ static const char *TAG = "tab5_ui";
  * Everything else is sized to match rather than left at the values that
  * looked fine in a mockup rendered at 96 PPI.
  */
-#define TEXT_Y      (18)   /* title row, top of the bar */
-#define SUB_Y       (68)   /* artist / album */
-#define SEEK_Y      (134)
+/*
+ * Three text rows now, not two.
+ *
+ * Artist and album shared a line because three stacked rows made the bar
+ * taller than the artwork could spare. They no longer share it: an album
+ * title of any length pushed the artist out of the joined string, and the
+ * artist is the part people read. The bar absorbed the extra row instead
+ * -- see UI_BAR_H.
+ *
+ * The rows are 50 px, 32 px and 32 px apart rather than evenly spaced.
+ * The title is scale 5 (40 px tall) and needs the clearance; artist and
+ * album are both scale 3 (24 px) and sit closer to each other than either
+ * does to the title, so they read as a pair belonging to it.
+ */
+#define TEXT_Y      (18)   /* title, top of the bar */
+#define ARTIST_Y    (68)
+#define ALBUM_Y     (100)
+#define SEEK_Y      (174)
 #define SEEK_X0     (132)  /* clears the MM:SS run at either end */
-#define ROW_Y       (214)
+#define ROW_Y       (254)
 #define BTN_R       (46)    /* play/pause circle */
 #define ICON_HALF   (26)
 
@@ -82,7 +98,6 @@ static const char *TAG = "tab5_ui";
  * showing stale pixels until the next frame clears them. */
 #define BUBBLE_ABOVE (SEEK_Y + 36)
 
-static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;
 static int s_w, s_h;
 static int s_bar_top;
@@ -102,257 +117,6 @@ static bool s_bubble_shown;
 static int bubble_cy(void)
 {
     return s_bar_top + SEEK_Y - BUBBLE_ABOVE - BUBBLE_R;
-}
-
-/* ------------------------------------------------------------------ */
-/* Primitives                                                          */
-/* ------------------------------------------------------------------ */
-
-static inline void px(int x, int y, uint16_t c)
-{
-    if (x < 0 || x >= s_w || y < 0 || y >= s_h) return;
-    s_fb[y * s_w + x] = c;
-}
-
-static void fill_rect(int x, int y, int w, int h, uint16_t c)
-{
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > s_w) w = s_w - x;
-    if (y + h > s_h) h = s_h - y;
-    if (w <= 0 || h <= 0) return;
-    for (int r = 0; r < h; r++) {
-        uint16_t *row = &s_fb[(y + r) * s_w + x];
-        for (int i = 0; i < w; i++) row[i] = c;
-    }
-}
-
-static void fill_circle(int cx, int cy, int r, uint16_t c)
-{
-    for (int dy = -r; dy <= r; dy++) {
-        const int span = (int)(0.5f + __builtin_sqrtf((float)(r * r - dy * dy)));
-        fill_rect(cx - span, cy + dy, 2 * span + 1, 1, c);
-    }
-}
-
-static void ring(int cx, int cy, int r, int thick, uint16_t c)
-{
-    const int inner = r - thick;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            const int d2 = dx * dx + dy * dy;
-            if (d2 <= r * r && d2 >= inner * inner) px(cx + dx, cy + dy, c);
-        }
-    }
-}
-
-/* Arc from 12 o'clock, clockwise, covering pct of the circle. Used only
- * by the finger bubble, where it shows the value being dragged without
- * needing a font. */
-static void ring_arc(int cx, int cy, int r, int thick, int pct, uint16_t c)
-{
-    if (pct <= 0) return;
-    if (pct > 100) pct = 100;
-    const int inner = r - thick;
-    /* 1024ths of a turn, integer only -- no atan2f per pixel. */
-    const int limit = (pct * 1024) / 100;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            const int d2 = dx * dx + dy * dy;
-            if (d2 > r * r || d2 < inner * inner) continue;
-            /* Angle from 12 o'clock, clockwise, in 1024ths. Quadrant
-             * dispatch plus a linear ramp inside each -- close enough for
-             * a 46 px indicator and free of floating point. */
-            const int ax = dx, ay = -dy;
-            int a;
-            const int adx = ax < 0 ? -ax : ax;
-            const int ady = ay < 0 ? -ay : ay;
-            const int denom = adx + ady;
-            if (denom == 0) continue;
-            const int frac = (adx * 256) / denom;   /* 0 at vertical */
-            if (ax >= 0 && ay >= 0)      a = frac;              /* 0..256   */
-            else if (ax >= 0)            a = 512 - frac;        /* 256..512 */
-            else if (ay < 0)             a = 512 + frac;        /* 512..768 */
-            else                         a = 1024 - frac;       /* 768..1024*/
-            if (a <= limit) px(cx + dx, cy + dy, c);
-        }
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* Seven-segment digits                                                */
-/* ------------------------------------------------------------------ */
-
-/*
- * No font is linked, and vendoring one for two timestamps is not worth
- * it. Seven segments cover 0-9 and a colon, which is the whole of MM:SS.
- *
- * Segment order: a top, b top-right, c bottom-right, d bottom,
- * e bottom-left, f top-left, g middle.
- */
-static const uint8_t k_seg[10] = {
-    0x3F, 0x06, 0x5B, 0x4F, 0x66, 0x6D, 0x7D, 0x07, 0x7F, 0x6F
-};
-
-#define DIG_W       (20)
-#define DIG_H       (38)
-#define DIG_T       (5)     /* segment thickness */
-#define DIG_GAP     (5)
-
-static void draw_digit(int x, int y, int n, uint16_t c)
-{
-    if (n < 0 || n > 9) return;
-    const uint8_t m = k_seg[n];
-    const int w = DIG_W, h = DIG_H, t = DIG_T;
-    const int mid = y + h / 2;
-
-    if (m & 0x01) fill_rect(x, y, w, t, c);                       /* a */
-    if (m & 0x02) fill_rect(x + w - t, y, t, h / 2, c);           /* b */
-    if (m & 0x04) fill_rect(x + w - t, mid, t, h / 2, c);         /* c */
-    if (m & 0x08) fill_rect(x, y + h - t, w, t, c);               /* d */
-    if (m & 0x10) fill_rect(x, mid, t, h / 2, c);                 /* e */
-    if (m & 0x20) fill_rect(x, y, t, h / 2, c);                   /* f */
-    if (m & 0x40) fill_rect(x, mid - t / 2, w, t, c);             /* g */
-}
-
-/* Smaller variant for the finger bubble, where a 24 px digit will not fit
- * inside the ring. Same segment table, different geometry. */
-#define SDIG_W      (14)
-#define SDIG_H      (26)
-#define SDIG_T      (3)
-#define SDIG_GAP    (4)
-
-static void draw_small_digit(int x, int y, int n, uint16_t c)
-{
-    if (n < 0 || n > 9) return;
-    const uint8_t m = k_seg[n];
-    const int w = SDIG_W, h = SDIG_H, t = SDIG_T;
-    const int mid = y + h / 2;
-
-    if (m & 0x01) fill_rect(x, y, w, t, c);
-    if (m & 0x02) fill_rect(x + w - t, y, t, h / 2, c);
-    if (m & 0x04) fill_rect(x + w - t, mid, t, h / 2, c);
-    if (m & 0x08) fill_rect(x, y + h - t, w, t, c);
-    if (m & 0x10) fill_rect(x, mid, t, h / 2, c);
-    if (m & 0x20) fill_rect(x, y, t, h / 2, c);
-    if (m & 0x40) fill_rect(x, mid - t / 2, w, t, c);
-}
-
-/* A percentage, centred on cx. 100 needs three digits, 0-99 needs two, and
- * the run is centred either way so the number does not shuffle sideways as
- * it crosses 100. */
-static void draw_pct_centred(int cx, int y, int pct, uint16_t c)
-{
-    if (pct < 0) pct = 0;
-    if (pct > 100) pct = 100;
-
-    const int digits = (pct >= 100) ? 3 : 2;
-    const int run = digits * SDIG_W + (digits - 1) * SDIG_GAP;
-    int x = cx - run / 2;
-
-    if (digits == 3) {
-        draw_small_digit(x, y, 1, c);
-        x += SDIG_W + SDIG_GAP;
-        draw_small_digit(x, y, 0, c);
-        x += SDIG_W + SDIG_GAP;
-        draw_small_digit(x, y, 0, c);
-    } else {
-        draw_small_digit(x, y, pct / 10, c);
-        x += SDIG_W + SDIG_GAP;
-        draw_small_digit(x, y, pct % 10, c);
-    }
-}
-
-/* MM:SS in the small digits, centred. Used by the seek bubble. */
-static void draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c)
-{
-    uint32_t m = sec / 60;
-    const uint32_t s2 = sec % 60;
-    if (m > 99) m = 99;
-
-    const int run = 4 * SDIG_W + 3 * SDIG_GAP + SDIG_W / 2 + SDIG_GAP;
-    int x = cx - run / 2;
-
-    draw_small_digit(x, y, (int)(m / 10), c);
-    x += SDIG_W + SDIG_GAP;
-    draw_small_digit(x, y, (int)(m % 10), c);
-    x += SDIG_W + SDIG_GAP;
-
-    fill_rect(x + 1, y + SDIG_H / 3, SDIG_T, SDIG_T, c);
-    fill_rect(x + 1, y + (2 * SDIG_H) / 3, SDIG_T, SDIG_T, c);
-    x += SDIG_W / 2 + SDIG_GAP;
-
-    draw_small_digit(x, y, (int)(s2 / 10), c);
-    x += SDIG_W + SDIG_GAP;
-    draw_small_digit(x, y, (int)(s2 % 10), c);
-}
-
-/* Width of an MM:SS run, so callers can right-align without guessing. */
-#define TIME_W  (4 * DIG_W + 3 * DIG_GAP + DIG_W / 2 + DIG_GAP)
-
-static void draw_time(int x, int y, uint32_t sec, uint16_t c)
-{
-    uint32_t m = sec / 60;
-    const uint32_t s2 = sec % 60;
-    if (m > 99) m = 99;
-
-    draw_digit(x, y, (int)(m / 10), c);
-    x += DIG_W + DIG_GAP;
-    draw_digit(x, y, (int)(m % 10), c);
-    x += DIG_W + DIG_GAP;
-
-    fill_rect(x + 1, y + DIG_H / 3, DIG_T, DIG_T, c);
-    fill_rect(x + 1, y + (2 * DIG_H) / 3, DIG_T, DIG_T, c);
-    x += DIG_W / 2 + DIG_GAP;
-
-    draw_digit(x, y, (int)(s2 / 10), c);
-    x += DIG_W + DIG_GAP;
-    draw_digit(x, y, (int)(s2 % 10), c);
-}
-
-/* ------------------------------------------------------------------ */
-/* Text                                                                */
-/* ------------------------------------------------------------------ */
-
-/*
- * font8x8_basic is ASCII 0-127, one byte per row, LSB leftmost. Scaled by
- * an integer factor because 8 px is unreadable on a 5" 720x1280 panel --
- * scale 2 is the title row, scale 1 is artist and album.
- */
-#define GLYPH_W(scale)  (8 * (scale) + (scale))     /* one column of gap */
-
-static void draw_char(int x, int y, char ch, int scale, uint16_t c)
-{
-    const unsigned char u = (unsigned char)ch;
-    if (u > 127) return;
-    const char *g = font8x8_basic[u];
-
-    for (int row = 0; row < 8; row++) {
-        const unsigned char bits = (unsigned char)g[row];
-        for (int col = 0; col < 8; col++) {
-            if (!(bits & (1 << col))) continue;
-            fill_rect(x + col * scale, y + row * scale, scale, scale, c);
-        }
-    }
-}
-
-/* Draws left-aligned, clipped to max_w, with an ellipsis when it does not
- * fit. Returns nothing: there is no reflow and no second line, because a
- * title long enough to need one is a title the user already knows. */
-static void draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c)
-{
-    if (!s || !*s) return;
-    const int gw = GLYPH_W(scale);
-    const int room = max_w / gw;
-    const int len = (int)strlen(s);
-
-    if (len <= room) {
-        for (int i = 0; i < len; i++) draw_char(x + i * gw, y, s[i], scale, c);
-        return;
-    }
-    if (room < 4) return;
-    for (int i = 0; i < room - 3; i++) draw_char(x + i * gw, y, s[i], scale, c);
-    for (int i = room - 3; i < room; i++) draw_char(x + i * gw, y, '.', scale, c);
 }
 
 /* ------------------------------------------------------------------ */
@@ -406,27 +170,27 @@ static void draw_slider(int x0, int x1, int y, int pct)
 
     /* Thin remainder first, then the thick fill over its left end, so the
      * two never disagree by a pixel at the join. */
-    fill_rect(x0, y - TRACK_THIN / 2, w, TRACK_THIN, C_TRACK);
-    fill_rect(x0, y - TRACK_THICK / 2, split - x0, TRACK_THICK, C_FILL);
-    fill_circle(split, y, THUMB_R, C_THUMB);
+    gfx_fill_rect(x0, y - TRACK_THIN / 2, w, TRACK_THIN, C_TRACK);
+    gfx_fill_rect(x0, y - TRACK_THICK / 2, split - x0, TRACK_THICK, C_FILL);
+    gfx_fill_circle(split, y, THUMB_R, C_THUMB);
 }
 
 static void draw_play_pause(bool playing)
 {
     int cx, cy;
     play_centre(&cx, &cy);
-    fill_circle(cx, cy, BTN_R, C_THUMB);
+    gfx_fill_circle(cx, cy, BTN_R, C_THUMB);
 
     if (playing) {
         /* Pause: two bars. */
-        fill_rect(cx - 15, cy - 20, 10, 40, C_BG);
-        fill_rect(cx + 5, cy - 20, 10, 40, C_BG);
+        gfx_fill_rect(cx - 15, cy - 20, 10, 40, C_BG);
+        gfx_fill_rect(cx + 5, cy - 20, 10, 40, C_BG);
     } else {
         /* Play: a triangle, nudged right so it looks centred rather than
          * measuring centred. */
         for (int dy = -20; dy <= 20; dy++) {
             const int a = dy < 0 ? -dy : dy;
-            fill_rect(cx - 11, cy + dy, 34 - (a * 34) / 20, 1, C_BG);
+            gfx_fill_rect(cx - 11, cy + dy, 34 - (a * 34) / 20, 1, C_BG);
         }
     }
 }
@@ -435,17 +199,17 @@ static void draw_folder(void)
 {
     int cx, cy;
     folder_centre(&cx, &cy);
-    fill_rect(cx - ICON_HALF, cy - 18, 21, 7, C_ICON);          /* tab */
-    fill_rect(cx - ICON_HALF, cy - 12, 2 * ICON_HALF, 32, C_ICON);
-    fill_rect(cx - ICON_HALF + 4, cy - 7, 2 * ICON_HALF - 8, 23, C_BG);
+    gfx_fill_rect(cx - ICON_HALF, cy - 18, 21, 7, C_ICON);          /* tab */
+    gfx_fill_rect(cx - ICON_HALF, cy - 12, 2 * ICON_HALF, 32, C_ICON);
+    gfx_fill_rect(cx - ICON_HALF + 4, cy - 7, 2 * ICON_HALF - 8, 23, C_BG);
 }
 
 static void draw_moon(void)
 {
     int cx, cy;
     moon_centre(&cx, &cy);
-    fill_circle(cx, cy, ICON_HALF, C_ICON);
-    fill_circle(cx + 13, cy - 10, ICON_HALF, C_BG); /* bite out the crescent */
+    gfx_fill_circle(cx, cy, ICON_HALF, C_ICON);
+    gfx_fill_circle(cx + 13, cy - 10, ICON_HALF, C_BG); /* bite out the crescent */
 }
 
 /* A speaker is a small rectangle (the body) with a cone flaring out to the
@@ -458,10 +222,10 @@ static void draw_speaker(void)
     vol_bounds(&x0, &x1, &y);
     const int cx = x0 - 42, cy = y;
 
-    fill_rect(cx - 13, cy - 6, 9, 13, C_ICON);      /* body */
+    gfx_fill_rect(cx - 13, cy - 6, 9, 13, C_ICON);      /* body */
     for (int dx = 0; dx <= 15; dx++) {              /* cone, flaring right */
         const int half = 4 + dx;
-        fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, C_ICON);
+        gfx_fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, C_ICON);
     }
 }
 
@@ -490,24 +254,34 @@ void ui_capture_background(void)
            (size_t)s_w * s_bubble_h * sizeof(uint16_t));
 }
 
+void ui_clear_art(void)
+{
+    if (!s_fb) return;
+    gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
+    gfx_blit(0, s_bar_top);
+    /* The saved strip is now a strip of black, which is exactly what the
+     * bubble should put back until the next cover is drawn over it. */
+    s_bubble_shown = false;
+}
+
 static void bubble_restore(void)
 {
     if (!s_bubble_bg || !s_bubble_shown) return;
     memcpy(&s_fb[s_bubble_top * s_w], s_bubble_bg,
            (size_t)s_w * s_bubble_h * sizeof(uint16_t));
-    esp_lcd_panel_draw_bitmap(s_panel, 0, s_bubble_top,
-                              s_w, s_bubble_top + s_bubble_h, s_fb);
+    gfx_blit(s_bubble_top, s_bubble_top + s_bubble_h);
     s_bubble_shown = false;
 }
 
 esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h)
 {
-    s_panel = panel;
+    /* gfx owns the framebuffer lookup now; this file keeps its own copies
+     * of the geometry because every layout function reads them. */
+    ESP_RETURN_ON_ERROR(gfx_init(panel, w, h), TAG, "gfx");
     s_w = w;
     s_h = h;
     s_bar_top = h - UI_BAR_H;
-    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(panel, 1, (void **)&s_fb),
-                        TAG, "get fb");
+    s_fb = gfx_fb();
     return ESP_OK;
 }
 
@@ -525,7 +299,7 @@ void ui_draw(const ui_state_t *st)
      * bubble stays on it. */
     if (s_drag < 0) bubble_restore();
 
-    fill_rect(0, s_bar_top, s_w, UI_BAR_H, C_BG);
+    gfx_fill_rect(0, s_bar_top, s_w, UI_BAR_H, C_BG);
 
     int x0, x1, y;
     seek_bounds(&x0, &x1, &y);
@@ -537,22 +311,25 @@ void ui_draw(const ui_state_t *st)
     /* Elapsed left of the bar, total right of it. Total reads 00:00 when
      * the backend could not supply a duration, which is the honest
      * rendering of "unknown" and matches the empty bar next to it. */
-    draw_time(10, y - DIG_H / 2, st->pos_sec, C_ICON);
-    draw_time(s_w - TIME_W - 10, y - DIG_H / 2, st->len_sec, C_TRACK);
+    gfx_draw_time(10, y - GFX_DIG_H / 2, st->pos_sec, C_ICON);
+    gfx_draw_time(s_w - GFX_TIME_W - 10, y - GFX_DIG_H / 2, st->len_sec, C_TRACK);
 
-    /* Title big, artist and album small underneath on one line. The two
-     * are joined here rather than given a row each: three stacked rows
-     * pushed the bar over 200 px, and artist alone is the part people
-     * actually read. */
-    draw_text(16, s_bar_top + TEXT_Y, st->title, 5, s_w - 32, C_THUMB);
+    /* Title big, then artist, then album -- a row each.
+     *
+     * The joined "artist  -  album" string is gone, and with it the 96
+     * byte buffer it was built in: the two tag fields are 64 bytes each,
+     * so anything approaching full length was silently truncated, and it
+     * truncated the album first only by luck of ordering.
+     *
+     * Album is dimmer than artist rather than the same grey. Three rows
+     * of equal weight read as a paragraph; the hierarchy is what makes it
+     * scannable at arm's length. */
+    gfx_draw_text(16, s_bar_top + TEXT_Y, st->title, 5, s_w - 32, C_THUMB);
     if (st->artist && *st->artist) {
-        char sub[96];
-        if (st->album && *st->album) {
-            snprintf(sub, sizeof(sub), "%s  -  %s", st->artist, st->album);
-        } else {
-            snprintf(sub, sizeof(sub), "%s", st->artist);
-        }
-        draw_text(16, s_bar_top + SUB_Y, sub, 3, s_w - 32, C_ICON);
+        gfx_draw_text(16, s_bar_top + ARTIST_Y, st->artist, 3, s_w - 32, C_ICON);
+    }
+    if (st->album && *st->album) {
+        gfx_draw_text(16, s_bar_top + ALBUM_Y, st->album, 3, s_w - 32, C_ALBUM);
     }
 
     vol_bounds(&x0, &x1, &y);
@@ -563,7 +340,7 @@ void ui_draw(const ui_state_t *st)
     draw_moon();
     draw_play_pause(st->playing);
 
-    esp_lcd_panel_draw_bitmap(s_panel, 0, s_bar_top, s_w, s_h, s_fb);
+    gfx_blit(s_bar_top, s_h);
 
     /* Bubble last, and in its own band above the bar. Restoring the saved
      * strip first is what erases the previous position -- the alternative,
@@ -577,22 +354,21 @@ void ui_draw(const ui_state_t *st)
         if (bx > s_w - BUBBLE_R - 2) bx = s_w - BUBBLE_R - 2;
         const int by = bubble_cy();
 
-        fill_circle(bx, by, BUBBLE_R, C_BUBBLE_BG);
-        ring(bx, by, BUBBLE_R, 3, C_BUBBLE_ED);
-        ring(bx, by, BUBBLE_R - 16, 7, C_TRACK);
-        ring_arc(bx, by, BUBBLE_R - 16, 7, s_drag_pct, C_FILL);
+        gfx_fill_circle(bx, by, BUBBLE_R, C_BUBBLE_BG);
+        gfx_ring(bx, by, BUBBLE_R, 3, C_BUBBLE_ED);
+        gfx_ring(bx, by, BUBBLE_R - 16, 7, C_TRACK);
+        gfx_ring_arc(bx, by, BUBBLE_R - 16, 7, s_drag_pct, C_FILL);
         /* Seek reads as a time, volume as a percentage. A seek bubble
          * showing "46" is a number with no units on a bar whose two ends
          * are already clocks. */
         if (s_drag == 0 && st->len_sec > 0) {
             const uint32_t t = (uint32_t)((uint64_t)st->len_sec * s_drag_pct / 100);
-            draw_small_time_centred(bx, by - SDIG_H / 2, t, C_THUMB);
+            gfx_draw_small_time_centred(bx, by - GFX_SDIG_H / 2, t, C_THUMB);
         } else {
-            draw_pct_centred(bx, by - SDIG_H / 2, s_drag_pct, C_THUMB);
+            gfx_draw_pct_centred(bx, by - GFX_SDIG_H / 2, s_drag_pct, C_THUMB);
         }
 
-        esp_lcd_panel_draw_bitmap(s_panel, 0, s_bubble_top,
-                                  s_w, s_bubble_top + s_bubble_h, s_fb);
+        gfx_blit(s_bubble_top, s_bubble_top + s_bubble_h);
         s_bubble_shown = true;
     }
 }

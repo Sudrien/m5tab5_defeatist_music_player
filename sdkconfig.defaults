@@ -37,6 +37,13 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_CODEPAGE_437=y
 
+# The card and a USB drive are mounted at the same time, so two logical
+# FatFs volumes have to exist. Two is already the IDF default; it is
+# stated here because it is now load-bearing rather than incidental. Drop
+# it to one and the second mount fails, and the only symptom is a tab that
+# stays greyed with a drive plugged into it.
+CONFIG_FATFS_VOLUME_COUNT=2
+
 # esp_log_level_set() is a no-op without this on IDF v6.
 CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
 

@@ -36,7 +36,7 @@ typedef struct {
 typedef enum {
     UI_ACTION_NONE = 0,
     UI_ACTION_PLAY_PAUSE,
-    UI_ACTION_CHOOSE_FILE,
+    UI_ACTION_CHOOSE_FILE,   /* folder button: open the chooser */
     UI_ACTION_SCREEN_OFF,
     UI_ACTION_SCREEN_ON,
     UI_ACTION_SEEK,         /* value = target percent 0..100 */
@@ -56,6 +56,14 @@ esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h);
  * bar. */
 void ui_capture_background(void);
 
+/* Blank the area above the bar.
+ *
+ * Needed once tracks follow one another: the cover is drawn by
+ * albumart_show() and never cleared, so a track with no art inherited the
+ * previous track's cover -- which reads as the player having ignored the
+ * choice rather than as the file having no picture in it. */
+void ui_clear_art(void);
+
 /* Repaint the bar. Cheap enough to call at 20 Hz: it touches only the
  * bottom UI_BAR_H rows, never the cover art above them. */
 void ui_draw(const ui_state_t *st);
@@ -70,7 +78,17 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y);
 
 /* Height of the bar at the bottom of the screen. Everything above it
  * belongs to the cover art. */
-#define UI_BAR_H    (276)
+/*
+ * Grew by 40 px when album moved off the artist line onto its own. That
+ * is one scale-3 row (24 px) plus the gap that keeps the three rows from
+ * reading as a block of text.
+ *
+ * It comes out of the artwork, which is the only place it can come from.
+ * At 1280 the cover had 1004 rows and now has 964; a 500x500 cover is
+ * unaffected either way, and one large enough to be cropped loses 20
+ * rows top and bottom.
+ */
+#define UI_BAR_H    (316)
 
 #ifdef __cplusplus
 }

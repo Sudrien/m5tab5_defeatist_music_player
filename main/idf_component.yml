@@ -10,6 +10,12 @@ dependencies:
 
   espressif/esp_lcd_st7121: "^1.0.0"
 
+  # USB mass storage host, for the flash-drive tab in the chooser. The IDF
+  # tree carries the host stack itself (the `usb` component); this is the
+  # class driver on top of it, and it lives in the registry rather than in
+  # IDF.
+  espressif/usb_host_msc: "^1.1.0"
+
   # Both, because the controller is probed rather than assumed: rev 1 Tab5
   # is ILI9881C + GT911, rev 2 is ST7121/ST7123 + ST7123. Dropping the one
   # your board does not have saves a little flash and guarantees the other
