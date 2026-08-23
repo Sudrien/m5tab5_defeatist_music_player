@@ -14,16 +14,16 @@ TODON'Ts:
 
 TODO:
 
-- esp-idf 5.5.5, so m5unified can handle graphics variants
+- ~~esp-idf 5.5.5, so m5unified can handle graphics variants~~
 - microsd hotplug supported
 - exfat format supported for absurdly big files supported
 - usb drive hotplug supported (2.0 speeds, be wary of power requirements)
-- screen sleep for power (to not turn off chip for touch for wake)
+- ~~screen sleep for power (to not turn off chip for touch for wake)~~
 
 TO INVESTIGATE:
 
 - peaking?
-- --mp3 format variants--
+- ~~mp3 format variants~~
 - why they hell are you telling other people to use a python script. This is an ffmpeg fix if you can't be bothered to pull in libraries
 
 ## Claude
