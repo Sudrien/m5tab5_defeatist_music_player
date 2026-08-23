@@ -343,6 +343,34 @@ int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info
     return got;
 }
 
+uint32_t decoder_duration_sec(decoder_t *d)
+{
+    if (!d || d->backend != BACKEND_MINIMP3) return 0;
+    if (!d->ex.samples || !d->ex.info.hz || !d->ex.info.channels) return 0;
+    /* ex.samples counts int16 values across all channels, not frames. */
+    return (uint32_t)(d->ex.samples / d->ex.info.channels / d->ex.info.hz);
+}
+
+esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
+{
+    if (!d || d->backend != BACKEND_MINIMP3) return ESP_ERR_NOT_SUPPORTED;
+    if (!d->ex.info.hz || !d->ex.info.channels) return ESP_ERR_INVALID_STATE;
+
+    /* mp3dec_ex_seek() counts in int16 values across all channels, the
+     * same units as ex.samples -- not frames. Seeking to
+     * sec * hz would land at half the intended point on stereo. */
+    uint64_t target = (uint64_t)sec * d->ex.info.hz * d->ex.info.channels;
+    if (d->ex.samples && target >= d->ex.samples) {
+        target = d->ex.samples ? d->ex.samples - 1 : 0;
+    }
+
+    if (mp3dec_ex_seek(&d->ex, target) != 0) {
+        ESP_LOGW(TAG, "seek failed (err %d)", d->ex.last_error);
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
 void decoder_close(decoder_t *d)
 {
     if (!d) return;

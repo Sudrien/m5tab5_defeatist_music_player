@@ -9,6 +9,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -136,6 +137,101 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
     }
 
     return ESP_ERR_NOT_FOUND;
+}
+
+/*
+ * Copy an ID3 text frame body into a plain ASCII buffer.
+ *
+ * The first byte is the encoding: 0 latin1, 1 UTF-16 with BOM, 2 UTF-16BE,
+ * 3 UTF-8. The font is ASCII-only, so everything is flattened to it and
+ * anything above 0x7F becomes '?' -- which is at least visibly wrong,
+ * rather than a mojibake glyph that looks deliberate.
+ */
+static void id3_text_to_ascii(const uint8_t *body, size_t len, char *out, size_t out_len)
+{
+    if (len < 1 || out_len < 1) { if (out_len) out[0] = 0; return; }
+
+    const uint8_t enc = body[0];
+    size_t i = 1, o = 0;
+
+    if (enc == 1 || enc == 2) {
+        /* UTF-16. Skip a BOM if present and read the low byte of each
+         * unit; anything with a nonzero high byte is outside ASCII. */
+        bool le = (enc == 1);
+        if (enc == 1 && i + 1 < len) {
+            if (body[i] == 0xFF && body[i + 1] == 0xFE) { le = true;  i += 2; }
+            else if (body[i] == 0xFE && body[i + 1] == 0xFF) { le = false; i += 2; }
+        }
+        for (; i + 1 < len && o + 1 < out_len; i += 2) {
+            const uint8_t lo = le ? body[i] : body[i + 1];
+            const uint8_t hi = le ? body[i + 1] : body[i];
+            if (lo == 0 && hi == 0) break;
+            out[o++] = (hi == 0 && lo >= 0x20 && lo < 0x7F) ? (char)lo : '?';
+        }
+    } else {
+        for (; i < len && o + 1 < out_len; i++) {
+            const uint8_t c = body[i];
+            if (c == 0) break;
+            out[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+        }
+    }
+    out[o] = 0;
+}
+
+esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
+{
+    uint8_t hdr[10];
+
+    memset(out, 0, sizeof(*out));
+
+    fseek(f, 0, SEEK_SET);
+    if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || memcmp(hdr, "ID3", 3) != 0) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const int ver = hdr[3];
+    if (ver < 3) return ESP_ERR_NOT_SUPPORTED;
+
+    if (hdr[5] & 0x40) {
+        uint8_t ext[4];
+        if (fread(ext, 1, 4, f) != 4) return ESP_ERR_INVALID_SIZE;
+        const uint32_t esz = (ver >= 4) ? syncsafe32(ext) : be32(ext);
+        fseek(f, (long)esz - ((ver >= 4) ? 4 : 0), SEEK_CUR);
+    }
+
+    const long tag_end = 10 + (long)syncsafe32(&hdr[6]);
+    int found = 0;
+
+    while (ftell(f) + 10 <= tag_end && found < 3) {
+        uint8_t fh[10];
+        if (fread(fh, 1, sizeof(fh), f) != sizeof(fh)) break;
+        if (fh[0] == 0) break;                      /* padding */
+
+        const uint32_t fsz = (ver >= 4) ? syncsafe32(&fh[4]) : be32(&fh[4]);
+        if (fsz == 0 || ftell(f) + (long)fsz > tag_end) break;
+
+        char *dst = NULL;
+        size_t dst_len = 0;
+        if      (!memcmp(fh, "TIT2", 4)) { dst = out->title;  dst_len = sizeof(out->title);  }
+        else if (!memcmp(fh, "TPE1", 4)) { dst = out->artist; dst_len = sizeof(out->artist); }
+        else if (!memcmp(fh, "TALB", 4)) { dst = out->album;  dst_len = sizeof(out->album);  }
+
+        if (!dst) {
+            fseek(f, (long)fsz, SEEK_CUR);
+            continue;
+        }
+
+        /* Frames are small; anything absurd is a corrupt size field, and
+         * malloc'ing it would be the corruption's idea rather than ours. */
+        if (fsz > 512) { fseek(f, (long)fsz, SEEK_CUR); continue; }
+
+        uint8_t body[512];
+        if (fread(body, 1, fsz, f) != fsz) break;
+        id3_text_to_ascii(body, fsz, dst, dst_len);
+        found++;
+    }
+
+    return found ? ESP_OK : ESP_ERR_NOT_FOUND;
 }
 
 /* ------------------------------------------------------------------ */

@@ -11,6 +11,22 @@
 extern "C" {
 #endif
 
+/* Title, artist and album from the ID3v2 tag. Fields are empty strings
+ * when the tag does not carry them; the caller falls back to the
+ * filename.
+ *
+ * This lives here rather than in its own file because the frame walker it
+ * needs is the same one albumart_extract() already has -- version-
+ * dependent frame sizes, the padding check, the tag-end bound. A second
+ * copy would be the thing that drifts. */
+typedef struct {
+    char title[64];
+    char artist[64];
+    char album[64];
+} id3_tags_t;
+
+esp_err_t id3_read_tags(FILE *f, id3_tags_t *out);
+
 /* Pull the first JPEG APIC frame out of an MP3's ID3v2 tag.
  * Returns ESP_ERR_NOT_FOUND when there is no tag or no picture frame.
  * On success the caller owns *out and must free() it. */

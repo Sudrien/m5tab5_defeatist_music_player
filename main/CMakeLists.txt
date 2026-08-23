@@ -1,9 +1,9 @@
 idf_component_register(
-    SRCS "player.c" "decoder.c" "albumart.c"
+    SRCS "player.c" "decoder.c" "albumart.c" "ui.c" "touch.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_driver_i2c esp_driver_i2s esp_driver_sdmmc
-             esp_driver_jpeg esp_lcd fatfs sdmmc
-    PRIV_REQUIRES pngle minimp3
+             esp_driver_jpeg esp_lcd esp_lcd_touch fatfs sdmmc
+    PRIV_REQUIRES pngle minimp3 font8x8
 )
 
 # minimp3 is a header-only library compiled into decoder.c, so its
