@@ -625,8 +625,12 @@ static void load_track_visuals(const char *path)
     if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
         /* The artwork area, not the panel: everything below belongs to
          * the transport bar and must not be cleared from here. */
+        /* A square, and the full width of the panel. albumart.c fits the
+         * decoded cover into whatever rectangle it is handed; handing it
+         * a square is what stops it letterboxing a square cover into a
+         * tall box with black above and below. */
         const esp_err_t serr = albumart_show(s_panel, LCD_H_RES,
-                                             LCD_V_RES - UI_BAR_H,
+                                             UI_ART_H,
                                              jpg, jpg_len);
         if (serr != ESP_OK) {
             ESP_LOGW(TAG, "cover art failed to decode (%s)",
@@ -812,6 +816,42 @@ static void ui_task(void *arg)
         case UI_ACTION_SEEK:
             s_seek_pct = act.value;
             break;
+        case UI_ACTION_PREV:
+            /*
+             * Back to the start of the track first, and only to the
+             * previous track if it is already there.
+             *
+             * The threshold is 3 seconds because that is roughly how long
+             * it takes to decide you meant the other one. It is the
+             * behaviour of every physical transport and every player
+             * since, and the reason is that "restart this" and "go back
+             * one" are both wanted from the same button far more often
+             * than either is wanted from its own.
+             */
+            if (s_len_sec > 0 && s_pos_sec >= 3) {
+                s_seek_pct = 0;
+            } else {
+                const char *p = playlist_prev();
+                if (p) request_track(p);
+                else   s_seek_pct = 0;      /* first track: restart it */
+            }
+            break;
+        case UI_ACTION_NEXT: {
+            /*
+             * PLAY_ORDER_ONE means "do not go on by yourself" -- it is an
+             * answer about what happens at the end of a track, and a
+             * press of the next button is not the end of a track. Asking
+             * playlist_next() with the order as-is would return NULL and
+             * the button would do nothing, which reads as broken rather
+             * than as a setting being respected.
+             */
+            const play_order_t ord = browser_order();
+            const char *p = playlist_next(ord == PLAY_ORDER_ONE
+                                          ? PLAY_ORDER_ALL : ord);
+            if (p) request_track(p);
+            else   ESP_LOGI(TAG, "no next track in %s", playlist_dir());
+            break;
+        }
         case UI_ACTION_CHOOSE_FILE:
             s_open_chooser = true;
             break;
@@ -833,11 +873,21 @@ static void ui_task(void *arg)
          * forty times a second for nothing. */
         st.playing = s_playing;
         st.volume = s_volume;
+        st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
         ui_draw(&st);
-        vTaskDelay(pdMS_TO_TICKS(down ? 20 : 100));
+
+        /* 50 Hz under a finger, 25 Hz while the title is travelling, 10 Hz
+         * otherwise. The middle rate exists because a marquee stepped at
+         * 10 Hz does not read as movement, it reads as a title jumping
+         * three pixels at a time; ui_animating() is false the moment the
+         * title fits, so a short one costs nothing. */
+        int period = 100;
+        if (down) period = 20;
+        else if (!s_screen_off && ui_animating()) period = 40;
+        vTaskDelay(pdMS_TO_TICKS(period));
     }
 }
 

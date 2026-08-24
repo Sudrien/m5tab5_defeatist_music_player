@@ -186,6 +186,15 @@ void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c)
     seg_digit(x, y, (int)(s2 % 10), GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
 }
 
+void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c)
+{
+    /* The minus is a bar the width of a digit at the vertical middle --
+     * segment g, drawn on its own. Reusing the segment geometry is what
+     * keeps it aligned with the digits beside it at any size. */
+    gfx_fill_rect(x, y + GFX_DIG_H / 2 - GFX_DIG_T / 2, GFX_DIG_W, GFX_DIG_T, c);
+    gfx_draw_time(x + GFX_DIG_W + GFX_DIG_GAP, y, sec, c);
+}
+
 void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c)
 {
     uint32_t m = sec / 60;
@@ -249,6 +258,44 @@ void gfx_draw_char(int x, int y, char ch, int scale, uint16_t c)
         for (int col = 0; col < 8; col++) {
             if (!(bits & (1 << col))) continue;
             gfx_fill_rect(x + col * scale, y + row * scale, scale, scale, c);
+        }
+    }
+}
+
+void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
+                           const char *s, int scale, uint16_t c)
+{
+    if (!s || !*s || win_w <= 0) return;
+    const int gw = GFX_GLYPH_W(scale);
+    const int win_x1 = win_x + win_w;
+
+    for (int i = 0; s[i]; i++) {
+        const int gx = x + i * gw;
+        /* Wholly left of the window: keep going, the string runs
+         * rightward. Wholly right of it: nothing after this can be
+         * visible either, so stop -- a 200 character title otherwise
+         * costs 200 glyph draws to show forty. */
+        if (gx + gw <= win_x) continue;
+        if (gx >= win_x1) break;
+
+        const unsigned char u = (unsigned char)s[i];
+        if (u > 127) continue;
+        const char *g = font8x8_basic[u];
+
+        for (int row = 0; row < 8; row++) {
+            const unsigned char bits = (unsigned char)g[row];
+            for (int col = 0; col < 8; col++) {
+                if (!(bits & (1 << col))) continue;
+                int px = gx + col * scale;
+                int pw = scale;
+                /* Clip the run rather than the glyph. A glyph half out of
+                 * the window has to be drawn half, or the text appears to
+                 * jump a character at a time at each end. */
+                if (px < win_x) { pw -= win_x - px; px = win_x; }
+                if (px + pw > win_x1) pw = win_x1 - px;
+                if (pw <= 0) continue;
+                gfx_fill_rect(px, y + row * scale, pw, scale, c);
+            }
         }
     }
 }

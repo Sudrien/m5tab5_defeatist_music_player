@@ -85,6 +85,13 @@ void gfx_ring_arc(int cx, int cy, int r, int thick, int pct, uint16_t c);
 #define GFX_SDIG_GAP    (4)
 
 void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c);
+
+/* Remaining time, with a leading minus. Its own function rather than a
+ * flag on gfx_draw_time() because the minus changes the width, and the
+ * caller right-justifies it -- a caller that has to know whether the sign
+ * is there in order to place the run may as well ask for it by name. */
+#define GFX_TIME_NEG_W  (GFX_DIG_W + GFX_DIG_GAP + GFX_TIME_W)
+void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c);
 void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c);
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c);
 
@@ -99,6 +106,20 @@ void gfx_draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c
 /* Same, but the tail is kept rather than the head -- for paths, where the
  * end is the part that identifies the directory. */
 void gfx_draw_text_tail(int x, int y, const char *s, int scale, int max_w, uint16_t c);
+
+/*
+ * Left-aligned at x, clipped to the window [win_x, win_x + win_w) --
+ * with no ellipsis, and with x allowed to fall outside the window on
+ * either side.
+ *
+ * That last part is the whole point: it is what a marquee is. The
+ * existing gfx_draw_text() truncates to a character boundary and adds
+ * dots, which is the right answer for a list of filenames and the wrong
+ * one for a title sliding past a fixed opening, where a glyph has to be
+ * drawn half in and half out.
+ */
+void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
+                           const char *s, int scale, uint16_t c);
 
 /* Pixel width the string would occupy unclipped. */
 int gfx_text_w(const char *s, int scale);
