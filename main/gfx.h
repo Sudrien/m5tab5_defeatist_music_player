@@ -24,6 +24,8 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
 
+#include "ark10.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -95,10 +97,26 @@ void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c);
 void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c);
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c);
 
-/* font8x8, integer-scaled. One column of gap per glyph. */
-#define GFX_GLYPH_W(scale)  (8 * (scale) + (scale))
+/*
+ * ark10, integer-scaled. One column of gap per glyph, as font8x8 had.
+ *
+ * Ark's monospaced halfwidth advance is 5, not 6 -- the glyphs are drawn
+ * with their own right bearing inside the cell. The extra column is here
+ * anyway because a handful of them do not have it: the tilde on U+00F1
+ * and the ogonek on U+0118 reach the fifth column, and at scale 3 a
+ * n-tilde touching the next letter is exactly the kind of thing that
+ * reads as a rendering bug rather than as a typeface.
+ *
+ * GFX_GLYPH_H exists because callers were centring text with a literal
+ * `8 * scale`. The glyph is 10 tall now. Anything vertical that still
+ * says 8 is a layout bug waiting for a European filename.
+ */
+#define GFX_GLYPH_W(scale)  (ARK10_W * (scale) + (scale))
+#define GFX_GLYPH_H(scale)  (ARK10_H * (scale))
 
-void gfx_draw_char(int x, int y, char ch, int scale, uint16_t c);
+/* Takes a Unicode codepoint, not a byte -- the strings the other
+ * functions here walk are UTF-8, and a char cannot name 'ł'. */
+void gfx_draw_char(int x, int y, uint32_t cp, int scale, uint16_t c);
 
 /* Left-aligned, clipped to max_w with an ellipsis. No reflow. */
 void gfx_draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c);
@@ -121,7 +139,8 @@ void gfx_draw_text_tail(int x, int y, const char *s, int scale, int max_w, uint1
 void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
                            const char *s, int scale, uint16_t c);
 
-/* Pixel width the string would occupy unclipped. */
+/* Pixel width the string would occupy unclipped. Counts glyph cells,
+ * not bytes: a UTF-8 string is narrower than strlen() suggests. */
 int gfx_text_w(const char *s, int scale);
 
 #ifdef __cplusplus

@@ -148,14 +148,56 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
 }
 
 /*
- * Copy an ID3 text frame body into a plain ASCII buffer.
+ * Append one codepoint to a UTF-8 buffer, if it fits whole.
+ *
+ * "If it fits whole" is the point: a 3 byte character with 2 bytes of
+ * room left has to be dropped rather than half-written, or the tag ends
+ * in a truncated sequence and gfx.c draws a replacement box for it. The
+ * old code could not have this bug because every character was one byte.
+ *
+ * Returns the number of bytes written, 0 if it did not fit.
+ */
+static size_t utf8_put(char *out, size_t o, size_t out_len, uint32_t cp)
+{
+    /* Anything past the BMP is outside the font's subset by a wide
+     * margin -- emoji in a TIT2 frame, usually -- so it becomes U+FFFD
+     * here rather than costing four bytes to render as a box anyway. */
+    if (cp > 0xFFFF) cp = 0xFFFD;
+
+    size_t n = (cp < 0x80) ? 1 : (cp < 0x800) ? 2 : 3;
+    if (o + n + 1 > out_len) return 0;
+
+    if (n == 1) {
+        out[o] = (char)cp;
+    } else if (n == 2) {
+        out[o]     = (char)(0xC0 | (cp >> 6));
+        out[o + 1] = (char)(0x80 | (cp & 0x3F));
+    } else {
+        out[o]     = (char)(0xE0 | (cp >> 12));
+        out[o + 1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[o + 2] = (char)(0x80 | (cp & 0x3F));
+    }
+    return n;
+}
+
+/*
+ * Copy an ID3 text frame body into a UTF-8 buffer.
  *
  * The first byte is the encoding: 0 latin1, 1 UTF-16 with BOM, 2 UTF-16BE,
- * 3 UTF-8. The font is ASCII-only, so everything is flattened to it and
- * anything above 0x7F becomes '?' -- which is at least visibly wrong,
- * rather than a mojibake glyph that looks deliberate.
+ * 3 UTF-8. This used to flatten all four to ASCII and replace everything
+ * above 0x7F with '?', because the font was ASCII. The font is now
+ * ark10, which has Latin-1 Supplement and Latin Extended-A, so the
+ * flattening is gone and each encoding is converted properly instead.
+ *
+ * Note that encoding 0 is Latin-1, not ASCII and not UTF-8: byte 0xE9 in
+ * a v2.3 frame means 'é' and has to be widened to two bytes, not copied.
+ * Getting this backwards is the classic ID3 mojibake, and it is silent --
+ * the tag looks fine to anything that also gets it backwards.
+ *
+ * Surrogate pairs in UTF-16 are decoded rather than dropped so that a
+ * tag containing an emoji yields one replacement box rather than two.
  */
-static void id3_text_to_ascii(const uint8_t *body, size_t len, char *out, size_t out_len)
+static void id3_text_to_utf8(const uint8_t *body, size_t len, char *out, size_t out_len)
 {
     if (len < 1 || out_len < 1) { if (out_len) out[0] = 0; return; }
 
@@ -163,24 +205,56 @@ static void id3_text_to_ascii(const uint8_t *body, size_t len, char *out, size_t
     size_t i = 1, o = 0;
 
     if (enc == 1 || enc == 2) {
-        /* UTF-16. Skip a BOM if present and read the low byte of each
-         * unit; anything with a nonzero high byte is outside ASCII. */
         bool le = (enc == 1);
         if (enc == 1 && i + 1 < len) {
             if (body[i] == 0xFF && body[i + 1] == 0xFE) { le = true;  i += 2; }
             else if (body[i] == 0xFE && body[i + 1] == 0xFF) { le = false; i += 2; }
         }
-        for (; i + 1 < len && o + 1 < out_len; i += 2) {
-            const uint8_t lo = le ? body[i] : body[i + 1];
-            const uint8_t hi = le ? body[i + 1] : body[i];
-            if (lo == 0 && hi == 0) break;
-            out[o++] = (hi == 0 && lo >= 0x20 && lo < 0x7F) ? (char)lo : '?';
+        for (; i + 1 < len; i += 2) {
+            uint32_t u = le ? ((uint32_t)body[i + 1] << 8 | body[i])
+                            : ((uint32_t)body[i] << 8 | body[i + 1]);
+            if (u == 0) break;
+
+            if (u >= 0xD800 && u <= 0xDBFF && i + 3 < len) {
+                const uint32_t lo = le ? ((uint32_t)body[i + 3] << 8 | body[i + 2])
+                                       : ((uint32_t)body[i + 2] << 8 | body[i + 3]);
+                if (lo >= 0xDC00 && lo <= 0xDFFF) {
+                    u = 0x10000 + ((u - 0xD800) << 10) + (lo - 0xDC00);
+                    i += 2;
+                }
+            }
+            if (u >= 0xD800 && u <= 0xDFFF) u = 0xFFFD;  /* unpaired */
+            if (u < 0x20) continue;                      /* control codes */
+
+            const size_t n = utf8_put(out, o, out_len, u);
+            if (!n) break;
+            o += n;
+        }
+    } else if (enc == 3) {
+        /* Already UTF-8. Copied through rather than decoded and
+         * re-encoded, but stopped at a character boundary: a byte-wise
+         * memcpy into a 64 byte field is how the last character of a
+         * long title becomes a box. */
+        for (; i < len; ) {
+            const uint8_t b = body[i];
+            if (b == 0) break;
+            size_t n = (b < 0x80) ? 1 : ((b & 0xE0) == 0xC0) ? 2
+                     : ((b & 0xF0) == 0xE0) ? 3 : ((b & 0xF8) == 0xF0) ? 4 : 1;
+            if (i + n > len) break;
+            if (o + n + 1 > out_len) break;
+            memcpy(&out[o], &body[i], n);
+            o += n;
+            i += n;
         }
     } else {
-        for (; i < len && o + 1 < out_len; i++) {
+        /* Latin-1. Every byte is its own codepoint, by definition. */
+        for (; i < len; i++) {
             const uint8_t c = body[i];
             if (c == 0) break;
-            out[o++] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+            if (c < 0x20) continue;
+            const size_t n = utf8_put(out, o, out_len, c);
+            if (!n) break;
+            o += n;
         }
     }
     out[o] = 0;
@@ -235,7 +309,7 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
 
         uint8_t body[512];
         if (fread(body, 1, fsz, f) != fsz) break;
-        id3_text_to_ascii(body, fsz, dst, dst_len);
+        id3_text_to_utf8(body, fsz, dst, dst_len);
         found++;
     }
 

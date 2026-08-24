@@ -37,6 +37,17 @@ CONFIG_FATFS_LFN_HEAP=y
 CONFIG_FATFS_MAX_LFN=255
 CONFIG_FATFS_CODEPAGE_437=y
 
+# readdir() returns UTF-8. This is not optional now that the font can
+# draw accented characters: the default API encoding is ANSI/OEM, which
+# means a file called "Björk - Jóga.mp3" comes back as codepage 437
+# bytes, and 0x94 is not 'ö' in any encoding gfx.c speaks. The tags were
+# already being converted properly in albumart.c; without this the
+# browser's filenames would be the one place left showing mojibake, and
+# only for the people whose files are affected.
+#
+# The codepage above still applies to short names, so it stays.
+CONFIG_FATFS_API_ENCODING_UTF_8=y
+
 # The card and a USB drive are mounted at the same time, so two logical
 # FatFs volumes have to exist. Two is already the IDF default; it is
 # stated here because it is now load-bearing rather than incidental. Drop

@@ -258,7 +258,7 @@ static void draw_tab(storage_id_t id, int x, int w)
 
     const char *label = storage_label(id);
     const int tw = gfx_text_w(label, NAME_SCALE);
-    gfx_draw_text(x + (w - tw) / 2, (TAB_H - 8 * NAME_SCALE) / 2, label,
+    gfx_draw_text(x + (w - tw) / 2, (TAB_H - GFX_GLYPH_H(NAME_SCALE)) / 2, label,
                   NAME_SCALE, w - 16,
                   present ? (active ? C_TEXT : C_DIM) : C_DISABLED);
 }
@@ -302,7 +302,7 @@ static void draw_button(int x, int y, int w, int h, const char *label, bool on)
 {
     gfx_fill_rect(x, y, w, h, on ? C_BTN : C_TAB_OFF);
     const int tw = gfx_text_w(label, LABEL_SCALE);
-    gfx_draw_text(x + (w - tw) / 2, y + (h - 8 * LABEL_SCALE) / 2, label,
+    gfx_draw_text(x + (w - tw) / 2, y + (h - GFX_GLYPH_H(LABEL_SCALE)) / 2, label,
                   LABEL_SCALE, w - 8, on ? C_TEXT : C_DISABLED);
 }
 
@@ -364,7 +364,7 @@ void browser_draw(void)
      * that says where you are. With nothing mounted it says why, because
      * "no drive" and "no power" are the difference between waiting and
      * tapping. */
-    gfx_draw_text_tail(16, TAB_H + (PATH_H - 8 * LABEL_SCALE) / 2,
+    gfx_draw_text_tail(16, TAB_H + (PATH_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
                        status_line(), LABEL_SCALE, w - 32, C_DIM);
     gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
 
@@ -385,7 +385,7 @@ void browser_draw(void)
         } else {
             draw_note_icon(48, y + ROW_H / 2, playing ? C_ACCENT : C_DIM);
         }
-        gfx_draw_text(96, y + (ROW_H - 8 * NAME_SCALE) / 2, s_entries[i].name,
+        gfx_draw_text(96, y + (ROW_H - GFX_GLYPH_H(NAME_SCALE)) / 2, s_entries[i].name,
                       NAME_SCALE, w - 112, playing ? C_ACCENT : C_TEXT);
     }
 
