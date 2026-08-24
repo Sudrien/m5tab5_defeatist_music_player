@@ -1092,6 +1092,29 @@ walk: 6043 frames, 157s, levels=1     <- and its envelope, again
 So `media_task` remembers the path it last walked and skips the walk when
 it matches.
 
+**A track changes when it is chosen, not when it is understood.** These
+were the same moment -- invalidation lived at the top of
+`load_track_visuals()` -- and `load_track_visuals()` runs *after*
+`decoder_open()`, which on a Xing-less MP3 is a full scan of the file.
+Twelve seconds on a USB drive. For all of it the screen kept the outgoing
+track's title, artist and cover, and anything the background task had in
+flight for the old track still counted as current:
+
+```
+playing /usb/aom/hotlantis.mp3          <- new track
+cover is 1920x1920                      <- previous track's cover,
+cover fitted to 720x720                    decoded and drawn anyway
+...
+no ID3 text frames; showing the filename   <- 3.3 s later
+```
+
+The generation check was not wrong there, it was late: at the moment that
+cover was drawn, the new track had not yet reached the line that bumps the
+counter, so the cover was current by the only definition available.
+`track_change_begin()` now runs before `decoder_open()` -- counter,
+scan abort, tags cleared to the filename, artwork blanked -- so the screen
+goes honest immediately instead of lying for as long as the open takes.
+
 **A decode cannot be cancelled partway**, the way a frame walk polls a
 flag and stops. So track identity is a counter. `media_task` copies
 `s_track_gen` before it starts and checks it twice -- after the read, and
