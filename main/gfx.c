@@ -6,6 +6,10 @@
 
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -21,11 +25,42 @@ static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;
 static int s_w, s_h;
 
+/*
+ * One blit at a time.
+ *
+ * The claim that there is a single writer to the framebuffer was never
+ * quite true: the transport bar is drawn by ui_task and the artwork by
+ * the decode loop, which are two tasks, and both end in
+ * esp_lcd_panel_draw_bitmap(). The DPI panel takes one transfer at a
+ * time and says so:
+ *
+ *   dpi_panel_draw_bitmap(553): previous draw operation is not finished
+ *
+ * It was rare while the bar repainted at 10 Hz and stopped being rare the
+ * moment a bouncing title raised that to 25.
+ *
+ * The mutex is necessary and not sufficient. draw_bitmap() from an
+ * external buffer goes out over DMA2D and returns before the transfer
+ * completes -- the driver takes its own semaphore with a zero timeout and
+ * returns ESP_ERR_INVALID_STATE if the last one is still in flight -- so
+ * a second caller can lose even after the first has returned. Hence the
+ * retry below. The mutex still earns its place: without it the two tasks
+ * take turns failing each other's retries.
+ *
+ * The two writers own disjoint bands of the shadow, rows above the bar
+ * and rows below it, so the only thing they contend for is the transfer.
+ */
+#define BLIT_RETRIES    (20)
+static SemaphoreHandle_t s_blit_lock;
+
 esp_err_t gfx_init(esp_lcd_panel_handle_t panel, int w, int h)
 {
     s_panel = panel;
     s_w = w;
     s_h = h;
+
+    s_blit_lock = xSemaphoreCreateMutex();
+    ESP_RETURN_ON_FALSE(s_blit_lock, ESP_ERR_NO_MEM, TAG, "no blit mutex");
 
     s_fb = heap_caps_malloc((size_t)w * h * sizeof(uint16_t),
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -51,20 +86,32 @@ esp_err_t gfx_blit_err(int y0, int y1)
     if (y0 < 0) y0 = 0;
     if (y1 > s_h) y1 = s_h;
     if (y1 <= y0) return ESP_OK;
-    return esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1,
-                                     &s_fb[(size_t)y0 * s_w]);
+
+    /* Full-width band, so the source rows are contiguous and the driver
+     * copies the region in one go. Passing the whole-screen base pointer
+     * with a y offset would be a different bitmap entirely. */
+    xSemaphoreTake(s_blit_lock, portMAX_DELAY);
+
+    esp_err_t err = ESP_OK;
+    for (int i = 0; i < BLIT_RETRIES; i++) {
+        err = esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1,
+                                        &s_fb[(size_t)y0 * s_w]);
+        if (err != ESP_ERR_INVALID_STATE) break;
+        /* One tick, which is longer than a band transfer takes. Sleeping
+         * rather than spinning: the task that owns the previous transfer
+         * needs the CPU to finish it. */
+        vTaskDelay(1);
+    }
+
+    xSemaphoreGive(s_blit_lock);
+    if (err != ESP_OK) ESP_LOGW(TAG, "blit %d..%d failed: %s", y0, y1,
+                                esp_err_to_name(err));
+    return err;
 }
 
 void gfx_blit(int y0, int y1)
 {
-    if (!s_fb) return;
-    if (y0 < 0) y0 = 0;
-    if (y1 > s_h) y1 = s_h;
-    if (y1 <= y0) return;
-    /* Full-width band, so the source rows are contiguous and the driver
-     * copies the region in one go. Passing the whole-screen base pointer
-     * with a y offset would be a different bitmap entirely. */
-    esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1, &s_fb[(size_t)y0 * s_w]);
+    (void)gfx_blit_err(y0, y1);
 }
 
 /* ------------------------------------------------------------------ */

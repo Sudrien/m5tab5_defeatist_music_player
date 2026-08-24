@@ -261,6 +261,41 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     ESP_GOTO_ON_ERROR(jpeg_decoder_get_info(jpeg, jpeg_len, &info), cleanup, TAG, "jpeg info");
     ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32, info.width, info.height);
 
+    /*
+     * The decoder works in whole MCUs, so it writes a picture rounded up
+     * to the MCU grid -- and it writes the padding too. Two consequences,
+     * and this code had both wrong.
+     *
+     * The buffer has to hold the padded picture. A 3000x3000 cover is
+     * 3008x3008 at 4:2:0, which is 18,096,128 bytes rather than the
+     * 18,000,000 an unpadded calculation asks for, and the driver
+     * refuses the whole decode over the 96 KB difference:
+     *
+     *   Given buffer size 18000000 is smaller than actual jpeg decode
+     *   output size 18096128
+     *
+     * And the padded width is the row stride. Copying out at info.width
+     * shifts every row by (padded - width) pixels relative to the one
+     * above it, which is a picture sheared diagonally across the screen.
+     * That was latent rather than absent: it needs a cover whose width is
+     * not already a multiple of the MCU, and 500 and 1000 both are not --
+     * so the bug was there all along and the log had nothing to say about
+     * it, because the decode succeeded.
+     *
+     * MCU size follows the chroma subsampling, which is why it has to be
+     * read from the header rather than assumed to be 16.
+     */
+    int mcu_w = 16, mcu_h = 16;
+    switch (info.sample_method) {
+    case JPEG_DOWN_SAMPLING_YUV420: mcu_w = 16; mcu_h = 16; break;
+    case JPEG_DOWN_SAMPLING_YUV422: mcu_w = 16; mcu_h = 8;  break;
+    case JPEG_DOWN_SAMPLING_YUV444:
+    case JPEG_DOWN_SAMPLING_GRAY:   mcu_w = 8;  mcu_h = 8;  break;
+    default: break;                 /* 16x16 is the largest, so it is safe */
+    }
+    const uint32_t pad_w = ((info.width  + mcu_w - 1) / mcu_w) * mcu_w;
+    const uint32_t pad_h = ((info.height + mcu_h - 1) / mcu_h) * mcu_h;
+
     /* The decoder DMAs straight out of the input buffer, so the
      * bitstream has to live in memory it can reach and be padded to the
      * alignment it asks for -- a plain malloc'd copy is not enough. */
@@ -274,7 +309,27 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     const jpeg_decode_memory_alloc_cfg_t out_cfg = {
         .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
     };
-    const size_t want = (size_t)info.width * info.height * 2;   /* RGB565 */
+    const size_t want = (size_t)pad_w * pad_h * 2;              /* RGB565 */
+
+    /*
+     * Ask before allocating, so a cover that does not fit says so in one
+     * line instead of failing somewhere inside the driver.
+     *
+     * There is no scaler in this hardware -- the decoder produces the
+     * picture at full size or not at all -- so a 3000x3000 cover costs
+     * 18 MB of PSRAM for a 720 px square, on a board that is also holding
+     * a 1.8 MB shadow buffer, the bitstream, and a decode ring with audio
+     * running through it. It usually fits. When it does not, the useful
+     * thing to print is how much was wanted.
+     */
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (largest < want) {
+        ESP_LOGW(TAG, "cover needs %u KB of PSRAM in one block, largest free is %u KB",
+                 (unsigned)(want / 1024), (unsigned)(largest / 1024));
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
     rgb = jpeg_alloc_decoder_mem(want, &out_cfg, &rgb_size);
     ESP_GOTO_ON_FALSE(rgb, ESP_ERR_NO_MEM, cleanup, TAG, "jpeg out buf");
 
@@ -286,14 +341,55 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     ESP_GOTO_ON_ERROR(jpeg_decoder_process(dec, &cfg, in, jpeg_len, rgb, rgb_size, &decoded),
                       cleanup, TAG, "jpeg decode");
 
-    /* Centre it. Larger than the panel is cropped rather than scaled:
-     * the hardware decoder only offers 1/2, 1/4 and 1/8 scaling, none of
-     * which lands on an arbitrary panel width. */
+    /*
+     * The decoder reports what it actually wrote. Cross-check it, because
+     * everything below indexes at a stride derived from the header and a
+     * disagreement there is a sheared picture rather than an error.
+     */
+    if (decoded != (uint32_t)want) {
+        ESP_LOGW(TAG, "decoder wrote %"PRIu32" bytes, expected %u for %"PRIu32"x%"PRIu32,
+                 decoded, (unsigned)want, pad_w, pad_h);
+        ret = ESP_ERR_INVALID_SIZE;
+        goto cleanup;
+    }
+
+    /*
+     * Downscale by an integer factor, then centre what is left.
+     *
+     * Cropping alone is what this used to do, and on a 3000x3000 cover it
+     * showed a 720 px square cut out of the middle -- under a quarter of
+     * the picture, with the edges of the artwork missing and no
+     * indication that anything had been left out. Taking every Nth pixel
+     * costs one multiply per output pixel, needs no second buffer, and
+     * shows the whole cover.
+     *
+     * Nearest neighbour, no filtering. At the factors that come up -- 4
+     * for a 3000 px cover, 2 for a 1500 -- a box filter would be visibly
+     * better on fine detail and would cost a read of every source pixel
+     * rather than one in sixteen, during playback. Album art is not fine
+     * detail.
+     *
+     * The step is the largest that still covers the panel, so the result
+     * is never smaller than the area: 3000/4 = 750 for a 720 px square,
+     * and the remaining 30 px is the crop it always did.
+     */
     const int iw = (int)info.width, ih = (int)info.height;
-    const int cw = (iw < screen_w) ? iw : screen_w;
-    const int ch = (ih < screen_h) ? ih : screen_h;
-    const int sx = (iw - cw) / 2, sy = (ih - ch) / 2;
+    const int stride = (int)pad_w;
+
+    int step = iw / screen_w;
+    const int step_v = ih / screen_h;
+    if (step_v < step) step = step_v;
+    if (step < 1) step = 1;
+
+    const int sw = iw / step, sh = ih / step;   /* scaled source size */
+    const int cw = (sw < screen_w) ? sw : screen_w;
+    const int ch = (sh < screen_h) ? sh : screen_h;
+    const int sx = (sw - cw) / 2, sy = (sh - ch) / 2;
     const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
+
+    if (step > 1) {
+        ESP_LOGI(TAG, "cover scaled 1/%d to %dx%d", step, sw, sh);
+    }
 
     /* The shadow, not the panel's buffer. Drawing straight into the
      * scanned-out buffer is what made the cover appear as a flash of
@@ -312,7 +408,13 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     memset(fb, 0, (size_t)screen_w * screen_h * 2);
     const uint16_t *src = (const uint16_t *)rgb;
     for (int y = 0; y < ch; y++) {
-        memcpy(&fb[(dy + y) * screen_w + dx], &src[(sy + y) * iw + sx], (size_t)cw * 2);
+        const uint16_t *row = &src[(size_t)(sy + y) * step * stride];
+        uint16_t *dst = &fb[(dy + y) * screen_w + dx];
+        if (step == 1) {
+            memcpy(dst, &row[sx], (size_t)cw * 2);
+        } else {
+            for (int x = 0; x < cw; x++) dst[x] = row[(sx + x) * step];
+        }
     }
     ESP_GOTO_ON_ERROR(gfx_blit_err(0, screen_h),
                       cleanup, TAG, "draw");
