@@ -1033,21 +1033,35 @@ decoder alone, after a 511 KB read off a USB drive. Every large cover was
 therefore spending longer than the ring holds, before anything progressive
 or software-decoded enters the picture.
 
-So the read and the decode moved to `art_task`, and what stays on the
-decode loop is tag parsing and two flags. Same compute-and-hand-off shape
-as the frame walk, one priority above it: a cover is worth having sooner
-than an envelope, being the larger thing on screen and the one a track
-change visibly blanks.
+So the read and the decode moved off it, and what stays on the decode loop
+is tag parsing and one flag. Same compute-and-hand-off shape as the frame
+walk -- and, in fact, the same task.
+
+**Both slow per-track jobs share one background task, in order.** They
+started as two, and on a USB drive that was the wrong shape: both open the
+same file on the same slow device at the same moment, the cover reading
+half a megabyte out of the tag and the walk reading the whole file, so
+they spent the first seconds of every track taking turns at the same queue
+and finished later than either would have alone. One at a time is not
+slower; it is the same total read with the contention removed.
+
+Art first, and not because it is smaller. The cover is the largest thing
+on screen and a track change blanks it, so the seconds before it arrives
+are the ones that read as the player having stalled. The envelope arriving
+late is invisible -- the bar falls back to a plain slider and then becomes
+a waveform, which is what it already did. A track change during the cover
+skips the walk entirely, since the request for the new one is already
+sitting there.
 
 **What makes a second drawing task allowable is that `gfx.c` now
 serialises blits properly** -- a mutex, and a wait on the panel's
 completion callback. Before that, "one writer to the framebuffer" was true
 only because the tasks that drew happened to take turns by construction,
 which is not a property you can add a task to. The two writers still own
-disjoint rows: `art_task` paints the artwork area and `ui_task` the bar.
+disjoint rows: `media_task` paints the artwork area and `ui_task` the bar.
 
 **A decode cannot be cancelled partway**, the way a frame walk polls a
-flag and stops. So track identity is a counter. `art_task` copies
+flag and stops. So track identity is a counter. `media_task` copies
 `s_track_gen` before it starts and checks it twice -- after the read, and
 after the decode -- and bins what it holds if the number has moved. The
 envelope does not need this because it is drawn once from a flag the
