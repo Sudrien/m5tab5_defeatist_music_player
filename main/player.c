@@ -566,6 +566,20 @@ static volatile int      s_seek_pct = -1;
  * for the same reason album art does: one writer to the framebuffer, no
  * lock. s_wave_ready is the handoff.
  */
+/*
+ * Track identity, as a number.
+ *
+ * The frame walk is cancelled with a flag it polls; a JPEG decode is a
+ * single call into a driver and cannot be. So the art task takes a copy
+ * of this before it starts and checks it again before drawing: if the
+ * number has moved, what it holds belongs to a song that is no longer
+ * playing and goes in the bin.
+ */
+static volatile uint32_t s_track_gen;
+
+static char              s_art_path[512];
+static volatile bool     s_art_want;
+
 static char              s_scan_path[512];
 static volatile bool     s_scan_want;
 static volatile bool     s_scan_abort;
@@ -586,13 +600,18 @@ static char s_path[512];
 static id3_tags_t s_tags;
 static const char *s_display_name = "";
 
-/* Read the tags and put the cover on screen. Was inline in app_main();
- * it runs once per track now.
+/*
+ * Everything a track change needs done immediately: the tags, a cleared
+ * artwork area, and a request for each of the two slow jobs.
  *
- * Called from the decode loop rather than the UI task deliberately: it
- * fopen()s the track and pushes a JPEG through the hardware codec, and
- * the UI task has 4 KB of stack and a 20 ms period. Doing it here costs
- * the ring a fraction of its 0.37 s of slack instead. */
+ * It used to decode the cover here too, and that was the whole problem.
+ * On the decode loop, which has 0.37 s of ring to spend, it was reading
+ * half a megabyte off a USB drive and then handing it to a decoder that
+ * takes 550 ms on a large picture. Both of those now belong to art_task;
+ * what is left is tag parsing and two flags, which is microseconds.
+ *
+ * Still on the decode loop rather than the UI task: it fopen()s the track,
+ * and the UI task has a 20 ms period to keep. */
 static void load_track_visuals(const char *path)
 {
     /*
@@ -613,6 +632,11 @@ static void load_track_visuals(const char *path)
      * contention that produced it. The abort is the cheapest statement in
      * the function and there is no reason for it to be last.
      */
+    /* Everything in flight for the outgoing track is stale from here.
+     * The counter is what the art task compares against, since a decode
+     * cannot be aborted partway the way a frame walk can. */
+    s_track_gen++;
+
     s_scan_abort = true;
     s_wave_ready = false;
     /* Drop the previous track's envelope now rather than when the new one
@@ -637,48 +661,112 @@ static void load_track_visuals(const char *path)
         ESP_LOGI(TAG, "no ID3 text frames; showing the filename");
     }
 
-    /* albumart_extract() reads ID3v2 specifically, so this finds nothing
-     * in a FLAC (PICTURE metadata block) or an M4A (covr atom). Those are
-     * a separate parser each and are not written yet -- see README.
-     *
-     * The area above the bar is cleared either way. Without that, a track
-     * with no art keeps the previous track's cover, which reads as the
-     * player having ignored the choice. */
-    ui_clear_art();
+    fclose(af);
 
-    bool have_art = false;
-    uint8_t *jpg = NULL;
-    size_t jpg_len = 0;
-    if (albumart_extract(af, &jpg, &jpg_len) == ESP_OK) {
-        /* The artwork area, not the panel: everything below belongs to
-         * the transport bar and must not be cleared from here. */
+    /* The area above the bar is cleared whether or not there turns out to
+     * be a cover. Without that, a track with no art keeps the previous
+     * track's cover, which reads as the player having ignored the
+     * choice. */
+    ui_clear_art();
+    ui_capture_background();
+
+    /* Both of the slow jobs for this track, requested rather than done.
+     * The old ones were cancelled at the top of the function. */
+    snprintf(s_art_path, sizeof(s_art_path), "%s", path);
+    s_art_want = true;
+
+    snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
+    s_scan_want = true;
+}
+
+/*
+ * Reads the cover out of the tag, decodes it, and puts it on screen.
+ *
+ * Its own task, because it is slow and the decode loop cannot afford to
+ * be. The ring is 64 KB -- 0.37 s of 44.1 kHz stereo -- and the hardware
+ * JPEG decode of a 3000x3000 cover took 550 ms on its own, before the
+ * 511 KB read off a USB drive that precedes it. Everything this function
+ * does used to happen inline in load_track_visuals(), on the decode loop,
+ * which means every large cover was spending longer than the ring holds.
+ *
+ * What makes a second drawing task allowable is that gfx.c now serialises
+ * blits properly -- a mutex, and a wait on the panel's completion
+ * callback -- so "one writer to the framebuffer" is enforced rather than
+ * arranged. Before that it was true only because the tasks that drew took
+ * turns by construction.
+ *
+ * The two writers still own disjoint rows: this task paints the artwork
+ * area and ui_task paints the bar below it.
+ */
+static void art_task(void *arg)
+{
+    (void)arg;
+    char path[512];
+
+    while (1) {
+        if (!s_art_want) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+            continue;
+        }
+        s_art_want = false;
+        const uint32_t gen = s_track_gen;
+        snprintf(path, sizeof(path), "%s", s_art_path);
+
+        FILE *af = fopen(path, "rb");
+        if (!af) continue;
+
+        uint8_t *jpg = NULL;
+        size_t jpg_len = 0;
+        const esp_err_t xerr = albumart_extract(af, &jpg, &jpg_len);
+        fclose(af);
+
+        if (xerr != ESP_OK) {
+            /* albumart_extract() reads ID3v2 specifically, so this finds
+             * nothing in a FLAC (PICTURE metadata block) or an M4A (covr
+             * atom). Those are a separate parser each and are not written
+             * yet -- see README. */
+            ESP_LOGI(TAG, "no cover art in tag");
+            continue;
+        }
+
+        /*
+         * The track may have moved on during the read. Decoding anyway
+         * would put the previous song's cover over the current song's
+         * screen, and unlike the envelope -- which is only ever drawn
+         * once, from a flag -- there is no later redraw to correct it.
+         */
+        if (gen != s_track_gen) {
+            ESP_LOGI(TAG, "cover arrived after the track changed; dropped");
+            free(jpg);
+            continue;
+        }
+
         /* A square, and the full width of the panel. albumart.c fits the
          * decoded cover into whatever rectangle it is handed; handing it
          * a square is what stops it letterboxing a square cover into a
          * tall box with black above and below. */
-        const esp_err_t serr = albumart_show(s_panel, LCD_H_RES,
-                                             UI_ART_H,
+        const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                              jpg, jpg_len);
+        free(jpg);
+
         if (serr != ESP_OK) {
             ESP_LOGW(TAG, "cover art failed to decode (%s)",
                      esp_err_to_name(serr));
-        } else {
-            have_art = true;
+            continue;
         }
-        free(jpg);
-    } else {
-        ESP_LOGI(TAG, "no cover art in tag");
+
+        /* One more generation check. The decode is the long part, and a
+         * cover blitted for a track that has already been replaced is
+         * exactly what the first check was avoiding. */
+        if (gen != s_track_gen) {
+            ESP_LOGI(TAG, "cover decoded after the track changed; not shown");
+            ui_clear_art();
+        }
+
+        /* After the art, not before -- this snapshots what the finger
+         * bubble has to put back. */
+        ui_capture_background();
     }
-    fclose(af);
-
-    /* After the art, not before -- this snapshots what the finger bubble
-     * has to put back. */
-    ui_capture_background();
-
-    /* Kick the envelope scan for this track. The old one was cancelled at
-     * the top of the function; this is only the request. */
-    snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
-    s_scan_want = true;
 }
 
 /*
@@ -1308,6 +1396,11 @@ void app_main(void)
      * card the decoder is reading, and the decoder winning every time is
      * the correct outcome. */
     xTaskCreate(scan_task, "wave", 4096, NULL, 1, NULL);
+    /* Priority 2: above the frame walk, which is pure background, and
+     * below the UI at 4 and the decoder. A cover is worth having sooner
+     * than an envelope -- it is the larger thing on screen and the one a
+     * track change visibly blanks. */
+    xTaskCreate(art_task, "art", 6144, NULL, 2, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by
      * the same expander write, so before panel_init() there is nothing on

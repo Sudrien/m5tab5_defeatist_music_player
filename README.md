@@ -1024,6 +1024,35 @@ JPEG covers. A PNG cover has always been right.
 either way, which is the right answer for JPEG, but a colour standard
 arrived at by zero-initialisation is not a decision.
 
+### Cover art has its own task
+
+`load_track_visuals()` runs on the decode loop, and it used to read the
+cover out of the tag and decode it there. The ring is 64 KB -- 0.37 s of
+44.1 kHz stereo -- and a 3000x3000 cover took 550 ms in the hardware
+decoder alone, after a 511 KB read off a USB drive. Every large cover was
+therefore spending longer than the ring holds, before anything progressive
+or software-decoded enters the picture.
+
+So the read and the decode moved to `art_task`, and what stays on the
+decode loop is tag parsing and two flags. Same compute-and-hand-off shape
+as the frame walk, one priority above it: a cover is worth having sooner
+than an envelope, being the larger thing on screen and the one a track
+change visibly blanks.
+
+**What makes a second drawing task allowable is that `gfx.c` now
+serialises blits properly** -- a mutex, and a wait on the panel's
+completion callback. Before that, "one writer to the framebuffer" was true
+only because the tasks that drew happened to take turns by construction,
+which is not a property you can add a task to. The two writers still own
+disjoint rows: `art_task` paints the artwork area and `ui_task` the bar.
+
+**A decode cannot be cancelled partway**, the way a frame walk polls a
+flag and stops. So track identity is a counter. `art_task` copies
+`s_track_gen` before it starts and checks it twice -- after the read, and
+after the decode -- and bins what it holds if the number has moved. The
+envelope does not need this because it is drawn once from a flag the
+decode loop owns; a cover blitted late has no later redraw to correct it.
+
 ### The decoder is baseline-only, and should say so
 
 A Frostpunk cover -- a valid 511 KB JPEG -- produced:
