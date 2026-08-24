@@ -333,9 +333,38 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     rgb = jpeg_alloc_decoder_mem(want, &out_cfg, &rgb_size);
     ESP_GOTO_ON_FALSE(rgb, ESP_ERR_NO_MEM, cleanup, TAG, "jpeg out buf");
 
+    /*
+     * BGR, on a panel that is RGB565 and a codebase that is RGB565
+     * everywhere else.
+     *
+     * `rgb_order` does not name the output colour order. It selects a
+     * DMA2D *byte* scramble applied after the colour conversion, and for
+     * RGB565 the two settings are:
+     *
+     *   ..._ORDER_RGB -> DMA2D_SCRAMBLE_ORDER_BYTE2_0_1
+     *   ..._ORDER_BGR -> DMA2D_SCRAMBLE_ORDER_BYTE2_1_0   (identity)
+     *
+     * A 16-bit RGB565 word in little-endian memory does not survive
+     * having its bytes reordered: red and blue come out exchanged. Which
+     * is what a gold cover on a red background rendered as silver on
+     * blue -- (200,150,50) read back as (50,150,200), with the near-grey
+     * highlights unchanged because swapping R and B does nothing to a
+     * pixel where they are equal.
+     *
+     * So the setting that looks right is the one that corrupts, and the
+     * name is describing the scramble rather than the result. The rest of
+     * the file is the control: gfx.c's RGB() macro, the pngle path and
+     * the DPI panel's own LCD_COLOR_FMT_RGB565 all agree with each other,
+     * and only the JPEG path disagreed.
+     *
+     * conv_std is stated rather than left at 0. It happens to be BT.601
+     * either way, which is the right answer for JPEG, but a colour
+     * standard arrived at by zero-initialisation is not a decision.
+     */
     const jpeg_decode_cfg_t cfg = {
         .output_format = JPEG_DECODE_OUT_FORMAT_RGB565,
-        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_RGB,
+        .rgb_order = JPEG_DEC_RGB_ELEMENT_ORDER_BGR,
+        .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
     };
     uint32_t decoded = 0;
     ESP_GOTO_ON_ERROR(jpeg_decoder_process(dec, &cfg, in, jpeg_len, rgb, rgb_size, &decoded),

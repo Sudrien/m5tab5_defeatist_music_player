@@ -992,6 +992,38 @@ ring with audio running through it. It usually fits; when it does not, the
 useful thing to print is how much was wanted, in one line, rather than
 whatever the driver says on the way down.
 
+### The JPEG decoder's `rgb_order` is a byte scramble, not a colour order
+
+A gold cover on a deep red background rendered as silver on blue. Not a
+format problem and not the decode -- red and blue exchanged.
+
+`jpeg_decode_cfg_t.rgb_order` does not name the output colour order. It
+picks a DMA2D **byte** scramble applied after the colour conversion, and
+for RGB565 output the two settings come out as:
+
+| Setting | Scramble |
+| --- | --- |
+| `JPEG_DEC_RGB_ELEMENT_ORDER_RGB` | `DMA2D_SCRAMBLE_ORDER_BYTE2_0_1` |
+| `JPEG_DEC_RGB_ELEMENT_ORDER_BGR` | `DMA2D_SCRAMBLE_ORDER_BYTE2_1_0` (identity) |
+
+A 16-bit RGB565 word in little-endian memory does not survive having its
+bytes reordered. So the setting whose name matches the panel is the one
+that corrupts, and `..._ORDER_BGR` is what produces a native RGB565 word.
+
+`(200,150,50)` read back as `(50,150,200)` is gold to blue exactly, and
+the near-grey highlights on the emblem were unchanged because swapping R
+and B does nothing to a pixel where they are equal -- which is why it read
+as *silver and blue* rather than as a uniform colour shift.
+
+The rest of the file is the control. `gfx.c`'s `RGB()` macro, the pngle
+path's hand-packed pixels and the DPI panel's own `LCD_COLOR_FMT_RGB565`
+all agree with each other; only the JPEG path disagreed, and only for
+JPEG covers. A PNG cover has always been right.
+
+`conv_std` is now stated rather than left at 0. It happens to be BT.601
+either way, which is the right answer for JPEG, but a colour standard
+arrived at by zero-initialisation is not a decision.
+
 ### One blit at a time
 
 The claim that there is a single writer to the framebuffer was never quite
