@@ -570,18 +570,15 @@ static volatile int      s_seek_pct = -1;
  * Track identity, as a number.
  *
  * The frame walk is cancelled with a flag it polls; a JPEG decode is a
- * single call into a driver and cannot be. So the art task takes a copy
- * of this before it starts and checks it again before drawing: if the
- * number has moved, what it holds belongs to a song that is no longer
- * playing and goes in the bin.
+ * single call into a driver and cannot be. So media_task takes a copy of
+ * this before it starts and checks it again before drawing: if the number
+ * has moved, what it holds belongs to a song that is no longer playing
+ * and goes in the bin.
  */
 static volatile uint32_t s_track_gen;
 
-static char              s_art_path[512];
-static volatile bool     s_art_want;
-
-static char              s_scan_path[512];
-static volatile bool     s_scan_want;
+static char              s_media_path[512];
+static volatile bool     s_media_want;
 static volatile bool     s_scan_abort;
 static volatile bool     s_wave_ready;
 static framewalk_t       s_walk;
@@ -602,13 +599,13 @@ static const char *s_display_name = "";
 
 /*
  * Everything a track change needs done immediately: the tags, a cleared
- * artwork area, and a request for each of the two slow jobs.
+ * artwork area, and a request for the two slow jobs.
  *
  * It used to decode the cover here too, and that was the whole problem.
  * On the decode loop, which has 0.37 s of ring to spend, it was reading
  * half a megabyte off a USB drive and then handing it to a decoder that
- * takes 550 ms on a large picture. Both of those now belong to art_task;
- * what is left is tag parsing and two flags, which is microseconds.
+ * takes 550 ms on a large picture. Both of those now belong to media_task;
+ * what is left is tag parsing and one flag, which is microseconds.
  *
  * Still on the decode loop rather than the UI task: it fopen()s the track,
  * and the UI task has a 20 ms period to keep. */
@@ -670,13 +667,11 @@ static void load_track_visuals(const char *path)
     ui_clear_art();
     ui_capture_background();
 
-    /* Both of the slow jobs for this track, requested rather than done.
-     * The old ones were cancelled at the top of the function. */
-    snprintf(s_art_path, sizeof(s_art_path), "%s", path);
-    s_art_want = true;
-
-    snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
-    s_scan_want = true;
+    /* Both of the slow jobs for this track, requested rather than done,
+     * and both on one task. The old ones were cancelled at the top of the
+     * function. */
+    snprintf(s_media_path, sizeof(s_media_path), "%s", path);
+    s_media_want = true;
 }
 
 /*
@@ -698,75 +693,62 @@ static void load_track_visuals(const char *path)
  * The two writers still own disjoint rows: this task paints the artwork
  * area and ui_task paints the bar below it.
  */
-static void art_task(void *arg)
+static void do_art(const char *path, uint32_t gen)
 {
-    (void)arg;
-    char path[512];
+    FILE *af = fopen(path, "rb");
+    if (!af) return;
 
-    while (1) {
-        if (!s_art_want) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-        s_art_want = false;
-        const uint32_t gen = s_track_gen;
-        snprintf(path, sizeof(path), "%s", s_art_path);
+    uint8_t *jpg = NULL;
+    size_t jpg_len = 0;
+    const esp_err_t xerr = albumart_extract(af, &jpg, &jpg_len);
+    fclose(af);
 
-        FILE *af = fopen(path, "rb");
-        if (!af) continue;
-
-        uint8_t *jpg = NULL;
-        size_t jpg_len = 0;
-        const esp_err_t xerr = albumart_extract(af, &jpg, &jpg_len);
-        fclose(af);
-
-        if (xerr != ESP_OK) {
-            /* albumart_extract() reads ID3v2 specifically, so this finds
-             * nothing in a FLAC (PICTURE metadata block) or an M4A (covr
-             * atom). Those are a separate parser each and are not written
-             * yet -- see README. */
-            ESP_LOGI(TAG, "no cover art in tag");
-            continue;
-        }
-
-        /*
-         * The track may have moved on during the read. Decoding anyway
-         * would put the previous song's cover over the current song's
-         * screen, and unlike the envelope -- which is only ever drawn
-         * once, from a flag -- there is no later redraw to correct it.
-         */
-        if (gen != s_track_gen) {
-            ESP_LOGI(TAG, "cover arrived after the track changed; dropped");
-            free(jpg);
-            continue;
-        }
-
-        /* A square, and the full width of the panel. albumart.c fits the
-         * decoded cover into whatever rectangle it is handed; handing it
-         * a square is what stops it letterboxing a square cover into a
-         * tall box with black above and below. */
-        const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
-                                             jpg, jpg_len);
-        free(jpg);
-
-        if (serr != ESP_OK) {
-            ESP_LOGW(TAG, "cover art failed to decode (%s)",
-                     esp_err_to_name(serr));
-            continue;
-        }
-
-        /* One more generation check. The decode is the long part, and a
-         * cover blitted for a track that has already been replaced is
-         * exactly what the first check was avoiding. */
-        if (gen != s_track_gen) {
-            ESP_LOGI(TAG, "cover decoded after the track changed; not shown");
-            ui_clear_art();
-        }
-
-        /* After the art, not before -- this snapshots what the finger
-         * bubble has to put back. */
-        ui_capture_background();
+    if (xerr != ESP_OK) {
+        /* albumart_extract() reads ID3v2 specifically, so this finds
+         * nothing in a FLAC (PICTURE metadata block) or an M4A (covr
+         * atom). Those are a separate parser each and are not written
+         * yet -- see README. */
+        ESP_LOGI(TAG, "no cover art in tag");
+        return;
     }
+
+    /*
+     * The track may have moved on during the read. Decoding anyway
+     * would put the previous song's cover over the current song's
+     * screen, and unlike the envelope -- which is only ever drawn
+     * once, from a flag -- there is no later redraw to correct it.
+     */
+    if (gen != s_track_gen) {
+        ESP_LOGI(TAG, "cover arrived after the track changed; dropped");
+        free(jpg);
+        return;
+    }
+
+    /* A square, and the full width of the panel. albumart.c fits the
+     * decoded cover into whatever rectangle it is handed; handing it
+     * a square is what stops it letterboxing a square cover into a
+     * tall box with black above and below. */
+    const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
+                                         jpg, jpg_len);
+    free(jpg);
+
+    if (serr != ESP_OK) {
+        ESP_LOGW(TAG, "cover art failed to decode (%s)",
+                 esp_err_to_name(serr));
+        return;
+    }
+
+    /* One more generation check. The decode is the long part, and a
+     * cover blitted for a track that has already been replaced is
+     * exactly what the first check was avoiding. */
+    if (gen != s_track_gen) {
+        ESP_LOGI(TAG, "cover decoded after the track changed; not shown");
+        ui_clear_art();
+    }
+
+    /* After the art, not before -- this snapshots what the finger
+     * bubble has to put back. */
+    ui_capture_background();
 }
 
 /*
@@ -776,58 +758,91 @@ static void art_task(void *arg)
  * EOF and back. Sharing it would be a seek war with the thing producing
  * the audio.
  */
-static void scan_task(void *arg)
+static void do_walk(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+
+    /* Decline before reading anything. Walking a format with no
+     * parser here is a whole file off the card in exchange for a log
+     * line saying it found nothing -- and it is contention with the
+     * decoder reading the same card for the same track. */
+    if (!framewalk_supports(f)) {
+        ESP_LOGI(TAG, "no frame walker for this format; no envelope");
+        fclose(f);
+        return;
+    }
+
+    /* One column per pixel of panel width, still, even though the bar
+     * is narrower than that now. The extra columns cost a kilobyte
+     * and are averaged down at draw time; the alternative is a rescan
+     * whenever the bar's width changes. */
+    const int cols = LCD_H_RES;
+
+    const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
+    fclose(f);
+
+    /* Loud, because every way this can fail is silent otherwise: an
+     * aborted scan, a format with no per-frame loudness, and a walk
+     * that found no frames at all all end with simply no envelope on
+     * screen and nothing said about it. */
+    if (err != ESP_OK) {
+        ESP_LOGI(TAG, "scan cancelled");
+    } else if (s_scan_abort) {
+        ESP_LOGI(TAG, "scan finished but the track moved on");
+    } else if (!s_walk.has_levels) {
+        ESP_LOGI(TAG, "no per-frame loudness in this format; no envelope");
+    } else if (!s_walk.frames) {
+        ESP_LOGW(TAG, "walk found no frames; no envelope");
+    } else {
+        ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
+        s_wave_ready = true;
+    }
+}
+
+/*
+ * One background task for both slow per-track jobs, in that order.
+ *
+ * They were two tasks, and on a USB drive that was the wrong shape. Both
+ * open the same file on the same slow device at the same moment -- the
+ * cover reads half a megabyte out of the tag, the walk reads the whole
+ * file -- so they spent the first seconds of every track taking turns at
+ * the same queue and finishing later than either would have alone. One
+ * task at a time is not slower here; it is the same total read with the
+ * contention removed.
+ *
+ * Art first, and not because it is smaller. The cover is the largest
+ * thing on screen and a track change blanks it, so the seconds before it
+ * arrives are the ones that read as the player having stalled. The
+ * envelope arriving late is invisible -- the bar falls back to a plain
+ * slider and then becomes a waveform, which is what it already did.
+ *
+ * One stack rather than two, and it is the larger of the two, because the
+ * cover path is the deeper one.
+ */
+static void media_task(void *arg)
 {
     (void)arg;
     char path[512];
 
     while (1) {
-        if (!s_scan_want) {
-            vTaskDelay(pdMS_TO_TICKS(100));
+        if (!s_media_want) {
+            vTaskDelay(pdMS_TO_TICKS(50));
             continue;
         }
-        s_scan_want = false;
+        s_media_want = false;
         s_scan_abort = false;
-        snprintf(path, sizeof(path), "%s", s_scan_path);
+        const uint32_t gen = s_track_gen;
+        snprintf(path, sizeof(path), "%s", s_media_path);
 
-        FILE *f = fopen(path, "rb");
-        if (!f) continue;
+        do_art(path, gen);
 
-        /* Decline before reading anything. Walking a format with no
-         * parser here is a whole file off the card in exchange for a log
-         * line saying it found nothing -- and it is contention with the
-         * decoder reading the same card for the same track. */
-        if (!framewalk_supports(f)) {
-            ESP_LOGI(TAG, "no frame walker for this format; no envelope");
-            fclose(f);
-            continue;
-        }
+        /* A track change during the cover makes the walk pointless too --
+         * s_media_want is already set for the new one, and starting this
+         * walk would only mean aborting it a moment later. */
+        if (gen != s_track_gen) continue;
 
-        /* One column per pixel of panel width, still, even though the bar
-         * is narrower than that now. The extra columns cost a kilobyte
-         * and are averaged down at draw time; the alternative is a rescan
-         * whenever the bar's width changes. */
-        const int cols = LCD_H_RES;
-
-        const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
-        fclose(f);
-
-        /* Loud, because every way this can fail is silent otherwise: an
-         * aborted scan, a format with no per-frame loudness, and a walk
-         * that found no frames at all all end with simply no envelope on
-         * screen and nothing said about it. */
-        if (err != ESP_OK) {
-            ESP_LOGI(TAG, "scan cancelled");
-        } else if (s_scan_abort) {
-            ESP_LOGI(TAG, "scan finished but the track moved on");
-        } else if (!s_walk.has_levels) {
-            ESP_LOGI(TAG, "no per-frame loudness in this format; no envelope");
-        } else if (!s_walk.frames) {
-            ESP_LOGW(TAG, "walk found no frames; no envelope");
-        } else {
-            ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
-            s_wave_ready = true;
-        }
+        do_walk(path);
     }
 }
 
@@ -1395,12 +1410,9 @@ void app_main(void)
     /* Lowest priority in the program. It reads a whole file off the same
      * card the decoder is reading, and the decoder winning every time is
      * the correct outcome. */
-    xTaskCreate(scan_task, "wave", 4096, NULL, 1, NULL);
-    /* Priority 2: above the frame walk, which is pure background, and
-     * below the UI at 4 and the decoder. A cover is worth having sooner
-     * than an envelope -- it is the larger thing on screen and the one a
-     * track change visibly blanks. */
-    xTaskCreate(art_task, "art", 6144, NULL, 2, NULL);
+    /* Priority 1, below the UI at 4 and well below the decoder. Nothing
+     * this task produces is worth a millisecond of the audio path. */
+    xTaskCreate(media_task, "media", 6144, NULL, 1, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by
      * the same expander write, so before panel_init() there is nothing on
