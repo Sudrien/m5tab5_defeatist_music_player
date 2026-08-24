@@ -940,6 +940,103 @@ The cost is 1.8 MB of PSRAM and a copy per redraw. The copy is of the band
 actually redrawn, which for the transport bar is `UI_BAR_H` rows rather
 than 1280.
 
+### The cover is decoded in whole MCUs
+
+The P4's hardware JPEG decoder works a macroblock at a time, so it writes
+a picture rounded **up** to the MCU grid, padding included. Two things
+follow, and `albumart_draw()` had both wrong.
+
+**The output buffer has to hold the padded picture.** A 3000x3000 cover at
+4:2:0 is 3008x3008, which is 18,096,128 bytes rather than the 18,000,000
+an unpadded `width * height * 2` asks for, and the driver refuses the
+decode over the 96 KB difference:
+
+```
+E jpeg.decoder: Given buffer size 18000000 is smaller than actual jpeg
+                decode output size 18096128
+E tab5_art: albumart_draw(286): jpeg decode
+W tab5_mp3: cover art failed to decode (ESP_ERR_INVALID_ARG)
+```
+
+**The padded width is the row stride.** Copying out at `info.width` shifts
+every row relative to the one above it -- a picture sheared diagonally
+across the screen. That one was latent rather than absent: it needs a
+cover whose width is not already a multiple of the MCU, which 500 and 1000
+both are not, so it was there from the first version and the log had
+nothing to say about it, because the decode had succeeded. The `out_size`
+the driver reports is now cross-checked against the computed padded size,
+so a disagreement is an error rather than a shear.
+
+MCU size follows the chroma subsampling -- 16x16 at 4:2:0, 16x8 at 4:2:2,
+8x8 at 4:4:4 and greyscale -- so it is read from `info.sample_method`
+rather than assumed to be 16.
+
+**Oversized covers are downscaled by an integer factor**, then cropped.
+Cropping alone is what this used to do, and on a 3000x3000 cover it showed
+a 720 px square cut from the middle: under a quarter of the picture, edges
+missing, nothing on screen or in the log to say so. There is no scaler in
+this hardware, but taking every Nth pixel on the way out of the decode
+buffer costs one multiply per output pixel, needs no second buffer, and
+shows the whole cover. The step is the largest that still covers the
+panel, so 3000 goes to 750 for a 720 px square and the remaining 30 px is
+the crop it always did.
+
+Nearest neighbour, no filtering. A box filter would be visibly better on
+fine detail and would read every source pixel rather than one in sixteen,
+during playback. Album art is not fine detail.
+
+**The allocation is checked before it is attempted.** Full size or not at
+all means a 3000 px cover wants 18 MB of PSRAM for a 720 px square, on a
+board also holding the 1.8 MB shadow buffer, the bitstream and a decode
+ring with audio running through it. It usually fits; when it does not, the
+useful thing to print is how much was wanted, in one line, rather than
+whatever the driver says on the way down.
+
+### One blit at a time
+
+The claim that there is a single writer to the framebuffer was never quite
+true. The transport bar is drawn by `ui_task` and the artwork by the
+decode loop -- two tasks -- and both end in `esp_lcd_panel_draw_bitmap()`.
+The DPI panel takes one transfer at a time and says so:
+
+```
+E lcd.dsi: dpi_panel_draw_bitmap(553): previous draw operation is not finished
+```
+
+It was rare while the bar repainted at 10 Hz and stopped being rare the
+moment a bouncing title raised that to 25.
+
+A mutex in `gfx_blit_err()` is necessary and not sufficient. Drawing from
+an external buffer goes out over DMA2D and **returns before the transfer
+completes** -- the driver takes its own semaphore with a zero timeout and
+returns `ESP_ERR_INVALID_STATE` if the previous one is still in flight --
+so a second caller can lose even after the first has returned. Hence a
+bounded retry, one tick apart, sleeping rather than spinning: the task
+that owns the previous transfer needs the CPU to finish it. The mutex
+still earns its place, because without it the two tasks take turns failing
+each other's retries.
+
+The two writers own disjoint bands of the shadow, rows above the bar and
+rows below it, so the transfer is the only thing they contend for.
+
+### The scan is cancelled before the cover is decoded, not after
+
+`load_track_visuals()` cancelled the outgoing track's frame walk at the
+bottom of the function, after the cover had been decoded. Decoding a cover
+can take seconds, and during those seconds the previous track's walk ran
+to completion against a card the audio decoder was also reading:
+
+```
+playing 04 - The Factory.mp3
+walk: 5957 frames, 142s          <- 06 - Processing's walk
+envelope ready: 720 columns
+```
+
+The result was discarded correctly a few seconds later, so nothing wrong
+appeared on screen. What it cost was the seconds of contention that
+produced it. The abort is the cheapest statement in the function and there
+was no reason for it to be last.
+
 ### Primitives moved to gfx.c
 
 The chooser needs rectangles, circles, seven-segment digits and clipped

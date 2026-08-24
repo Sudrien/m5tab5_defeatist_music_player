@@ -595,6 +595,33 @@ static const char *s_display_name = "";
  * the ring a fraction of its 0.37 s of slack instead. */
 static void load_track_visuals(const char *path)
 {
+    /*
+     * Cancel the running scan first, before anything slow.
+     *
+     * This used to sit at the bottom of the function, after the cover had
+     * been decoded -- and decoding a cover can take seconds. A 3000x3000
+     * JPEG took three, during which the previous track's walk ran to
+     * completion against a card the decoder was also reading, and set
+     * s_wave_ready for a track that had already been replaced:
+     *
+     *   playing 04 - The Factory.mp3
+     *   walk: 5957 frames, 142s          <- 06 - Processing's walk
+     *   envelope ready: 720 columns
+     *
+     * The result was thrown away correctly a few seconds later, so
+     * nothing wrong appeared on screen. What it cost was the seconds of
+     * contention that produced it. The abort is the cheapest statement in
+     * the function and there is no reason for it to be last.
+     */
+    s_scan_abort = true;
+    s_wave_ready = false;
+    /* Drop the previous track's envelope now rather than when the new one
+     * lands. The bar redraws many times a second and the scan takes
+     * seconds; leaving the old one up means the new song is drawn against
+     * the last song's shape for the whole of that, which is worse than a
+     * plain slider. */
+    waveform_set(NULL);
+
     memset(&s_tags, 0, sizeof(s_tags));
 
     s_display_name = strrchr(path, '/');
@@ -648,18 +675,8 @@ static void load_track_visuals(const char *path)
      * has to put back. */
     ui_capture_background();
 
-    /* Kick the envelope scan for this track. Cancels whatever the scan
-     * task was doing first: on a fast run through a folder the previous
-     * walk is still going, and finishing it would draw the wrong track's
-     * envelope over the right track's cover. */
-    s_scan_abort = true;
-    s_wave_ready = false;
-    /* Drop the previous track's envelope now rather than when the new one
-     * lands. The bar redraws ten times a second and the scan takes
-     * seconds; leaving the old one up means the new song is drawn against
-     * the last song's shape for the whole of that, which is worse than a
-     * plain slider. */
-    waveform_set(NULL);
+    /* Kick the envelope scan for this track. The old one was cancelled at
+     * the top of the function; this is only the request. */
     snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
     s_scan_want = true;
 }
