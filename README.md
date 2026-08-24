@@ -1024,6 +1024,36 @@ JPEG covers. A PNG cover has always been right.
 either way, which is the right answer for JPEG, but a colour standard
 arrived at by zero-initialisation is not a decision.
 
+### The decoder is baseline-only, and should say so
+
+A Frostpunk cover -- a valid 511 KB JPEG -- produced:
+
+```
+E jpeg.decoder: SOS encountered before SOF0
+E tab5_art: albumart_draw(261): jpeg info
+W tab5_mp3: cover art failed to decode (ESP_ERR_NOT_FOUND)
+```
+
+That is a progressive JPEG. The P4's decoder handles SOF0 (and SOF1)
+only, so handed a progressive file it walks the markers, never finds a SOF
+it knows, reaches the scan and complains about the order of the markers.
+Which is accurate in the way a stack trace is accurate: it reads as a
+corrupt tag or a bug in this file, and it is neither -- the file is a
+perfectly good JPEG that this silicon cannot decode.
+
+So `albumart_draw()` walks the markers itself first, in about fifteen
+lines, and says which flavour it found:
+
+```
+W tab5_art: cover is a progressive JPEG (SOF marker 0xC2); this decoder is
+            baseline-only
+```
+
+Worth the lines because that answer tells you what to do about it --
+re-encode the cover as baseline -- and the driver's version does not. It
+also covers the lossless, differential and arithmetic-coded SOFs, which
+fail the same way for the same reason and are rarer only by luck.
+
 ### One blit at a time
 
 The claim that there is a single writer to the framebuffer was never quite
@@ -1042,11 +1072,20 @@ A mutex in `gfx_blit_err()` is necessary and not sufficient. Drawing from
 an external buffer goes out over DMA2D and **returns before the transfer
 completes** -- the driver takes its own semaphore with a zero timeout and
 returns `ESP_ERR_INVALID_STATE` if the previous one is still in flight --
-so a second caller can lose even after the first has returned. Hence a
-bounded retry, one tick apart, sleeping rather than spinning: the task
-that owns the previous transfer needs the CPU to finish it. The mutex
-still earns its place, because without it the two tasks take turns failing
-each other's retries.
+so a second caller can lose even after the first has returned.
+
+The first attempt at that was a bounded retry, and it worked and was loud:
+the driver logs an error from inside on every attempt that loses, so a
+contended blit printed three or four lines before succeeding. Retrying an
+operation that has a completion callback is guessing at a fact the
+hardware will tell you. So `on_color_trans_done` is registered and each
+blit waits for it **before releasing the mutex**, which means the next
+caller cannot be early. The callback has to live in IRAM; the driver
+checks, because it is called from the DMA completion ISR.
+
+The retry stays as a fallback with a 60 ms wait behind it. If the callback
+is ever not delivered -- a driver path that skips it, a timeout -- the
+behaviour degrades to what it was rather than to a stall.
 
 The two writers own disjoint bands of the shadow, rows above the bar and
 rows below it, so the transfer is the only thing they contend for.

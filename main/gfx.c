@@ -10,6 +10,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_lcd_mipi_dsi.h"
@@ -51,6 +52,41 @@ static int s_w, s_h;
  * and rows below it, so the only thing they contend for is the transfer.
  */
 #define BLIT_RETRIES    (20)
+
+/*
+ * ...and a way to know when the transfer is actually done.
+ *
+ * The retry alone worked and was loud: the driver logs an error from
+ * inside on every attempt that loses, so a contended blit printed three
+ * or four lines of
+ *
+ *   dpi_panel_draw_bitmap(553): previous draw operation is not finished
+ *
+ * before succeeding. Retrying an operation that has a completion callback
+ * is guessing at a fact the hardware will tell you, so the callback is
+ * registered and each blit waits for it before releasing the mutex. The
+ * next caller then cannot be early.
+ *
+ * The retry stays as a fallback. If the callback is ever not delivered --
+ * a driver path that skips it, a timeout -- the wait expires and the
+ * behaviour degrades to what it was rather than to a stall.
+ */
+#define BLIT_DONE_MS    (60)
+
+static SemaphoreHandle_t s_blit_done;
+
+/* Must be in IRAM: the driver checks, because it calls this from the DMA
+ * completion ISR. Returning true asks for a yield when the give woke a
+ * higher-priority task. */
+static IRAM_ATTR bool on_blit_done(esp_lcd_panel_handle_t panel,
+                                   esp_lcd_dpi_panel_event_data_t *data,
+                                   void *ctx)
+{
+    (void)panel; (void)data; (void)ctx;
+    BaseType_t woken = pdFALSE;
+    xSemaphoreGiveFromISR(s_blit_done, &woken);
+    return woken == pdTRUE;
+}
 static SemaphoreHandle_t s_blit_lock;
 
 esp_err_t gfx_init(esp_lcd_panel_handle_t panel, int w, int h)
@@ -61,6 +97,15 @@ esp_err_t gfx_init(esp_lcd_panel_handle_t panel, int w, int h)
 
     s_blit_lock = xSemaphoreCreateMutex();
     ESP_RETURN_ON_FALSE(s_blit_lock, ESP_ERR_NO_MEM, TAG, "no blit mutex");
+
+    s_blit_done = xSemaphoreCreateBinary();
+    ESP_RETURN_ON_FALSE(s_blit_done, ESP_ERR_NO_MEM, TAG, "no blit semaphore");
+
+    const esp_lcd_dpi_panel_event_callbacks_t cbs = {
+        .on_color_trans_done = on_blit_done,
+    };
+    ESP_RETURN_ON_ERROR(esp_lcd_dpi_panel_register_event_callbacks(panel, &cbs, NULL),
+                        TAG, "blit callback");
 
     s_fb = heap_caps_malloc((size_t)w * h * sizeof(uint16_t),
                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -101,6 +146,14 @@ esp_err_t gfx_blit_err(int y0, int y1)
          * rather than spinning: the task that owns the previous transfer
          * needs the CPU to finish it. */
         vTaskDelay(1);
+    }
+
+    /* Wait for the transfer this call started, still holding the mutex,
+     * so the next caller finds the panel idle. The synchronous path in
+     * the driver invokes the callback before returning, in which case the
+     * token is already there and this does not block at all. */
+    if (err == ESP_OK) {
+        xSemaphoreTake(s_blit_done, pdMS_TO_TICKS(BLIT_DONE_MS));
     }
 
     xSemaphoreGive(s_blit_lock);

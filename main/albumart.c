@@ -245,6 +245,70 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
 /* Decode and draw                                                     */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Is this a baseline JPEG?
+ *
+ * The P4's decoder handles SOF0 and nothing else. Handed a progressive
+ * file it walks the markers, never finds SOF0, reaches the scan and
+ * reports:
+ *
+ *   E jpeg.decoder: SOS encountered before SOF0
+ *   E tab5_art: albumart_draw(261): jpeg info
+ *   W tab5_mp3: cover art failed to decode (ESP_ERR_NOT_FOUND)
+ *
+ * Which is accurate, in the way a stack trace is accurate. It reads as a
+ * corrupt tag or a bug in this file, and it is neither: the file is a
+ * perfectly good JPEG that this silicon cannot decode. Saying so is a
+ * fifteen line marker walk, and it is worth it because the answer tells
+ * you what to do about it -- re-encode that cover as baseline -- while
+ * the driver's version does not.
+ *
+ * Markers are two bytes, 0xFF then a code, and every one except the
+ * standalone few carries a big-endian length that includes itself. SOS
+ * ends the header, so the SOF has to appear before it or there is not
+ * one.
+ */
+static bool jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out)
+{
+    *sof_out = 0;
+    if (len < 4 || p[0] != 0xFF || p[1] != 0xD8) return false;   /* no SOI */
+
+    size_t i = 2;
+    while (i + 3 < len) {
+        if (p[i] != 0xFF) { i++; continue; }             /* fill byte or junk */
+        const uint8_t m = p[i + 1];
+        if (m == 0xFF) { i++; continue; }                /* fill */
+        if (m == 0xD8 || m == 0x01 || (m >= 0xD0 && m <= 0xD7)) { i += 2; continue; }
+        if (m == 0xDA) return false;                     /* SOS, no SOF seen */
+
+        /* SOFn: C0-CF except C4 (DHT), C8 (JPG), CC (DAC). C0 is
+         * baseline, C1 is extended sequential and the hardware takes it
+         * too; C2 is progressive, which it does not. */
+        if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
+            *sof_out = m;
+            return (m == 0xC0 || m == 0xC1);
+        }
+
+        const size_t seg = ((size_t)p[i + 2] << 8) | p[i + 3];
+        if (seg < 2) return false;
+        i += 2 + seg;
+    }
+    return false;
+}
+
+static const char *sof_name(uint8_t m)
+{
+    switch (m) {
+    case 0xC2: return "progressive";
+    case 0xC3: return "lossless";
+    case 0xC5: case 0xC6: case 0xC7: return "differential";
+    case 0xC9: case 0xCA: case 0xCB: return "arithmetic-coded";
+    case 0xCD: case 0xCE: case 0xCF: return "differential arithmetic-coded";
+    case 0x00: return "no SOF marker";
+    default:   return "unsupported";
+    }
+}
+
 esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
                         const uint8_t *jpeg, size_t jpeg_len)
 {
@@ -253,6 +317,13 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     uint8_t *in = NULL;
     uint8_t *rgb = NULL;
     size_t in_size = 0, rgb_size = 0;
+
+    uint8_t sof = 0;
+    if (!jpeg_is_baseline(jpeg, jpeg_len, &sof)) {
+        ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X); "
+                      "this decoder is baseline-only", sof_name(sof), sof);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
 
     const jpeg_decode_engine_cfg_t engine = { .timeout_ms = 5000 };
     ESP_RETURN_ON_ERROR(jpeg_new_decoder_engine(&engine, &dec), TAG, "jpeg engine");
