@@ -14,6 +14,7 @@
 
 #include "gfx.h"
 #include "ui.h"
+#include "waveform.h"
 
 static const char *TAG = "tab5_ui";
 
@@ -29,6 +30,22 @@ static const char *TAG = "tab5_ui";
  * C_TRACK -- that is 0x3A, chosen to be a slider groove that does not
  * compete with the fill, and it is too dark to read as text. */
 #define C_ALBUM     RGB(0x88, 0x88, 0x88)
+/* The envelope's two halves.
+ *
+ * Played reuses C_FILL exactly -- it is the same statement the slider fill
+ * was making, in the shape of the song instead of a rectangle. Unplayed is
+ * its own grey rather than C_TRACK: 0x3A was chosen to be a groove that
+ * disappears behind the fill, and a 64 px shape drawn in it reads as a
+ * smudge. 0x6E is the dimmest grey that still resolves as a waveform at
+ * arm's length on this panel.
+ */
+#define C_WAVE_PAST   C_FILL
+#define C_WAVE_FUTURE RGB(0x6E, 0x6E, 0x6E)
+/* The playhead, where the two meet. The colour boundary alone marks the
+ * position, but only where the envelope is tall; across a quiet passage it
+ * is a 5 px change of colour, so there is a line as well. */
+#define C_PLAYHEAD  RGB(0xFF, 0xFF, 0xFF)
+
 #define C_BUBBLE_BG RGB(0x1A, 0x1A, 0x1A)
 #define C_BUBBLE_ED RGB(0x44, 0x44, 0x44)
 
@@ -64,9 +81,18 @@ static const char *TAG = "tab5_ui";
 #define TEXT_Y      (18)   /* title, top of the bar */
 #define ARTIST_Y    (68)
 #define ALBUM_Y     (100)
-#define SEEK_Y      (174)
+/*
+ * The seek baseline -- and now the floor the envelope stands on, so
+ * everything from SEEK_Y - UI_WAVE_H down to SEEK_Y belongs to it.
+ *
+ * Moved down 40 px to make that room without crowding the album row,
+ * which ends at 124. That leaves 26 px of clear space above the tallest
+ * possible column, which is enough for the two to read as separate
+ * things.
+ */
+#define SEEK_Y      (214)
 #define SEEK_X0     (142)  /* clears the MM:SS run at either end */
-#define ROW_Y       (254)
+#define ROW_Y       (294)
 #define BTN_R       (46)    /* play/pause circle */
 #define ICON_HALF   (26)
 
@@ -314,8 +340,33 @@ void ui_draw(const ui_state_t *st)
      *     to try dragging it.
      *   - no length: a bare groove.
      */
-    if (st->can_seek) {
-        draw_slider(x0, x1, y, s_drag == 0 ? s_drag_pct : pos_pct);
+    const int shown_pct = (s_drag == 0) ? s_drag_pct : pos_pct;
+
+    if (waveform_ready() && st->len_sec > 0) {
+        /*
+         * The envelope is the bar. Played columns red, unplayed grey, and
+         * the split is the position -- which is the whole reason for
+         * merging the two: the shape of the song and the point reached in
+         * it were always the same axis drawn twice.
+         *
+         * The thumb is gone with the groove. A slider needs one because
+         * there is nothing else to grab; this is a 64 px tall target with
+         * a hard colour edge in it, and a circle sitting on top of the
+         * envelope obscured the columns nearest the position -- the ones
+         * being looked at.
+         */
+        waveform_draw_bar(x0, x1, y, UI_WAVE_H, shown_pct,
+                          C_WAVE_PAST, C_WAVE_FUTURE);
+
+        const int split = x0 + ((x1 - x0) * shown_pct) / 100;
+        gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,
+                      st->can_seek ? C_PLAYHEAD : C_WAVE_FUTURE);
+    } else if (st->can_seek) {
+        /* No envelope yet -- the scan takes a few seconds on a long track
+         * and may never produce one for a format with no per-frame
+         * loudness. The bar is still a control in the meantime, so it
+         * falls back to what it was. */
+        draw_slider(x0, x1, y, shown_pct);
     } else if (st->len_sec > 0) {
         gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
         gfx_fill_rect(x0, y - 3, ((x1 - x0) * pos_pct) / 100, 6, C_FILL);
@@ -501,9 +552,13 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
      */
     if (!st->can_seek) return act;
 
+    /* The hit box now covers the envelope's full height, not a padded
+     * band around a line. Pressing a tall column and having nothing
+     * happen would read as the bar having gone dead -- the drawn shape
+     * has to be the target. */
     seek_bounds(&x0, &x1, &sy);
     if (x >= x0 - HIT_PAD_X && x <= x1 + HIT_PAD_X &&
-        y >= sy - HIT_PAD_Y && y <= sy + HIT_PAD_Y) {
+        y >= sy - UI_WAVE_H - HIT_PAD_Y && y <= sy + HIT_PAD_Y) {
         s_drag = 0;
         s_drag_x = x;
         s_drag_y = y;

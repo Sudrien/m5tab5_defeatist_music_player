@@ -73,6 +73,13 @@ void ui_clear_art(void);
  * bottom UI_BAR_H rows, never the cover art above them. */
 void ui_draw(const ui_state_t *st);
 
+/* Height of the envelope standing on the seek baseline.
+ *
+ * 64 px of upper sideband. The mirrored version needed twice this and
+ * could only get it in the artwork area; half the shape carries all of
+ * the information, so it fits here. */
+#define UI_WAVE_H   (64)
+
 /* Feed one poll of the touch controller. down=false means no finger.
  * Returns the action this poll produced, if any.
  *
@@ -93,7 +100,17 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y);
  * unaffected either way, and one large enough to be cropped loses 20
  * rows top and bottom.
  */
-#define UI_BAR_H    (316)
+/*
+ * Grew again, by 40 px, when the envelope moved out of the artwork and
+ * onto the seek bar. That is UI_WAVE_H less the slack the old slider row
+ * already had around it.
+ *
+ * Artwork drops from 964 rows to 924, which still clears a 500 px cover
+ * with room either side. The trade is deliberate: the artwork lost a
+ * strip it was not using, and got back the whole of its middle, which the
+ * envelope used to draw a frame around.
+ */
+#define UI_BAR_H    (356)
 
 #ifdef __cplusplus
 }

@@ -570,7 +570,6 @@ static char              s_scan_path[512];
 static volatile bool     s_scan_want;
 static volatile bool     s_scan_abort;
 static volatile bool     s_wave_ready;
-static volatile bool     s_wave_framed;   /* cover present, so draw a border */
 static framewalk_t       s_walk;
 
 /* The track being played, its tags, and the filename fallback.
@@ -651,7 +650,12 @@ static void load_track_visuals(const char *path)
      * envelope over the right track's cover. */
     s_scan_abort = true;
     s_wave_ready = false;
-    s_wave_framed = have_art;
+    /* Drop the previous track's envelope now rather than when the new one
+     * lands. The bar redraws ten times a second and the scan takes
+     * seconds; leaving the old one up means the new song is drawn against
+     * the last song's shape for the whole of that, which is worse than a
+     * plain slider. */
+    waveform_set(NULL);
     snprintf(s_scan_path, sizeof(s_scan_path), "%s", path);
     s_scan_want = true;
 }
@@ -690,12 +694,10 @@ static void scan_task(void *arg)
             continue;
         }
 
-        /* The frame layout uses four sides of WAVE_INNER; the fill layout
-         * uses one column per pixel. Asking for the larger of the two
-         * costs nothing and means the mode can change without a rescan. */
-        /* One column per pixel of panel width, both shapes -- the frame
-         * is the same envelope with a square skipped, not a different
-         * layout, so it wants the same column count. */
+        /* One column per pixel of panel width, still, even though the bar
+         * is narrower than that now. The extra columns cost a kilobyte
+         * and are averaged down at draw time; the alternative is a rescan
+         * whenever the bar's width changes. */
         const int cols = LCD_H_RES;
 
         const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
@@ -714,8 +716,7 @@ static void scan_task(void *arg)
         } else if (!s_walk.frames) {
             ESP_LOGW(TAG, "walk found no frames; no envelope");
         } else {
-            ESP_LOGI(TAG, "envelope ready: %d columns, %s",
-                     s_walk.columns, s_wave_framed ? "framed" : "fill");
+            ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
             s_wave_ready = true;
         }
     }
@@ -944,11 +945,16 @@ static track_end_t play_file(const char *path)
          * there is one writer to the framebuffer. */
         if (s_wave_ready) {
             s_wave_ready = false;
-            waveform_draw(&s_walk, s_wave_framed ? WAVE_FRAME : WAVE_FILL,
-                          LCD_V_RES - UI_BAR_H);
-            /* The bubble's saved strip is now stale -- it was captured
-             * before the envelope existed. */
-            ui_capture_background();
+            /* Hand it over rather than draw it. The envelope is part of
+             * the transport bar now, so it is drawn by ui_draw() on every
+             * repaint like everything else in there -- it has to be, it
+             * changes colour as the track plays.
+             *
+             * That also retires the bubble recapture that used to follow
+             * this: the artwork no longer changes when a scan lands, so
+             * the saved strip behind the finger bubble is still good.
+             */
+            waveform_set(&s_walk);
 
             /* The walk counted frames on the way past. For a format that
              * states its own length this is redundant and is not used;

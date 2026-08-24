@@ -352,6 +352,19 @@ Details that matter:
   class of bug as the ID3v2 tag at the front, at the other end of the
   file -- which is the argument for treating "arbitrary bytes adjacent to
   audio" as a category rather than fixing them one at a time.
+- **A granule with no main data is silence, and is reported as such.**
+  `part2_3_length == 0` means no scalefactors and no Huffman data --
+  nothing for a gain to apply to -- and `global_gain` is then whatever the
+  encoder left in the field. LAME writes 210 there, and something in the
+  run writes 255. Read literally, every LAME-encoded MP3 opens and closes
+  at four fifths of full scale.
+
+  That is the spike at each end of the envelope that survived the ID3v2
+  and trailing-tag fixes above, and it is not metadata: these are real
+  frames, correctly parsed, in the audio stream -- the encoder delay at
+  the head and the flush padding at the tail. A 2.6 minute test track has
+  51 of them, seven at the front and the rest trailing. They are reported
+  as 0 and left out of the normalisation range.
 - **The first sync is confirmed by a second one** at exactly the offset
   the first header states, with a matching sample rate. One valid-looking
   header proves nothing; two at the stated spacing do. Once locked, the
@@ -414,70 +427,71 @@ still spans the full width.
 
 Verified against a generated 5000-packet Opus stream: 100 s, exact.
 
-### The envelope, framed or filling
+### The envelope is the seek bar
 
-`waveform.c` draws the walk's output two ways: as a band running round the
-cover when there is one, and as a single large envelope across the whole
-artwork area when there is not.
+`waveform.c` draws the walk's output as a single shape at the bottom of
+the screen: an **upper-sideband envelope standing on the seek bar's
+baseline**, spanning the bar's width, with everything played drawn in red
+and everything still to come in grey.
 
-It is drawn **once, when the scan lands**, and then left alone. Not
-animated and not a progress indicator -- which is exactly what lets the
-scan run at whatever pace the card allows instead of having to keep up
-with playback.
+It used to be a band framing the cover art, mirrored about a centre line,
+drawn once when the scan landed and then left alone. Three things changed
+and they are one idea.
 
-- **The scan runs alongside playback, not before it.** A whole-song walk
-  before the first note would be a second of silence; a frame that appears
-  a second in is invisible. `scan_task` is the lowest priority in the
-  program, because it reads the same card the decoder is reading and the
-  decoder winning is the correct outcome.
-- **The task computes, the decode loop draws.** Same rule as album art:
-  one writer to the framebuffer, no lock. `s_wave_ready` is the handoff.
-- **A new track aborts the old scan.** On a fast run through a folder the
-  previous walk is still going, and finishing it would paint the wrong
-  track's envelope around the right track's cover.
-- **Its own `FILE*`.** The decoder holds one and this seeks to EOF;
-  sharing would be a seek war with the thing producing the audio.
-- **The envelope is scaled from the track's own minimum**, not from zero.
-  `global_gain` on a quiet passage is a low number rather than 0, so a
-  straight 0-255 mapping draws every track as a fat band that never
-  touches the inner edge. Rescaling is what makes a quiet track look
-  quiet, and two tracks look different -- the entire point of drawing it.
-- **There is a floor on the drawn thickness.** `global_gain` on a real
-  track occupies a narrow slice of its 0-255 range, so the quiet end of a
-  normalised envelope came out as a one-pixel hairline: present, correct,
-  and invisible from arm's length on a 294 PPI panel. 6 px reads as a
-  band; below that it reads as the feature not working.
-- **One renderer, two shapes.** The envelope is always mirrored about the
-  middle of the artwork area, left to right, one column per pixel of
-  width. The framed case differs only in leaving a 548 px square
-  untouched for the cover to sit in.
+- **Upper sideband only.** The mirrored envelope spent half its pixels
+  restating the other half. `global_gain` is a magnitude -- there is no
+  sign to it -- so the lower lobe carried nothing the upper one did not.
+  Dropping it buys the same detail in half the height, which is what makes
+  it fit in the transport bar at all.
+- **Moved down, into the bar.** Up in the artwork area it competed with
+  the cover for the same rectangle, which is why it needed a cutout, why
+  the cutout had to be a guess at the cover's size, and why a cover larger
+  than 548 px got overdrawn at the edges. None of that exists now: the
+  artwork area is the artwork's.
+- **Combined with the seek bar.** There were two horizontal, left-to-
+  right, time-axis objects on screen, one showing the shape of the song
+  and one showing the point reached in it. Same axis, drawn twice. The
+  slider's groove, fill and thumb are gone; the envelope's own columns
+  carry the position as a colour boundary, with a 3 px white playhead at
+  the split because across a quiet passage the boundary is only 5 px tall.
 
-  This replaced a band that ran round the cover's perimeter with the
-  song's four quarters on the four sides. It looked deliberate and it was
-  a second layout to reason about, it needed corner gaps to avoid looking
-  broken, and its time axis ran clockwise -- which nothing else on screen
-  does.
-- **The framed envelope is based at the cutout edge, not the centre.**
-  Scaling from the middle looked right on paper and wrong on screen: only
-  the loudest columns reached past the cover, so instead of a frame there
-  were spikes escaping from behind a square. Starting the bar at the
-  square's edge and growing outward gives a band that surrounds the cover
-  continuously and still moves with the track.
-- **The cutout is skipped, not painted.** `albumart.c` has already cleared
-  the area and drawn the cover into exactly that square, so not drawing
-  there is what leaves the picture visible with a black margin -- and it
-  means the envelope never has to know how big the picture is.
+Consequences of the merge:
 
-The frame also picks up the duration the walk counted, but only when
-nothing else supplied one -- so on a Xing-less MP3 the seek bar goes from
-empty to filled partway through the song rather than staying empty for all
-of it.
+- **It is redrawn on every repaint, not once.** It has to be -- it changes
+  colour as the track plays. That in turn means it needs its own copy of
+  the levels: `waveform_set()` takes one, because the scan task's
+  `framewalk_t` is overwritten the moment the next track starts scanning
+  and the UI is now a live reader of it. It is a kilobyte.
+- **The scan still runs alongside playback**, on the lowest priority task,
+  with its own `FILE*`, and a new track still aborts the old walk. Nothing
+  about the scan changed; it just hands off differently.
+- **The bar falls back to a plain slider while there is no envelope** --
+  during the scan, and permanently for a format with no per-frame
+  loudness. A track has to stay seekable in the meantime, and a control
+  that vanishes for the first few seconds of every song is worse than one
+  that changes appearance once.
+- **The hit target is the drawn shape**, the full 64 px, not a padded band
+  around a line. Pressing a tall column and having nothing happen reads as
+  the bar having gone dead.
+- **The bar grew 40 px and the artwork lost them**, 964 rows to 924. A
+  500 px cover is unaffected. The artwork gave up a strip it was not using
+  and got back the whole of its middle, which the envelope used to draw a
+  frame around.
+- **The envelope is still scaled from the track's own minimum**, not from
+  zero. `global_gain` on a quiet passage is a low number rather than 0, so
+  a straight 0-255 mapping draws every track as a slab with no shape in
+  it. Silent columns are excluded from that range -- see below -- or a
+  track that opens with encoder padding would put the floor at 0 and
+  reintroduce the slab through the front door.
+- **There is still a floor on the drawn height**, 5 px rather than 6. The
+  quiet end of a normalised envelope is a one-pixel hairline, invisible at
+  arm's length on a 294 PPI panel, and a hairline in the middle of a
+  slider reads as the slider being broken rather than as the song being
+  quiet.
 
-**Known limitation:** `WAVE_INNER` is fixed at 548 px rather than derived
-from the cover, because `albumart_show()` does not report the rectangle it
-drew into. A cover larger than 548 px is overdrawn at the edges by the
-frame. The fix is for `albumart_show()` to return its rect, not for
-`waveform.c` to guess.
+The walk still supplies the duration when nothing else could, so on a
+Xing-less MP3 the bar goes from empty to filled partway through the song
+rather than staying empty for all of it.
 
 ### Length and seekability are different questions
 
