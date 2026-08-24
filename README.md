@@ -971,18 +971,31 @@ MCU size follows the chroma subsampling -- 16x16 at 4:2:0, 16x8 at 4:2:2,
 8x8 at 4:4:4 and greyscale -- so it is read from `info.sample_method`
 rather than assumed to be 16.
 
-**Oversized covers are downscaled by an integer factor**, then cropped.
-Cropping alone is what this used to do, and on a 3000x3000 cover it showed
-a 720 px square cut from the middle: under a quarter of the picture, edges
-missing, nothing on screen or in the log to say so. There is no scaler in
-this hardware, but taking every Nth pixel on the way out of the decode
-buffer costs one multiply per output pixel, needs no second buffer, and
-shows the whole cover. The step is the largest that still covers the
-panel, so 3000 goes to 750 for a 720 px square and the remaining 30 px is
-the crop it always did.
+**Oversized covers are scaled to fit at a fractional ratio.** Two
+revisions, and the second is the interesting one.
+
+Cropping alone was the original: a 720 px square cut from the middle of a
+3000 px cover, under a quarter of the picture, with nothing on screen or
+in the log to say so. Then an integer decimation -- every Nth pixel, N the
+largest that still covered the panel -- which fixed the 3000 px case and
+left the common ones badly served. 1920 over 720 is 2.67, so N was 2, the
+cover came out at 960 px, and a quarter of it was *still* cropped away. An
+integer step can only land on the panel exactly when the cover is a
+multiple of it, and covers are round numbers of their own rather than
+multiples of a panel.
+
+So the step is 16.16 fixed point. Same shape and same cost -- one shift
+and one multiply per output pixel, no second buffer -- and the picture
+lands on the panel exactly. 1920 becomes 720 whole rather than 960
+cropped.
+
+Fit rather than fill, so nothing is lost. A cover that is not square gets
+black at two edges instead of having its other two trimmed. The cover is
+the thing being shown, and a player that quietly crops the artwork it was
+given is deciding something it was not asked to decide.
 
 Nearest neighbour, no filtering. A box filter would be visibly better on
-fine detail and would read every source pixel rather than one in sixteen,
+fine detail and would read every source pixel rather than one in seven,
 during playback. Album art is not fine detail.
 
 **The allocation is checked before it is attempted.** Full size or not at
@@ -1059,6 +1072,25 @@ completion callback. Before that, "one writer to the framebuffer" was true
 only because the tasks that drew happened to take turns by construction,
 which is not a property you can add a task to. The two writers still own
 disjoint rows: `media_task` paints the artwork area and `ui_task` the bar.
+
+**A repaint is not a track change.** `load_track_visuals()` runs for two
+reasons and they do not want the same work: a new track needs everything,
+while a repaint -- the chooser closing, having drawn over the artwork --
+needs the cover put back and nothing else, because the envelope on screen
+is already this track's. Without that distinction, dismissing the chooser
+cost a full walk of the playing file. Cancelling out of a folder with
+nothing playable in it read 30 MB off the card to produce an envelope
+identical to the one already drawn:
+
+```
+/usb/FirmamentSoundtrack: 0 tracks
+nothing playable in /usb/FirmamentSoundtrack
+tags: "Doctor" / ...                  <- repaint of the playing track
+walk: 6043 frames, 157s, levels=1     <- and its envelope, again
+```
+
+So `media_task` remembers the path it last walked and skips the walk when
+it matches.
 
 **A decode cannot be cancelled partway**, the way a frame walk polls a
 flag and stops. So track identity is a counter. `media_task` copies
