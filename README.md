@@ -284,15 +284,20 @@ because the controller needs a moment once reset is released.
 
 ### Sizes are set for 294 PPI
 
-720x1280 on a 5" panel is about 294 PPI, so an 8 px font glyph is 1.4 mm
+720x1280 on a 5" panel is about 294 PPI, so a 10 px font glyph is 1.7 mm
 tall -- unreadable at arm's length. Everything is scaled for that rather
 than left at values that looked right in a 96 PPI mockup: the title is
-font8x8 at scale 4 (about 2.8 mm, roughly a phone's body text), album and
+ark10 at scale 4 (about 3.4 mm, roughly a phone's body text), album and
 artist at scale 3, the MM:SS digits 20x38, the slider thumbs 16 px radius,
 and the bar itself 560 px.
 
-Scale 4 fits nineteen characters across the panel, which is why the title
-bounces rather than being cut.
+The font change moved both of those numbers. font8x8 was a 9 px advance
+per glyph and 8 px tall; ark10 is 6 and 10. So text at a given scale is a
+third narrower and a quarter taller than it was: scale 4 now fits
+twenty-nine characters across the panel rather than nineteen, and fewer
+titles bounce. The vertical growth is why `GFX_GLYPH_H(scale)` exists --
+`browser.c` was centring rows with a literal `8 * scale`, which was right
+for the old font and silently four pixels off for this one.
 
 If the layout is ever moved again, two things are load-bearing rather than
 aesthetic:
@@ -325,12 +330,31 @@ the frame walker it needs is the one `albumart_extract()` already has --
 version-dependent frame sizes, the padding check, the tag-end bound. A
 second copy is the thing that drifts.
 
-The font is `font8x8` (public domain), fetched by `cmake/vendored.cmake`
-like minimp3 and pngle. It is ASCII 0-127, so `id3_text_to_ascii()`
-flattens latin1, UTF-8 and both UTF-16 encodings down to it and turns
-anything above 0x7F into `?`. Visibly wrong beats a mojibake glyph that
-looks deliberate. Accented artist names will show question marks; that is
-the price of not vendoring a Unicode font.
+The font is **Ark Pixel Font**, 10px monospaced, as `components/ark10` --
+Basic Latin, Latin-1 Supplement and Latin Extended-A, 351 glyphs. It
+replaced `font8x8`, which was ASCII-only and made every accented artist
+name a row of question marks.
+
+It is not vendored the way minimp3 and pngle are, because it cannot be:
+Ark ships one PNG per glyph and builds its font files at release time, so
+there is no single file for `cmake/vendored.cmake` to pin a SHA256
+against. `tools/gen_ark10.py` converts the PNGs to a C table, is run by
+hand, and its output is committed. The generated header names the
+upstream commit, which is the same guarantee moved somewhere that can
+hold it.
+
+`id3_text_to_utf8()` replaced `id3_text_to_ascii()`. All four ID3 text
+encodings now convert properly rather than being flattened -- in
+particular encoding 0 is Latin-1, not ASCII, so 0xE9 is widened to a two
+byte 'é' rather than copied. FatFs also moved to
+`CONFIG_FATFS_API_ENCODING_UTF_8`, without which filenames would have
+stayed codepage 437 and the browser would have been the one place left
+showing mojibake.
+
+Five Latin-1 characters are still missing -- © ® ¼ ½ ¾ -- because Ark
+draws those fullwidth and this table is halfwidth-only. They render as a
+notdef box, as does anything past Latin Extended-A. A box rather than
+`?`, because `?` reads as a character the file actually contained.
 
 No title in the tag falls back to the filename.
 
@@ -1243,9 +1267,11 @@ rather than against a board.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
-- **Non-ASCII still shows as `?`**, marquee or not. A long title in a
-  script `font8x8` does not cover bounces just as legibly and says just as
-  little.
+- **Non-Latin still shows as boxes**, marquee or not. ark10 stops at
+  Latin Extended-A; a Cyrillic or Japanese title bounces just as legibly
+  and says just as little. Upstream has both, and `RANGES` in
+  `tools/gen_ark10.py` is where they would go -- CJK would be the thing
+  that stops being 4 KB.
 
 ### Licensing, since you already care about this for exFAT
 
@@ -1255,6 +1281,19 @@ rather than against a board.
   licence. Free, but the grant is limited to Espressif silicon. Fine
   here; worth knowing before this code gets copied somewhere it is not.
 - pngle and miniz are MIT.
+- **Ark Pixel Font is SIL OFL-1.1, and `components/ark10` is therefore
+  OFL-1.1 too, not MIT.** Converting the glyph PNGs into C arrays makes
+  those files a Modified Version under OFL section 5, and section 5
+  requires Modified Versions to stay under the OFL. This is not a problem
+  -- the OFL explicitly allows bundling with software under any licence,
+  and only the font files are bound -- but `components/ark10/LICENSE-OFL`
+  has to ship with any redistribution, including a firmware image, and
+  the tables must not be sold on their own. Ark declares no Reserved Font
+  Name, so the derivative did not have to be renamed; it is called
+  `ark10` anyway, because it is not the Original Version.
+
+  This is the one obligation the project did not previously have. font8x8
+  was public domain and nothing had to travel with it.
 
 ### Open, matching the TODO list above
 

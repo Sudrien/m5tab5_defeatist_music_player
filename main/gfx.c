@@ -16,7 +16,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 
-#include "font8x8_basic.h"
+#include "ark10.h"
 
 #include "gfx.h"
 
@@ -347,19 +347,128 @@ void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c)
 /* Text                                                                */
 /* ------------------------------------------------------------------ */
 
-void gfx_draw_char(int x, int y, char ch, int scale, uint16_t c)
-{
-    const unsigned char u = (unsigned char)ch;
-    if (u > 127) return;
-    const char *g = font8x8_basic[u];
+/*
+ * This section used to index font8x8_basic[] with a byte and return
+ * early for anything above 127. It now decodes UTF-8 to a codepoint and
+ * looks it up in ark10, which covers Latin-1 Supplement and Latin
+ * Extended-A -- so "Björk", "Sigur Rós", "Łódź" and "Beyoncé" render as
+ * themselves rather than as a row of question marks.
+ *
+ * The strings arriving here are UTF-8 by construction: albumart.c
+ * converts every ID3 text encoding to it, and FatFs is configured to
+ * hand back UTF-8 filenames. A byte sequence that is not valid UTF-8 is
+ * still possible -- a tag can contain anything -- and decodes to one
+ * replacement glyph per bad byte rather than being allowed to desync the
+ * decoder and eat the rest of the string.
+ */
 
-    for (int row = 0; row < 8; row++) {
-        const unsigned char bits = (unsigned char)g[row];
-        for (int col = 0; col < 8; col++) {
+/* Drawn for anything the table does not have. A hollow box is the
+ * conventional notdef and, unlike '?', does not read as a character the
+ * file actually contained. */
+static const uint8_t NOTDEF[ARK10_H] = {
+    0x00, 0x00, 0x0F, 0x09, 0x09, 0x09, 0x09, 0x09, 0x0F, 0x00
+};
+
+/*
+ * Decode one codepoint, advancing *p past it. Returns 0 at end of
+ * string.
+ *
+ * Overlong forms, surrogates and continuation bytes appearing where a
+ * lead byte should are all rejected as one bad byte each. That is
+ * stricter than it needs to be for drawing text, and it is the
+ * difference between a corrupt tag costing one glyph and a corrupt tag
+ * costing the rest of the row.
+ */
+static uint32_t utf8_next(const char **p)
+{
+    const unsigned char *s = (const unsigned char *)*p;
+    const unsigned char b = s[0];
+
+    if (b == 0) return 0;
+
+    int n;
+    uint32_t cp;
+    if      (b < 0x80)          { *p += 1; return b; }
+    else if ((b & 0xE0) == 0xC0) { n = 1; cp = b & 0x1F; }
+    else if ((b & 0xF0) == 0xE0) { n = 2; cp = b & 0x0F; }
+    else if ((b & 0xF8) == 0xF0) { n = 3; cp = b & 0x07; }
+    else                         { *p += 1; return 0xFFFD; }
+
+    for (int i = 1; i <= n; i++) {
+        if ((s[i] & 0xC0) != 0x80) { *p += 1; return 0xFFFD; }
+        cp = (cp << 6) | (s[i] & 0x3F);
+    }
+
+    static const uint32_t min_for[4] = { 0, 0x80, 0x800, 0x10000 };
+    if (cp < min_for[n] || (cp >= 0xD800 && cp <= 0xDFFF)) {
+        *p += 1;
+        return 0xFFFD;
+    }
+
+    *p += n + 1;
+    return cp;
+}
+
+/*
+ * Codepoint to bitmap, with the two Latin-1 spacing characters Ark does
+ * not draw handled here rather than baked into the table -- they are
+ * behaviour, not glyphs, and putting them in the generated file would
+ * mean the generator had opinions about rendering.
+ *
+ * Returns NULL for a character that occupies no cell at all (soft
+ * hyphen), which the callers skip without advancing x.
+ */
+static const uint8_t *glyph_for(uint32_t cp)
+{
+    if (cp == 0x00A0) cp = 0x0020;      /* no-break space draws as space */
+    if (cp == 0x00AD) return NULL;      /* soft hyphen: not a line break here */
+
+    const uint8_t *g = ark10_glyph(cp);
+    return g ? g : NOTDEF;
+}
+
+/* Number of glyph cells a UTF-8 string occupies. Not strlen: "Rós" is
+ * four bytes and three cells, and every width and truncation decision
+ * below wants the second number. */
+static int glyph_count(const char *s)
+{
+    int n = 0;
+    while (*s) {
+        if (glyph_for(utf8_next(&s))) n++;
+    }
+    return n;
+}
+
+/* Byte offset of the glyph_count()-th cell from the end -- what
+ * gfx_draw_text_tail() needs to start drawing partway into a string it
+ * cannot index by character. */
+static const char *tail_at(const char *s, int cells_from_end)
+{
+    const char *p = s;
+    const int total = glyph_count(s);
+    int skip = total - cells_from_end;
+    if (skip <= 0) return s;
+    while (skip > 0 && *p) {
+        if (glyph_for(utf8_next(&p))) skip--;
+    }
+    return p;
+}
+
+static void blit_glyph(const uint8_t *g, int x, int y, int scale, uint16_t c)
+{
+    for (int row = 0; row < ARK10_H; row++) {
+        const uint8_t bits = g[row];
+        for (int col = 0; col < ARK10_W; col++) {
             if (!(bits & (1 << col))) continue;
             gfx_fill_rect(x + col * scale, y + row * scale, scale, scale, c);
         }
     }
+}
+
+void gfx_draw_char(int x, int y, uint32_t cp, int scale, uint16_t c)
+{
+    const uint8_t *g = glyph_for(cp);
+    if (g) blit_glyph(g, x, y, scale, c);
 }
 
 void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
@@ -369,8 +478,15 @@ void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
     const int gw = GFX_GLYPH_W(scale);
     const int win_x1 = win_x + win_w;
 
-    for (int i = 0; s[i]; i++) {
+    int i = 0;
+    uint32_t cp;
+    while ((cp = utf8_next(&s)) != 0) {
+        const uint8_t *g = glyph_for(cp);
+        if (!g) continue;
+
         const int gx = x + i * gw;
+        i++;
+
         /* Wholly left of the window: keep going, the string runs
          * rightward. Wholly right of it: nothing after this can be
          * visible either, so stop -- a 200 character title otherwise
@@ -378,13 +494,9 @@ void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
         if (gx + gw <= win_x) continue;
         if (gx >= win_x1) break;
 
-        const unsigned char u = (unsigned char)s[i];
-        if (u > 127) continue;
-        const char *g = font8x8_basic[u];
-
-        for (int row = 0; row < 8; row++) {
-            const unsigned char bits = (unsigned char)g[row];
-            for (int col = 0; col < 8; col++) {
+        for (int row = 0; row < ARK10_H; row++) {
+            const uint8_t bits = g[row];
+            for (int col = 0; col < ARK10_W; col++) {
                 if (!(bits & (1 << col))) continue;
                 int px = gx + col * scale;
                 int pw = scale;
@@ -403,7 +515,7 @@ void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
 int gfx_text_w(const char *s, int scale)
 {
     if (!s) return 0;
-    return (int)strlen(s) * GFX_GLYPH_W(scale);
+    return glyph_count(s) * GFX_GLYPH_W(scale);
 }
 
 void gfx_draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c)
@@ -411,15 +523,30 @@ void gfx_draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c
     if (!s || !*s) return;
     const int gw = GFX_GLYPH_W(scale);
     const int room = max_w / gw;
-    const int len = (int)strlen(s);
+    const int len = glyph_count(s);
 
     if (len <= room) {
-        for (int i = 0; i < len; i++) gfx_draw_char(x + i * gw, y, s[i], scale, c);
+        int i = 0;
+        uint32_t cp;
+        while ((cp = utf8_next(&s)) != 0) {
+            const uint8_t *g = glyph_for(cp);
+            if (!g) continue;
+            blit_glyph(g, x + i * gw, y, scale, c);
+            i++;
+        }
         return;
     }
     if (room < 4) return;
-    for (int i = 0; i < room - 3; i++) gfx_draw_char(x + i * gw, y, s[i], scale, c);
-    for (int i = room - 3; i < room; i++) gfx_draw_char(x + i * gw, y, '.', scale, c);
+
+    int i = 0;
+    uint32_t cp;
+    while (i < room - 3 && (cp = utf8_next(&s)) != 0) {
+        const uint8_t *g = glyph_for(cp);
+        if (!g) continue;
+        blit_glyph(g, x + i * gw, y, scale, c);
+        i++;
+    }
+    for (; i < room; i++) gfx_draw_char(x + i * gw, y, '.', scale, c);
 }
 
 /* Keeps the tail. A truncated path with the head kept reads "/sd/Music/Th"
@@ -430,16 +557,27 @@ void gfx_draw_text_tail(int x, int y, const char *s, int scale, int max_w, uint1
     if (!s || !*s) return;
     const int gw = GFX_GLYPH_W(scale);
     const int room = max_w / gw;
-    const int len = (int)strlen(s);
+    const int len = glyph_count(s);
 
     if (len <= room) {
-        for (int i = 0; i < len; i++) gfx_draw_char(x + i * gw, y, s[i], scale, c);
+        gfx_draw_text(x, y, s, scale, max_w, c);
         return;
     }
     if (room < 4) return;
+
     for (int i = 0; i < 3; i++) gfx_draw_char(x + i * gw, y, '.', scale, c);
-    const char *tail = s + len - (room - 3);
-    for (int i = 0; i < room - 3; i++) {
-        gfx_draw_char(x + (i + 3) * gw, y, tail[i], scale, c);
+
+    /* Starting partway into a UTF-8 string means finding the boundary
+     * first; s + len - n is a byte offset and would land in the middle
+     * of a multibyte sequence, which is how a truncated path acquires a
+     * replacement box at its left edge. */
+    const char *p = tail_at(s, room - 3);
+    int i = 3;
+    uint32_t cp;
+    while (i < room && (cp = utf8_next(&p)) != 0) {
+        const uint8_t *g = glyph_for(cp);
+        if (!g) continue;
+        blit_glyph(g, x + i * gw, y, scale, c);
+        i++;
     }
 }

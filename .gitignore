@@ -13,7 +13,6 @@
 /components/pngle/pngle.h
 /components/pngle/miniz.c
 /components/pngle/miniz.h
-/components/font8x8/font8x8_basic.h
 /components/fatfs/
 
 # Download temporaries from a failed or interrupted vendored fetch.

@@ -4,7 +4,9 @@
 #
 #   minimp3  -- MP3 decode (Layers I/II/III, free format, gapless)
 #   pngle    -- streaming PNG decode for cover art
-#   font8x8  -- bitmap font for the title/artist rows
+#
+# The font is not here: components/ark10 is generated and committed. See
+# tools/gen_ark10.py.
 #
 # You do not normally need to run this: cmake/vendored.cmake fetches the
 # same files, from the same pinned commits, at configure time. This is
@@ -28,12 +30,10 @@ PNGLE="$ROOT/components/pngle"
 # leaves behind that does not match.
 MINIMP3_REF=ea99364f61c14656440e8d77e9c233ccf3124633
 PNGLE_REF=b1c68193f1d3f8642b3e0e095d457a828038e6fb
-FONT8X8_REF=8e279d2d864e79128e96188a6b9526cfa3fbfef9
 
 if [ "${1:-}" = "--revert" ]; then
     rm -f "$MINIMP3/minimp3.h" "$MINIMP3/minimp3_ex.h"
     rm -f "$PNGLE/pngle.c" "$PNGLE/pngle.h" "$PNGLE/miniz.c" "$PNGLE/miniz.h"
-    rm -f "$ROOT/components/font8x8/font8x8_basic.h"
     echo "removed vendored headers (CMakeLists.txt kept)"
     exit 0
 fi
@@ -56,12 +56,6 @@ fetch "$BASE/pngle.c" "$PNGLE/pngle.c"
 fetch "$BASE/pngle.h" "$PNGLE/pngle.h"
 fetch "$BASE/miniz.c" "$PNGLE/miniz.c"
 fetch "$BASE/miniz.h" "$PNGLE/miniz.h"
-
-echo "font8x8 -> components/font8x8/"
-FONT="$ROOT/components/font8x8"
-mkdir -p "$FONT"
-fetch "https://raw.githubusercontent.com/dhepper/font8x8/$FONT8X8_REF/font8x8_basic.h" \
-      "$FONT/font8x8_basic.h"
 
 cat <<'MSG'
 

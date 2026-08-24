@@ -22,7 +22,14 @@
 
 set(MINIMP3_COMMIT ea99364f61c14656440e8d77e9c233ccf3124633)
 set(PNGLE_COMMIT   b1c68193f1d3f8642b3e0e095d457a828038e6fb)
-set(FONT8X8_COMMIT 8e279d2d864e79128e96188a6b9526cfa3fbfef9)
+
+# The font is no longer fetched here. components/ark10 is generated from
+# Ark Pixel Font by tools/gen_ark10.py and committed, because Ark ships
+# one PNG per glyph rather than a header -- there is no single file to
+# pin, and pulling a 17 MB archive on every fresh configure to extract
+# 350 of them is a worse trade than 4 KB in git. The generated header
+# records the upstream commit it came from, which is the same guarantee
+# the SHA256 checks below provide, moved to a place that can hold it.
 
 # vendored_fetch(<url> <destination> <sha256>)
 function(vendored_fetch url dest sha)
@@ -105,10 +112,3 @@ vendored_fetch("${_pngle_base}/miniz.c" "${_pngle_dir}/miniz.c"
 vendored_fetch("${_pngle_base}/miniz.h" "${_pngle_dir}/miniz.h"
                8a638511f9f98e8240fc00522989fe7908a06f73a6386191e4374046c993cfa0)
 
-# font8x8, public domain. Vendored rather than hand-written: a bitmap font
-# typed from memory is a table of plausible-looking wrong glyphs, and the
-# wrongness only shows up as one bad letter in one filename.
-vendored_fetch(
-    "https://raw.githubusercontent.com/dhepper/font8x8/${FONT8X8_COMMIT}/font8x8_basic.h"
-    "${CMAKE_CURRENT_LIST_DIR}/../components/font8x8/font8x8_basic.h"
-    49d8df366296b203ca3211bc0672cf2a762135bf12710735b6292756b19dffd5)
