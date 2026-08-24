@@ -132,25 +132,127 @@ installed.
 
 ### On-screen controls
 
-`ui.c` draws a 150 px transport bar into the panel's scan buffer directly,
-the way `albumart.c` already does. No LVGL, no M5Canvas -- five controls
-is less code than a toolkit to draw them with.
+`ui.c` draws the transport into the panel's scan buffer directly, the way
+`albumart.c` already does. No LVGL, no M5Canvas -- a toolkit would be more
+code than the thing it draws.
 
-Played portion of the seek bar and the set portion of volume are both a
-thick red bar; the remainder of each is a thin grey line. Dragging either
-raises a ring indicator offset above the finger, so the thing being
-adjusted is never under the hand.
+Eight rows, top to bottom, each one thing:
 
-Volume applies live during a drag, because you want to hear it. Seek
-fires once on release -- re-decoding on every poll would thrash the SD
-card.
+| Row | What |
+| --- | --- |
+| 1 | cover art, 720x720 |
+| 2 | the seek bar -- the loudness envelope, full panel width |
+| 3 | elapsed left-justified, remaining right-justified |
+| 4 | title, bouncing when it does not fit |
+| 5 | album |
+| 6 | artist |
+| 7 | folder \| prev, play/pause, next \| sleep |
+| 8 | volume |
+
+**The artwork is a square and the bar is the remainder**, which is the
+reverse of every version before it. The bar used to be sized to its
+contents and the cover got what was left, so a 720 px wide column was 964
+rows tall and `albumart.c` letterboxed a square cover into the middle of
+it with 122 rows of black above and below. Those rows were not doing
+anything. `UI_ART_H` is 720 and `UI_BAR_H` is `1280 - UI_ART_H`; the
+controls went from 356 px to 560 and the cover lost nothing it was using.
+
+**Reading down is reading outward.** What is playing, where in it, what it
+is called, and then the controls -- which are the only rows a finger goes
+near, and are therefore the ones nearest the hand. The previous layout put
+the three text rows at the top of the bar and the seek bar under them,
+which meant the two things that move while a track plays were the two
+furthest from the artwork they belong to.
+
+**The clocks got a row of their own** because the envelope took the full
+width. They used to flank it, which is what `SEEK_X0`'s 142 px of margin
+at each end was for: 284 px of a 720 px panel spent on two five-character
+numbers, taken out of the middle of the one element that wants width.
+`SEEK_X0` is 0 now.
+
+**The right-hand clock counts down, not up.** The total was the same five
+characters for the whole song and said nothing the bar was not already
+showing. How long is left is the question people actually ask of a player,
+and it is the one number on screen that the seek bar cannot answer by
+being looked at. It is drawn with a leading minus -- `gfx_draw_time_neg()`
+rather than a flag, because the sign changes the width and the caller
+right-justifies the run.
+
+**Album above artist**, which is also a reversal. Downward the rows now go
+most specific to least: this track, the record it is on, the person who
+made it.
+
+Played portion of the seek bar and the set portion of volume are both red;
+the remainder of each is grey. Dragging either raises a ring indicator
+offset above the finger, so the thing being adjusted is never under the
+hand. Volume applies live during a drag, because you want to hear it. Seek
+fires once on release -- re-decoding on every poll would thrash the card.
 
 Hit targets are padded well past the drawn shapes (`HIT_PAD_X`,
-`HIT_PAD_Y`), and buttons are tested before sliders so a button landing
-inside a padded slider box still wins.
+`HIT_PAD_Y`). Row 7's five centres are spaced so the padded boxes do not
+touch: play claims `BTN_R + HIT_PAD_X` = 60 either side and the skips 38,
+so at 248, 360 and 472 there is clear air between them. Buttons are still
+tested before sliders, but they no longer *need* to be -- boxes that
+overlap and are disambiguated by test order work right up until the order
+changes.
 
 With the screen off, a touch only wakes -- it does not also press whatever
 was under it, or one tap would turn the screen straight back off.
+
+### Prev is two buttons
+
+Row 7's back button seeks to the start of the track, and only skips to the
+previous track if it is already there. The threshold is three seconds,
+which is roughly how long it takes to decide you meant the other one.
+Every physical transport has worked this way, and the reason is that
+"restart this" and "go back one" are both wanted from the same button far
+more often than either is wanted from its own.
+
+The forward button asks `playlist_next()` with `PLAY_ORDER_ONE` mapped to
+`PLAY_ORDER_ALL`. "One" is an answer about what happens at the *end of a
+track*, and a button press is not the end of a track; passing the order
+through unchanged returns NULL and the button does nothing, which reads as
+broken rather than as a setting being respected.
+
+Neither button is a playlist history. Shuffle's back button goes to the
+previous *index*, not the previously played track, for the reason
+`playlist_prev()` already gives: undoing a random choice needs a stack,
+and the button is there to skip back one track.
+
+### The title bounces
+
+A title too long for 720 px slides left, pauses, slides back, pauses, and
+repeats. Album and artist are still cut with an ellipsis.
+
+The asymmetry is deliberate. The title is the one string on screen that is
+not interchangeable with something else already visible -- an album can be
+truncated because the cover above it says the same thing, and an artist
+because the album implies it, but `Everything In Its Right Pl...` is a
+song nobody can name.
+
+- **Bounce rather than wrap.** A wrapping marquee needs the string drawn
+  twice with a separator and never shows the beginning and end together. A
+  bounce shows the head, travels, shows the tail, and comes back. On
+  titles, where the front identifies the song and the back is usually
+  `(Remastered 2011)`, the head is worth returning to.
+- **It needs a clipped text primitive, not the existing one.**
+  `gfx_draw_text()` truncates at a character boundary and adds dots, which
+  is right for a list of filenames and wrong for a string sliding past a
+  fixed opening, where a glyph has to be drawn half in and half out.
+  `gfx_draw_text_clipped()` clips the fill runs rather than the glyphs,
+  and takes an x that may sit outside the window on either side.
+- **It is stepped from `ui_draw()`, not a timer**, so it moves at whatever
+  rate the bar is repainted. That rate was 10 Hz when no finger is down --
+  correct for a seconds-resolution clock, and visibly wrong for something
+  moving, where it reads as a title jumping three pixels at a time. So
+  `ui_animating()` exists and the UI task polls at 25 Hz while it is true.
+  A title that fits never sets it, so a short one costs nothing.
+- **The title is compared by pointer *and* length.** The player hands the
+  UI a pointer into its own tag buffer, which is rewritten in place
+  between tracks: the string changes without the pointer changing. Neither
+  test is reliable alone and both are cheap. Getting it wrong means a
+  short title inheriting the previous long one's offset and being drawn
+  off the side of the panel.
 
 ### Touch
 
@@ -184,45 +286,38 @@ because the controller needs a moment once reset is released.
 720x1280 on a 5" panel is about 294 PPI, so an 8 px font glyph is 1.4 mm
 tall -- unreadable at arm's length. Everything is scaled for that rather
 than left at values that looked right in a 96 PPI mockup: the title is
-font8x8 at scale 5 (about 3.5 mm, roughly a phone's body text), artist
-and album at scale 3, the MM:SS digits 20x38, the slider thumbs 16 px
-radius, and the bar itself 276 px.
+font8x8 at scale 4 (about 2.8 mm, roughly a phone's body text), album and
+artist at scale 3, the MM:SS digits 20x38, the slider thumbs 16 px radius,
+and the bar itself 560 px.
 
-If the bar is ever resized again, two things are load-bearing rather than
+Scale 4 fits nineteen characters across the panel, which is why the title
+bounces rather than being cut.
+
+If the layout is ever moved again, two things are load-bearing rather than
 aesthetic:
 
-- `SEEK_X0` has to clear the MM:SS run at both ends. `TIME_W` is derived
-  from the digit metrics, so it moves when they do.
 - `BUBBLE_ABOVE` has to exceed `SEEK_Y`, or the bubble overlaps the bar.
   That is not cosmetic: the bar is blitted before the bubble is drawn, so
   any part of the bubble inside it gets written to the framebuffer and
   never pushed, and shows stale pixels until the next frame clears them.
+- Row 7's centres have to keep the padded hit boxes apart. See above.
 
 ### Text rows
 
-Title, artist and album, a row each, all clipped with an ellipsis rather
-than wrapped.
+Title, album and artist, a row each. Album and artist are clipped with an
+ellipsis rather than wrapped; the title bounces, for the reasons above.
 
 Artist and album used to share a line, on the grounds that three stacked
 rows made the bar taller than the artwork could spare. That was the wrong
-trade. The joined string was built in a 96 byte buffer from two 64 byte
-tag fields, so anything approaching full length was silently truncated --
-and it happened to truncate the album only because of the argument order.
-An album title of any real length pushed the artist out of the row
-entirely, which is the one part people actually read.
+trade twice over -- and the second time it was not even true, because the
+artwork was not using the rows. The joined string was built in a 96 byte
+buffer from two 64 byte tag fields, so anything approaching full length
+was silently truncated, and it happened to truncate the album only because
+of the argument order. An album title of any real length pushed the artist
+out of the row entirely, which is the one part people actually read.
 
-So the bar took the extra row instead: `UI_BAR_H` went from 276 to 316,
-which is one scale-3 row plus the gap that keeps the three from reading as
-a paragraph. It comes out of the cover, which had 1004 rows and now has
-964 -- no change at all to a 500x500 cover, and 20 rows off each end of
-one large enough to be cropped.
-
-The rows are not evenly spaced. The title is scale 5 and needs clearance;
-artist and album are both scale 3 and sit closer to each other than either
-does to the title, so they read as a pair belonging to it. Album is dimmer
-than artist for the same reason -- three rows of equal weight read as a
-block of text, and the hierarchy is what makes it scannable at arm's
-length.
+Album is dimmer than artist. Three rows of equal weight read as a block of
+text; the hierarchy is what makes it scannable at arm's length.
 
 `id3_read_tags()` lives in `albumart.c` rather than its own file because
 the frame walker it needs is the one `albumart_extract()` already has --
@@ -240,15 +335,19 @@ No title in the tag falls back to the filename.
 
 ### Time display
 
-Elapsed sits left of the seek bar, total right of it, both drawn as seven
-segments. No font is linked and vendoring one for two timestamps is not
-worth it -- seven segments cover 0-9 and a colon, which is all of MM:SS.
+Row 3: elapsed at the left edge, remaining at the right, both drawn as
+seven segments. No font is linked and vendoring one for two timestamps is
+not worth it -- seven segments cover 0-9 and a colon, which is all of
+MM:SS, and the minus sign for the remaining time is segment `g` drawn on
+its own, which is what keeps it aligned with the digits beside it.
 
 Duration comes from `decoder_duration_sec()`, which minimp3 answers
-directly and everything else answers through the container probe: `MP3D_SEEK_TO_SAMPLE` builds the index up front so `ex.samples` is
-known. The esp_audio_codec simple decoder exposes `frame_size`, not stream
-length, so FLAC and WAV report 0 -- the total reads `00:00` and the bar
-stays empty rather than inventing a scale.
+directly and everything else answers through the container probe:
+`MP3D_SEEK_TO_SAMPLE` builds the index up front so `ex.samples` is known.
+The esp_audio_codec simple decoder exposes `frame_size`, not stream
+length, so FLAC and WAV report 0 -- with nothing to subtract from, the
+right-hand clock reads `00:00` in the dim colour and the bar stays a plain
+groove rather than inventing a scale.
 
 ### Duration comes from the container when the decoder cannot say
 
@@ -473,10 +572,11 @@ Consequences of the merge:
 - **The hit target is the drawn shape**, the full 64 px, not a padded band
   around a line. Pressing a tall column and having nothing happen reads as
   the bar having gone dead.
-- **The bar grew 40 px and the artwork lost them**, 964 rows to 924. A
-  500 px cover is unaffected. The artwork gave up a strip it was not using
-  and got back the whole of its middle, which the envelope used to draw a
-  frame around.
+- **The bar grew and the artwork lost the rows.** The artwork gave up a
+  strip it was not using and got back the whole of its middle, which the
+  envelope used to draw a frame around. It has since given up the rest of
+  what it was not using -- the cover is a 720 px square now and the bar is
+  everything below it.
 - **The envelope is still scaled from the track's own minimum**, not from
   zero. `global_gain` on a quiet passage is a low number rather than 0, so
   a straight 0-255 mapping draws every track as a slab with no shape in
@@ -698,10 +798,10 @@ track whose path is on a volume that is no longer there.
 
 ### The chooser
 
-`browser.c`, full screen rather than a panel over the artwork. The bar is
-276 px of a 1280 px panel; a chooser that respected the cover would get
-eleven rows in the gap and need scrolling twice as often, and the artwork
-is not information while you are picking something else to play.
+`browser.c`, full screen rather than a panel over the artwork. A chooser
+that respected the cover would get a handful of rows in what is left and
+need scrolling several times as often -- and the artwork is not
+information while you are picking something else to play.
 
 It owns no task. `ui_task` drives it -- `browser_touch()` then
 `browser_draw()` -- exactly as it drives the transport bar, so there is
@@ -834,11 +934,11 @@ Two things follow from the shadow being separate:
   It clears what it is given, so passing the full panel would blank the
   transport bar in the shadow and blit that over it -- the bar would
   disappear on every track change until the next `ui_draw()` put it back.
-  The caller passes `LCD_V_RES - UI_BAR_H`.
+  The caller passes `UI_ART_H`.
 
 The cost is 1.8 MB of PSRAM and a copy per redraw. The copy is of the band
-actually redrawn, which for the transport bar is 276 rows rather than
-1280.
+actually redrawn, which for the transport bar is `UI_BAR_H` rows rather
+than 1280.
 
 ### Primitives moved to gfx.c
 
@@ -872,12 +972,13 @@ rather than against a board.
 
 ### What the controls do not do yet
 
-- **No filename on screen** in the transport bar. Seven segments do not
-  spell, and a real font is the price of that row. The chooser does have
-  one, so the name is a tap away.
 - **Seek on non-MP3 does nothing**, per above.
-- **No next/previous buttons on the bar.** The bar is full at five
-  controls; skipping is a trip through the chooser.
+- **The marquee is pixel-stepped, not eased.** It starts and stops at full
+  speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
+  which is more state than the effect is worth.
+- **Non-ASCII still shows as `?`**, marquee or not. A long title in a
+  script `font8x8` does not cover bounces just as legibly and says just as
+  little.
 
 ### Licensing, since you already care about this for exFAT
 

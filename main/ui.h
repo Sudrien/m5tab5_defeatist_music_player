@@ -44,6 +44,8 @@ typedef enum {
     UI_ACTION_CHOOSE_FILE,   /* folder button: open the chooser */
     UI_ACTION_SCREEN_OFF,
     UI_ACTION_SCREEN_ON,
+    UI_ACTION_PREV,         /* start of track, or the track before it */
+    UI_ACTION_NEXT,
     UI_ACTION_SEEK,         /* value = target percent 0..100 */
     UI_ACTION_VOLUME,       /* value = target percent 0..100 */
 } ui_action_kind_t;
@@ -78,7 +80,19 @@ void ui_draw(const ui_state_t *st);
  * 64 px of upper sideband. The mirrored version needed twice this and
  * could only get it in the artwork area; half the shape carries all of
  * the information, so it fits here. */
-#define UI_WAVE_H   (64)
+#define UI_WAVE_H   (72)
+
+/*
+ * Whether anything on the bar is mid-animation.
+ *
+ * Exactly one thing is: a title too long for the panel, sliding. The UI
+ * task polls at 10 Hz when no finger is down, which is right for a
+ * seconds-resolution clock and visibly wrong for something moving --
+ * 10 Hz reads as a title jumping in steps rather than travelling. Asking
+ * costs nothing and means the faster rate is paid for only while there is
+ * something to see.
+ */
+bool ui_animating(void);
 
 /* Feed one poll of the touch controller. down=false means no finger.
  * Returns the action this poll produced, if any.
@@ -101,16 +115,19 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y);
  * rows top and bottom.
  */
 /*
- * Grew again, by 40 px, when the envelope moved out of the artwork and
- * onto the seek bar. That is UI_WAVE_H less the slack the old slider row
- * already had around it.
+ * The artwork is a square now -- 720x720, the full width of the panel --
+ * and the bar is what is left: 1280 - 720.
  *
- * Artwork drops from 964 rows to 924, which still clears a 500 px cover
- * with room either side. The trade is deliberate: the artwork lost a
- * strip it was not using, and got back the whole of its middle, which the
- * envelope used to draw a frame around.
+ * Derived rather than chosen, which is the reverse of every version
+ * before this one. The bar used to be sized to its contents and the
+ * artwork got the remainder, so the cover was 964 rows in a 720 px column
+ * and albumart.c letterboxed it into the middle with 122 rows of black
+ * above and below. Those rows were doing nothing. Making the cover square
+ * hands them to the controls, which had eight rows to fit into 356 px and
+ * now have 560.
  */
-#define UI_BAR_H    (356)
+#define UI_ART_H    (720)
+#define UI_BAR_H    (1280 - UI_ART_H)
 
 #ifdef __cplusplus
 }

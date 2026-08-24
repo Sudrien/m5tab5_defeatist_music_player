@@ -65,36 +65,49 @@ static const char *TAG = "tab5_ui";
  * looked fine in a mockup rendered at 96 PPI.
  */
 /*
- * Three text rows now, not two.
+ * Eight rows, top to bottom, each one thing:
  *
- * Artist and album shared a line because three stacked rows made the bar
- * taller than the artwork could spare. They no longer share it: an album
- * title of any length pushed the artist out of the joined string, and the
- * artist is the part people read. The bar absorbed the extra row instead
- * -- see UI_BAR_H.
+ *   1  the cover, 720x720, above the bar entirely
+ *   2  the seek bar -- the envelope, full panel width
+ *   3  elapsed left, remaining right
+ *   4  title
+ *   5  album
+ *   6  artist
+ *   7  folder | prev, play/pause, next | sleep
+ *   8  volume
  *
- * The rows are 50 px, 32 px and 32 px apart rather than evenly spaced.
- * The title is scale 5 (40 px tall) and needs the clearance; artist and
- * album are both scale 3 (24 px) and sit closer to each other than either
- * does to the title, so they read as a pair belonging to it.
+ * The previous layout stacked title, artist and album at the top of the
+ * bar and then put the seek bar under them, which meant the two things
+ * that change while a track plays -- the position and the clock -- were
+ * the two furthest from the artwork they belong to. Reading down is now
+ * reading outward: what is playing, where in it, what it is called, and
+ * then the controls, which are the only rows a finger goes near.
+ *
+ * The clocks moved to a row of their own because the envelope took the
+ * full width. They used to flank it, which is what SEEK_X0 was for: 142 px
+ * of margin at each end so the MM:SS runs had somewhere to sit. That was
+ * 284 px of the panel spent on two five-character numbers, taken out of
+ * the middle of the one element that wants width.
+ *
+ * Sizes are for a 5" 720x1280 panel -- about 294 PPI, where an 8 px font
+ * glyph is 1.4 mm tall and unreadable at arm's length. Scale 4 puts the
+ * title at roughly 2.8 mm, about a phone's body text, and fits 19
+ * characters across the panel -- which is why the title bounces.
  */
-#define TEXT_Y      (18)   /* title, top of the bar */
-#define ARTIST_Y    (68)
-#define ALBUM_Y     (100)
-/*
- * The seek baseline -- and now the floor the envelope stands on, so
- * everything from SEEK_Y - UI_WAVE_H down to SEEK_Y belongs to it.
- *
- * Moved down 40 px to make that room without crowding the album row,
- * which ends at 124. That leaves 26 px of clear space above the tallest
- * possible column, which is enough for the two to read as separate
- * things.
- */
-#define SEEK_Y      (214)
-#define SEEK_X0     (142)  /* clears the MM:SS run at either end */
-#define ROW_Y       (294)
+#define SEEK_Y      (96)    /* row 2: the envelope's baseline */
+#define SEEK_X0     (0)     /* full width, edge to edge */
+#define TIME_Y      (112)   /* row 3 */
+#define TIME_PAD    (16)    /* clocks in from each edge */
+#define TITLE_Y     (186)   /* row 4 */
+#define ALBUM_Y     (238)   /* row 5 */
+#define ARTIST_Y    (278)   /* row 6 */
+#define ROW_Y       (380)   /* row 7, centres */
+#define VOL_Y       (490)   /* row 8 */
+#define TEXT_X      (16)
+
 #define BTN_R       (46)    /* play/pause circle */
 #define ICON_HALF   (26)
+#define SKIP_HALF   (35)    /* prev/next: 26 px triangle plus a 7 px bar */
 
 /* Hit targets are padded well beyond the drawn shapes. A 22 px slider on
  * a 5" panel is a small thing to hit with a thumb, and there is nothing
@@ -136,9 +149,70 @@ static bool s_was_down;
 
 /* Saved cover-art strip behind the bubble, and whether a bubble was drawn
  * last frame (so the restore only costs anything while dragging). */
+/*
+ * Marquee state for the title.
+ *
+ * s_marq_title is compared by pointer, not by strcmp: the player hands
+ * the UI a pointer into its own tag buffer, which is rewritten in place
+ * between tracks, so the string can change without the pointer changing.
+ * Length is checked alongside it for exactly that case. Both are cheap
+ * and neither is reliable alone.
+ */
+static const char *s_marq_title;
+static int  s_marq_len;
+static int  s_marq_off;         /* pixels the string is shifted left */
+static int  s_marq_dir = 1;
+static int  s_marq_hold;
+static bool s_marq_active;
+
 static uint16_t *s_bubble_bg;
 static int s_bubble_top, s_bubble_h;
 static bool s_bubble_shown;
+
+/*
+ * Bounce, rather than wrap.
+ *
+ * A wrapping marquee needs the string drawn twice with a separator and it
+ * never shows the beginning and end together; a bounce shows the head,
+ * travels, shows the tail, and comes back. On a title -- where the front
+ * is usually the part that identifies the song and the back is usually
+ * "(Remastered 2011)" -- the head is worth returning to.
+ *
+ * Advanced from ui_draw() rather than from a timer, so it moves at
+ * whatever rate the bar is being repainted. ui_animating() is what makes
+ * that rate 25 Hz instead of 10.
+ */
+#define MARQ_STEP   (3)
+#define MARQ_HOLD   (14)        /* frames paused at each end */
+
+static void marquee_step(const char *title, int over)
+{
+    if (over <= 0) {
+        s_marq_active = false;
+        s_marq_off = 0;
+        return;
+    }
+    s_marq_active = true;
+
+    if (s_marq_hold > 0) { s_marq_hold--; return; }
+
+    s_marq_off += MARQ_STEP * s_marq_dir;
+    if (s_marq_off >= over) {
+        s_marq_off = over;
+        s_marq_dir = -1;
+        s_marq_hold = MARQ_HOLD;
+    } else if (s_marq_off <= 0) {
+        s_marq_off = 0;
+        s_marq_dir = 1;
+        s_marq_hold = MARQ_HOLD;
+    }
+    (void)title;
+}
+
+bool ui_animating(void)
+{
+    return s_marq_active;
+}
 
 static int bubble_cy(void)
 {
@@ -151,6 +225,8 @@ static int bubble_cy(void)
 
 /* Seek runs nearly the full width; volume sits between the folder icon
  * and the play button. Returned in absolute screen coordinates. */
+/* Row 2: the envelope, edge to edge. Nothing shares the row now, which
+ * is what the clocks moving to row 3 bought. */
 static void seek_bounds(int *x0, int *x1, int *y)
 {
     *x0 = SEEK_X0;
@@ -158,28 +234,53 @@ static void seek_bounds(int *x0, int *x1, int *y)
     *y  = s_bar_top + SEEK_Y;
 }
 
+/* Row 8. The speaker sits in the left margin, so the groove starts clear
+ * of it and stops the same distance from the right edge -- an asymmetric
+ * slider reads as a mistake even when the icon explains it. */
 static void vol_bounds(int *x0, int *x1, int *y)
 {
-    *x0 = 196;
-    *x1 = 402;
-    *y  = s_bar_top + ROW_Y;
+    *x0 = 96;
+    *x1 = s_w - 96;
+    *y  = s_bar_top + VOL_Y;
 }
 
+/*
+ * Row 7, five controls in three groups: the file chooser at the left
+ * edge, transport in the middle, sleep at the right.
+ *
+ * The centres are spaced so the padded hit boxes do not touch. Play is
+ * BTN_R + HIT_PAD_X = 60 either side; prev and next are 38. At 248, 360
+ * and 472 the gaps are 300-288 and 420-434, which is the margin the
+ * ordering in ui_touch() no longer has to provide. Boxes that overlap and
+ * are disambiguated by test order work until the order changes.
+ */
 static void play_centre(int *cx, int *cy)
 {
-    *cx = 524;
+    *cx = s_w / 2;
+    *cy = s_bar_top + ROW_Y;
+}
+
+static void prev_centre(int *cx, int *cy)
+{
+    *cx = s_w / 2 - 112;
+    *cy = s_bar_top + ROW_Y;
+}
+
+static void next_centre(int *cx, int *cy)
+{
+    *cx = s_w / 2 + 112;
     *cy = s_bar_top + ROW_Y;
 }
 
 static void folder_centre(int *cx, int *cy)
 {
-    *cx = 84;
+    *cx = 64;
     *cy = s_bar_top + ROW_Y;
 }
 
 static void moon_centre(int *cx, int *cy)
 {
-    *cx = s_w - 84;
+    *cx = s_w - 64;
     *cy = s_bar_top + ROW_Y;
 }
 
@@ -219,6 +320,35 @@ static void draw_play_pause(bool playing)
             gfx_fill_rect(cx - 11, cy + dy, 34 - (a * 34) / 20, 1, C_BG);
         }
     }
+}
+
+/*
+ * Prev and next: a triangle with a bar on the leading side.
+ *
+ * Drawn rather than glyphs because font8x8 has no transport symbols and
+ * an ASCII "|<" at scale 3 is two characters that read as punctuation.
+ * The bar is what distinguishes them from the play triangle at a glance,
+ * which matters when all three sit in a row 112 px apart.
+ */
+static void draw_skip(int cx, int cy, bool forward)
+{
+    const int h = 22;               /* half-height of the triangle */
+    const int w = 26;               /* base to apex */
+
+    for (int dy = -h; dy <= h; dy++) {
+        const int a = dy < 0 ? -dy : dy;
+        const int run = w - (a * w) / h;
+        if (run <= 0) continue;
+        if (forward) gfx_fill_rect(cx - w, cy + dy, run, 1, C_ICON);
+        else         gfx_fill_rect(cx + w - run, cy + dy, run, 1, C_ICON);
+    }
+
+    /* The bar goes just past the apex -- the wall the tape stops against,
+     * which is the convention every transport since a cassette deck has
+     * used. Past the apex and not behind the base: behind the base it
+     * reads as an underline on an arrow. */
+    if (forward) gfx_fill_rect(cx + 2, cy - h, 7, 2 * h + 1, C_ICON);
+    else         gfx_fill_rect(cx - 9, cy - h, 7, 2 * h + 1, C_ICON);
 }
 
 static void draw_folder(void)
@@ -374,11 +504,29 @@ void ui_draw(const ui_state_t *st)
         gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
     }
 
-    /* Elapsed left of the bar, total right of it. Total reads 00:00 when
-     * the backend could not supply a duration, which is the honest
-     * rendering of "unknown" and matches the empty bar next to it. */
-    gfx_draw_time(10, y - GFX_DIG_H / 2, st->pos_sec, C_ICON);
-    gfx_draw_time(s_w - GFX_TIME_W - 10, y - GFX_DIG_H / 2, st->len_sec, C_TRACK);
+    /*
+     * Row 3: elapsed at the left edge, remaining at the right.
+     *
+     * Remaining rather than total, and negative rather than bare. The
+     * total was the same five characters for the whole song and said
+     * nothing the bar was not already showing; how long is left is the
+     * question people actually ask of a player, and it is the one number
+     * on screen that the seek bar cannot answer by looking at it.
+     *
+     * With no duration there is nothing to subtract from, so the right
+     * hand clock reads 00:00 in the dim colour -- the honest rendering of
+     * "unknown", matching the plain groove above it.
+     */
+    const int ty = s_bar_top + TIME_Y;
+    gfx_draw_time(TIME_PAD, ty, st->pos_sec, C_ICON);
+
+    if (st->len_sec > 0) {
+        const uint32_t left = (st->len_sec > st->pos_sec)
+                            ? st->len_sec - st->pos_sec : 0;
+        gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left, C_ICON);
+    } else {
+        gfx_draw_time(s_w - GFX_TIME_W - TIME_PAD, ty, 0, C_TRACK);
+    }
 
     /* Title big, then artist, then album -- a row each.
      *
@@ -390,12 +538,46 @@ void ui_draw(const ui_state_t *st)
      * Album is dimmer than artist rather than the same grey. Three rows
      * of equal weight read as a paragraph; the hierarchy is what makes it
      * scannable at arm's length. */
-    gfx_draw_text(16, s_bar_top + TEXT_Y, st->title, 4, s_w - 32, C_THUMB);
-    if (st->artist && *st->artist) {
-        gfx_draw_text(16, s_bar_top + ARTIST_Y, st->artist, 3, s_w - 32, C_ICON);
+    /*
+     * Rows 4, 5, 6: title, album, artist.
+     *
+     * The title bounces when it does not fit rather than being cut with
+     * an ellipsis. It is the one string on screen that is not
+     * interchangeable with the file it came from -- an album can be
+     * truncated because the cover above it says the same thing, and an
+     * artist because the album implies it, but "Everything In Its Right
+     * Pl..." is a song nobody can name.
+     *
+     * Album above artist, which is the reverse of what this used to do.
+     * Reading downward the rows now go from most specific to least: this
+     * track, the record it is on, the person who made the record.
+     */
+    const char *title = st->title ? st->title : "";
+    const int title_w = gfx_text_w(title, 4);
+    const int win_w = s_w - 2 * TEXT_X;
+    const int over = title_w - win_w;
+    const int len = (int)strlen(title);
+
+    /* A new title starts from the left, not from wherever the last one
+     * had got to. Without this a short title inherits the previous long
+     * one's offset and is drawn off the side of the panel. */
+    if (title != s_marq_title || len != s_marq_len) {
+        s_marq_title = title;
+        s_marq_len = len;
+        s_marq_off = 0;
+        s_marq_dir = 1;
+        s_marq_hold = MARQ_HOLD;
     }
+    marquee_step(title, over);
+
+    gfx_draw_text_clipped(TEXT_X - s_marq_off, s_bar_top + TITLE_Y,
+                          TEXT_X, win_w, title, 4, C_THUMB);
+
     if (st->album && *st->album) {
-        gfx_draw_text(16, s_bar_top + ALBUM_Y, st->album, 3, s_w - 32, C_ALBUM);
+        gfx_draw_text(TEXT_X, s_bar_top + ALBUM_Y, st->album, 3, win_w, C_ALBUM);
+    }
+    if (st->artist && *st->artist) {
+        gfx_draw_text(TEXT_X, s_bar_top + ARTIST_Y, st->artist, 3, win_w, C_ICON);
     }
 
     vol_bounds(&x0, &x1, &y);
@@ -404,6 +586,12 @@ void ui_draw(const ui_state_t *st)
     draw_speaker();
     draw_folder();
     draw_moon();
+
+    int cx, cy;
+    prev_centre(&cx, &cy);
+    draw_skip(cx, cy, false);
+    next_centre(&cx, &cy);
+    draw_skip(cx, cy, true);
     draw_play_pause(st->playing);
 
     gfx_blit(s_bar_top, s_h);
@@ -505,6 +693,18 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
     play_centre(&cx, &cy);
     if (in_box(x, y, cx, cy, BTN_R)) {
         act.kind = UI_ACTION_PLAY_PAUSE;
+        return act;
+    }
+
+    prev_centre(&cx, &cy);
+    if (in_box(x, y, cx, cy, SKIP_HALF)) {
+        act.kind = UI_ACTION_PREV;
+        return act;
+    }
+
+    next_centre(&cx, &cy);
+    if (in_box(x, y, cx, cy, SKIP_HALF)) {
+        act.kind = UI_ACTION_NEXT;
         return act;
     }
 
