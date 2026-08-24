@@ -268,9 +268,12 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
  * ends the header, so the SOF has to appear before it or there is not
  * one.
  */
-static bool jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out)
+static bool jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out,
+                             uint32_t *w_out, uint32_t *h_out)
 {
     *sof_out = 0;
+    *w_out = 0;
+    *h_out = 0;
     if (len < 4 || p[0] != 0xFF || p[1] != 0xD8) return false;   /* no SOI */
 
     size_t i = 2;
@@ -286,6 +289,16 @@ static bool jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out)
          * too; C2 is progressive, which it does not. */
         if (m >= 0xC0 && m <= 0xCF && m != 0xC4 && m != 0xC8 && m != 0xCC) {
             *sof_out = m;
+            /* Every SOF has the same first five payload bytes: precision,
+             * then height and width, both big-endian 16-bit. Read them
+             * even for the flavours that cannot be decoded -- the size is
+             * what says whether a software fallback could afford the
+             * picture, and bailing before jpeg_decoder_get_info() means
+             * nothing else will report it. */
+            if (i + 9 < len) {
+                *h_out = ((uint32_t)p[i + 5] << 8) | p[i + 6];
+                *w_out = ((uint32_t)p[i + 7] << 8) | p[i + 8];
+            }
             return (m == 0xC0 || m == 0xC1);
         }
 
@@ -319,9 +332,11 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     size_t in_size = 0, rgb_size = 0;
 
     uint8_t sof = 0;
-    if (!jpeg_is_baseline(jpeg, jpeg_len, &sof)) {
-        ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X); "
-                      "this decoder is baseline-only", sof_name(sof), sof);
+    uint32_t sof_w = 0, sof_h = 0;
+    if (!jpeg_is_baseline(jpeg, jpeg_len, &sof, &sof_w, &sof_h)) {
+        ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X), %"PRIu32"x%"PRIu32"; "
+                      "this decoder is baseline-only", sof_name(sof), sof,
+                 sof_w, sof_h);
         return ESP_ERR_NOT_SUPPORTED;
     }
 
