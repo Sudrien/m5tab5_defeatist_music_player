@@ -579,6 +579,26 @@ static volatile uint32_t s_track_gen;
 
 static char              s_media_path[512];
 static volatile bool     s_media_want;
+
+/*
+ * The track whose envelope is already computed.
+ *
+ * load_track_visuals() runs for two different reasons and they do not
+ * want the same work. A new track needs everything. A repaint -- the
+ * chooser closing, having drawn over the artwork -- needs the cover put
+ * back and nothing else, because the envelope on screen is already this
+ * track's.
+ *
+ * Without this, dismissing the chooser cost a full walk of the playing
+ * file. Cancelling a folder with nothing playable in it read 30 MB off
+ * the card for an envelope identical to the one already drawn:
+ *
+ *   /usb/FirmamentSoundtrack: 0 tracks
+ *   nothing playable in /usb/FirmamentSoundtrack
+ *   tags: "Doctor" / ...                     <- repaint of the playing track
+ *   walk: 6043 frames, 157s, levels=1        <- and its envelope, again
+ */
+static char              s_walked_path[512];
 static volatile bool     s_scan_abort;
 static volatile bool     s_wave_ready;
 static framewalk_t       s_walk;
@@ -630,18 +650,15 @@ static void load_track_visuals(const char *path)
      * the function and there is no reason for it to be last.
      */
     /* Everything in flight for the outgoing track is stale from here.
-     * The counter is what the art task compares against, since a decode
+     * The counter is what media_task compares against, since a decode
      * cannot be aborted partway the way a frame walk can. */
     s_track_gen++;
 
     s_scan_abort = true;
     s_wave_ready = false;
-    /* Drop the previous track's envelope now rather than when the new one
-     * lands. The bar redraws many times a second and the scan takes
-     * seconds; leaving the old one up means the new song is drawn against
-     * the last song's shape for the whole of that, which is worse than a
-     * plain slider. */
-    waveform_set(NULL);
+    /* Only for a genuinely different track. A repaint of the one playing
+     * keeps its envelope and skips the walk. */
+    if (strcmp(path, s_walked_path) != 0) waveform_set(NULL);
 
     memset(&s_tags, 0, sizeof(s_tags));
 
@@ -842,7 +859,14 @@ static void media_task(void *arg)
          * walk would only mean aborting it a moment later. */
         if (gen != s_track_gen) continue;
 
+        /* Already walked, and still the track on screen. The envelope is
+         * drawn and correct; walking it again would produce the same
+         * numbers at the cost of reading the whole file. */
+        if (strcmp(path, s_walked_path) == 0) continue;
+
         do_walk(path);
+        if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
+                                   "%s", path);
     }
 }
 

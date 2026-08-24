@@ -10,6 +10,7 @@
  */
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -469,41 +470,63 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     }
 
     /*
-     * Downscale by an integer factor, then centre what is left.
+     * Scale to fit, at a fractional ratio, and centre the result.
      *
-     * Cropping alone is what this used to do, and on a 3000x3000 cover it
-     * showed a 720 px square cut out of the middle -- under a quarter of
-     * the picture, with the edges of the artwork missing and no
-     * indication that anything had been left out. Taking every Nth pixel
-     * costs one multiply per output pixel, needs no second buffer, and
-     * shows the whole cover.
+     * Two revisions here and the second is the interesting one.
      *
-     * Nearest neighbour, no filtering. At the factors that come up -- 4
-     * for a 3000 px cover, 2 for a 1500 -- a box filter would be visibly
-     * better on fine detail and would cost a read of every source pixel
-     * rather than one in sixteen, during playback. Album art is not fine
-     * detail.
+     * Cropping alone was the original: a 720 px square cut out of the
+     * middle of a 3000 px cover, which is under a quarter of the picture
+     * with no indication that anything was missing. Then an integer
+     * decimation, taking every Nth pixel, with N the largest that still
+     * covered the panel -- which fixed the 3000 px case and left the
+     * common ones badly served. 1920 over 720 is 2.67, so N was 2, the
+     * cover came out 960 px, and a quarter of it was still cropped away.
+     * An integer step can only ever land on the panel exactly when the
+     * cover is a multiple of it.
      *
-     * The step is the largest that still covers the panel, so the result
-     * is never smaller than the area: 3000/4 = 750 for a 720 px square,
-     * and the remaining 30 px is the crop it always did.
+     * So the step is 16.16 fixed point instead. The arithmetic is the
+     * same shape and the same cost -- one shift and one multiply per
+     * output pixel -- and the picture lands on the panel exactly. 1920
+     * becomes 720 whole rather than 960 cropped.
+     *
+     * Fit rather than fill, so nothing is lost. A cover that is not
+     * square gets black at two edges instead of having its other two
+     * trimmed; the cover is the thing being shown, and a player that
+     * quietly crops the artwork it was given is deciding something it was
+     * not asked to decide.
+     *
+     * Nearest neighbour, no filtering. A box filter would be visibly
+     * better on fine detail and would read every source pixel rather than
+     * one in seven, during playback. Album art is not fine detail.
      */
     const int iw = (int)info.width, ih = (int)info.height;
     const int stride = (int)pad_w;
 
-    int step = iw / screen_w;
-    const int step_v = ih / screen_h;
-    if (step_v < step) step = step_v;
-    if (step < 1) step = 1;
+    int cw = iw, ch = ih;
+    if (iw > screen_w || ih > screen_h) {
+        /* The dimension that overflows by more sets the ratio. Compared
+         * as a cross product rather than as two divisions, so the choice
+         * is exact instead of being made on truncated integers. */
+        if ((int64_t)iw * screen_h >= (int64_t)ih * screen_w) {
+            cw = screen_w;
+            ch = (int)(((int64_t)ih * screen_w) / iw);
+        } else {
+            ch = screen_h;
+            cw = (int)(((int64_t)iw * screen_h) / ih);
+        }
+        if (cw < 1) cw = 1;
+        if (ch < 1) ch = 1;
+    }
 
-    const int sw = iw / step, sh = ih / step;   /* scaled source size */
-    const int cw = (sw < screen_w) ? sw : screen_w;
-    const int ch = (sh < screen_h) ? sh : screen_h;
-    const int sx = (sw - cw) / 2, sy = (sh - ch) / 2;
+    /* 16.16, rounded up so the last output pixel cannot index past the
+     * last source row or column. */
+    const uint32_t xstep = (uint32_t)(((uint64_t)iw << 16) / (uint32_t)cw);
+    const uint32_t ystep = (uint32_t)(((uint64_t)ih << 16) / (uint32_t)ch);
+
     const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
 
-    if (step > 1) {
-        ESP_LOGI(TAG, "cover scaled 1/%d to %dx%d", step, sw, sh);
+    if (cw != iw || ch != ih) {
+        ESP_LOGI(TAG, "cover fitted to %dx%d", cw, ch);
     }
 
     /* The shadow, not the panel's buffer. Drawing straight into the
@@ -523,12 +546,22 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     memset(fb, 0, (size_t)screen_w * screen_h * 2);
     const uint16_t *src = (const uint16_t *)rgb;
     for (int y = 0; y < ch; y++) {
-        const uint16_t *row = &src[(size_t)(sy + y) * step * stride];
+        uint32_t syf = (uint32_t)y * ystep;
+        int srow = (int)(syf >> 16);
+        if (srow >= ih) srow = ih - 1;
+
+        const uint16_t *row = &src[(size_t)srow * stride];
         uint16_t *dst = &fb[(dy + y) * screen_w + dx];
-        if (step == 1) {
-            memcpy(dst, &row[sx], (size_t)cw * 2);
+
+        if (xstep == (1u << 16)) {
+            memcpy(dst, row, (size_t)cw * 2);
         } else {
-            for (int x = 0; x < cw; x++) dst[x] = row[(sx + x) * step];
+            uint32_t sxf = 0;
+            for (int x = 0; x < cw; x++, sxf += xstep) {
+                int scol = (int)(sxf >> 16);
+                if (scol >= iw) scol = iw - 1;
+                dst[x] = row[scol];
+            }
         }
     }
     ESP_GOTO_ON_ERROR(gfx_blit_err(0, screen_h),
