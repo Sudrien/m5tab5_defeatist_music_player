@@ -117,6 +117,29 @@ static int mp3_global_gain(const uint8_t *fr, bool lsf, bool mono, bool crc)
     int off;
     if (!lsf) off = mono ? (9 + 5 + 4) : (9 + 3 + 8);
     else      off = mono ? (8 + 1)     : (8 + 2);
+
+    /*
+     * part2_3_length == 0 means the granule carries no main data at all:
+     * no scalefactors, no Huffman data, nothing to apply a gain to. It is
+     * digital silence, and global_gain is then whatever the encoder
+     * happened to leave in the field -- LAME writes 210, and something in
+     * the run writes 255.
+     *
+     * This is the spike at each end of every envelope. It was read as
+     * metadata, and it is not: the ID3v2 tag at the front and the ID3v1
+     * tag at the back are both already stepped over, and the file this
+     * was chased on has exactly 51 of these frames, seven at the start
+     * and the rest trailing. They are the encoder delay at the head and
+     * the flush padding at the tail -- real MP3 frames, correctly parsed,
+     * containing silence and reporting a gain of 210 for it. Read
+     * literally, a track opens and closes at four fifths of full scale.
+     *
+     * Reported as 0 so the run of silence lands at the bottom of the
+     * range, which is both what it sounds like and, because span() then
+     * normalises from the minimum, what stops it dragging the scale.
+     */
+    if (bits(fr + hdr, off, 12) == 0) return 0;
+
     off += 12 + 9;          /* part2_3_length, big_values */
     return (int)bits(fr + hdr, off, 8);
 }
