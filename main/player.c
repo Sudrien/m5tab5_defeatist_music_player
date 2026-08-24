@@ -629,42 +629,62 @@ static const char *s_display_name = "";
  *
  * Still on the decode loop rather than the UI task: it fopen()s the track,
  * and the UI task has a 20 ms period to keep. */
-static void load_track_visuals(const char *path)
+/*
+ * The moment the track changes, as distinct from the moment its details
+ * are known.
+ *
+ * These were the same statement, at the top of load_track_visuals(), and
+ * load_track_visuals() runs after decoder_open() -- which on a Xing-less
+ * MP3 is a full scan of the file. Twelve seconds on a USB drive. For all
+ * of that the screen kept the outgoing track's title, artist and cover,
+ * and anything the background task had in flight for it still counted as
+ * current:
+ *
+ *   playing /usb/aom/hotlantis.mp3          <- new track
+ *   cover is 1920x1920                      <- previous track's cover,
+ *   cover fitted to 720x720                    decoded and drawn anyway
+ *   ...
+ *   no ID3 text frames; showing the filename   <- 3.3 s later
+ *
+ * The generation check was not wrong, it was late: at the moment that
+ * cover was drawn the new track had not yet reached the line that bumps
+ * the counter, so the cover was, by the only definition available,
+ * current. Invalidating when the decision is made rather than when its
+ * consequences are computed is what makes the check mean what it says.
+ *
+ * Called from play_file() before decoder_open(), so the screen goes blank
+ * and honest immediately instead of lying for as long as the open takes.
+ */
+static void track_change_begin(const char *path)
 {
-    /*
-     * Cancel the running scan first, before anything slow.
-     *
-     * This used to sit at the bottom of the function, after the cover had
-     * been decoded -- and decoding a cover can take seconds. A 3000x3000
-     * JPEG took three, during which the previous track's walk ran to
-     * completion against a card the decoder was also reading, and set
-     * s_wave_ready for a track that had already been replaced:
-     *
-     *   playing 04 - The Factory.mp3
-     *   walk: 5957 frames, 142s          <- 06 - Processing's walk
-     *   envelope ready: 720 columns
-     *
-     * The result was thrown away correctly a few seconds later, so
-     * nothing wrong appeared on screen. What it cost was the seconds of
-     * contention that produced it. The abort is the cheapest statement in
-     * the function and there is no reason for it to be last.
-     */
-    /* Everything in flight for the outgoing track is stale from here.
-     * The counter is what media_task compares against, since a decode
-     * cannot be aborted partway the way a frame walk can. */
     s_track_gen++;
 
     s_scan_abort = true;
     s_wave_ready = false;
-    /* Only for a genuinely different track. A repaint of the one playing
-     * keeps its envelope and skips the walk. */
     if (strcmp(path, s_walked_path) != 0) waveform_set(NULL);
 
+    /* The filename is what there is until the tag is read. It is also
+     * what will be shown permanently if there is no tag, so this is not a
+     * placeholder so much as the first draft of the answer. */
     memset(&s_tags, 0, sizeof(s_tags));
-
     s_display_name = strrchr(path, '/');
     s_display_name = s_display_name ? s_display_name + 1 : path;
 
+    ui_clear_art();
+    ui_capture_background();
+}
+
+static void load_track_visuals(const char *path)
+{
+    /*
+     * No invalidation here any more -- track_change_begin() did it, at
+     * the moment the track changed. What is left is the part that needs
+     * the file open.
+     *
+     * This is also the repaint path, which is the other reason the two
+     * had to come apart: the chooser closing wants the cover put back and
+     * nothing thrown away.
+     */
     FILE *af = fopen(path, "rb");
     if (!af) return;
 
@@ -677,16 +697,17 @@ static void load_track_visuals(const char *path)
 
     fclose(af);
 
-    /* The area above the bar is cleared whether or not there turns out to
-     * be a cover. Without that, a track with no art keeps the previous
-     * track's cover, which reads as the player having ignored the
-     * choice. */
+    /* Cleared here as well as in track_change_begin(), because this is
+     * also the repaint path: the chooser has just been drawing over the
+     * artwork area and whatever it left there has to go before the cover
+     * is painted back. On a track change it is a second clear of an
+     * already black area, which is a memset nobody can see. */
     ui_clear_art();
     ui_capture_background();
 
     /* Both of the slow jobs for this track, requested rather than done,
-     * and both on one task. The old ones were cancelled at the top of the
-     * function. */
+     * and both on one task. Anything in flight for the outgoing track was
+     * invalidated by track_change_begin(). */
     snprintf(s_media_path, sizeof(s_media_path), "%s", path);
     s_media_want = true;
 }
@@ -1054,6 +1075,12 @@ typedef enum {
 static track_end_t play_file(const char *path)
 {
     const storage_id_t vol = storage_of_path(path);
+
+    /* Before the open, not after. decoder_open() on a Xing-less MP3 scans
+     * the whole file to build a seek index, and until it returns the
+     * screen would otherwise still be showing the track that just
+     * ended. */
+    track_change_begin(path);
 
     decoder_t *dec = decoder_open(path);
     if (!dec) return TRACK_ENDED;
