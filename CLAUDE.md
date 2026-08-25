@@ -96,6 +96,167 @@ advance. Text at a given scale is now **narrower and taller**.
 - `ui.c`'s marquee compares `strlen()` as a change-detection token only.
   That is still fine: it is a token, not a width.
 
+## Never share a handle across tasks; publish a value
+
+`s_pcm` belongs to `play_file()` and the I2S writer, and to nobody else.
+The decode loop deletes it at the end of every track, so any other task
+holding it is one context switch away from reading freed PSRAM.
+
+The first version of the prefetch gate let `media_task` call
+`xStreamBufferBytesAvailable(s_pcm)` behind an `if (!s_pcm)` guard. That
+guard does nothing: the pointer can be loaded before the check and used
+after the free. It crashed on hardware exactly where that predicts --
+`next` pressed while the frame walk was running, so `media_task` was
+polling occupancy every 100 ms -- and the symptom was a TLSF assert on a
+later, unrelated `free()`, because what a stray read corrupts is heap
+metadata rather than anything of ours. Reproduced under ASan as a
+heap-use-after-free on the first run.
+
+**The rule: cross-task, publish a number, not a pointer.** `s_ring_pct`
+is written by the owner and read by anyone; an int cannot dangle. And
+teardown order is publish-invalid, clear-handle, then free, so there is
+never a reachable handle to a freed buffer.
+
+If anything else ever needs to know about the ring, it gets another
+published value. It does not get `s_pcm`.
+
+## Control latency lives in the decode loop
+
+Seeks and track changes are requested on the UI task and serviced at the
+top of the decode loop, so **the decode loop's worst-case iteration time
+is the control latency.** Anything that stalls that loop presents as a
+button that did nothing, and the user presses it again, which makes it
+worse.
+
+Three things guard it now, and all three log:
+
+- `request_seek()` warns when a request overwrites one that was never
+  serviced. `s_seek_pct` is a single slot, so rapid presses collapse --
+  and without the warning that is indistinguishable from a dead button.
+- The ring send is sliced at `SEND_SLICE_MS` rather than blocking on the
+  whole block, so ring size cannot become control latency.
+- `LOOP_STALL_MS` timing around `decoder_read()` and the ring send says
+  which of the two stalled. From outside they are the same symptom.
+
+A note on a wrong theory, so it does not get re-derived: enlarging the
+ring does **not** increase this latency. The writer drains continuously,
+so a send waits only for room for one block -- about 27 ms at 64 KB and
+about 27 ms at 512 KB. This was measured, after being asserted
+incorrectly.
+
+## Priority is not a device throttle
+
+`media_task` runs at priority 1 and that is not what keeps it out of the
+decoder's way. Priority arbitrates the CPU; a 512 KB read issued at
+priority 1 sits in the same I/O queue as the decoder's next refill.
+Background work is throttled by `media_settle()` -- a delay, then a
+ring-occupancy floor, then a bounded timeout -- not by being scheduled
+politely.
+
+If background reads ever need to be added, they go through
+`media_settle()` too. Lowering a priority instead will look like it
+worked on SD and fail on USB.
+
+## The media cache hands out borrowed pointers
+
+`mediacache.c` has no lock, and that is only safe because every caller is
+`media_task`. Entries return borrowed pointers whose lifetime is bounded
+by the next eviction -- safe only because the task that could evict is
+the task holding the pointer. **If a second caller ever appears, this
+needs a mutex and the borrow contract has to become a copy.**
+
+Ownership rules that are load-bearing:
+
+- `mediacache_put_art()` **takes ownership**, including on the path where
+  every slot is pinned and it cannot store the blob -- it frees it. A
+  caller that also frees is a double free.
+- `do_art()` tracks `owned`: a cache hit is borrowed and must not be
+  freed, a fresh read is ours and goes into the cache rather than the
+  bin. Even on the "track changed while reading" path, because the track
+  it belongs to is very likely the one being returned to.
+- `mediacache_init()` releases before it memsets. Calling it twice
+  otherwise abandons up to a third of a megabyte.
+- Pins are reassigned wholesale on each track change (unpin-all, then pin
+  the outgoing track) rather than tracked per transition. Three slots,
+  two pins, one for prefetch.
+
+Tested host-side under ASan with the leak checker: ownership, LRU
+eviction, pin protection, the all-pinned path, and the play/prefetch/
+skip/back sequence.
+
+## One press is one action
+
+**Gating the input source is not enough. The iteration that changes
+which screen is up must not also dispatch input to the new one.**
+
+`ui_task` takes one touch sample at the top of each loop and hands it to
+whichever screen is up further down. `touch_swallow()` gates
+`touch_get()`, so it has no effect on a sample that has already been
+copied into a local -- which is exactly the case on the iteration that
+opens the chooser. The fix is that the opening branch draws and
+`continue`s. The closing branch always did, which is why only the open
+direction ever showed the fault.
+
+If a screen transition is ever added elsewhere in that loop, it needs
+both: `touch_swallow()` for the presses that follow, and `continue` for
+the sample already in hand.
+
+
+`touch_swallow()` exists because a tap that changes which screen is up
+would otherwise be read twice: once by the screen that was up, and again
+by the screen that just opened, whose edge detector starts out believing
+nothing was down while the finger is still on the glass.
+
+Call it on **both** sides of every screen transition, not just the one
+you noticed. Opening the chooser without it played the eleventh track in
+the directory, because the folder icon is at y=1100 and the chooser puts
+list row 10 there. Closing it without it delivers the same press to the
+transport bar underneath.
+
+The swallow lifts on two conditions, both required: the finger has
+lifted, **and** `TOUCH_SETTLE_MS` (250 ms) has passed. They cover
+different failures. Waiting for the release stops the press that caused
+the transition being read again by the screen it opened. Waiting out the
+window stops the panel's own drop-and-reacquire -- a finger rolling
+slightly makes the GT911 lose a point for one poll -- from becoming a
+fresh tap on that screen milliseconds later. Either alone leaves a real
+way to select something nobody aimed at.
+
+The settle comparison uses signed tick difference, not `now < until`.
+The tick counter wraps every 49 days at 1 kHz, and the naive form gets
+it wrong exactly once per wrap, for 250 ms, on a device people leave
+running. This was checked exhaustively against
+`(int32_t)(now - until) >= 0` across the full difference space.
+
+`TOUCH_SETTLE_MS` is the only number involved: raise it if the chooser
+still feels like it selects on opening, lower it if paging through a long
+directory feels sticky. The swallow is armed only on screen transitions,
+so it never delays an ordinary tap.
+
+## Cover art parsers are fuzz-tested; keep them that way
+
+`covertag.c` parses four container formats from bytes that came off an SD
+card, so every length in it is attacker-controlled in the only sense that
+matters: a corrupt file should not be able to crash the player.
+
+The parsers were validated with synthetic files per format plus 1200
+mutated cases (truncation, byte flips, length fields overwritten with
+`0xFFFFFFFF`) under ASan and UBSan, with targeted cases for each known
+trap. If you change a parser, regenerate that corpus and rerun it rather
+than eyeballing the bounds.
+
+Rules that are load-bearing:
+
+- **Cap before allocating.** `COVERTAG_MAX_IMAGE` is checked against the
+  length from the file *before* `malloc()`, never after.
+- **Check each length against what is left**, not against the total.
+- **`found` counts fields actually filled**, not blocks encountered.
+  Returning `ESP_OK` for an empty comment block tells `player.c` the tags
+  are good and suppresses the filename fallback, leaving the title blank.
+- **Trust magic bytes over declared types.** Taggers write the MP4 `covr`
+  type indicator as JPEG for PNG data often enough that the indicator is
+  a hint and `albumart_is_supported_image()` is the answer.
+
 ## Missing glyphs are boxes, deliberately
 
 Anything outside the subset draws a hollow notdef box, including five

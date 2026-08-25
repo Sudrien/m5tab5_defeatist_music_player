@@ -351,6 +351,149 @@ byte 'é' rather than copied. FatFs also moved to
 stayed codepage 437 and the browser would have been the one place left
 showing mojibake.
 
+### Prefetch, and going back
+
+`mediacache.c` holds three entries -- previous, current, next -- keyed by
+path, each carrying the compressed cover and the `framewalk_t` envelope.
+Roughly 350 KB of PSRAM in steady state. The **decoded** cover is
+deliberately not cached: 700x700 RGB565 is a megabyte and the hardware
+JPEG codec rebuilds it in single-digit milliseconds.
+
+`media_task` prefetches the *next* track's cover once the playing
+track's own cover and envelope are in hand, gated on how full the PCM
+ring is -- start above 75%, drop the result if it fell below 50% while
+reading. Two thresholds rather than one because a single one chatters at
+the boundary. The gate exists because prefetch is a second reader on the
+device the decoder is already reading, which on a USB drive is exactly
+the contention the one-task-for-both design was built to avoid.
+
+The ring moved from 64 KB to 256 KB and into PSRAM, since 256 KB of the
+P4's 768 KB of L2MEM is not available to spend on a buffer the CPU only
+memcpy()s through. `xStreamBufferCreateWithCaps()` must be paired with
+`vStreamBufferDeleteWithCaps()`; the plain delete frees through the
+wrong heap, once per track.
+
+The gate reads a **published integer**, not the ring handle.
+`media_task` calling `xStreamBufferBytesAvailable(s_pcm)` directly is a
+use-after-free -- the decode loop frees the ring between tracks, and an
+`if (!s_pcm)` guard does not help because the pointer can be loaded
+before the check and used after the free. It crashed on hardware as a
+TLSF assert on an unrelated later `free()`, which is what a stray read
+into freed heap metadata looks like.
+
+`media_task` is already the lowest priority task in the program -- 1,
+against 4 for the UI and 6 for the I2S writer -- but **priority decides
+who gets the CPU, not who gets the device.** A background task at
+priority 1 issuing a 512 KB read still puts that read in the same queue
+the decoder is waiting on. So the throttle is time and depth: the cover
+waits 700 ms after a track change and the envelope 2.5 s, and both then
+wait for the ring to reach 60% before touching the card. The wait is
+bounded at 8 s and says so in the log if it expires, because a late
+cover beats no cover and a gate that never opens should not be silent.
+
+Only the cover is prefetched. The frame walk reads the whole file, which
+on a 60 MB FLAC is a background reader doing more I/O than the decoder
+for the entire track, and a late envelope is invisible -- the bar
+degrades to a plain slider and then becomes a waveform, which is what it
+already does.
+
+Shuffle does not prefetch. `playlist_peek_next()` returns NULL for it on
+purpose: the choice is made by `esp_random()` when asked, so predicting
+it would mean fixing it a song early and making the played-bitmap lie if
+the track is skipped.
+
+**Double-tapping previous** walks the play history rather than the list.
+`playlist_prev()` is index-1, which is right in list order and wrong
+under shuffle -- `playlist.h` said as much already. The stack is eight
+deep and pushed when a track actually starts, not when one is requested.
+
+The subtle part is the anchor. The two taps are up to 400 ms apart and
+the first one already requested a track change, so by the time the
+second arrives that track may or may not have started and pushed itself.
+Popping the top would mean "the track before the one I was on" or "the
+track I was just on" depending on how fast the card is -- a back button
+that sometimes goes forward. So the second tap is resolved against the
+track that was playing when the *first* tap landed.
+
+**Every button logs.** Transport presses are logged once where they are
+dispatched rather than per case, so a new action cannot be added and
+forget to log itself; `ui_action_name()` sits next to the enum for the
+same reason. Volume is excluded because a drag emits one every poll --
+fifty a second would bury everything else -- and its release is logged
+by its own case. Browser presses log before the switch acts, so a press
+that turns out to do nothing (page up at the top of a list) still shows
+as received: a button that is working and a button that is not both look
+like silence otherwise.
+
+**Touch and screen transitions.** `ui_task` samples the panel once per
+iteration and passes that sample to whichever screen is up. An iteration
+that changes screens therefore must not also dispatch input, or the press
+that opened the chooser arrives as the chooser's first tap -- at the
+folder icon's coordinates, which is list row 10. Gating the touch source
+does not help here, because the value has already been read. The opening
+branch draws and `continue`s; the closing branch always did.
+
+**`sdkconfig.defaults` is only read when `sdkconfig` does not exist.** An
+existing build directory keeps the old value, so the font renders
+accents and the filenames still do not -- which looks like a font bug and
+is not. The tell is a single replacement character where one accent
+should be: `Bôa` is four bytes in UTF-8 and three in codepage 437, and a
+lone 0x93 is invalid UTF-8, so it collapses to exactly one U+FFFD.
+Two would mean something else entirely. After pulling this change:
+
+    rm sdkconfig && idf.py reconfigure
+
+or `idf.py fullclean`. Verify with `idf.py menuconfig` under
+*Component config -> FAT Filesystem support -> API character encoding*.
+
+### Cover art and tags beyond MP3
+
+`covertag.c` dispatches on magic bytes and reads whichever container is
+in front of it. `albumart.c` keeps the ID3v2 reader -- it is bound up
+with the APIC layout and the v2.3/v2.4 size trap, and moving it would
+have been churn -- but grew `_at()` variants so the same parser can be
+pointed at a tag that is not at offset 0.
+
+| Container | Picture | Tags |
+| --- | --- | --- |
+| MP3 | APIC frame | TIT2 / TPE1 / TALB |
+| FLAC | PICTURE block (type 6) | VORBIS_COMMENT (type 4) |
+| M4A / MP4 | `moov.udta.meta.ilst.covr` | `(c)nam` / `(c)ART` / `(c)alb` |
+| Ogg Vorbis, Opus | base64 `METADATA_BLOCK_PICTURE` | VorbisComment |
+| WAV | ID3v2 in an `id3 ` chunk | same |
+
+Notes on the parts that bite:
+
+- **`meta` carries four bytes of version and flags before its children**
+  and nothing else on the MP4 path does. Walking it like a plain
+  container puts you four bytes out and every child type reads as
+  garbage.
+- **`"\xA9ART"` does not mean what it looks like.** C reads `\xA9A` as
+  one hex escape, because `A` is a hex digit, so the literal is three
+  bytes and no M4A ever reports an artist. Same for `alb`. Only `nam`
+  is safe, which is the worst outcome -- it would have looked fine.
+  Written as `"\xA9" "ART"`.
+- **Ogg needs real page reassembly.** A cover spans pages via 255-byte
+  segments, so it cannot be read from a fixed prefix the way the three
+  strings could. The packet buffer grows geometrically; growing it by
+  each 255-byte segment is four thousand reallocs for a 1 MB cover, on
+  a heap shared with a running decoder.
+- **base64 is decoded in place**, because the alternative is holding the
+  encoded and decoded copies of a megabyte at once.
+- **FLAC files can hold several pictures.** Type 3 (front cover) wins;
+  anything else is kept only as a fallback, so a file with a liner-notes
+  scan first still shows the sleeve.
+- **A leading ID3v2 tag on a FLAC or Ogg is skipped.** Not legal in
+  either, and taggers do it anyway.
+- Sizes read from the file are capped at `COVERTAG_MAX_IMAGE` (4 MB)
+  before any allocation, since a corrupt length field is otherwise a
+  `malloc()` of whatever the corruption says.
+
+`ESP_ERR_NOT_SUPPORTED` from the dispatcher now means "no parser for
+this container" and `ESP_ERR_NOT_FOUND` means "no picture in the file" --
+which is what `do_art()`'s log line used to claim while actually meaning
+"no APIC frame".
+
 Five Latin-1 characters are still missing -- © ® ¼ ½ ¾ -- because Ark
 draws those fullwidth and this table is halfwidth-only. They render as a
 notdef box, as does anything past Latin Extended-A. A box rather than

@@ -131,6 +131,16 @@ static bool shuffle_seen(int i)
     return s_played && (s_played[i / 8] & (1 << (i % 8)));
 }
 
+const char *playlist_peek_next(play_order_t order)
+{
+    if (s_count <= 0) return NULL;
+    if (order != PLAY_ORDER_ALL) return NULL;   /* see the header */
+
+    const int n = s_current + 1;
+    if (s_current < 0 || n >= s_count) return NULL;
+    return s_paths[n];
+}
+
 const char *playlist_next(play_order_t order)
 {
     if (s_count <= 0) return NULL;

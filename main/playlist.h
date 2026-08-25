@@ -65,6 +65,19 @@ void playlist_set_current(int i);
  */
 const char *playlist_next(play_order_t order);
 
+/*
+ * What playlist_next() would return, without consuming anything.
+ *
+ * For prefetch. Returns NULL under PLAY_ORDER_ONE (nothing follows) and,
+ * deliberately, under PLAY_ORDER_SHUFFLE: shuffle's choice is made by
+ * esp_random() at the moment it is asked, so there is no next track to
+ * predict. Predicting one would mean fixing the choice early, which
+ * turns "random when you get there" into "decided a song ago" and makes
+ * the played-bitmap lie if the track is skipped. Shuffle simply does not
+ * prefetch, and that is the honest answer rather than a missing feature.
+ */
+const char *playlist_peek_next(play_order_t order);
+
 /* Previous entry in list order, or NULL at the top. Shuffle deliberately
  * does not have a history: a back button that undoes a random choice
  * needs a stack, and the button is there to skip back one track. */

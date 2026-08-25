@@ -54,14 +54,30 @@ static uint32_t syncsafe32(const uint8_t *p)
  * picture type byte, description (NUL-terminated, two NULs for the
  * UTF-16 encodings), then the image.
  */
-esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
+/*
+ * Is this something albumart_show() can decode?
+ *
+ * Exported because every container's picture block ends in the same
+ * question, and each of them answering it separately is how one of them
+ * ends up accepting a BMP and failing further downstream, where the
+ * error message is about the decoder rather than about the file.
+ */
+bool albumart_is_supported_image(const uint8_t *p, size_t len)
+{
+    if (!p) return false;
+    if (len > 3 && p[0] == 0xFF && p[1] == 0xD8) return true;               /* JPEG */
+    if (len > 8 && memcmp(p, "\x89PNG\r\n\x1a\n", 8) == 0) return true;    /* PNG */
+    return false;
+}
+
+esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len)
 {
     uint8_t hdr[10];
 
     *out = NULL;
     *out_len = 0;
 
-    fseek(f, 0, SEEK_SET);
+    fseek(f, base, SEEK_SET);
     if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || memcmp(hdr, "ID3", 3) != 0) {
         return ESP_ERR_NOT_FOUND;
     }
@@ -80,7 +96,7 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
         fseek(f, (long)esz - ((ver >= 4) ? 4 : 0), SEEK_CUR);
     }
 
-    const long tag_end = 10 + (long)syncsafe32(&hdr[6]);
+    const long tag_end = base + 10 + (long)syncsafe32(&hdr[6]);
 
     while (ftell(f) + 10 <= tag_end) {
         uint8_t fh[10];
@@ -119,9 +135,7 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
         if (i >= fsz) { free(frame); return ESP_ERR_INVALID_SIZE; }
 
         const size_t img_len = fsz - i;
-        const bool is_jpeg = img_len > 3 && frame[i] == 0xFF && frame[i + 1] == 0xD8;
-        const bool is_png  = img_len > 8 && memcmp(&frame[i], "\x89PNG\r\n\x1a\n", 8) == 0;
-        if (!is_jpeg && !is_png) {
+        if (!albumart_is_supported_image(&frame[i], img_len)) {
             ESP_LOGW(TAG, "APIC is %s, which is neither JPEG nor PNG", mime);
             free(frame);
             return ESP_ERR_NOT_SUPPORTED;
@@ -145,6 +159,12 @@ esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
     }
 
     return ESP_ERR_NOT_FOUND;
+}
+
+/* An ID3v2 tag at the front of the file, which is where an MP3 keeps it. */
+esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
+{
+    return albumart_extract_at(f, 0, out, out_len);
 }
 
 /*
@@ -260,13 +280,13 @@ static void id3_text_to_utf8(const uint8_t *body, size_t len, char *out, size_t 
     out[o] = 0;
 }
 
-esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
+esp_err_t id3_read_tags_at(FILE *f, long base, id3_tags_t *out)
 {
     uint8_t hdr[10];
 
     memset(out, 0, sizeof(*out));
 
-    fseek(f, 0, SEEK_SET);
+    fseek(f, base, SEEK_SET);
     if (fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr) || memcmp(hdr, "ID3", 3) != 0) {
         return ESP_ERR_NOT_FOUND;
     }
@@ -281,7 +301,7 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
         fseek(f, (long)esz - ((ver >= 4) ? 4 : 0), SEEK_CUR);
     }
 
-    const long tag_end = 10 + (long)syncsafe32(&hdr[6]);
+    const long tag_end = base + 10 + (long)syncsafe32(&hdr[6]);
     int found = 0;
 
     while (ftell(f) + 10 <= tag_end && found < 3) {
@@ -314,6 +334,11 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
     }
 
     return found ? ESP_OK : ESP_ERR_NOT_FOUND;
+}
+
+esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
+{
+    return id3_read_tags_at(f, 0, out);
 }
 
 /* ------------------------------------------------------------------ */

@@ -433,7 +433,9 @@ browser_result_t browser_touch(bool down, int x, int y)
     const int rows = rows_visible();
 
     if (y < TAB_H) {
-        select_tab(x < w / 2 ? STORAGE_SD : STORAGE_USB);
+        const storage_id_t want = (x < w / 2) ? STORAGE_SD : STORAGE_USB;
+        ESP_LOGI(TAG, "button: tab %s", want == STORAGE_SD ? "SD" : "USB");
+        select_tab(want);
         return res;
     }
 
@@ -441,6 +443,16 @@ browser_result_t browser_touch(bool down, int x, int y)
         const int bw = w / FOOT_BUTTONS;
         int which = x / bw;
         if (which >= FOOT_BUTTONS) which = FOOT_BUTTONS - 1;
+
+        /* One line per footer press, named, before the switch acts on
+         * it -- so a press that turns out to do nothing (page up at the
+         * top of the list, play-folder on an empty folder) still shows
+         * up as having been received. A button that is working and a
+         * button that is not both look like silence otherwise. */
+        static const char *const foot_name[FOOT_BUTTONS] = {
+            "up", "play folder", "page up", "page down", "order", "cancel"
+        };
+        ESP_LOGI(TAG, "button: %s", foot_name[which]);
 
         switch (which) {
         case 0:
@@ -470,6 +482,7 @@ browser_result_t browser_touch(bool down, int x, int y)
             s_order = (s_order == PLAY_ORDER_ONE)     ? PLAY_ORDER_ALL
                     : (s_order == PLAY_ORDER_ALL)     ? PLAY_ORDER_SHUFFLE
                                                       : PLAY_ORDER_ONE;
+            ESP_LOGI(TAG, "play order now %s", order_label());
             s_dirty = true;
             break;
         default:
@@ -483,6 +496,9 @@ browser_result_t browser_touch(bool down, int x, int y)
     if (r < 0 || r >= rows) return res;
     const int i = s_top + r;
     if (i >= s_count) return res;
+
+    ESP_LOGI(TAG, "button: row %d (%s) \"%s\"", i,
+             s_entries[i].is_dir ? "dir" : "file", s_entries[i].name);
 
     if (s_entries[i].is_dir) {
         char sub[512];

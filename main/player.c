@@ -53,6 +53,8 @@
 #include "esp_idf_version.h"
 
 #include "albumart.h"
+#include "covertag.h"
+#include "mediacache.h"
 #include "browser.h"
 #include "decoder.h"
 #include "framewalk.h"
@@ -127,10 +129,41 @@ static const char *TAG = "tab5_mp3";
  * waits on DMA and the decoder can stall for a whole SD read without
  * anyone hearing it.
  *
- * 64 KB is ~0.37 s of 44.1 kHz stereo: comfortably longer than a FAT
- * cluster read, short enough that seeking will not feel laggy later. */
-#define PCM_RING_BYTES          (64 * 1024)
+ * 64 KB was ~0.37 s of 44.1 kHz stereo: comfortably longer than a FAT
+ * cluster read, short enough that seeking will not feel laggy later.
+ *
+ * 256 KB now, ~1.5 s, because media_task prefetches the next track's
+ * cover while this one plays and that is a second reader on the same
+ * slow device. The prefetch is gated on how full this is (see
+ * ring_headroom_pct), so the extra depth is not slack that gets spent --
+ * it is the measurement the gate reads. At 64 KB the gate would be
+ * deciding on a third of a second of history, which is noise.
+ *
+ * In PSRAM, not internal RAM. xStreamBufferCreate() allocates from the
+ * default heap, and 256 KB of the P4's 768 KB of L2MEM is not available
+ * to spend on a ring the CPU only ever memcpy()s through. */
+#define PCM_RING_BYTES          (256 * 1024)
 #define PCM_CHUNK_BYTES         (4 * 1024)
+
+/*
+ * How long the decode loop will sit in one xStreamBufferSend() before
+ * coming up for air to look at the controls.
+ *
+ * This, not the ring size, is now the worst-case delay between pressing
+ * something and the decode loop noticing. 20 ms is one decoded MP3 frame
+ * at 44.1 kHz, so a full ring costs at most one frame of latency per
+ * check rather than however many seconds the ring happens to hold.
+ */
+#define SEND_SLICE_MS           (20)
+
+/*
+ * A decode-loop phase slower than this gets a line.
+ *
+ * 400 ms is well past anything healthy -- a block is ~26 ms of audio --
+ * and well short of a delay anyone would notice as a button not
+ * responding, so it catches the cause before the symptom.
+ */
+#define LOOP_STALL_MS           (400)
 
 /* ---- I2S ---- */
 #define I2S_MCLK_GPIO           (GPIO_NUM_30)
@@ -475,6 +508,34 @@ static esp_err_t es8388_init(void)
 /* ------------------------------------------------------------------ */
 
 static StreamBufferHandle_t s_pcm;
+
+/*
+ * Ring occupancy, 0-100, or -1 when there is no ring.
+ *
+ * A published NUMBER rather than a shared handle, and that distinction
+ * is the whole point of it.
+ *
+ * media_task needs to know how full the ring is, to decide whether it
+ * can afford to read. The obvious way to tell it is to let it call
+ * xStreamBufferBytesAvailable(s_pcm) -- which is what the first version
+ * did, and which is a use-after-free waiting to happen: the decode loop
+ * deletes the ring at the end of every track, and between the delete and
+ * the s_pcm = NULL that follows it, any other task holding that handle
+ * is reading freed PSRAM. A `if (!s_pcm) return` guard does not fix it
+ * either; the pointer can be loaded before the check and used after the
+ * free.
+ *
+ * It crashed exactly where that predicts: pressing next while the frame
+ * walk was running, so media_task was polling occupancy every 100 ms and
+ * eventually landed inside the window. The symptom was a TLSF assert on
+ * a later, innocent free, because what the read corrupts is the heap
+ * metadata rather than anything of ours.
+ *
+ * So the handle stays private to the decode loop and the writer, and the
+ * decode loop publishes an int. An int cannot dangle. -1 means "no ring"
+ * and is written before the ring goes away, not after.
+ */
+static volatile int s_ring_pct = -1;
 static volatile bool s_decode_done;
 
 /* The writer used to outlive the one and only file. Now that play_file()
@@ -554,6 +615,38 @@ static volatile bool     s_open_chooser;
 static volatile int      s_seek_pct = -1;
 
 /*
+ * When the outstanding seek was asked for, and by what.
+ *
+ * A seek is requested on the UI task and serviced on the decode loop,
+ * and nothing measured the gap between those two. A press that takes
+ * long enough to act reads as a press that was missed -- which is how
+ * four presses of prev become four presses of prev, each one of them
+ * making it worse.
+ *
+ * Logged with the request rather than inferred from timestamps, because
+ * the interesting case is the request that is overwritten before it is
+ * ever serviced: that one leaves no trace at all otherwise.
+ */
+static volatile TickType_t s_seek_asked;
+static const char *volatile s_seek_why = "";
+
+static void request_seek(int pct, const char *why)
+{
+    if (s_seek_pct >= 0) {
+        /* The previous request never made it to the decoder. Said out
+         * loud: from the outside this is indistinguishable from a button
+         * that did nothing, and it is the reason repeated presses of the
+         * same control appear to be ignored. */
+        ESP_LOGW(TAG, "seek (%s) replaced an unserviced seek (%s) after %" PRIu32 " ms",
+                 why, s_seek_why,
+                 (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_seek_asked));
+    }
+    s_seek_why = why;
+    s_seek_asked = xTaskGetTickCount();
+    s_seek_pct = pct;
+}
+
+/*
  * The background envelope scan.
  *
  * A whole-song walk, so it does not run before playback -- it runs
@@ -615,6 +708,83 @@ static framewalk_t       s_walk;
  * the new artwork, which is a frame, not a fault. */
 static char s_path[512];
 static id3_tags_t s_tags;
+
+/*
+ * What was actually played, newest last.
+ *
+ * playlist_prev() walks index-1, which is the right answer in list order
+ * and the wrong one under shuffle -- playlist.h says so itself: a back
+ * button that undoes a random choice needs a stack. This is that stack.
+ *
+ * Eight deep because it is a transport button, not a browser: pressing
+ * back eight times is already past the point where anyone is retracing a
+ * path rather than looking for something. Deeper costs nothing in memory
+ * and everything in the odds that the entry is still cached.
+ *
+ * Paths are copied rather than pointed at, because playlist_load_dir()
+ * invalidates every pointer the playlist handed out and the history has
+ * to survive changing folders -- that is most of the point of it.
+ */
+#define HISTORY_DEPTH   (8)
+static char s_history[HISTORY_DEPTH][512];
+static int  s_history_n;
+
+/*
+ * Pushed when a track actually starts, not when one is requested.
+ *
+ * A requested track that never plays -- a file that vanished with its
+ * volume, a skip landing on something unreadable -- must not become a
+ * place the back button can return to.
+ */
+static void history_push(const char *path)
+{
+    if (!path || !*path) return;
+
+    /* Not the same track twice in a row. Restarting a track, or the
+     * decoder re-entering one, would otherwise fill the stack with a
+     * single song and make back do nothing eight times. */
+    if (s_history_n > 0 && strcmp(s_history[s_history_n - 1], path) == 0) return;
+
+    if (s_history_n == HISTORY_DEPTH) {
+        memmove(s_history[0], s_history[1], sizeof(s_history) - sizeof(s_history[0]));
+        s_history_n--;
+    }
+    snprintf(s_history[s_history_n], sizeof(s_history[0]), "%s", path);
+    s_history_n++;
+}
+
+/*
+ * The track played before `anchor`, discarding anchor and anything after
+ * it. NULL when anchor is not in the history or is the oldest entry.
+ *
+ * Anchored rather than simply popping the top, because of a race the
+ * obvious version loses. The two taps of a double tap are up to 400 ms
+ * apart and the first one already requested a track change -- so by the
+ * time the second arrives, that track may or may not have started and
+ * pushed itself. Popping the top therefore means "the track before the
+ * one I was on" or "the track I was just on" depending on how fast the
+ * card was, which is a back button that sometimes goes forward.
+ *
+ * The anchor is the track that was playing when the FIRST tap landed, so
+ * the answer does not depend on what happened in between.
+ */
+static const char *history_back_from(const char *anchor)
+{
+    if (!anchor || !*anchor) return NULL;
+
+    int i = s_history_n - 1;
+    while (i >= 0 && strcmp(s_history[i], anchor) != 0) i--;
+    if (i <= 0) return NULL;
+
+    /* Truncate rather than just read: anchor and whatever the first tap
+     * started are both ahead of where we are going, and leaving them
+     * would make the next press walk forward through them. */
+    s_history_n = i;
+    return s_history[i - 1];
+}
+
+/* Where the current double-tap pair started. */
+static char s_prev_anchor[512];
 static const char *s_display_name = "";
 
 /*
@@ -663,6 +833,20 @@ static void track_change_begin(const char *path)
     s_wave_ready = false;
     if (strcmp(path, s_walked_path) != 0) waveform_set(NULL);
 
+    /*
+     * Re-pin around the change. The track leaving the screen is the one
+     * a back button is for, so it keeps a slot; everything else becomes
+     * evictable, including whatever was pinned two tracks ago.
+     *
+     * unpin-then-pin rather than an explicit unpin of the old entry,
+     * because the set of things worth keeping is defined by where
+     * playback is now, not by tracking each transition. With three
+     * slots, two pins, that leaves exactly one for prefetch -- which is
+     * the intended shape.
+     */
+    mediacache_unpin_all();
+    if (s_path[0]) mediacache_pin(s_path);      /* the outgoing track */
+
     /* The filename is what there is until the tag is read. It is also
      * what will be shown permanently if there is no tag, so this is not a
      * placeholder so much as the first draft of the answer. */
@@ -688,11 +872,11 @@ static void load_track_visuals(const char *path)
     FILE *af = fopen(path, "rb");
     if (!af) return;
 
-    if (id3_read_tags(af, &s_tags) == ESP_OK) {
+    if (covertag_read_tags(af, &s_tags) == ESP_OK) {
         ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
                  s_tags.title, s_tags.artist, s_tags.album);
     } else {
-        ESP_LOGI(TAG, "no ID3 text frames; showing the filename");
+        ESP_LOGI(TAG, "no text tags in this file; showing the filename");
     }
 
     fclose(af);
@@ -738,15 +922,37 @@ static void do_art(const char *path, uint32_t gen)
 
     uint8_t *jpg = NULL;
     size_t jpg_len = 0;
-    const esp_err_t xerr = albumart_extract(af, &jpg, &jpg_len);
-    fclose(af);
+    esp_err_t xerr;
+
+    /*
+     * The cache first, which is what makes a prefetched track and a
+     * track being returned to both appear immediately. `owned` says
+     * whether the bytes are ours to free: a cache hit is borrowed, and
+     * freeing it would leave the cache pointing at a freed block.
+     */
+    bool owned = false;
+    size_t cached_len = 0;
+    const uint8_t *cached = mediacache_art(path, &cached_len);
+
+    if (cached) {
+        jpg = (uint8_t *)cached;
+        jpg_len = cached_len;
+        xerr = ESP_OK;
+        fclose(af);
+        ESP_LOGI(TAG, "cover from cache (%u bytes)", (unsigned)jpg_len);
+    } else {
+        xerr = covertag_extract_art(af, &jpg, &jpg_len);
+        fclose(af);
+        owned = true;
+    }
 
     if (xerr != ESP_OK) {
-        /* albumart_extract() reads ID3v2 specifically, so this finds
-         * nothing in a FLAC (PICTURE metadata block) or an M4A (covr
-         * atom). Those are a separate parser each and are not written
-         * yet -- see README. */
-        ESP_LOGI(TAG, "no cover art in tag");
+        /* Now genuinely "no picture in the file" for MP3, FLAC, M4A,
+         * Ogg and WAV alike, rather than "no APIC frame" -- which was
+         * what it used to mean, and was why every FLAC on the card
+         * showed a blank square. ESP_ERR_NOT_SUPPORTED still means the
+         * container has no parser here at all. */
+        ESP_LOGI(TAG, "no cover art in this file (%s)", esp_err_to_name(xerr));
         return;
     }
 
@@ -758,7 +964,11 @@ static void do_art(const char *path, uint32_t gen)
      */
     if (gen != s_track_gen) {
         ESP_LOGI(TAG, "cover arrived after the track changed; dropped");
-        free(jpg);
+        /* Into the cache rather than the bin. It was read for a track
+         * that moved on, but the track it belongs to is very likely the
+         * one being returned to -- a fast double-skip lands here, and
+         * throwing the bytes away means reading them again. */
+        if (owned) mediacache_put_art(path, jpg, jpg_len);
         return;
     }
 
@@ -768,7 +978,11 @@ static void do_art(const char *path, uint32_t gen)
      * tall box with black above and below. */
     const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                          jpg, jpg_len);
-    free(jpg);
+
+    /* Kept, not freed, when we own it: this is the playing track, so it
+     * is about to be pinned and is the thing a back button wants. The
+     * cache takes ownership; a borrowed hit is left alone. */
+    if (owned) mediacache_put_art(path, jpg, jpg_len);
 
     if (serr != ESP_OK) {
         ESP_LOGW(TAG, "cover art failed to decode (%s)",
@@ -798,6 +1012,20 @@ static void do_art(const char *path, uint32_t gen)
  */
 static void do_walk(const char *path)
 {
+    /*
+     * A cached envelope, which is the entire point of caching it: the
+     * walk is a whole-file read, so returning to a track otherwise costs
+     * the same 30 MB it cost the first time. A kilobyte in PSRAM buys
+     * that back.
+     */
+    const framewalk_t *hit = mediacache_walk(path);
+    if (hit) {
+        memcpy(&s_walk, hit, sizeof(s_walk));
+        s_wave_ready = true;
+        ESP_LOGI(TAG, "envelope from cache: %d columns", s_walk.columns);
+        return;
+    }
+
     FILE *f = fopen(path, "rb");
     if (!f) return;
 
@@ -835,7 +1063,170 @@ static void do_walk(const char *path)
     } else {
         ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
         s_wave_ready = true;
+        mediacache_put_walk(path, &s_walk);
     }
+}
+
+/*
+ * How full the PCM ring is, 0-100, or -1 when nothing is playing.
+ *
+ * This is the whole throttle. Prefetch is a second reader on the device
+ * the decoder is already reading, and on a USB drive that contention is
+ * exactly what the one-task-for-both design was built to avoid -- so
+ * rather than guess a safe moment, ask the thing that would suffer.
+ *
+ * A percentage rather than a byte count because the ring size is a
+ * tuning knob and the thresholds should not have to move with it.
+ */
+static int ring_headroom_pct(void)
+{
+    return s_ring_pct;
+}
+
+/*
+ * Start prefetching only above HIGH, and only while it stays above LOW.
+ *
+ * Two thresholds rather than one because a single one chatters: at
+ * exactly the boundary the prefetch would start, take a read, drop
+ * below, abort, refill, start again, and spend the whole track doing
+ * that. The gap is hysteresis.
+ *
+ * HIGH is deliberately near the top. Prefetch is never urgent -- the
+ * worst case is the cover arriving when the track starts, which is what
+ * happens today -- so it should only ever run out of genuine surplus.
+ */
+#define PREFETCH_START_PCT      (75)
+#define PREFETCH_ABORT_PCT      (50)
+
+/*
+ * How long media_task waits after a track change before touching the
+ * card, and how full the ring has to be before it starts.
+ *
+ * media_task is already the lowest priority task in the program (1,
+ * against 4 for the UI and 6 for the I2S writer), but priority only
+ * decides who gets the CPU -- it does nothing about who gets the device.
+ * A background task at priority 1 issuing a 512 KB read still puts that
+ * read in the same queue as the decoder's, and the decoder then waits
+ * behind it no matter how important it is.
+ *
+ * So the throttle is time and depth, not priority. The delay lets the
+ * ring fill from empty after a track change -- which is exactly when the
+ * decoder needs the device most and when the old code piled a cover read
+ * and a whole-file walk on top of it. ART_DELAY is short because the
+ * cover is the visible thing; WALK_DELAY is long because the envelope is
+ * not, and because the walk reads the entire file.
+ */
+#define MEDIA_ART_DELAY_MS      (700)
+#define MEDIA_WALK_DELAY_MS     (2500)
+#define MEDIA_MIN_RING_PCT      (60)
+#define MEDIA_WAIT_SLICE_MS     (100)
+#define MEDIA_WAIT_MAX_MS       (8000)
+
+/*
+ * Sleep for `delay_ms`, then wait for the ring to reach MEDIA_MIN_RING_PCT.
+ *
+ * Returns false if the track changed while waiting, which means whatever
+ * was about to be done is for a song nobody is listening to any more.
+ *
+ * The wait is bounded: a format the ring never fills for -- a slow
+ * device, a very high bitrate -- must not mean the cover never loads at
+ * all. After MEDIA_WAIT_MAX_MS it proceeds anyway and says so, because a
+ * late cover beats no cover, and the log line is how that gets noticed
+ * rather than being silently lived with.
+ */
+static bool media_settle(uint32_t gen, int delay_ms, const char *what)
+{
+    int waited = 0;
+
+    while (waited < delay_ms) {
+        vTaskDelay(pdMS_TO_TICKS(MEDIA_WAIT_SLICE_MS));
+        waited += MEDIA_WAIT_SLICE_MS;
+        if (gen != s_track_gen) return false;
+    }
+
+    while (waited < MEDIA_WAIT_MAX_MS) {
+        const int pct = ring_headroom_pct();
+        if (pct < 0 || pct >= MEDIA_MIN_RING_PCT) return true;
+        vTaskDelay(pdMS_TO_TICKS(MEDIA_WAIT_SLICE_MS));
+        waited += MEDIA_WAIT_SLICE_MS;
+        if (gen != s_track_gen) return false;
+    }
+
+    ESP_LOGW(TAG, "%s: ring never reached %d%% in %d ms; going ahead anyway",
+             what, MEDIA_MIN_RING_PCT, MEDIA_WAIT_MAX_MS);
+    return true;
+}
+
+/*
+ * Fetch the next track's cover into the cache, if there is one and if
+ * the ring can spare the reads.
+ *
+ * Art only, deliberately. The cover is ~120 KB and bounded; the frame
+ * walk reads the whole file, which on a 60 MB FLAC is a second reader
+ * doing more I/O than the decoder for the entire track. The cover is
+ * also the part that shows: a track change blanks it, and the seconds
+ * before it returns are the ones that read as a stall. A late envelope
+ * is invisible, because the bar degrades to a plain slider and then
+ * becomes a waveform -- which is what it already does today.
+ *
+ * If the walk is ever prefetched too, it needs the abort flag threaded
+ * through framewalk_scan()'s existing polling, not a gate checked once
+ * at the start like this one.
+ */
+static void prefetch_next(void)
+{
+    const char *next = playlist_peek_next(browser_order());
+    if (!next) {
+        ESP_LOGD(TAG, "prefetch: nothing next (order/end of folder)");
+        return;
+    }
+
+    size_t have = 0;
+    if (mediacache_art(next, &have)) {
+        ESP_LOGD(TAG, "prefetch: already cached");
+        return;
+    }
+
+    /* Said out loud rather than returning quietly. A gate that never
+     * opens looks exactly like a feature that was never built, and the
+     * only way to tell them apart from a log is if the gate reports
+     * itself. */
+    const int pct = ring_headroom_pct();
+    if (pct < PREFETCH_START_PCT) {
+        ESP_LOGI(TAG, "prefetch held off: ring at %d%%, need %d%%",
+                 pct, PREFETCH_START_PCT);
+        return;
+    }
+
+    FILE *f = fopen(next, "rb");
+    if (!f) return;
+
+    uint8_t *img = NULL;
+    size_t len = 0;
+    const esp_err_t err = covertag_extract_art(f, &img, &len);
+    fclose(f);
+
+    if (err != ESP_OK) return;
+
+    /* Checked again on the way out. The read is bounded but not
+     * instant, and a cover that cost the decoder its margin is worse
+     * than no cover -- so if the ring fell through the floor while this
+     * was reading, the result is dropped rather than kept, and the log
+     * line says the gate is set too loose for this device. */
+    const int after = ring_headroom_pct();
+    if (after >= 0 && after < PREFETCH_ABORT_PCT) {
+        ESP_LOGI(TAG, "prefetch cost too much ring (%d%%); dropped", after);
+        free(img);
+        return;
+    }
+
+    mediacache_put_art(next, img, len);         /* takes ownership */
+
+    int n = 0;
+    size_t bytes = 0;
+    mediacache_stats(&n, &bytes);
+    ESP_LOGI(TAG, "prefetched cover for %s (%u bytes; cache %d entries, %u KB)",
+             next, (unsigned)len, n, (unsigned)(bytes / 1024));
 }
 
 /*
@@ -873,6 +1264,9 @@ static void media_task(void *arg)
         const uint32_t gen = s_track_gen;
         snprintf(path, sizeof(path), "%s", s_media_path);
 
+        /* Out of the way of the track starting. See media_settle(). */
+        if (!media_settle(gen, MEDIA_ART_DELAY_MS, "cover")) continue;
+
         do_art(path, gen);
 
         /* A track change during the cover makes the walk pointless too --
@@ -885,9 +1279,33 @@ static void media_task(void *arg)
          * numbers at the cost of reading the whole file. */
         if (strcmp(path, s_walked_path) == 0) continue;
 
+        /* The expensive one: a whole-file read, so it waits longest and
+         * is the first thing dropped when the track moves on. A cached
+         * envelope skips the wait, because do_walk() will not touch the
+         * card at all. */
+        if (!mediacache_walk(path) &&
+            !media_settle(gen, MEDIA_WALK_DELAY_MS, "envelope")) continue;
+
         do_walk(path);
         if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
                                    "%s", path);
+
+        /*
+         * Everything for the playing track is in hand. Pin it so the
+         * prefetch below cannot evict what is on screen, then use
+         * whatever surplus the ring has to get a head start on the next
+         * one.
+         *
+         * Ordered this way on purpose: prefetch runs after the current
+         * track's own cover and envelope, never before. The next track's
+         * artwork is worth nothing compared to this one's, and racing
+         * them for the same device would make the visible one late to
+         * make an invisible one early.
+         */
+        if (gen == s_track_gen) {
+            mediacache_pin(path);
+            prefetch_next();
+        }
     }
 }
 
@@ -912,7 +1330,34 @@ static void ui_task(void *arg)
          * same reason ui_draw() and albumart_show() never overlap. */
         if (s_open_chooser) {
             s_open_chooser = false;
+            touch_swallow();
             browser_open(s_path);
+
+            /*
+             * Draw the chooser and start the next iteration, rather than
+             * falling through to browser_touch() below.
+             *
+             * touch_swallow() gates touch_get(), and `bdown` was read at
+             * the top of this iteration -- before the swallow existed.
+             * Falling through hands the chooser that already-taken
+             * sample, which is the press that opened it, at the folder
+             * icon's coordinates, and browser_open() has just reset the
+             * chooser's edge detector so it reads as a first tap.
+             *
+             * That is the whole bug, and it is why swallowing alone did
+             * not fix it: no amount of gating the source helps a value
+             * that has already been copied out of it. The iteration that
+             * changes which screen is up must not also dispatch input to
+             * the new one.
+             *
+             * The close path below already does this -- it ends in
+             * `continue` -- which is why choosing a track never leaked a
+             * tap onto the transport bar and only the open direction
+             * showed the fault.
+             */
+            browser_draw();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
         }
 
         if (browser_is_open()) {
@@ -933,6 +1378,7 @@ static void ui_task(void *arg)
                     request_track(r.path);
                 }
                 browser_close();
+                touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
                 break;
             case BROWSER_PLAY_FOLDER:
@@ -943,10 +1389,12 @@ static void ui_task(void *arg)
                     ESP_LOGW(TAG, "nothing playable in %s", r.path);
                 }
                 browser_close();
+                touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
                 break;
             case BROWSER_CANCELLED:
                 browser_close();
+                touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
                 break;
             default:
@@ -970,6 +1418,24 @@ static void ui_task(void *arg)
         const bool down = bdown;
         const ui_action_t act = ui_touch(&st, down, bx, by);
 
+        /*
+         * One line per press, at the point they are dispatched rather
+         * than at each case, so a new action cannot be added and forget
+         * to log itself.
+         *
+         * VOLUME is excluded because it is not a press: a drag emits one
+         * every poll, fifty a second, and logging those buries
+         * everything else. Its release is logged by the case below.
+         */
+        if (act.kind != UI_ACTION_NONE && act.kind != UI_ACTION_VOLUME) {
+            if (act.kind == UI_ACTION_SEEK) {
+                ESP_LOGI(TAG, "button: %s -> %d%%",
+                         ui_action_name(act.kind), act.value);
+            } else {
+                ESP_LOGI(TAG, "button: %s", ui_action_name(act.kind));
+            }
+        }
+
         switch (act.kind) {
         case UI_ACTION_PLAY_PAUSE:
             s_playing = !s_playing;
@@ -979,7 +1445,7 @@ static void ui_task(void *arg)
             es8388_set_volume((uint8_t)act.value);
             break;
         case UI_ACTION_SEEK:
-            s_seek_pct = act.value;
+            request_seek(act.value, "slider");
             break;
         case UI_ACTION_PREV:
             /*
@@ -993,14 +1459,53 @@ static void ui_task(void *arg)
              * one" are both wanted from the same button far more often
              * than either is wanted from its own.
              */
+            /* Remembered before anything moves, so a second tap can ask
+             * "before THIS one" regardless of what the first tap started
+             * in the meantime. */
+            snprintf(s_prev_anchor, sizeof(s_prev_anchor), "%s", s_path);
+
             if (s_len_sec > 0 && s_pos_sec >= 3) {
-                s_seek_pct = 0;
+                request_seek(0, "prev: restart");
             } else {
                 const char *p = playlist_prev();
                 if (p) request_track(p);
-                else   s_seek_pct = 0;      /* first track: restart it */
+                else   request_seek(0, "prev: first track");
             }
             break;
+
+        case UI_ACTION_PREV_AGAIN: {
+            /*
+             * A second tap within the double-tap window: go back through
+             * what was actually played, rather than back through the
+             * list.
+             *
+             * Position is not consulted here. The 3-second rule exists to
+             * disambiguate one press; a deliberate second press has
+             * already said which of the two was meant, so applying the
+             * rule again would make a double tap restart the track --
+             * the one thing it certainly does not mean.
+             *
+             * The first tap of the pair has already acted, and under
+             * PLAY_ORDER_ALL it usually did the same thing this will.
+             * That is fine: it lands on the same track and the cache
+             * makes the second arrival free. Under shuffle they differ,
+             * which is the case worth having.
+             */
+            const char *h = history_back_from(s_prev_anchor);
+            if (h) {
+                ESP_LOGI(TAG, "back through history to %s", h);
+                /* Keep the list pointing at where playback actually is,
+                 * so the track after this one follows from here rather
+                 * than from wherever the first tap left the index. */
+                const int idx = playlist_index_of(h);
+                if (idx >= 0) playlist_set_current(idx);
+                request_track(h);
+            } else {
+                ESP_LOGI(TAG, "no play history; restarting the track");
+                request_seek(0, "prev x2: no history");
+            }
+            break;
+        }
         case UI_ACTION_NEXT: {
             /*
              * PLAY_ORDER_ONE means "do not go on by yourself" -- it is an
@@ -1212,7 +1717,17 @@ static track_end_t play_file(const char *path)
 
         if (s_seek_pct >= 0) {
             const int pct = s_seek_pct;
+            const uint32_t waited =
+                (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_seek_asked);
             s_seek_pct = -1;
+
+            /* Loud past a tenth of a second. Anything the decode loop
+             * takes this long to notice will have been pressed again by
+             * then, and the second press is what gets blamed. */
+            if (waited > 100) {
+                ESP_LOGW(TAG, "seek (%s) waited %" PRIu32 " ms for the decode loop",
+                         s_seek_why, waited);
+            }
 
             if (s_len_sec == 0) {
                 ESP_LOGI(TAG, "seek ignored: no duration for this format");
@@ -1240,9 +1755,27 @@ static track_end_t play_file(const char *path)
             }
         }
 
+        /*
+         * Phase timing around the two calls that can block.
+         *
+         * The decode loop is where a control request is noticed, so
+         * anything that stalls it is a button that appears not to work.
+         * Which of the two it is matters: a slow decoder_read() is the
+         * device, a slow send is the writer or the I2S clock, and from
+         * the outside they are the same symptom. Only logged past the
+         * threshold, so a healthy loop stays silent.
+         */
+        const TickType_t t_read = xTaskGetTickCount();
+
         decoder_info_t info;
         const int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
         if (n <= 0) break;
+
+        const uint32_t read_ms =
+            (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_read);
+        if (read_ms > LOOP_STALL_MS) {
+            ESP_LOGW(TAG, "decoder_read blocked %" PRIu32 " ms", read_ms);
+        }
 
         if ((uint32_t)info.sample_rate != cur_rate || info.channels != cur_chans) {
             ESP_LOGI(TAG, "%s: %d Hz, %d ch, %d kbps",
@@ -1253,7 +1786,11 @@ static track_end_t play_file(const char *path)
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
                 ESP_ERROR_CHECK(i2s_set_rate((uint32_t)info.sample_rate));
-                s_pcm = xStreamBufferCreate(PCM_RING_BYTES, PCM_CHUNK_BYTES);
+                s_ring_pct = 0;
+                s_pcm = xStreamBufferCreateWithCaps(PCM_RING_BYTES,
+                                                    PCM_CHUNK_BYTES,
+                                                    MALLOC_CAP_SPIRAM |
+                                                    MALLOC_CAP_8BIT);
                 s_decode_done = false;
                 s_writer_done = false;
                 xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
@@ -1271,15 +1808,62 @@ static track_end_t play_file(const char *path)
         /* The I2S slot config is stereo, so mono is duplicated into both
          * slots. Done here rather than in the backends so neither of them
          * has to know about the output format. */
+        /*
+         * Sent in slices with a timeout rather than one blocking call.
+         *
+         * The seek and track-change checks are at the top of this loop,
+         * so the loop's worst-case latency IS the control latency -- and
+         * a full ring means this call blocks until the writer has drained
+         * enough for the whole block. That was tolerable at 64 KB (0.37 s)
+         * and became four times worse the moment the ring went to 256 KB,
+         * which is a control regression introduced by a change that was
+         * about throughput and said nothing about buttons.
+         *
+         * Slicing decouples the two: the ring can be any size and a
+         * press is still noticed within SEND_SLICE_MS. If a request is
+         * already waiting, the rest of this block is abandoned -- it is
+         * audio for a position that is about to be thrown away, and
+         * finishing it only delays the jump the user asked for.
+         *
+         * Note that ring SIZE is not the problem here and enlarging it
+         * did not cause one: the writer drains continuously, so a send
+         * only ever waits for room for a single block -- about 27 ms at
+         * 64 KB and about 27 ms at 512 KB. Slicing takes that 27 ms to
+         * nearly zero, which is worth having and is not worth
+         * attributing a multi-second delay to.
+         */
+        const uint8_t *src;
+        size_t remain;
         if (info.channels == 1) {
             for (int i = 0; i < n; i++) {
                 st[2 * i] = st[2 * i + 1] = pcm[i];
             }
-            xStreamBufferSend(s_pcm, st, (size_t)n * 2 * sizeof(int16_t),
-                              portMAX_DELAY);
+            src = (const uint8_t *)st;
+            remain = (size_t)n * 2 * sizeof(int16_t);
         } else {
-            xStreamBufferSend(s_pcm, pcm, (size_t)n * sizeof(int16_t),
-                              portMAX_DELAY);
+            src = (const uint8_t *)pcm;
+            remain = (size_t)n * sizeof(int16_t);
+        }
+
+        const TickType_t t_send = xTaskGetTickCount();
+        while (remain) {
+            if (s_seek_pct >= 0 || s_pending_ready) break;
+            const size_t sent = xStreamBufferSend(s_pcm, src, remain,
+                                                  pdMS_TO_TICKS(SEND_SLICE_MS));
+            src += sent;
+            remain -= sent;
+        }
+        /* Published here because this is the one place that both owns
+         * the handle and runs often enough for the number to be fresh:
+         * once per decoded block, about forty times a second. */
+        s_ring_pct = (int)((xStreamBufferBytesAvailable(s_pcm) * 100) /
+                           PCM_RING_BYTES);
+
+        const uint32_t send_ms =
+            (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_send);
+        if (send_ms > LOOP_STALL_MS) {
+            ESP_LOGW(TAG, "ring send blocked %" PRIu32 " ms (ring %d%%)",
+                     send_ms, ring_headroom_pct());
         }
         /* Position from samples decoded, not from bytes read: with VBR
          * the two disagree, and this is the number the slider shows. */
@@ -1309,8 +1893,22 @@ static track_end_t play_file(const char *path)
          * playlist, freeing the ring out from under a blocked
          * xStreamBufferReceive() is a use-after-free once per track. */
         while (!s_writer_done) vTaskDelay(pdMS_TO_TICKS(10));
-        vStreamBufferDelete(s_pcm);
+        /*
+         * Order matters. -1 is published FIRST, so anything asking about
+         * occupancy is already being told there is no ring before the
+         * memory stops existing. Then the handle is cleared, then the
+         * buffer is freed -- so at no point is there a reachable handle
+         * to a freed buffer.
+         *
+         * WithCaps allocated it, so WithCaps has to free it. The plain
+         * vStreamBufferDelete() frees through the default heap and the
+         * ring is in PSRAM -- a mismatch that happens once per track and
+         * would not necessarily fault straight away.
+         */
+        s_ring_pct = -1;
+        StreamBufferHandle_t doomed = s_pcm;
         s_pcm = NULL;
+        vStreamBufferDeleteWithCaps(doomed);
     }
     /* Why, not just that. "finished" on a track the user skipped out of
      * reads as the skip having been ignored until the next line arrives. */
@@ -1396,6 +1994,7 @@ static void player_loop(void)
         }
 
         ESP_LOGI(TAG, "playing %s", s_path);
+        history_push(s_path);
         const track_end_t why = play_file(s_path);
         have = false;
 
@@ -1406,6 +2005,11 @@ static void player_loop(void)
              * there. Keeping it would offer a next track that cannot be
              * opened. */
             playlist_clear();
+            /* The cache is keyed by path and every path in it is on the
+             * volume that just left. Keeping them would mean a later
+             * track with a coincidentally equal path getting someone
+             * else's cover. */
+            mediacache_clear();
             s_open_chooser = true;
             continue;
         }
@@ -1463,6 +2067,7 @@ void app_main(void)
      * the correct outcome. */
     /* Priority 1, below the UI at 4 and well below the decoder. Nothing
      * this task produces is worth a millisecond of the audio path. */
+    mediacache_init();
     xTaskCreate(media_task, "media", 6144, NULL, 1, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by

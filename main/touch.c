@@ -32,7 +32,46 @@ static const char *TAG = "tab5_touch";
 
 #define TOUCH_INT_GPIO      (GPIO_NUM_23)
 
+/*
+ * How long after a screen transition a new press is ignored, on top of
+ * waiting for the finger to lift.
+ *
+ * Release-then-press is not always a second intent. Capacitive panels
+ * report a brief loss of contact when a finger rolls or the pressure
+ * eases, and the GT911 in particular will drop a point for one poll and
+ * pick it back up -- which, at the moment a new screen has just
+ * appeared under it, is indistinguishable from a deliberate second tap
+ * on whatever landed there.
+ *
+ * 250 ms is above the panel's jitter and below what reads as
+ * unresponsive: a deliberate second tap takes longer than that to
+ * arrive, because the hand has to see the new screen first.
+ *
+ * If the chooser still feels like it selects something on opening,
+ * raise this before reaching for anything else -- it is the only number
+ * involved. If it starts feeling sticky when paging quickly through a
+ * long directory, lower it. Note that the swallow is armed only on
+ * screen transitions, so this never delays an ordinary tap.
+ */
+#ifndef TOUCH_SETTLE_MS
+#define TOUCH_SETTLE_MS     (250)
+#endif
+
 static esp_lcd_touch_handle_t s_touch;
+
+/*
+ * Set by touch_swallow(). Cleared only when BOTH are true: the finger
+ * has lifted, and the settle window has expired.
+ *
+ * Two conditions because they cover different failures. Waiting for the
+ * release stops the press that caused the transition from being read
+ * again by the screen it opened. Waiting out the window stops the
+ * panel's own release-and-reacquire from becoming a fresh tap on that
+ * screen a few milliseconds later. Either alone leaves a real way to
+ * select something nobody aimed at.
+ */
+static bool s_swallow;
+static TickType_t s_swallow_until;
 
 esp_err_t touch_init(i2c_master_bus_handle_t bus, int panel_w, int panel_h)
 {
@@ -94,6 +133,33 @@ bool touch_present(void)
     return s_touch != NULL;
 }
 
+void touch_swallow(void)
+{
+    s_swallow = true;
+    s_swallow_until = xTaskGetTickCount() + pdMS_TO_TICKS(TOUCH_SETTLE_MS);
+}
+
+/* True while the swallow is still in force. Kept in one place because
+ * the release test and the timer test have to agree, and an inverted
+ * comparison in one of them is a lock that never lifts. */
+static bool swallow_active(bool finger_down)
+{
+    if (!s_swallow) return false;
+
+    /* Signed subtraction, so this stays correct across the tick counter
+     * wrapping -- which it does every 49 days at 1 kHz, and which a
+     * plain `now < until` gets wrong exactly once per wrap, for 250 ms,
+     * on a device people leave running. */
+    const bool settled =
+        (TickType_t)(xTaskGetTickCount() - s_swallow_until) < (TickType_t)(1u << 31);
+
+    if (!finger_down && settled) {
+        s_swallow = false;
+        return false;
+    }
+    return true;
+}
+
 bool touch_get(int *x, int *y)
 {
     if (!s_touch) return false;
@@ -105,10 +171,20 @@ bool touch_get(int *x, int *y)
     esp_lcd_touch_point_data_t pt[1] = { 0 };
     uint8_t count = 0;
 
-    if (esp_lcd_touch_read_data(s_touch) != ESP_OK) return false;
-    if (esp_lcd_touch_get_data(s_touch, pt, &count, 1) != ESP_OK || count == 0) {
+    if (esp_lcd_touch_read_data(s_touch) != ESP_OK) {
+        swallow_active(false);
         return false;
     }
+    if (esp_lcd_touch_get_data(s_touch, pt, &count, 1) != ESP_OK || count == 0) {
+        /* Finger up. Not the end of the swallow on its own: the settle
+         * window still has to expire, or the panel dropping a point for
+         * one poll counts as the release and the reacquisition counts as
+         * a new tap. */
+        swallow_active(false);
+        return false;
+    }
+
+    if (swallow_active(true)) return false;
 
     *x = pt[0].x;
     *y = pt[0].y;
