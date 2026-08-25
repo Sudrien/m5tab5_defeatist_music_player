@@ -45,10 +45,16 @@ typedef enum {
     UI_ACTION_SCREEN_OFF,
     UI_ACTION_SCREEN_ON,
     UI_ACTION_PREV,         /* start of track, or the track before it */
+    UI_ACTION_PREV_AGAIN,   /* double tap: back through play history */
     UI_ACTION_NEXT,
     UI_ACTION_SEEK,         /* value = target percent 0..100 */
     UI_ACTION_VOLUME,       /* value = target percent 0..100 */
 } ui_action_kind_t;
+
+/* Name of an action, for logging. Never NULL. Lives beside the enum so a
+ * new action cannot be added without a name -- the switch has no default,
+ * so the compiler asks. */
+const char *ui_action_name(ui_action_kind_t k);
 
 typedef struct {
     ui_action_kind_t kind;

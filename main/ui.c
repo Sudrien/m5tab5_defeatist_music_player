@@ -13,6 +13,9 @@
 #include "esp_log.h"
 
 #include "gfx.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "ui.h"
 #include "waveform.h"
 
@@ -146,6 +149,33 @@ static int s_drag = -1;         /* 0 = seek, 1 = volume */
 static int s_drag_x, s_drag_y;
 static int s_drag_pct;
 static bool s_was_down;
+
+/*
+ * When the previous-track button was last tapped, for double-tap
+ * detection. 0 means "no tap pending a partner".
+ *
+ * 400 ms: comfortably longer than two deliberate taps take, and shorter
+ * than the gap between two separate decisions to go back one track.
+ */
+const char *ui_action_name(ui_action_kind_t k)
+{
+    switch (k) {
+    case UI_ACTION_NONE:        return "none";
+    case UI_ACTION_PLAY_PAUSE:  return "play/pause";
+    case UI_ACTION_CHOOSE_FILE: return "folder";
+    case UI_ACTION_SCREEN_OFF:  return "moon (screen off)";
+    case UI_ACTION_SCREEN_ON:   return "wake";
+    case UI_ACTION_PREV:        return "prev";
+    case UI_ACTION_PREV_AGAIN:  return "prev x2";
+    case UI_ACTION_NEXT:        return "next";
+    case UI_ACTION_SEEK:        return "seek";
+    case UI_ACTION_VOLUME:      return "volume";
+    }
+    return "?";
+}
+
+#define DOUBLE_TAP_MS   (400)
+static TickType_t s_prev_tick;
 
 /* Saved cover-art strip behind the bubble, and whether a bubble was drawn
  * last frame (so the restore only costs anything while dragging). */
@@ -698,7 +728,25 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
 
     prev_centre(&cx, &cy);
     if (in_box(x, y, cx, cy, SKIP_HALF)) {
-        act.kind = UI_ACTION_PREV;
+        /*
+         * A second tap inside the window is a different intent, not a
+         * repeat of the first: single means "the track before this one
+         * in the list", double means "whatever I was actually listening
+         * to". Under shuffle those are unrelated answers.
+         *
+         * The first tap is not held back waiting to see whether a second
+         * arrives. Doing that would put DOUBLE_TAP_MS of lag on
+         * every single press to serve the rarer one; instead both fire
+         * and the player treats the second as a correction. That is why
+         * the second action is PREV_AGAIN rather than PREV: the player
+         * needs to know it is undoing its own last move.
+         */
+        const TickType_t now = xTaskGetTickCount();
+        const bool again = s_prev_tick &&
+            (now - s_prev_tick) < pdMS_TO_TICKS(DOUBLE_TAP_MS);
+
+        s_prev_tick = again ? 0 : now;   /* a triple tap is two doubles */
+        act.kind = again ? UI_ACTION_PREV_AGAIN : UI_ACTION_PREV;
         return act;
     }
 
