@@ -26,7 +26,7 @@ jobs:
       - name: Install ESP-IDF
         uses: espressif/install-esp-idf-action@v1
         with:
-          version: "5.5.5"
+          version: "v5.5.5"
           target: 'esp32p4'
 
       - name: Build and Merge Binaries
