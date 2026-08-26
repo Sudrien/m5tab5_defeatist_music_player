@@ -49,6 +49,7 @@ What do you mean no audio over Bluetooth
 - setting storage
 - turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
+- Podcast over wifi downloader? Conceivable. 
 
 ## Potential issues
 
