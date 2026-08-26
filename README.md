@@ -4,7 +4,7 @@ What do you mean no audio over Bluetooth
 
 ![](screenshots/IMG_20260825_212600_264a.jpg)
 
-( [Bôa has a bandcamp by the way](https://boa-uk.bandcamp.com/). You want this because you want artist to actually get paid for their work, right? )
+( [Bôa has a bandcamp by the way](https://boa-uk.bandcamp.com/). You want this because you want artist to actually get paid for their work, right? Not some streaming cents. )
 
 
 ## The M5Tab5 is not an ideal music player.
