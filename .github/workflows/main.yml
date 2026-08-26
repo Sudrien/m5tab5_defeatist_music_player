@@ -23,21 +23,19 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref || github.ref }}
 
-      - name: Run exFAT Setup Script
-        run: |
-          chmod +x tools/enable_exfat.sh
-          ./tools/enable_exfat.sh
-
-      - name: Run vendored Setup Script
-        run: |
-          chmod +x tools/fetch_vendored.sh
-          ./tools/fetch_vendored.sh
-          
       - name: Install ESP-IDF
         uses: espressif/install-esp-idf-action@v1
         with:
           version: "v5.5.5"
           target: 'esp32p4'
+
+      - name: Run exFAT and Vendored Setup Scripts
+        run: |
+          chmod +x tools/enable_exfat.sh
+          ./tools/enable_exfat.sh
+          
+          chmod +x tools/fetch_vendored.sh
+          ./tools/fetch_vendored.sh
 
       - name: Build and Merge Binaries
         run: |
