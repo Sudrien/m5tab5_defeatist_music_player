@@ -23,7 +23,7 @@ TODO:
 
 TO INVESTIGATE:
 
-- peaking? (come of it's embedded record needle noise. ugh)
+- peaking? (some of it's embedded record needle noise. ugh)
 - ~~mp3 format variants~~
 - why they hell are you telling other people to use a python script. This is an ffmpeg fix if you can't be bothered to pull in libraries
 
