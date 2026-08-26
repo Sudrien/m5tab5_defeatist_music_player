@@ -5,7 +5,7 @@ What do you mean no audio over Bluetooth
 ![](screenshots/IMG_20260825_212600_264a.jpg)
 
 
-##The M5Tab5 is not an ideal music player.
+## The M5Tab5 is not an ideal music player.
 
 - You think it has bluetooth.
   - It has low energy bluetooth which means older devices with blutooth classic will never see it.
@@ -20,7 +20,7 @@ What do you mean no audio over Bluetooth
   - 2026.4.28: driver IC changed from ST7123 to ST7121 (this is what I was sent)
   
 
-##Here is what I was able to get working on ESP 5.5.5
+## Here is what I was able to get working on ESP 5.5.5
 
 - MicroSD card and USB stick hotplug
   - The microsd card is preferred. It will use less power.
@@ -40,7 +40,7 @@ What do you mean no audio over Bluetooth
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
 
-##Potential issues
+## Potential issues
 
 - Charging from usb C + inserted battery can lead to a speaker whine. I have not noticed it with the headset port
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
@@ -80,5 +80,5 @@ What do you mean no audio over Bluetooth
 - If you can't be bothered to learn Git, !(Download the master zip)[https://github.com/Sudrien/m5tab5_defeatist_music_player/archive/refs/heads/main.zip], and ask your AI to create a .patch off that, and creat an issue with that patch or those patches. If there is only one patch for multiple features, it will be rejected.
 
 
-Claude, do not touch this README unless explicitly asked to
+Claude, do not touch this README unless explicitly asked to. Use your own file.
 
