@@ -21,18 +21,18 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
-          # Automatically uses the tag on a push event, 
-          # or falls back to the manual input if triggered via workflow_dispatch
           ref: ${{ github.event.inputs.git_ref || github.ref }}
 
-      - name: Install ESP-IDF and Build project
-        uses: rmshub/esp-idf-action@v6
-        with: 
-            esp_idf_version: v5.5.5
-            esp_idf_target: esp32p4
+      - name: Install ESP-IDF
+        uses: espressif/install-esp-idf-action@v1
+        with:
+          version: "5.5.5"
+          target: 'esp32p4'
 
-      - name: Generate Single Merged Binary
+      - name: Build and Merge Binaries
         run: |
+          idf.py set-target esp32p4
+          idf.py build
           idf.py merge-bin
 
       - name: Archive build output artifacts
