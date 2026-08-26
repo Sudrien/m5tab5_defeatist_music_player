@@ -1,16 +1,23 @@
 /*
  * battery.h -- state of charge, as a number the UI can draw.
  *
- * The Tab5 measures its own pack with an INA226 on the same I2C bus
- * everything else here is on: a bus voltage register and a shunt voltage
- * register, 16 bits each. That is the whole of the hardware interface,
- * and it is why this file is small.
+ * The Tab5 measures its own pack with an INA226 (U31 on the schematic)
+ * on the same I2C bus everything else here is on: a bus voltage register
+ * and a shunt voltage register, 16 bits each. That is the whole of the
+ * hardware interface, and it is why this file is small.
+ *
+ * The pack is an NP-F550: **2S, nominally 7.4 V**, full around 8.2 V and
+ * flat around 6.0 V. Not a single cell. Every curve in this file is for
+ * two in series, and a single-cell curve here does not read low -- it
+ * pins at 100% for the entire discharge, because 7 V is off the top of
+ * it. That is the failure worth naming, since it looks like a working
+ * gauge on a full battery and stays looking like one.
  *
  * WHAT IS HONEST AND WHAT IS NOT
  *
  * The voltage is measured. The percentage is not -- it is that voltage
- * put through a piecewise curve for a single lithium cell, which is a
- * guess, and a worse one under load than at rest. It moves when the
+ * put through a piecewise curve for two lithium cells in series, which
+ * is a guess, and a worse one under load than at rest. It moves when the
  * amplifier is driving the speaker and moves back when headphones are
  * plugged in, and no amount of curve fitting fixes that; coulomb
  * counting would, and needs a charge reference this does not have.
@@ -21,9 +28,11 @@
  * happened is worse than one that reads 60% and stays put, because the
  * movement is the part people believe.
  *
- * Charging is the sign of the current through the shunt, and the sign
- * depends on which way round the shunt is wired. BATTERY_CHARGE_SIGN is
- * the knob if the bolt appears exactly when it should not.
+ * Charging is the sign of the current through the shunt (R39, 5 mohm).
+ * On this board **positive is discharging and negative is charging**,
+ * which is the opposite of the intuitive reading and is why
+ * BATTERY_CHARGE_SIGN exists rather than a bare comparison. Flip it if
+ * the fill turns green exactly when it should not.
  *
  * THREADING
  *
@@ -48,9 +57,11 @@ extern "C" {
 /*
  * INA226, 0x41 on the internal bus.
  *
- * If the probe at init logs a device that answers but reads a constant,
- * this address is the first thing to doubt -- it is strapped by two
- * address pins and 0x40, 0x44 and 0x45 are the other plausible ones.
+ * From the schematic rather than from folklore: U31's A1 pin is tied to
+ * GND and A0 to SOC_3.3V, which is 0x41 in the INA226 address table.
+ * SCL/SDA are xG32_SYS_SCL / xG31_SYS_SDA -- the same bus as the two
+ * PI4IOE expanders and the ES8388, so it takes the bus handle this file
+ * is handed rather than making its own.
  */
 #define BATTERY_INA226_ADDR     (0x41)
 

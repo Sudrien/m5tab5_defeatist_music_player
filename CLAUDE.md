@@ -423,11 +423,11 @@ Rules that are load-bearing:
 
 ## The battery percentage is a guess and says so
 
-`battery.c` reads an INA226 on the shared I2C bus: bus voltage, shunt
-voltage, two registers. The **voltage is measured; the percentage is
-not** -- it is that voltage through a piecewise single-cell curve, which
-sags under load and recovers when the amplifier is muted by a headphone
-plug. Coulomb counting would fix that and needs a charge reference this
+`battery.c` reads the INA226 (U31, 0x41 -- A1 to GND, A0 to SOC_3.3V) on
+the shared I2C bus: bus voltage, shunt voltage, two registers. The
+**voltage is measured; the percentage is not** -- it is that voltage
+through a piecewise curve, which sags under load and recovers when the
+amplifier is muted by a headphone plug. Coulomb counting would fix that and needs a charge reference this
 board does not give us.
 
 So the reading is averaged in the part (16 samples, which is where audio
@@ -441,11 +441,15 @@ Three things that will look like bugs and are not:
 
 - **-1 draws an empty outline and no digits.** No gauge, or no reading
   yet. Drawing 0% would be a claim, and the wrong one.
-- **Charging is the sign of the shunt current**, which depends on which
-  way round the shunt is wired. `BATTERY_CHARGE_SIGN` is the knob if the
-  green fill appears exactly when it should not. There is a threshold
-  rather than a bare sign test because the reading dithers around zero at
-  rest.
+- **The pack is 2S.** NP-F550, 7.4 V nominal: full is about 8.2 V and
+  the board gives up around 6.0 V. A single-cell curve here does not read
+  low, it pins at 100% for the whole discharge, because 7 V is off the
+  top of it -- which looks like a working gauge on a full battery and
+  goes on looking like one.
+- **Positive shunt current is DISCHARGING** on this board, so
+  `BATTERY_CHARGE_SIGN` is -1. R39 (5 mohm) has IN+ on the pack side.
+  There is a threshold rather than a bare sign test because the reading
+  dithers around zero at rest.
 - **An absent gauge is not fatal.** `battery_init()` probes before
   configuring and returns `ESP_ERR_NOT_FOUND`; `app_main()` does not
   `ESP_ERROR_CHECK` it. If it reads a constant, doubt

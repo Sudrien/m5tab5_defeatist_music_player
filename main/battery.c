@@ -33,13 +33,29 @@ static const char *TAG = "tab5_batt";
  */
 #define CONFIG_VALUE    (0x4527)
 
-/* Which sign of shunt voltage means current into the pack. Flip this if
- * the bolt appears exactly when it should not -- the shunt's orientation
- * is a board detail and this is the only thing that depends on it. */
-#define BATTERY_CHARGE_SIGN     (+1)
+/*
+ * Which sign of shunt voltage means current INTO the pack.
+ *
+ * Negative, on this board. R39 sits between the pack and the system with
+ * IN+ on the pack side, so ordinary discharge reads positive and a
+ * charger pushing current backwards through it reads negative. M5Stack's
+ * own configuration for this board says the same thing in as many words.
+ *
+ * It is a named constant rather than a bare comparison because it is a
+ * board fact, not a law: this is the one line to change if the fill
+ * turns green exactly when it should not.
+ */
+#define BATTERY_CHARGE_SIGN     (-1)
 
 /*
- * One lithium cell, resting, as eight points.
+ * TWO lithium cells in series, resting, as eight points.
+ *
+ * An NP-F550 is 2S: about 8.2 V full and about 6.0 V at the point the
+ * board gives up. These are single-cell figures doubled, with the bottom
+ * anchored at 6.0 V rather than at 2 x 3.0 V, because the shutdown
+ * threshold is what "empty" means to someone holding the thing -- a
+ * gauge that reads 8% as the player dies is wrong in the only way that
+ * matters.
  *
  * Not a formula, because there is not one -- the middle of the curve is
  * nearly flat and the ends fall off a cliff, which is exactly what a
@@ -48,8 +64,8 @@ static const char *TAG = "tab5_batt";
 typedef struct { int mv; int pct; } point_t;
 
 static const point_t k_curve[] = {
-    { 3300,   0 }, { 3550,  10 }, { 3660,  20 }, { 3740,  40 },
-    { 3850,  60 }, { 3950,  75 }, { 4070,  90 }, { 4180, 100 },
+    { 6000,   0 }, { 7100,  10 }, { 7320,  20 }, { 7480,  40 },
+    { 7700,  60 }, { 7900,  75 }, { 8140,  90 }, { 8300, 100 },
 };
 
 static int curve_pct(int mv)
@@ -143,6 +159,8 @@ static void battery_task(void *arg)
             /* A threshold rather than a bare sign test. At rest the
              * reading dithers around zero, and a bolt that flickers on a
              * player sitting on a desk is worse than no bolt. */
+            /* 200 uV across 5 mohm is 40 mA -- comfortably above the
+             * dither and well below any real charge current. */
             s_charging = (BATTERY_CHARGE_SIGN * shunt_uv) > 200;
 
             /* Exponential average, 1/8. Fast enough to follow a cable
