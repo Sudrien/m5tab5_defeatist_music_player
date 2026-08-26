@@ -44,13 +44,12 @@ jobs:
           idf.py set-target esp32p4
           idf.py build
           idf.py merge-bin
+          mv build/merged-binary.bin build/m5tab5_defeatist_music_player_${{ github.ref_name }}_standalone.bin
 
       - name: Archive build output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-merged-${{ github.ref_name }}
+          name: m5tab5_defeatist_music_player-${{ github.ref_name }}
           path: |
-            build/merged-binary.bin
-            build/bootloader/bootloader.bin
-            build/partition_table/partition-table.bin
-            build/*.bin
+            build/m5tab5_defeatist_music_player_${{ github.ref_name }}_standalone.bin
+            build/m5tab5_defeatist_music_player.bin
