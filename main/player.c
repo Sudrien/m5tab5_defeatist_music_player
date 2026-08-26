@@ -699,6 +699,37 @@ static void request_seek(int pct, const char *why)
  */
 static volatile uint32_t s_track_gen;
 
+/*
+ * Whether s_pos_sec, s_len_sec and s_can_seek belong to the track whose
+ * name is on screen.
+ *
+ * They used to be set just before the decode loop's first iteration,
+ * which is after decoder_open() -- and decoder_open() on a Xing-less MP3
+ * is a whole-file scan, twelve seconds on a USB drive. For all of it the
+ * bar went on filling and the clock went on counting the *previous*
+ * track, which is the most convincing possible way to look like the
+ * press did nothing.
+ *
+ * Cleared by track_change_begin(), at the moment the decision is made,
+ * for the same reason the generation counter is bumped there. Set again
+ * only once the new numbers are real.
+ */
+static volatile bool     s_stats_valid;
+
+/*
+ * What the decoder says this file is, published for the format card.
+ *
+ * Only ever written by the decode loop on the first block of a track and
+ * read by media_task, which is why it is a handful of scalars and one
+ * short string rather than a struct behind a lock: media_task waits for
+ * s_fmt_known and by then none of them are moving.
+ */
+static char              s_fmt_codec[16];
+static volatile int      s_fmt_rate;
+static volatile int      s_fmt_chans;
+static volatile int      s_fmt_kbps;
+static volatile bool     s_fmt_known;
+
 static char              s_media_path[512];
 static volatile bool     s_media_want;
 
@@ -722,8 +753,22 @@ static volatile bool     s_media_want;
  */
 static char              s_walked_path[512];
 static volatile bool     s_scan_abort;
+
+/*
+ * The prefetch walk's own abort flag.
+ *
+ * Separate from s_scan_abort deliberately. That one means "the walk of
+ * the playing track is no longer wanted"; this one means "the track that
+ * was going to be next is no longer next". They are set together on a
+ * track change and cleared at different times -- media_task clears
+ * s_scan_abort when it picks up the new track, and prefetch_next()
+ * clears this one immediately before it starts scanning, which is the
+ * only point at which "no longer next" has been re-decided.
+ */
+static volatile bool     s_prefetch_abort;
 static volatile bool     s_wave_ready;
-static framewalk_t       s_walk;
+static framewalk_t       s_walk;            /* media_task's scan buffer */
+static framewalk_t       s_walk_pending;    /* decode loop's; see below */
 
 /* The track being played, its tags, and the filename fallback.
  *
@@ -854,13 +899,72 @@ static const char *s_display_name = "";
  * Called from play_file() before decoder_open(), so the screen goes blank
  * and honest immediately instead of lying for as long as the open takes.
  */
+/*
+ * Title, artist and album, now rather than eventually.
+ *
+ * The cache first, because prefetch put them there a track ago and a hit
+ * is a memcpy; otherwise a read, which is a couple of fread()s at the
+ * front of the file and is measured in milliseconds even on USB. Either
+ * way this is cheap enough to run on the decode loop before
+ * decoder_open(), which is the whole point of it: the tag is available
+ * long before the decoder has finished deciding what the file is.
+ *
+ * WHY THE FILENAME IS NOT SET FIRST
+ *
+ * It used to be. track_change_begin() pointed s_display_name at the
+ * basename immediately and the tags landed later, so every track change
+ * flashed "04 - track04.mp3" for as long as the tag read took and then
+ * replaced it with the title. That reads as the player having failed to
+ * find a title and then changing its mind -- and on a file that really
+ * has no tag, the flash is indistinguishable from the final answer,
+ * which is what made it look like a guess in both cases.
+ *
+ * So the filename is the fallback and is only reached as one. Between
+ * the track change and this function returning, the title row is empty;
+ * that gap is a few milliseconds and an empty row for it is honest,
+ * where a filename for it is not.
+ */
+static void load_tags(const char *path)
+{
+    memset(&s_tags, 0, sizeof(s_tags));
+
+    if (mediacache_tags(path, &s_tags)) {
+        ESP_LOGI(TAG, "tags from cache: \"%s\"", s_tags.title);
+    } else {
+        FILE *af = fopen(path, "rb");
+        if (af) {
+            if (covertag_read_tags(af, &s_tags) == ESP_OK) {
+                ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
+                         s_tags.title, s_tags.artist, s_tags.album);
+                /* Read here, stored by media_task. This runs on the
+                 * decode loop, and storing is what evicts -- which is
+                 * media_task's alone, because media_task is the one
+                 * holding borrowed pointers into these entries. See the
+                 * threading note in mediacache.h. */
+            } else {
+                memset(&s_tags, 0, sizeof(s_tags));
+                ESP_LOGI(TAG, "no text tags in this file; showing the filename");
+            }
+            fclose(af);
+        }
+    }
+
+    /* Only now, and only if there is nothing better. */
+    if (!s_tags.title[0]) {
+        s_display_name = strrchr(path, '/');
+        s_display_name = s_display_name ? s_display_name + 1 : path;
+    } else {
+        s_display_name = "";
+    }
+}
+
 static void track_change_begin(const char *path)
 {
     s_track_gen++;
 
     s_scan_abort = true;
+    s_prefetch_abort = true;
     s_wave_ready = false;
-    if (strcmp(path, s_walked_path) != 0) waveform_set(NULL);
 
     /*
      * Re-pin around the change. The track leaving the screen is the one
@@ -876,12 +980,57 @@ static void track_change_begin(const char *path)
     mediacache_unpin_all();
     if (s_path[0]) mediacache_pin(s_path);      /* the outgoing track */
 
-    /* The filename is what there is until the tag is read. It is also
-     * what will be shown permanently if there is no tag, so this is not a
-     * placeholder so much as the first draft of the answer. */
-    memset(&s_tags, 0, sizeof(s_tags));
-    s_display_name = strrchr(path, '/');
-    s_display_name = s_display_name ? s_display_name + 1 : path;
+    /*
+     * Everything the old track's numbers said, retired here rather than
+     * when the new ones arrive. See s_stats_valid: the gap between the
+     * two is a whole-file scan on some formats, and a bar that keeps
+     * filling across it is the previous song's progress drawn under this
+     * song's name.
+     */
+    s_stats_valid = false;
+    s_pos_sec = 0;
+    s_len_sec = 0;
+    s_can_seek = false;
+    s_fmt_known = false;
+    s_fmt_rate = s_fmt_chans = s_fmt_kbps = 0;
+    s_fmt_codec[0] = '\0';
+
+    /*
+     * The envelope, from the cache when prefetch got there first.
+     *
+     * Three cases and they are all here: the walk we already have for
+     * this exact path (a repaint, or a track that never changed), the
+     * one prefetch left in the cache -- which arrives fully drawn, with
+     * no scan and no wait -- and nothing, which blanks it.
+     */
+    if (strcmp(path, s_walked_path) != 0) {
+        /*
+         * Its own buffer, not s_walk.
+         *
+         * s_walk is where framewalk_scan() writes, and that scan belongs
+         * to media_task -- which may still be part-way through the
+         * previous track's when this runs. Copying a cached envelope
+         * into it would be two tasks writing one kilobyte at once, for
+         * no reason: waveform_set() takes a copy anyway, so this buffer
+         * is dead the moment the call returns.
+         *
+         * And the copy accessor, not the borrowing one: this is the
+         * decode loop, and a pointer into a cache entry is only safe in
+         * the hands of the task that evicts.
+         */
+        if (mediacache_walk_copy(path, &s_walk_pending)) {
+            waveform_set(&s_walk_pending);
+            snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
+            ESP_LOGI(TAG, "envelope from cache at track change");
+        } else {
+            waveform_set(NULL);
+        }
+    }
+
+    /* Read before the screen is asked to show anything, so the title row
+     * is either right or empty and never a filename standing in for a
+     * title the file actually has. */
+    load_tags(path);
 
     ui_clear_art();
     ui_capture_background();
@@ -898,17 +1047,10 @@ static void load_track_visuals(const char *path)
      * had to come apart: the chooser closing wants the cover put back and
      * nothing thrown away.
      */
-    FILE *af = fopen(path, "rb");
-    if (!af) return;
-
-    if (covertag_read_tags(af, &s_tags) == ESP_OK) {
-        ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
-                 s_tags.title, s_tags.artist, s_tags.album);
-    } else {
-        ESP_LOGI(TAG, "no text tags in this file; showing the filename");
-    }
-
-    fclose(af);
+    /* The tags are already in hand -- track_change_begin() read them
+     * before decoder_open(), and the cache makes this path free on a
+     * repaint, where they have not changed at all. */
+    load_tags(path);
 
     /* Cleared here as well as in track_change_begin(), because this is
      * also the repaint path: the chooser has just been drawing over the
@@ -944,10 +1086,118 @@ static void load_track_visuals(const char *path)
  * The two writers still own disjoint rows: this task paints the artwork
  * area and ui_task paints the bar below it.
  */
+/* Extension, upper case, without the dot. "FILE" when there is not one
+ * -- which is rarer than it sounds, since the browser only lists things
+ * it recognised by extension in the first place. */
+static void container_name(const char *path, char *out, size_t out_len)
+{
+    const char *dot = strrchr(path, '.');
+    const char *slash = strrchr(path, '/');
+    if (!dot || (slash && dot < slash) || !dot[1]) {
+        snprintf(out, out_len, "FILE");
+        return;
+    }
+    size_t i = 0;
+    for (const char *p = dot + 1; *p && i + 1 < out_len; p++, i++) {
+        out[i] = (*p >= 'a' && *p <= 'z') ? (char)(*p - 32) : *p;
+    }
+    out[i] = '\0';
+}
+
+/*
+ * What goes where the cover would have gone.
+ *
+ * A file with no picture used to get 720x720 of black, which is exactly
+ * what a cover that has not arrived yet looks like -- so the two states
+ * the player most needs to distinguish were drawn identically, and the
+ * honest one was the one that looked broken. The format is the thing
+ * every file can say about itself, and it is worth reading: a track that
+ * turns out to be 96 kbps mono explains itself at a glance.
+ *
+ * The decoder is the source for everything but the container and the
+ * size, so this waits briefly for the first block to be decoded. Not
+ * long, and not forever: by the time media_task runs, the ring has been
+ * filling for the best part of a second and s_fmt_known is set. The
+ * bound is for the case where it is not -- a paused start, a stalled
+ * device -- where the card appears with two lines instead of four rather
+ * than not appearing.
+ */
+#define FMT_WAIT_SLICE_MS   (50)
+#define FMT_WAIT_MAX_MS     (600)
+
+static void show_format_card(const char *path, long bytes, uint32_t gen)
+{
+    for (int waited = 0; !s_fmt_known && waited < FMT_WAIT_MAX_MS;
+         waited += FMT_WAIT_SLICE_MS) {
+        vTaskDelay(pdMS_TO_TICKS(FMT_WAIT_SLICE_MS));
+        if (gen != s_track_gen) return;
+    }
+    if (gen != s_track_gen) return;
+
+    char head[16];
+    char rate[48] = "";
+    char codec[48] = "";
+    char size[32] = "";
+
+    container_name(path, head, sizeof(head));
+
+    if (s_fmt_known && s_fmt_rate > 0) {
+        snprintf(rate, sizeof(rate), "%d Hz  %s", s_fmt_rate,
+                 s_fmt_chans == 1 ? "mono"
+                 : s_fmt_chans == 2 ? "stereo" : "multichannel");
+    }
+    if (s_fmt_known && s_fmt_kbps > 0) {
+        snprintf(codec, sizeof(codec), "%s  %d kbps",
+                 s_fmt_codec[0] ? s_fmt_codec : head, s_fmt_kbps);
+    } else if (s_fmt_known && s_fmt_codec[0]) {
+        snprintf(codec, sizeof(codec), "%s", s_fmt_codec);
+    }
+    if (bytes > 0) {
+        /* One decimal place, integer arithmetic -- MB is the only unit
+         * worth having here and a cover-less file is never small enough
+         * for KB to read better. */
+        const long tenths = (bytes * 10) / (1024 * 1024);
+        snprintf(size, sizeof(size), "%ld.%ld MB", tenths / 10, tenths % 10);
+    }
+
+    const char *lines[5];
+    int n = 0;
+    lines[n++] = head;
+    if (rate[0])  lines[n++] = rate;
+    if (codec[0]) lines[n++] = codec;
+    if (size[0])  lines[n++] = size;
+    lines[n++] = "no cover art";
+
+    ui_show_art_info(lines, n);
+    ui_capture_background();
+}
+
 static void do_art(const char *path, uint32_t gen)
 {
+    /*
+     * Already known to have no picture in it -- prefetch read the tag, or
+     * this track was played earlier. Straight to the card, with no read
+     * at all. Without the negative being cached this is a full tag scan
+     * every time the track comes back, to learn the same nothing.
+     */
+    if (mediacache_no_art(path)) {
+        ESP_LOGI(TAG, "no cover art (cached); showing the format");
+        long known = 0;
+        FILE *sf = fopen(path, "rb");        /* size only: open, seek, close */
+        if (sf) {
+            if (fseek(sf, 0, SEEK_END) == 0) known = ftell(sf);
+            fclose(sf);
+        }
+        show_format_card(path, known, gen);
+        return;
+    }
+
     FILE *af = fopen(path, "rb");
     if (!af) return;
+
+    long fsize = 0;
+    if (fseek(af, 0, SEEK_END) == 0) fsize = ftell(af);
+    rewind(af);
 
     uint8_t *jpg = NULL;
     size_t jpg_len = 0;
@@ -982,6 +1232,21 @@ static void do_art(const char *path, uint32_t gen)
          * showed a blank square. ESP_ERR_NOT_SUPPORTED still means the
          * container has no parser here at all. */
         ESP_LOGI(TAG, "no cover art in this file (%s)", esp_err_to_name(xerr));
+
+        /* Remembered, so a return to this track does not read the tag
+         * again to find the same nothing, and so the card can be put up
+         * without a read at all.
+         *
+         * Only for the two errors that are statements about the file. A
+         * failed allocation or a short read says nothing about whether
+         * there is a picture in there, and caching it as "none" would
+         * make one bad moment permanent for as long as the entry
+         * survives. */
+        if (xerr == ESP_ERR_NOT_FOUND || xerr == ESP_ERR_NOT_SUPPORTED) {
+            mediacache_put_no_art(path);
+        }
+
+        if (gen == s_track_gen) show_format_card(path, fsize, gen);
         return;
     }
 
@@ -1187,21 +1452,42 @@ static bool media_settle(uint32_t gen, int delay_ms, const char *what)
 }
 
 /*
- * Fetch the next track's cover into the cache, if there is one and if
- * the ring can spare the reads.
+ * Get the next track ready: tags, cover, envelope. In that order.
  *
- * Art only, deliberately. The cover is ~120 KB and bounded; the frame
- * walk reads the whole file, which on a 60 MB FLAC is a second reader
- * doing more I/O than the decoder for the entire track. The cover is
- * also the part that shows: a track change blanks it, and the seconds
- * before it returns are the ones that read as a stall. A late envelope
- * is invisible, because the bar degrades to a plain slider and then
- * becomes a waveform -- which is what it already does today.
+ * Everything a track change makes the user wait for is fetched here, a
+ * track early, into the three-entry cache -- so arriving at the next
+ * song is a memcpy rather than three reads off a device the decoder is
+ * already using. That is the entire reason a "load" felt slow: none of
+ * this work could start until the track it was for was already playing.
  *
- * If the walk is ever prefetched too, it needs the abort flag threaded
- * through framewalk_scan()'s existing polling, not a gate checked once
- * at the start like this one.
+ * The order is the order they are wanted in. Tags are first because they
+ * are tiny and because the title is the first thing to appear; the cover
+ * is second because it is the largest thing on screen and its absence is
+ * what reads as a stall; the envelope is last because it is a whole-file
+ * read and its absence is invisible -- the bar degrades to a plain
+ * slider and fills in later, which is what it already did.
+ *
+ * Each stage re-checks the gate. They are not one operation: the tags
+ * cost a few KB and the walk costs the whole file, and a device that can
+ * spare the first cannot necessarily spare the last.
+ *
+ * The walk is abortable through s_prefetch_abort, threaded into
+ * framewalk_scan()'s existing polling. It has to be -- a gate checked
+ * once at the start is fine for a 120 KB bounded read and is not fine
+ * for a 60 MB one that would otherwise run for seconds after the track
+ * it was for stopped being next.
  */
+static framewalk_t s_prefetch_walk;     /* media_task only; ~1 KB, not a local */
+
+/* Whether the ring can still spare a reader. Logged by the caller when
+ * it cannot, because a gate that never opens is indistinguishable from a
+ * feature that was never built. */
+static bool prefetch_ok(int floor_pct)
+{
+    const int pct = ring_headroom_pct();
+    return pct < 0 || pct >= floor_pct;
+}
+
 static void prefetch_next(void)
 {
     const char *next = playlist_peek_next(browser_order());
@@ -1210,52 +1496,116 @@ static void prefetch_next(void)
         return;
     }
 
-    size_t have = 0;
-    if (mediacache_art(next, &have)) {
-        ESP_LOGD(TAG, "prefetch: already cached");
-        return;
-    }
-
-    /* Said out loud rather than returning quietly. A gate that never
-     * opens looks exactly like a feature that was never built, and the
-     * only way to tell them apart from a log is if the gate reports
-     * itself. */
-    const int pct = ring_headroom_pct();
-    if (pct < PREFETCH_START_PCT) {
+    if (!prefetch_ok(PREFETCH_START_PCT)) {
         ESP_LOGI(TAG, "prefetch held off: ring at %d%%, need %d%%",
-                 pct, PREFETCH_START_PCT);
+                 ring_headroom_pct(), PREFETCH_START_PCT);
         return;
     }
 
-    FILE *f = fopen(next, "rb");
-    if (!f) return;
+    const uint32_t gen = s_track_gen;
 
-    uint8_t *img = NULL;
-    size_t len = 0;
-    const esp_err_t err = covertag_extract_art(f, &img, &len);
-    fclose(f);
-
-    if (err != ESP_OK) return;
-
-    /* Checked again on the way out. The read is bounded but not
-     * instant, and a cover that cost the decoder its margin is worse
-     * than no cover -- so if the ring fell through the floor while this
-     * was reading, the result is dropped rather than kept, and the log
-     * line says the gate is set too loose for this device. */
-    const int after = ring_headroom_pct();
-    if (after >= 0 && after < PREFETCH_ABORT_PCT) {
-        ESP_LOGI(TAG, "prefetch cost too much ring (%d%%); dropped", after);
-        free(img);
-        return;
+    /* ---- tags ---- */
+    if (!mediacache_tags(next, NULL)) {
+        FILE *f = fopen(next, "rb");
+        if (f) {
+            id3_tags_t t;
+            memset(&t, 0, sizeof(t));
+            if (covertag_read_tags(f, &t) == ESP_OK) {
+                mediacache_put_tags(next, &t);
+                ESP_LOGI(TAG, "prefetched tags: \"%s\"", t.title);
+            }
+            fclose(f);
+        }
     }
 
-    mediacache_put_art(next, img, len);         /* takes ownership */
+    if (gen != s_track_gen) return;
+
+    /* ---- cover ---- */
+    size_t have = 0;
+    if (!mediacache_art(next, &have) && !mediacache_no_art(next)) {
+        if (!prefetch_ok(PREFETCH_ABORT_PCT)) {
+            ESP_LOGI(TAG, "prefetch stopped before the cover (ring %d%%)",
+                     ring_headroom_pct());
+            return;
+        }
+
+        FILE *f = fopen(next, "rb");
+        if (!f) return;
+
+        uint8_t *img = NULL;
+        size_t len = 0;
+        const esp_err_t err = covertag_extract_art(f, &img, &len);
+        fclose(f);
+
+        if (err != ESP_OK) {
+            /* The useful half of what was learned. Without storing it,
+             * arriving at this track re-reads the tag to find the same
+             * nothing before it can put the format card up. Same two
+             * errors as do_art(), for the same reason. */
+            if (err == ESP_ERR_NOT_FOUND || err == ESP_ERR_NOT_SUPPORTED) {
+                mediacache_put_no_art(next);
+            }
+        } else {
+            /* Checked again on the way out. The read is bounded but not
+             * instant, and a cover that cost the decoder its margin is
+             * worse than no cover -- so if the ring fell through the
+             * floor while this was reading, the result is dropped and
+             * the log line says the gate is set too loose for this
+             * device. */
+            if (!prefetch_ok(PREFETCH_ABORT_PCT)) {
+                ESP_LOGI(TAG, "prefetch cost too much ring (%d%%); dropped",
+                         ring_headroom_pct());
+                free(img);
+                return;
+            }
+            mediacache_put_art(next, img, len);     /* takes ownership */
+            ESP_LOGI(TAG, "prefetched cover for %s (%u bytes)",
+                     next, (unsigned)len);
+        }
+    }
+
+    if (gen != s_track_gen) return;
+
+    /* ---- envelope ---- */
+    if (!mediacache_walk(next)) {
+        if (!prefetch_ok(PREFETCH_START_PCT)) {
+            ESP_LOGI(TAG, "prefetch stopped before the envelope (ring %d%%)",
+                     ring_headroom_pct());
+            return;
+        }
+
+        FILE *f = fopen(next, "rb");
+        if (!f) return;
+
+        if (!framewalk_supports(f)) {
+            fclose(f);
+        } else {
+            /* Cleared here and nowhere else: this is the moment "still
+             * next" was last true. */
+            s_prefetch_abort = false;
+
+            const esp_err_t err = framewalk_scan(f, LCD_H_RES,
+                                                 &s_prefetch_abort,
+                                                 &s_prefetch_walk);
+            fclose(f);
+
+            if (err == ESP_OK && !s_prefetch_abort &&
+                s_prefetch_walk.has_levels && s_prefetch_walk.frames &&
+                gen == s_track_gen) {
+                mediacache_put_walk(next, &s_prefetch_walk);
+                ESP_LOGI(TAG, "prefetched envelope for %s (%d columns)",
+                         next, s_prefetch_walk.columns);
+            } else {
+                ESP_LOGI(TAG, "prefetch walk abandoned");
+            }
+        }
+    }
 
     int n = 0;
     size_t bytes = 0;
     mediacache_stats(&n, &bytes);
-    ESP_LOGI(TAG, "prefetched cover for %s (%u bytes; cache %d entries, %u KB)",
-             next, (unsigned)len, n, (unsigned)(bytes / 1024));
+    ESP_LOGI(TAG, "prefetch done: cache %d entries, %u KB", n,
+             (unsigned)(bytes / 1024));
 }
 
 /*
@@ -1293,34 +1643,81 @@ static void media_task(void *arg)
         const uint32_t gen = s_track_gen;
         snprintf(path, sizeof(path), "%s", s_media_path);
 
-        /* Out of the way of the track starting. See media_settle(). */
-        if (!media_settle(gen, MEDIA_ART_DELAY_MS, "cover")) continue;
+        /*
+         * Out of the way of the track starting. See media_settle().
+         *
+         * Skipped entirely when the answer is already in memory, which
+         * after a prefetch it usually is. The delay exists to keep a
+         * second reader off the device while the ring fills; a cache hit
+         * is not a reader, and making it wait 700 ms for the sake of
+         * symmetry would throw away most of what the prefetch bought.
+         * "Already cached" includes knowing there is no cover: that puts
+         * the format card up, and it is not a read either.
+         */
+        size_t cached_len = 0;
+        const bool art_in_hand = mediacache_art(path, &cached_len) != NULL ||
+                                 mediacache_no_art(path);
+
+        if (!art_in_hand && !media_settle(gen, MEDIA_ART_DELAY_MS, "cover")) {
+            continue;
+        }
 
         HEAP_CHECK("before do_art");
         do_art(path, gen);
         HEAP_CHECK("after do_art");
+
+        /*
+         * The tags the decode loop read a moment ago, stored -- by the
+         * task that is allowed to store them. It cost a read either way;
+         * this is what makes the back button's return to this track free.
+         * After the cover, because the cover is the thing on screen and
+         * this is a few KB at the front of a file.
+         */
+        if (gen == s_track_gen && !mediacache_tags(path, NULL)) {
+            FILE *tf = fopen(path, "rb");
+            if (tf) {
+                id3_tags_t t;
+                memset(&t, 0, sizeof(t));
+                if (covertag_read_tags(tf, &t) == ESP_OK) {
+                    mediacache_put_tags(path, &t);
+                }
+                fclose(tf);
+            }
+        }
 
         /* A track change during the cover makes the walk pointless too --
          * s_media_want is already set for the new one, and starting this
          * walk would only mean aborting it a moment later. */
         if (gen != s_track_gen) continue;
 
-        /* Already walked, and still the track on screen. The envelope is
-         * drawn and correct; walking it again would produce the same
-         * numbers at the cost of reading the whole file. */
-        if (strcmp(path, s_walked_path) == 0) continue;
+        /*
+         * The envelope, unless it is already drawn.
+         *
+         * Two ways it can be: this is a repaint of the track that was
+         * already walked, or track_change_begin() installed a prefetched
+         * walk out of the cache. Either way the shape on screen is this
+         * track's and walking again would read the whole file to produce
+         * the same numbers.
+         *
+         * Skipped rather than `continue`d, which it used to be -- the
+         * prefetch below is the next track's business and has nothing to
+         * do with whether this one needed a walk. Continuing here meant
+         * that the better the cache did, the less prefetching happened,
+         * which is precisely backwards.
+         */
+        if (strcmp(path, s_walked_path) != 0) {
+            /* The expensive one: a whole-file read, so it waits longest
+             * and is the first thing dropped when the track moves on. A
+             * cached envelope skips the wait, because do_walk() will not
+             * touch the card at all. */
+            if (!mediacache_walk(path) &&
+                !media_settle(gen, MEDIA_WALK_DELAY_MS, "envelope")) continue;
 
-        /* The expensive one: a whole-file read, so it waits longest and
-         * is the first thing dropped when the track moves on. A cached
-         * envelope skips the wait, because do_walk() will not touch the
-         * card at all. */
-        if (!mediacache_walk(path) &&
-            !media_settle(gen, MEDIA_WALK_DELAY_MS, "envelope")) continue;
-
-        do_walk(path);
-        HEAP_CHECK("after do_walk");
-        if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
-                                   "%s", path);
+            do_walk(path);
+            HEAP_CHECK("after do_walk");
+            if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
+                                       "%s", path);
+        }
 
         /*
          * Everything for the playing track is in hand. Pin it so the
@@ -1464,6 +1861,7 @@ static void ui_task(void *arg)
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
+        st.stats_valid = s_stats_valid;
 
         const bool down = bdown;
         const ui_action_t act = ui_touch(&st, down, bx, by);
@@ -1597,6 +1995,7 @@ static void ui_task(void *arg)
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
+        st.stats_valid = s_stats_valid;
         ui_draw(&st);
 
         /* 50 Hz under a finger, 25 Hz while the title is travelling, 10 Hz
@@ -1707,6 +2106,10 @@ static track_end_t play_file(const char *path)
     s_pos_sec = 0;
     s_can_seek = decoder_can_seek(dec);
     s_len_sec = decoder_duration_sec(dec);
+    /* Published last, and only here. Everything the bar draws from is now
+     * this track's; before this line it was the previous track's and the
+     * UI was drawing dashes rather than pretending otherwise. */
+    s_stats_valid = true;
     if (s_len_sec == 0) {
         ESP_LOGI(TAG, "no duration available; seek bar will stay empty");
     }
@@ -1848,6 +2251,18 @@ static track_end_t play_file(const char *path)
             ESP_LOGI(TAG, "%s: %d Hz, %d ch, %d kbps",
                      info.codec, info.sample_rate, info.channels,
                      info.bitrate_kbps);
+
+            /* For the format card, which is what a file with no picture
+             * in it shows instead of a cover. Published rather than
+             * fetched: media_task cannot ask the decoder anything -- the
+             * decoder_t belongs to this loop, and handing it across is
+             * the mistake s_ring_pct exists to avoid. */
+            snprintf(s_fmt_codec, sizeof(s_fmt_codec), "%s",
+                     info.codec ? info.codec : "");
+            s_fmt_rate = info.sample_rate;
+            s_fmt_chans = info.channels;
+            s_fmt_kbps = info.bitrate_kbps;
+            s_fmt_known = true;
 
             if (cur_rate == 0) {
                 /* First block: set the rate before anything is queued,
@@ -2140,7 +2555,7 @@ void app_main(void)
     /* Priority 1, below the UI at 4 and well below the decoder. Nothing
      * this task produces is worth a millisecond of the audio path. */
     mediacache_init();
-    xTaskCreate(media_task, "media", 6144, NULL, 1, NULL);
+    xTaskCreate(media_task, "media", 8192, NULL, 1, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by
      * the same expander write, so before panel_init() there is nothing on

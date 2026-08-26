@@ -94,6 +94,17 @@ void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c);
  * is there in order to place the run may as well ask for it by name. */
 #define GFX_TIME_NEG_W  (GFX_DIG_W + GFX_DIG_GAP + GFX_TIME_W)
 void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c);
+/*
+ * MM:SS with every digit replaced by its middle segment.
+ *
+ * "Unknown", rather than zero. A clock reading 00:00 for a track whose
+ * length has not been determined yet is a statement about the track, and
+ * a wrong one; four dashes are the same width, in the same place, and do
+ * not claim anything. Used for both clocks between a track change and
+ * the point the new track's duration is known.
+ */
+void gfx_draw_time_dashes(int x, int y, uint16_t c);
+
 void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c);
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c);
 

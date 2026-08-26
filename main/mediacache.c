@@ -4,11 +4,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "mediacache.h"
 
@@ -22,12 +25,50 @@ typedef struct {
 
     uint8_t    *art;
     size_t      art_len;
+    bool        no_art;         /* read, and there was none */
+
+    bool        has_tags;
+    id3_tags_t  tags;           /* 192 bytes; stored inline, not pointed at */
 
     framewalk_t *walk;          /* PSRAM; ~1 KB */
 } entry_t;
 
 static entry_t  s_e[MEDIACACHE_ENTRIES];
 static uint32_t s_clock;
+
+/*
+ * The lock this file spent its first version not needing.
+ *
+ * It was safe without one because every caller was media_task, and the
+ * borrowed pointers were safe for the same reason: the only task that
+ * could evict an entry was the task holding the pointer. That stopped
+ * being true when the decode loop started asking for tags and the
+ * envelope at the moment of a track change -- which it has to do,
+ * because the whole point of prefetching them is that they are on screen
+ * before anything slow has happened.
+ *
+ * So: a mutex around every entry access, and a split in the contract
+ * that the header spells out. Copy-out accessors (mediacache_tags,
+ * mediacache_walk_copy) are safe from any task. Borrowing accessors
+ * (mediacache_art, mediacache_walk) and anything that stores are still
+ * media_task's alone, because a borrowed pointer outlives the lock and
+ * nothing but the borrower's own eviction can be reasoned about.
+ *
+ * A recursive mutex would let the two kinds nest; they do not nest, and
+ * a plain one that deadlocks if they ever start is the more useful of
+ * the two.
+ */
+static SemaphoreHandle_t s_lock;
+
+static void lock(void)
+{
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+}
+
+static void unlock(void)
+{
+    if (s_lock) xSemaphoreGive(s_lock);
+}
 
 static void release(entry_t *e);
 
@@ -41,11 +82,17 @@ static void release(entry_t *e);
  */
 void mediacache_init(void)
 {
+    /* Before the first lock() can matter: init runs in app_main() with no
+     * other task yet created. */
+    if (!s_lock) s_lock = xSemaphoreCreateMutex();
+
+    lock();
     for (int i = 0; i < MEDIACACHE_ENTRIES; i++) {
         if (s_e[i].used) release(&s_e[i]);
     }
     memset(s_e, 0, sizeof(s_e));
     s_clock = 0;
+    unlock();
 }
 
 static entry_t *find(const char *path)
@@ -104,19 +151,24 @@ static void touch(entry_t *e)
 
 const uint8_t *mediacache_art(const char *path, size_t *len)
 {
+    lock();
     entry_t *e = find(path);
-    if (!e || !e->art) return NULL;
+    if (!e || !e->art) { unlock(); return NULL; }
     touch(e);
     *len = e->art_len;
-    return e->art;
+    const uint8_t *p = e->art;
+    unlock();
+    /* Borrowed past the lock -- media_task only. See the note above. */
+    return p;
 }
 
 void mediacache_put_art(const char *path, uint8_t *img, size_t len)
 {
     if (!img) return;
 
+    lock();
     entry_t *e = slot_for(path);
-    if (!e) { free(img); return; }       /* ownership was taken; honour it */
+    if (!e) { unlock(); free(img); return; }  /* ownership was taken; honour it */
 
     if (!e->used) {
         e->used = true;
@@ -129,23 +181,98 @@ void mediacache_put_art(const char *path, uint8_t *img, size_t len)
     free(e->art);
     e->art = img;
     e->art_len = len;
+    e->no_art = false;
     touch(e);
+    unlock();
+}
+
+bool mediacache_tags(const char *path, id3_tags_t *out)
+{
+    lock();
+    entry_t *e = find(path);
+    if (!e || !e->has_tags) { unlock(); return false; }
+    touch(e);
+    if (out) *out = e->tags;
+    unlock();
+    return true;
+}
+
+void mediacache_put_tags(const char *path, const id3_tags_t *t)
+{
+    if (!t) return;
+
+    lock();
+    entry_t *e = slot_for(path);
+    if (!e) { unlock(); return; }
+
+    if (!e->used) {
+        e->used = true;
+        snprintf(e->path, sizeof(e->path), "%s", path);
+    }
+
+    e->tags = *t;
+    e->has_tags = true;
+    touch(e);
+    unlock();
+}
+
+bool mediacache_no_art(const char *path)
+{
+    lock();
+    entry_t *e = find(path);
+    const bool r = e && e->no_art;
+    unlock();
+    return r;
+}
+
+void mediacache_put_no_art(const char *path)
+{
+    lock();
+    entry_t *e = slot_for(path);
+    if (!e) { unlock(); return; }
+
+    if (!e->used) {
+        e->used = true;
+        snprintf(e->path, sizeof(e->path), "%s", path);
+    }
+
+    e->no_art = true;
+    touch(e);
+    unlock();
 }
 
 const framewalk_t *mediacache_walk(const char *path)
 {
+    lock();
     entry_t *e = find(path);
-    if (!e || !e->walk) return NULL;
+    if (!e || !e->walk) { unlock(); return NULL; }
     touch(e);
-    return e->walk;
+    const framewalk_t *w = e->walk;
+    unlock();
+    /* Borrowed past the lock -- media_task only. */
+    return w;
+}
+
+bool mediacache_walk_copy(const char *path, framewalk_t *out)
+{
+    if (!out) return false;
+
+    lock();
+    entry_t *e = find(path);
+    if (!e || !e->walk) { unlock(); return false; }
+    touch(e);
+    memcpy(out, e->walk, sizeof(*out));
+    unlock();
+    return true;
 }
 
 void mediacache_put_walk(const char *path, const framewalk_t *w)
 {
     if (!w) return;
 
+    lock();
     entry_t *e = slot_for(path);
-    if (!e) return;
+    if (!e) { unlock(); return; }
 
     if (!e->used) {
         e->used = true;
@@ -155,40 +282,51 @@ void mediacache_put_walk(const char *path, const framewalk_t *w)
     if (!e->walk) {
         e->walk = heap_caps_malloc(sizeof(*e->walk),
                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!e->walk) return;            /* entry stays valid, just art-only */
+        /* Entry stays valid, just art-only. */
+        if (!e->walk) { unlock(); return; }
     }
     memcpy(e->walk, w, sizeof(*e->walk));
     touch(e);
+    unlock();
 }
 
 void mediacache_pin(const char *path)
 {
+    lock();
     entry_t *e = find(path);
     if (e) { e->pinned = true; touch(e); }
+    unlock();
 }
 
 void mediacache_unpin_all(void)
 {
+    lock();
     for (int i = 0; i < MEDIACACHE_ENTRIES; i++) s_e[i].pinned = false;
+    unlock();
 }
 
 void mediacache_clear(void)
 {
+    lock();
     for (int i = 0; i < MEDIACACHE_ENTRIES; i++) {
         if (s_e[i].used) release(&s_e[i]);
     }
+    unlock();
 }
 
 void mediacache_stats(int *entries, size_t *bytes)
 {
     int n = 0;
     size_t b = 0;
+    lock();
     for (int i = 0; i < MEDIACACHE_ENTRIES; i++) {
         if (!s_e[i].used) continue;
         n++;
         b += s_e[i].art_len;
+        if (s_e[i].has_tags) b += sizeof(s_e[i].tags);
         if (s_e[i].walk) b += sizeof(*s_e[i].walk);
     }
+    unlock();
     if (entries) *entries = n;
     if (bytes) *bytes = b;
 }

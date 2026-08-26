@@ -41,6 +41,20 @@ typedef struct {
      * exists, which is what the button is promising. */
     bool     has_next;
     bool     screen_off;
+
+    /*
+     * Whether pos_sec, len_sec and can_seek describe the track named
+     * above them.
+     *
+     * False from the moment a track change is decided until the new
+     * track's duration is known -- which on a Xing-less MP3 is a whole-
+     * file scan away. The three numbers are stale for all of it, and a
+     * seek bar that keeps filling and a clock that keeps counting are
+     * the most convincing part of the illusion that nothing has
+     * happened. While this is false the clocks read as dashes and the
+     * bar is a bare groove.
+     */
+    bool stats_valid;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
@@ -82,6 +96,20 @@ void ui_capture_background(void);
  * previous track's cover -- which reads as the player having ignored the
  * choice rather than as the file having no picture in it. */
 void ui_clear_art(void);
+
+/*
+ * Fill the artwork square with lines of text, centred.
+ *
+ * For a file with no picture in it. The alternative -- and what this
+ * replaces -- is 720x720 of black, which looks like a cover that has not
+ * arrived yet rather than one that does not exist. What goes there
+ * instead is the thing the file can always say about itself: its format.
+ *
+ * lines[0] is drawn largest and the rest step down, so the container
+ * name reads as a heading and the details under it as detail. Draws and
+ * blits immediately; not part of ui_draw().
+ */
+void ui_show_art_info(const char *const *lines, int n);
 
 /* Repaint the bar. Cheap enough to call at 20 Hz: it touches only the
  * bottom UI_BAR_H rows, never the cover art above them. */
