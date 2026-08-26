@@ -11,7 +11,8 @@ What do you mean no audio over Bluetooth
 
 - You think it has bluetooth.
   - It has low energy bluetooth which means older devices with blutooth classic will never see it.
-  - LE Audio / Auracast reqquires differnt wiring and profiles. Which might work if you reflash the C6, but that requires [special equipment](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi). 
+  - LE Audio / Auracast reqquires differnt wiring and profiles. Which might work if you reflash the C6, but that requires [special equipment](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi).
+  - Something like [The bb-link](https://github.com/halka/bb-link) would be required.
 - It has a headset port
   - Which is great for a headset. Or an AUX cable.
   - But there is nothing listing for inline controls. These can be wired, supposedly. Which, again, means special (but not too special) equipment. 
