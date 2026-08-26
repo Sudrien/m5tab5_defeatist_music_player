@@ -40,6 +40,13 @@ What do you mean no audio over Bluetooth
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
 
+## What could happen
+- I think there is nothing in dependencies stopping form using esp-idf 6.1
+- build file lists faster
+- is fast file seek enabled? I think it is?
+- setting storage
+- turn off autoplay on boot
+
 ## Potential issues
 
 - Charging from usb C + inserted battery can lead to a speaker whine. I have not noticed it with the headset port
