@@ -15,9 +15,9 @@ What do you mean no audio over Bluetooth
   - But there is nothing listing for inline controls. These can be wired, supposedly. Which, again, means special (but not too special) equipment. 
 - The display and touch are controlled by the same chip. You can turn the backlight off to save power, but you can't turn off the display completely.
 - The whole display driver mess.
- - Initial release (2025.5.9): separate ILI9881C display driver + GT911 touch controller
- - 2025.10.14: switched to ST7123 display-touch integrated (TDDI) driver
- - 2026.4.28: driver IC changed from ST7123 to ST7121 (this is what I was sent)
+  - Initial release (2025.5.9): separate ILI9881C display driver + GT911 touch controller
+  - 2025.10.14: switched to ST7123 display-touch integrated (TDDI) driver
+  - 2026.4.28: driver IC changed from ST7123 to ST7121 (this is what I was sent)
   
 
 ##Here is what I was able to get working on ESP 5.5.5
