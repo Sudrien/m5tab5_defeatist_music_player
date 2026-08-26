@@ -96,6 +96,75 @@ advance. Text at a given scale is now **narrower and taller**.
 - `ui.c`'s marquee compares `strlen()` as a change-detection token only.
   That is still fine: it is a token, not a width.
 
+## A request needs a reader
+
+`s_seek_pct` is a request to the decode loop. At the end of a playlist
+there is no decode loop -- so a seek sat in the variable until an
+unrelated track started and was then applied to it, fifteen seconds
+after the button. From the outside: four presses that did nothing,
+followed by a song that mysteriously started from zero.
+
+`s_decoding` says whether a reader exists. Seeks are **refused** when it
+is false, not queued -- a request with no reader is not pending, it is
+lost, and a lost request that fires later against a different song is
+worse than one that never fires. Pending seeks are also dropped on any
+track change and when a track ends.
+
+Set it after `decoder_open()` succeeds, clear it on **every** exit from
+`play_file()` including the out-of-memory path. Leaving it true on an
+error path reintroduces the bug in the place it is hardest to see.
+
+## Heap corruption: what actually happened
+
+Symptom: `tlsf_free ... block already marked as free`, backtrace always
+pointing at the PCM ring's delete. Two theories built on that backtrace
+were wrong. What resolved it was patch 11 reverting the ring from 256 KB
+of PSRAM via `xStreamBufferCreateWithCaps()` back to 64 KB via plain
+`xStreamBufferCreate()` -- after which the same rapid-skip sequence that
+crashed twice ran for three and a half minutes clean.
+
+**So: do not put the PCM ring in PSRAM with the WithCaps API.** The
+mechanism is not established -- absence of a crash in one long run is
+strong evidence, not proof -- and if it is ever revisited, it needs a
+soak test measured in hours, not one good run.
+
+The ring is created and freed once per track, which makes it the
+most-churned allocation and therefore the block that discovers damage
+first. It will appear in the backtrace of almost any heap corruption
+here and says nothing about the cause. Bisect with `-DHEAPCHECK=1` and
+`CONFIG_HEAP_POISONING_COMPREHENSIVE` instead of reading the stack.
+
+## Debugging heap corruption here: read this first
+
+The PCM ring is created and freed once per track, which makes it the
+most-churned allocation in the program and therefore **the block that
+keeps discovering damage somebody else did.** It will appear in the
+backtrace of almost any heap corruption, and it says nothing about the
+cause.
+
+Two theories were built on that backtrace and both were wrong: a
+use-after-free on the ring handle (real, fixed, not the cause) and the
+larger PSRAM ring (not a bug at all). Do not add a third by reading the
+stack trace.
+
+Instead:
+
+1. `idf.py -DHEAPCHECK=1 build`. `main/heapcheck.h` checks every heap at
+   named points -- around `do_art`, `do_walk`, prefetch, and ring
+   create/delete -- and logs the first one that fails. The last good
+   checkpoint and the first bad one name the subsystem.
+2. Turn on `CONFIG_HEAP_POISONING_COMPREHENSIVE`
+   (Component config -> Heap memory debugging -> Comprehensive). This
+   catches the offending WRITE rather than the next free, which is the
+   difference between finding it and guessing.
+3. Ruled out so far by host testing under ASan: `mediacache.c` (2000
+   rapid track changes with the full ownership dance, clean),
+   `covertag.c` (1200-case fuzz corpus, clean).
+
+The checkpoints do not abort on failure, deliberately -- the sequence is
+the evidence, and aborting on the first bad one discards what came
+before it.
+
 ## Never share a handle across tasks; publish a value
 
 `s_pcm` belongs to `play_file()` and the I2S writer, and to nobody else.

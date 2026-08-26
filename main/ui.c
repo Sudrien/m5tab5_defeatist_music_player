@@ -33,6 +33,12 @@ static const char *TAG = "tab5_ui";
  * C_TRACK -- that is 0x3A, chosen to be a slider groove that does not
  * compete with the fill, and it is too dark to read as text. */
 #define C_ALBUM     RGB(0x88, 0x88, 0x88)
+
+/* A disabled icon. Dark enough to read as off at arm's length, light
+ * enough not to look like a rendering fault -- the same distance below
+ * C_ICON that C_ALBUM sits below C_THUMB, so the bar has one idea of
+ * what "de-emphasised" means rather than two. */
+#define C_ICON_OFF  RGB(0x55, 0x55, 0x55)
 /* The envelope's two halves.
  *
  * Played reuses C_FILL exactly -- it is the same statement the slider fill
@@ -360,25 +366,26 @@ static void draw_play_pause(bool playing)
  * The bar is what distinguishes them from the play triangle at a glance,
  * which matters when all three sit in a row 112 px apart.
  */
-static void draw_skip(int cx, int cy, bool forward)
+static void draw_skip(int cx, int cy, bool forward, bool enabled)
 {
     const int h = 22;               /* half-height of the triangle */
     const int w = 26;               /* base to apex */
+    const uint16_t c = enabled ? C_ICON : C_ICON_OFF;
 
     for (int dy = -h; dy <= h; dy++) {
         const int a = dy < 0 ? -dy : dy;
         const int run = w - (a * w) / h;
         if (run <= 0) continue;
-        if (forward) gfx_fill_rect(cx - w, cy + dy, run, 1, C_ICON);
-        else         gfx_fill_rect(cx + w - run, cy + dy, run, 1, C_ICON);
+        if (forward) gfx_fill_rect(cx - w, cy + dy, run, 1, c);
+        else         gfx_fill_rect(cx + w - run, cy + dy, run, 1, c);
     }
 
     /* The bar goes just past the apex -- the wall the tape stops against,
      * which is the convention every transport since a cassette deck has
      * used. Past the apex and not behind the base: behind the base it
      * reads as an underline on an arrow. */
-    if (forward) gfx_fill_rect(cx + 2, cy - h, 7, 2 * h + 1, C_ICON);
-    else         gfx_fill_rect(cx - 9, cy - h, 7, 2 * h + 1, C_ICON);
+    if (forward) gfx_fill_rect(cx + 2, cy - h, 7, 2 * h + 1, c);
+    else         gfx_fill_rect(cx - 9, cy - h, 7, 2 * h + 1, c);
 }
 
 static void draw_folder(void)
@@ -521,16 +528,39 @@ void ui_draw(const ui_state_t *st)
         const int split = x0 + ((x1 - x0) * shown_pct) / 100;
         gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,
                       st->can_seek ? C_PLAYHEAD : C_WAVE_FUTURE);
-    } else if (st->can_seek) {
-        /* No envelope yet -- the scan takes a few seconds on a long track
-         * and may never produce one for a format with no per-frame
-         * loudness. The bar is still a control in the meantime, so it
-         * falls back to what it was. */
-        draw_slider(x0, x1, y, shown_pct);
     } else if (st->len_sec > 0) {
-        gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
-        gfx_fill_rect(x0, y - 3, ((x1 - x0) * pos_pct) / 100, 6, C_FILL);
+        /*
+         * No envelope yet -- the scan takes a few seconds on a long
+         * track and may never produce one at all for a format with no
+         * per-frame loudness.
+         *
+         * Drawn as a flat block at full height rather than as a slider
+         * with a thumb: the same geometry the envelope will occupy, with
+         * every column at 100%. Two reasons.
+         *
+         * The row stops jumping. A thin groove with a circle on it,
+         * replaced seconds later by a 72 px tall waveform, is a layout
+         * change in the middle of a glance -- and the thumb was the only
+         * part that moved, so it read as the control being replaced
+         * rather than as detail arriving. Now the block simply acquires
+         * a shape.
+         *
+         * And the thumb was misleading here anyway. It says "grab me",
+         * which is exactly what the envelope version deliberately does
+         * not say -- the whole 72 px block is the target, and it is the
+         * same target before and after the scan finishes.
+         */
+        waveform_draw_flat(x0, x1, y, UI_WAVE_H, shown_pct,
+                           C_WAVE_PAST, C_WAVE_FUTURE);
+
+        const int split = x0 + ((x1 - x0) * shown_pct) / 100;
+        gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,
+                      st->can_seek ? C_PLAYHEAD : C_WAVE_FUTURE);
     } else {
+        /* No duration at all: nothing to show a position against, so a
+         * bare groove. Not a flat block -- a full-height bar with no
+         * playhead in it would claim the track had a length and that the
+         * position was zero. */
         gfx_fill_rect(x0, y - 3, x1 - x0, 6, C_TRACK);
     }
 
@@ -618,10 +648,14 @@ void ui_draw(const ui_state_t *st)
     draw_moon();
 
     int cx, cy;
+    /* Prev is never greyed: it always does something -- restart the
+     * track if nothing else -- so dimming it would be a lie about a
+     * working button. Next genuinely stops working at the end of a
+     * folder, which is the case worth showing. */
     prev_centre(&cx, &cy);
-    draw_skip(cx, cy, false);
+    draw_skip(cx, cy, false, true);
     next_centre(&cx, &cy);
-    draw_skip(cx, cy, true);
+    draw_skip(cx, cy, true, st->has_next);
     draw_play_pause(st->playing);
 
     gfx_blit(s_bar_top, s_h);

@@ -66,6 +66,18 @@ bool waveform_ready(void);
  * Draws into the gfx shadow and does not blit; the caller owns the blit,
  * because this is one element of a bar that is pushed in one go.
  */
+/*
+ * The same bar with every column at full height, for before the
+ * envelope exists.
+ *
+ * Needs no scan and no data -- only the position -- so it works from the
+ * first frame of a track, and shares waveform_draw_bar()'s geometry
+ * exactly so the row does not change shape when the real envelope
+ * replaces it.
+ */
+void waveform_draw_flat(int x0, int x1, int base_y, int height, int pct,
+                        uint16_t past, uint16_t future);
+
 void waveform_draw_bar(int x0, int x1, int base_y, int height, int pct,
                        uint16_t past, uint16_t future);
 

@@ -373,6 +373,15 @@ memcpy()s through. `xStreamBufferCreateWithCaps()` must be paired with
 `vStreamBufferDeleteWithCaps()`; the plain delete frees through the
 wrong heap, once per track.
 
+The ring is 64 KB in the ordinary heap. Patch 06 moved it to 256 KB in
+PSRAM via `xStreamBufferCreateWithCaps()`, which corrupted the heap --
+`tlsf_free: block already marked as free`, reproducibly, when skipping
+tracks fast enough that some decoded no blocks at all. Patch 11 reverted
+it and the same sequence then ran clean for three and a half minutes.
+The mechanism was never established, so the ring stays where it was. The justification for enlarging it was weak
+anyway -- ring size does not affect control latency, and the prefetch
+gate reads a percentage.
+
 The gate reads a **published integer**, not the ring handle.
 `media_task` calling `xStreamBufferBytesAvailable(s_pcm)` directly is a
 use-after-free -- the decode loop frees the ring between tracks, and an
@@ -414,6 +423,37 @@ Popping the top would mean "the track before the one I was on" or "the
 track I was just on" depending on how fast the card is -- a back button
 that sometimes goes forward. So the second tap is resolved against the
 track that was playing when the *first* tap landed.
+
+**Next greys out at the end of a folder.** `playlist_has_next()` is
+deliberately not `playlist_peek_next() != NULL`: under shuffle there is
+no *predictable* next track but there certainly is one, so peek returns
+NULL and this returns true. Greying under shuffle would claim the
+playlist had ended when it had not. Repeat-one maps to list order,
+matching what the skip button actually does -- repeat-one governs what
+happens when a track ends, not what skip means. Prev is never greyed,
+because it always does something.
+
+**The seek row is the same shape before and after the scan.** With no
+envelope yet, the row draws as a flat full-height block split at the
+playhead rather than as a thin groove with a thumb. The thumb was
+misleading -- it says "grab me", when the whole 72 px block is the
+target both before and after -- and swapping a 6 px groove for a 72 px
+waveform mid-glance read as the control being replaced rather than as
+detail arriving. Two fills, not a per-column loop; at 720 px that is 720
+`gfx_fill_rect()` calls saved per repaint for as long as the scan takes.
+
+**Covers are fitted to the box in both directions.** Previously a cover
+smaller than the panel was centred at native size, so a 300 px cover
+used a sixth of the area it was given and looked like a thumbnail that
+had failed to load. The JPEG path needed no new arithmetic -- the 16.16
+step is simply below 1.0 when enlarging. The PNG path did: pngle streams
+source runs and never offers a bitmap to sample, so the mapping has to
+run forwards, from source pixel to destination edges. Expressed as edges
+(`i*cw/iw` to `(i+1)*cw/iw`) rather than as a step, because computing
+both with the same expression is what makes adjacent runs abut instead
+of leaving seams. Nearest neighbour either way, so enlargement is
+blocky; that is honest, and a bilinear pass would trade blocky for soft
+at four reads per output pixel during playback.
 
 **Every button logs.** Transport presses are logged once where they are
 dispatched rather than per case, so a new action cannot be added and

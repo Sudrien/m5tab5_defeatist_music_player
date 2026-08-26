@@ -34,6 +34,12 @@ typedef struct {
      * and still not be seekable: duration.c reads Ogg lengths out of the
      * container, but nothing can seek an Ogg yet. */
     bool can_seek;
+
+    /* Whether the next button would do anything. False greys it out --
+     * the last track of a folder in list order, or an empty playlist.
+     * True under shuffle even though the next track is unknown: it
+     * exists, which is what the button is promising. */
+    bool     has_next;
     bool     screen_off;
 } ui_state_t;
 

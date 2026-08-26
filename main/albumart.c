@@ -601,21 +601,41 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     const int iw = (int)info.width, ih = (int)info.height;
     const int stride = (int)pad_w;
 
-    int cw = iw, ch = ih;
-    if (iw > screen_w || ih > screen_h) {
-        /* The dimension that overflows by more sets the ratio. Compared
-         * as a cross product rather than as two divisions, so the choice
-         * is exact instead of being made on truncated integers. */
-        if ((int64_t)iw * screen_h >= (int64_t)ih * screen_w) {
-            cw = screen_w;
-            ch = (int)(((int64_t)ih * screen_w) / iw);
-        } else {
-            ch = screen_h;
-            cw = (int)(((int64_t)iw * screen_h) / ih);
-        }
-        if (cw < 1) cw = 1;
-        if (ch < 1) ch = 1;
+    /*
+     * Fitted to the box in BOTH directions -- enlarged as well as
+     * reduced. There used to be an `if (iw > screen_w || ih > screen_h)`
+     * around this, so a cover smaller than the panel was centred at its
+     * native size with black all round it. A 300 px cover on a 720 px
+     * panel occupied a sixth of the area it was given and looked like a
+     * thumbnail somebody forgot to load properly.
+     *
+     * Nothing about the arithmetic below needed to change to enlarge:
+     * the 16.16 step is simply less than 1.0 when cw > iw, and the same
+     * loop reads each source pixel several times instead of skipping
+     * some. That is the advantage of a fixed-point step over the integer
+     * one this replaced.
+     *
+     * Nearest neighbour, so enlarging is blocky -- a 300 px cover on a
+     * 720 px panel is 2.4x and the pixels show. That is the honest
+     * result: the alternative is a bilinear pass that makes a small
+     * image look soft instead of blocky, which is not obviously better
+     * and costs four reads and three lerps per output pixel during
+     * playback.
+     */
+    const int64_t fit_by_width = (int64_t)iw * screen_h;
+    const int64_t fit_by_height = (int64_t)ih * screen_w;
+
+    int cw, ch;
+    if (fit_by_width >= fit_by_height) {
+        /* Wider than the box's aspect: width is the binding dimension. */
+        cw = screen_w;
+        ch = (int)(((int64_t)ih * screen_w) / iw);
+    } else {
+        ch = screen_h;
+        cw = (int)(((int64_t)iw * screen_h) / ih);
     }
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
 
     /* 16.16, rounded up so the last output pixel cannot index past the
      * last source row or column. */
@@ -625,7 +645,8 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
 
     if (cw != iw || ch != ih) {
-        ESP_LOGI(TAG, "cover fitted to %dx%d", cw, ch);
+        ESP_LOGI(TAG, "cover %s to %dx%d",
+                 (cw > iw) ? "enlarged" : "fitted", cw, ch);
     }
 
     /* The shadow, not the panel's buffer. Drawing straight into the
@@ -690,16 +711,48 @@ typedef struct {
     bool saw_init;
     uint16_t *fb;
     int screen_w, screen_h;
-    int dx, dy;             /* top-left of the image in screen space */
+    int dx, dy;             /* top-left of the scaled image in screen space */
+    int iw, ih;             /* source size */
+    int cw, ch;             /* size on screen after fitting */
 } png_ctx_t;
 
 static void png_on_init(pngle_t *pngle, uint32_t w, uint32_t h)
 {
     png_ctx_t *c = pngle_get_user_data(pngle);
     c->saw_init = true;
+    c->iw = (int)w;
+    c->ih = (int)h;
+
+    /*
+     * Same fit-to-box as the JPEG path, up as well as down.
+     *
+     * Scaled forwards rather than backwards, and that is forced by the
+     * streaming: pngle hands over source pixels as it finds them and
+     * never offers a bitmap to sample, so the destination rectangle has
+     * to be computed FROM each source pixel instead of the destination
+     * loop pulling from a source. Which is why the mapping below is
+     * expressed as edges -- pixel i covers [i*cw/iw, (i+1)*cw/iw) -- and
+     * not as a step. Rounding each edge the same way is what stops
+     * enlargement leaving unwritten seams between blocks.
+     */
+    if ((int64_t)w * c->screen_h >= (int64_t)h * c->screen_w) {
+        c->cw = c->screen_w;
+        c->ch = (int)(((int64_t)h * c->screen_w) / w);
+    } else {
+        c->ch = c->screen_h;
+        c->cw = (int)(((int64_t)w * c->screen_h) / h);
+    }
+    if (c->cw < 1) c->cw = 1;
+    if (c->ch < 1) c->ch = 1;
+
+    c->dx = (c->screen_w - c->cw) / 2;
+    c->dy = (c->screen_h - c->ch) / 2;
+
     ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32" (png)", w, h);
-    c->dx = (c->screen_w - (int)w) / 2;
-    c->dy = (c->screen_h - (int)h) / 2;
+    if (c->cw != (int)w || c->ch != (int)h) {
+        ESP_LOGI(TAG, "cover %s to %dx%d",
+                 (c->cw > (int)w) ? "enlarged" : "fitted", c->cw, c->ch);
+    }
 }
 
 static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
@@ -712,13 +765,28 @@ static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
                                    ((rgba[1] & 0xFC) << 3) |
                                     (rgba[2] >> 3));
 
-    for (uint32_t yy = 0; yy < h; yy++) {
-        const int sy = c->dy + (int)(y + yy);
+    /*
+     * The source run [x, x+w) x [y, y+h) maps to the half-open
+     * destination rectangle between the scaled edges of its first and
+     * last pixels. Computing both edges with the same expression is what
+     * makes adjacent runs abut exactly: run A's right edge and run B's
+     * left edge are the same arithmetic on the same number.
+     *
+     * At 1:1 this reduces to the old behaviour. Below 1:1 a run can map
+     * to zero pixels and is dropped, which is the correct way to shrink
+     * -- the run that lands on that pixel wins.
+     */
+    const int px0 = c->dx + (int)(((int64_t)x * c->cw) / c->iw);
+    const int px1 = c->dx + (int)(((int64_t)(x + w) * c->cw) / c->iw);
+    const int py0 = c->dy + (int)(((int64_t)y * c->ch) / c->ih);
+    const int py1 = c->dy + (int)(((int64_t)(y + h) * c->ch) / c->ih);
+
+    for (int sy = py0; sy < py1; sy++) {
         if (sy < 0 || sy >= c->screen_h) continue;
-        for (uint32_t xx = 0; xx < w; xx++) {
-            const int sx = c->dx + (int)(x + xx);
+        uint16_t *row = &c->fb[(size_t)sy * c->screen_w];
+        for (int sx = px0; sx < px1; sx++) {
             if (sx < 0 || sx >= c->screen_w) continue;
-            c->fb[sy * c->screen_w + sx] = px;
+            row[sx] = px;
         }
     }
 }
