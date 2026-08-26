@@ -286,6 +286,29 @@ void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c)
     seg_digit(x, y, (int)(s2 % 10), GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
 }
 
+static void seg_dash(int x, int y, int w, int h, int t, uint16_t c)
+{
+    gfx_fill_rect(x, y + h / 2 - t / 2, w, t, c);
+}
+
+void gfx_draw_time_dashes(int x, int y, uint16_t c)
+{
+    /* Same cell positions as gfx_draw_time(), so the run does not shift
+     * sideways at the moment the real numbers arrive. */
+    seg_dash(x, y, GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
+    x += GFX_DIG_W + GFX_DIG_GAP;
+    seg_dash(x, y, GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
+    x += GFX_DIG_W + GFX_DIG_GAP;
+
+    gfx_fill_rect(x + 1, y + GFX_DIG_H / 3, GFX_DIG_T, GFX_DIG_T, c);
+    gfx_fill_rect(x + 1, y + (2 * GFX_DIG_H) / 3, GFX_DIG_T, GFX_DIG_T, c);
+    x += GFX_DIG_W / 2 + GFX_DIG_GAP;
+
+    seg_dash(x, y, GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
+    x += GFX_DIG_W + GFX_DIG_GAP;
+    seg_dash(x, y, GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
+}
+
 void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c)
 {
     /* The minus is a bar the width of a digit at the vertical middle --

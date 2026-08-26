@@ -226,13 +226,108 @@ If background reads ever need to be added, they go through
 `media_settle()` too. Lowering a priority instead will look like it
 worked on SD and fail on USB.
 
+## Nothing on screen may outlive the track it describes
+
+A track change is decided in `track_change_begin()`, and everything that
+was true about the previous track has to stop being displayed *there* --
+not when its replacement is computed. The two are separated by
+`decoder_open()`, which on a Xing-less MP3 is a full scan of the file:
+twelve seconds on a USB drive.
+
+Three things were being retired late and all three read as the player
+having ignored the press:
+
+- **The clock and the seek bar.** `s_pos_sec` / `s_len_sec` /
+  `s_can_seek` were set just before the decode loop's first iteration,
+  so the bar kept filling and the clock kept counting the *old* track
+  under the *new* track's name. They are cleared at the decision now, and
+  `s_stats_valid` is what says whether they mean anything. While it is
+  false, `ui_draw()` draws dashed clocks and a bare groove -- unknown,
+  rather than a confident wrong number.
+- **The title.** The filename used to be installed immediately as a
+  placeholder and replaced when the tag arrived, which flashes
+  `04 - track04.mp3` on every change and is indistinguishable from the
+  final answer on a file that genuinely has no tag. `load_tags()` runs
+  before `decoder_open()` -- it is a couple of `fread()`s, or a cache hit
+  -- and the filename is only reached as a fallback. An empty title row
+  for a few milliseconds is honest; a filename for them is not.
+- **The envelope.** Installed from the cache at the same point, so a
+  prefetched track's waveform is on screen before the decoder has opened
+  the file.
+
+If something new is added to the screen, it gets cleared in
+`track_change_begin()`, not wherever its replacement is computed.
+
+## A file with no cover says what it is
+
+`do_art()` draws a format card -- container, rate, channels, bitrate,
+size -- through `ui_show_art_info()` when there is no picture. 720x720 of
+black is what a cover that has not arrived yet looks like, so the two
+states the player most needs to distinguish were drawn identically and
+the honest one looked broken.
+
+The decoder is the source for everything but the container and the size,
+and `media_task` cannot ask it anything -- the `decoder_t` belongs to the
+decode loop. So the decode loop publishes `s_fmt_*` on the first block,
+the same publish-a-value rule as `s_ring_pct`, and the card waits briefly
+for it.
+
+"No cover" is cached as a bool. Without the negative, a file with no
+picture is indistinguishable from one not yet read, and every return to
+it re-reads the tag to learn the same nothing. Only `ESP_ERR_NOT_FOUND`
+and `ESP_ERR_NOT_SUPPORTED` are cached that way: an allocation failure is
+not a statement about the file.
+
+## Prefetch is the whole track, not just the cover
+
+`prefetch_next()` fetches tags, cover and envelope for the next track, in
+that order, each stage re-checking the ring gate. They are not one
+operation -- tags cost a few KB and the walk costs the whole file.
+
+The walk is abortable through `s_prefetch_abort`, threaded into
+`framewalk_scan()`'s polling. A gate checked once at the start is fine
+for a bounded 120 KB read and is not fine for a 60 MB one that would
+otherwise keep running for seconds after the track it was for stopped
+being next. `s_prefetch_abort` is separate from `s_scan_abort` because
+they mean different things and are cleared at different moments.
+
+Two consequences that are easy to undo by accident:
+
+- `media_task` **skips** the walk stage when the envelope is already
+  drawn; it must not `continue`, which it used to. Prefetch is the next
+  track's business, and continuing meant the better the cache did, the
+  less prefetching happened.
+- The art settle delay is **skipped on a cache hit**. `media_settle()`
+  exists to keep a second reader off the device; a cache hit is not a
+  reader, and making it wait 700 ms throws away most of what the
+  prefetch bought.
+
 ## The media cache hands out borrowed pointers
 
-`mediacache.c` has no lock, and that is only safe because every caller is
-`media_task`. Entries return borrowed pointers whose lifetime is bounded
-by the next eviction -- safe only because the task that could evict is
-the task holding the pointer. **If a second caller ever appears, this
-needs a mutex and the borrow contract has to become a copy.**
+`mediacache.c` had no lock, and that was only safe because every caller
+was `media_task`. The second caller has now appeared: the decode loop
+reads tags and the envelope in `track_change_begin()`, because the entire
+value of prefetching them is that they are on screen before anything slow
+has run.
+
+So there is a mutex, and the contract is split:
+
+- **Copy-out, safe from any task:** `mediacache_tags()`,
+  `mediacache_walk_copy()`, and the pin calls, which touch only flags.
+- **`media_task` only:** `mediacache_art()`, `mediacache_walk()`, every
+  `mediacache_put_*()`, `mediacache_clear()` -- they borrow past the
+  lock, or they evict.
+
+The rule behind the split is the old one: a borrowed pointer is bounded
+by the next eviction, and only the borrower may evict. **The decode loop
+therefore never stores anything.** It reads the tags and `media_task`
+caches them a moment later, which costs one small read per track and
+keeps eviction in one place. A lock alone would not have been enough --
+a `put_*()` from the decode loop can evict the very blob `media_task` is
+blitting.
+
+`s_walk` is `media_task`'s scan buffer and the decode loop has its own,
+`s_walk_pending`, for the same reason.
 
 Ownership rules that are load-bearing:
 

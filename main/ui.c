@@ -457,6 +457,50 @@ void ui_clear_art(void)
     s_bubble_shown = false;
 }
 
+/*
+ * The format card, drawn where the cover would be.
+ *
+ * Scale 6 for the heading and 3 for the rest, laid out around the centre
+ * of the square rather than from its top: the number of lines varies
+ * with what the decoder has managed to say about the file so far, and a
+ * block that grows downward from a fixed top drifts off centre as it
+ * does.
+ */
+#define ART_INFO_HEAD_SCALE (6)
+#define ART_INFO_BODY_SCALE (3)
+#define ART_INFO_GAP        (18)
+
+void ui_show_art_info(const char *const *lines, int n)
+{
+    if (!s_fb || !lines || n <= 0) return;
+
+    gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
+
+    int total = GFX_GLYPH_H(ART_INFO_HEAD_SCALE);
+    for (int i = 1; i < n; i++) {
+        total += ART_INFO_GAP + GFX_GLYPH_H(ART_INFO_BODY_SCALE);
+    }
+
+    int y = (s_bar_top - total) / 2;
+    if (y < 0) y = 0;
+
+    for (int i = 0; i < n; i++) {
+        const char *t = lines[i] ? lines[i] : "";
+        const int scale = i ? ART_INFO_BODY_SCALE : ART_INFO_HEAD_SCALE;
+        const int w = gfx_text_w(t, scale);
+        int x = (s_w - w) / 2;
+        if (x < TEXT_X) x = TEXT_X;
+        gfx_draw_text(x, y, t, scale, s_w - 2 * TEXT_X,
+                      i ? C_ICON : C_THUMB);
+        y += GFX_GLYPH_H(scale) + ART_INFO_GAP;
+    }
+
+    gfx_blit(0, s_bar_top);
+
+    /* What the finger bubble has to put back has just changed. */
+    s_bubble_shown = false;
+}
+
 static void bubble_restore(void)
 {
     if (!s_bubble_bg || !s_bubble_shown) return;
@@ -496,7 +540,13 @@ void ui_draw(const ui_state_t *st)
 
     int x0, x1, y;
     seek_bounds(&x0, &x1, &y);
-    const int pos_pct = (st->len_sec > 0)
+    /*
+     * A track whose numbers are not in yet gets the empty state, not the
+     * previous track's. See ui_state_t::stats_valid -- everything below
+     * that reads pos_sec or len_sec is gated on it.
+     */
+    const bool stats = st->stats_valid;
+    const int pos_pct = (stats && st->len_sec > 0)
                       ? (int)((st->pos_sec * 100) / st->len_sec)
                       : 0;
     /*
@@ -509,7 +559,7 @@ void ui_draw(const ui_state_t *st)
      */
     const int shown_pct = (s_drag == 0) ? s_drag_pct : pos_pct;
 
-    if (waveform_ready() && st->len_sec > 0) {
+    if (stats && waveform_ready() && st->len_sec > 0) {
         /*
          * The envelope is the bar. Played columns red, unplayed grey, and
          * the split is the position -- which is the whole reason for
@@ -528,7 +578,7 @@ void ui_draw(const ui_state_t *st)
         const int split = x0 + ((x1 - x0) * shown_pct) / 100;
         gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,
                       st->can_seek ? C_PLAYHEAD : C_WAVE_FUTURE);
-    } else if (st->len_sec > 0) {
+    } else if (stats && st->len_sec > 0) {
         /*
          * No envelope yet -- the scan takes a few seconds on a long
          * track and may never produce one at all for a format with no
@@ -578,14 +628,25 @@ void ui_draw(const ui_state_t *st)
      * "unknown", matching the plain groove above it.
      */
     const int ty = s_bar_top + TIME_Y;
-    gfx_draw_time(TIME_PAD, ty, st->pos_sec, C_ICON);
 
-    if (st->len_sec > 0) {
-        const uint32_t left = (st->len_sec > st->pos_sec)
-                            ? st->len_sec - st->pos_sec : 0;
-        gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left, C_ICON);
+    if (!stats) {
+        /* Both clocks, both dashed. The elapsed one especially: it is
+         * the number that was counting a moment ago, and leaving it at
+         * the old track's value for the length of an open is the single
+         * most convincing way to look like the press did nothing. */
+        gfx_draw_time_dashes(TIME_PAD, ty, C_TRACK);
+        gfx_draw_time_dashes(s_w - GFX_TIME_W - TIME_PAD, ty, C_TRACK);
     } else {
-        gfx_draw_time(s_w - GFX_TIME_W - TIME_PAD, ty, 0, C_TRACK);
+        gfx_draw_time(TIME_PAD, ty, st->pos_sec, C_ICON);
+
+        if (st->len_sec > 0) {
+            const uint32_t left = (st->len_sec > st->pos_sec)
+                                ? st->len_sec - st->pos_sec : 0;
+            gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left,
+                              C_ICON);
+        } else {
+            gfx_draw_time(s_w - GFX_TIME_W - TIME_PAD, ty, 0, C_TRACK);
+        }
     }
 
     /* Title big, then artist, then album -- a row each.
