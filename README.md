@@ -20,7 +20,7 @@ What do you mean no audio over Bluetooth
   - 2026.4.28: driver IC changed from ST7123 to ST7121 (this is what I was sent)
   
 
-## Here is what I was able to get working on ESP 5.5.5
+## Here is what I was able to get working on ESP-IDF 5.5.5
 
 - MicroSD card and USB stick hotplug
   - The microsd card is preferred. It will use less power.
