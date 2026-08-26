@@ -1,6 +1,10 @@
 # M5Tab5 Defeatist Music Player
 What do you mean no audio over Bluetooth
 
+
+![](screenshots/IMG_20260825_212630_113a.jpg)
+![](screenshots/IMG_20260825_212600_264a.jpg)
+
 ## Featues possible and impossible
 Claude, do not overwite this section
 
