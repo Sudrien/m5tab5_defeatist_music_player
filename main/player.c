@@ -53,6 +53,7 @@
 #include "esp_idf_version.h"
 
 #include "albumart.h"
+#include "battery.h"
 #include "covertag.h"
 #include "heapcheck.h"
 #include "mediacache.h"
@@ -1862,6 +1863,8 @@ static void ui_task(void *arg)
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
         st.stats_valid = s_stats_valid;
+        st.battery_pct = battery_pct();
+        st.battery_charging = battery_charging();
 
         const bool down = bdown;
         const ui_action_t act = ui_touch(&st, down, bx, by);
@@ -1996,6 +1999,8 @@ static void ui_task(void *arg)
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
         st.stats_valid = s_stats_valid;
+        st.battery_pct = battery_pct();
+        st.battery_charging = battery_charging();
         ui_draw(&st);
 
         /* 50 Hz under a finger, 25 Hz while the title is travelling, 10 Hz
@@ -2548,6 +2553,14 @@ void app_main(void)
     ESP_ERROR_CHECK(storage_init(s_exp2));
 
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
+
+    /* The gauge is on the same bus as everything else and is allowed to
+     * be absent: a board with no pack, or one wired differently, gets an
+     * empty outline on the volume row and nothing else changes. Not
+     * ESP_ERROR_CHECK'd for exactly that reason. */
+    if (battery_init(s_i2c_bus) == ESP_OK) {
+        ESP_ERROR_CHECK(battery_start());
+    }
 
     /* Lowest priority in the program. It reads a whole file off the same
      * card the decoder is reading, and the decoder winning every time is

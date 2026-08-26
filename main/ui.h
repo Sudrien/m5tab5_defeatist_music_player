@@ -55,6 +55,15 @@ typedef struct {
      * bar is a bare groove.
      */
     bool stats_valid;
+
+    /*
+     * State of charge 0-100, or -1 for "no reading". Drawn opposite the
+     * speaker on the volume row: an empty outline and no digits at -1,
+     * because a gauge that invents a number when it has none is worse
+     * than one that admits it.
+     */
+    int  battery_pct;
+    bool battery_charging;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
