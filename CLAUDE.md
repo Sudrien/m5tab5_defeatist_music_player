@@ -421,6 +421,36 @@ Rules that are load-bearing:
   type indicator as JPEG for PNG data often enough that the indicator is
   a hint and `albumart_is_supported_image()` is the answer.
 
+## The battery percentage is a guess and says so
+
+`battery.c` reads an INA226 on the shared I2C bus: bus voltage, shunt
+voltage, two registers. The **voltage is measured; the percentage is
+not** -- it is that voltage through a piecewise single-cell curve, which
+sags under load and recovers when the amplifier is muted by a headphone
+plug. Coulomb counting would fix that and needs a charge reference this
+board does not give us.
+
+So the reading is averaged in the part (16 samples, which is where audio
+-rate ripple should be rejected), smoothed 1/8 in software, and rounded
+to 5. That is not accuracy, it is a refusal to display precision that is
+not there: a gauge stepping 63, 61, 64 while nothing happens is worse
+than one that sits at 60, because the movement is the part people
+believe.
+
+Three things that will look like bugs and are not:
+
+- **-1 draws an empty outline and no digits.** No gauge, or no reading
+  yet. Drawing 0% would be a claim, and the wrong one.
+- **Charging is the sign of the shunt current**, which depends on which
+  way round the shunt is wired. `BATTERY_CHARGE_SIGN` is the knob if the
+  green fill appears exactly when it should not. There is a threshold
+  rather than a bare sign test because the reading dithers around zero at
+  rest.
+- **An absent gauge is not fatal.** `battery_init()` probes before
+  configuring and returns `ESP_ERR_NOT_FOUND`; `app_main()` does not
+  `ESP_ERROR_CHECK` it. If it reads a constant, doubt
+  `BATTERY_INA226_ADDR` first.
+
 ## Missing glyphs are boxes, deliberately
 
 Anything outside the subset draws a hollow notdef box, including five

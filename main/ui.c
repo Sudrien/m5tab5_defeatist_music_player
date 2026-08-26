@@ -422,6 +422,81 @@ static void draw_speaker(void)
     }
 }
 
+/*
+ * The battery, at the right end of the volume row.
+ *
+ * Opposite the speaker on purpose: that row already has an icon in the
+ * left margin and 96 px of unused panel in the right one, and the two
+ * things being reported -- how loud it is, how much is left -- are both
+ * states of the device rather than of the track. Everything above this
+ * row is about the song.
+ *
+ * Icon above, digits below, both centred on the same x. Side by side
+ * would need 76 px of width in a 96 px margin, which leaves the outline
+ * touching the slider groove.
+ *
+ * The fill is proportional and the outline is not: an outline that
+ * shrinks reads as a smaller battery rather than as a flatter one.
+ */
+#define BATT_W      (46)
+#define BATT_H      (24)
+#define BATT_NUB_W  (5)
+#define BATT_NUB_H  (10)
+#define BATT_WALL   (3)
+
+/* Below 20% the fill turns red -- the same red as the seek bar's played
+ * portion, because it is the same statement: this much is spent. */
+#define BATT_LOW_PCT (20)
+#define C_BATT_LOW   C_FILL
+#define C_BATT_CHG   RGB(0x4C, 0xC0, 0x5E)
+
+static void draw_battery(int pct, bool charging)
+{
+    int x0, x1, y;
+    vol_bounds(&x0, &x1, &y);
+    const int cx = x1 + 42, cy = y;
+
+    const int left = cx - BATT_W / 2;
+    const int top  = cy - 30;
+
+    /* Outline: four walls rather than a filled rect with a hole punched
+     * in it, so nothing is drawn twice and the interior can be filled
+     * without clearing it first. */
+    gfx_fill_rect(left, top, BATT_W, BATT_WALL, C_ICON);
+    gfx_fill_rect(left, top + BATT_H - BATT_WALL, BATT_W, BATT_WALL, C_ICON);
+    gfx_fill_rect(left, top, BATT_WALL, BATT_H, C_ICON);
+    gfx_fill_rect(left + BATT_W - BATT_WALL, top, BATT_WALL, BATT_H, C_ICON);
+
+    /* The nub, which is what makes 46x24 read as a battery rather than
+     * as a text field. */
+    gfx_fill_rect(left + BATT_W, cy - 30 + (BATT_H - BATT_NUB_H) / 2,
+                  BATT_NUB_W, BATT_NUB_H, C_ICON);
+
+    if (pct < 0) {
+        /* No reading. An empty outline and no digits -- see ui_state_t.
+         * Drawing 0% here would be a claim, and the wrong one. */
+        return;
+    }
+
+    const int inner_x = left + BATT_WALL + 1;
+    const int inner_w = BATT_W - 2 * (BATT_WALL + 1);
+    const int inner_y = top + BATT_WALL + 1;
+    const int inner_h = BATT_H - 2 * (BATT_WALL + 1);
+
+    const uint16_t c = charging ? C_BATT_CHG
+                     : (pct <= BATT_LOW_PCT ? C_BATT_LOW : C_ICON);
+
+    int w = (inner_w * pct) / 100;
+    /* A nonzero charge always shows at least a sliver. Rounding 4% down
+     * to nothing draws the same picture as a flat pack. */
+    if (w == 0 && pct > 0) w = 1;
+    gfx_fill_rect(inner_x, inner_y, w, inner_h, c);
+
+    /* Same seven-segment digits as the clocks, so the two numbers on the
+     * panel that are not part of a song look like each other. */
+    gfx_draw_pct_centred(cx, cy + 4, pct, c);
+}
+
 /* ------------------------------------------------------------------ */
 
 /* Copy the band the bubble can occupy out of the framebuffer. Called once
@@ -705,6 +780,7 @@ void ui_draw(const ui_state_t *st)
     draw_slider(x0, x1, y, s_drag == 1 ? s_drag_pct : st->volume);
 
     draw_speaker();
+    draw_battery(st->battery_pct, st->battery_charging);
     draw_folder();
     draw_moon();
 
