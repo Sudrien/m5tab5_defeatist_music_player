@@ -4,7 +4,14 @@ on:
   push:
     tags:
       - 'v*'
+
   workflow_dispatch:
+    inputs:
+      git_ref:
+        description: 'Git tag, branch, or commit to build (e.g. v0.1.0)'
+        required: true
+        default: 'main'
+        type: string
 
 jobs:
   build:
@@ -13,6 +20,10 @@ jobs:
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
+        with:
+          # Automatically uses the tag on a push event, 
+          # or falls back to the manual input if triggered via workflow_dispatch
+          ref: ${{ github.event.inputs.git_ref || github.ref }}
 
       - name: Install ESP-IDF and Build project
         uses: rmshub/esp-idf-action@v6
@@ -22,7 +33,6 @@ jobs:
 
       - name: Generate Single Merged Binary
         run: |
-          # This compiles and combines bootloader, partitions, and app into one file
           idf.py merge-bin
 
       - name: Archive build output artifacts
