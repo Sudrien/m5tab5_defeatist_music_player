@@ -49,6 +49,7 @@ What do you mean no audio over Bluetooth
 
 ## Licensing
 
+- This code is MIT
 - minimp3 is CC0/public domain. No attribution obligation, vendored
   anyway so the source is auditable in-tree.
 - esp_audio_codec ships **precompiled archives** under the ESPRESSIF MIT
