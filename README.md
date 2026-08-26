@@ -42,6 +42,7 @@ What do you mean no audio over Bluetooth
 - drag to seek (most formats, some just don't support it)
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
+- gapless playback is supposedly set up, but not well tested.
 
 ## What could happen
 - I think there is nothing in dependencies stopping form using esp-idf 6.1
