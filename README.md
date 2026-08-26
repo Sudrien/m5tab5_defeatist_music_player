@@ -53,7 +53,7 @@ What do you mean no audio over Bluetooth
 
 ## Potential issues
 
-- Charging from usb C + inserted battery can lead to a speaker whine. I have not noticed it with the headset port
+- Charging from usb C + inserted battery + display on can lead to a speaker whine. I have not noticed it with the headset port
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
 - I can never tell if the peaking I'm hearing is a buffer underun of record needle noise encoded in the music, personally. 
