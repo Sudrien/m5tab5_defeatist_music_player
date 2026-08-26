@@ -58,7 +58,8 @@ What do you mean no audio over Bluetooth
 - per file resume
 - 'Crossfade on manual skip (separate from gapless) is a common "why doesn't this exist" complaint on small players.'
 - Sleep timer
-- classic BT dongle support
+- ~~classic BT dongle support~~
+- UAC dongle support (usb to bluetooth adapter for PS5)
 
 ## Potential issues
 
