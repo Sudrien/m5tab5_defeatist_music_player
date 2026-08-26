@@ -51,7 +51,13 @@ What do you mean no audio over Bluetooth
 - setting storage
 - turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
-- Podcast over wifi downloader? Conceivable. 
+- Podcast over wifi downloader? Conceivable. Would want chapter support
+- ReplayGain / loudness normalization
+- Cue sheets - do people actually rip full albums? I just have seen tracks
+- m3u/m3u8 - playlists are significant potential UI
+- per file resume
+- 'Crossfade on manual skip (separate from gapless) is a common "why doesn't this exist" complaint on small players.'
+- Sleep timer
 
 ## Potential issues
 
