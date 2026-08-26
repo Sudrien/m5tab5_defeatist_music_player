@@ -48,7 +48,7 @@ What do you mean no audio over Bluetooth
 - I think there is nothing in dependencies stopping form using esp-idf 6.1
 - build file lists faster
 - is fast file seek enabled? I think it is?
-- setting storage
+- setting storage (defeatist.dat + defeatist.bak)
 - turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
