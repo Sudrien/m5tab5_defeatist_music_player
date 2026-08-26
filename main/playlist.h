@@ -78,6 +78,22 @@ const char *playlist_next(play_order_t order);
  */
 const char *playlist_peek_next(play_order_t order);
 
+/*
+ * Whether pressing next would do anything, for the UI to grey the button.
+ *
+ * Distinct from playlist_peek_next() != NULL, and the difference is the
+ * whole reason it exists: under shuffle there is no predictable next
+ * track, but there is certainly a next track, so peek returns NULL and
+ * this returns true. Greying the button under shuffle would say the
+ * playlist had ended when it had not.
+ *
+ * PLAY_ORDER_ONE is mapped to ALL, matching what UI_ACTION_NEXT actually
+ * does: repeat-one governs what happens when a track ENDS, not what the
+ * skip button means. Greying next in repeat-one would be wrong about a
+ * button that works.
+ */
+bool playlist_has_next(play_order_t order);
+
 /* Previous entry in list order, or NULL at the top. Shuffle deliberately
  * does not have a history: a back button that undoes a random choice
  * needs a stack, and the button is there to skip back one track. */

@@ -93,6 +93,31 @@ bool waveform_ready(void)
     return s_columns > 0;
 }
 
+void waveform_draw_flat(int x0, int x1, int base_y, int height, int pct,
+                        uint16_t past, uint16_t future)
+{
+    if (x1 <= x0 || height <= 0) return;
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+
+    const int width = x1 - x0;
+    const int split = x0 + (width * pct) / 100;
+
+    /*
+     * Two fills, not one per column. The envelope version needs a column
+     * loop because every column has its own height; this one does not,
+     * and at 720 px that is 720 gfx_fill_rect() calls saved on every
+     * repaint of a bar that is redrawn at up to 20 Hz for as long as the
+     * scan takes.
+     *
+     * Deliberately the same height and baseline as waveform_draw_bar(),
+     * so the row does not resize when the envelope arrives -- see the
+     * call site in ui.c.
+     */
+    gfx_fill_rect(x0, base_y - height, split - x0, height, past);
+    gfx_fill_rect(split, base_y - height, x1 - split, height, future);
+}
+
 void waveform_draw_bar(int x0, int x1, int base_y, int height, int pct,
                        uint16_t past, uint16_t future)
 {

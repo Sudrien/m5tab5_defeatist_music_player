@@ -54,6 +54,7 @@
 
 #include "albumart.h"
 #include "covertag.h"
+#include "heapcheck.h"
 #include "mediacache.h"
 #include "browser.h"
 #include "decoder.h"
@@ -129,20 +130,24 @@ static const char *TAG = "tab5_mp3";
  * waits on DMA and the decoder can stall for a whole SD read without
  * anyone hearing it.
  *
- * 64 KB was ~0.37 s of 44.1 kHz stereo: comfortably longer than a FAT
+ * 64 KB is ~0.37 s of 44.1 kHz stereo: comfortably longer than a FAT
  * cluster read, short enough that seeking will not feel laggy later.
  *
- * 256 KB now, ~1.5 s, because media_task prefetches the next track's
- * cover while this one plays and that is a second reader on the same
- * slow device. The prefetch is gated on how full this is (see
- * ring_headroom_pct), so the extra depth is not slack that gets spent --
- * it is the measurement the gate reads. At 64 KB the gate would be
- * deciding on a third of a second of history, which is noise.
+ * BACK to 64 KB and back to the ordinary allocator, after patch 06 moved
+ * it to 256 KB in PSRAM via xStreamBufferCreateWithCaps().
  *
- * In PSRAM, not internal RAM. xStreamBufferCreate() allocates from the
- * default heap, and 256 KB of the P4's 768 KB of L2MEM is not available
- * to spend on a ring the CPU only ever memcpy()s through. */
-#define PCM_RING_BYTES          (256 * 1024)
+ * Not because the larger ring was shown to be the fault -- it was not --
+ * but because it was the one thing about this allocation that changed
+ * before the heap started getting corrupted, and a variable that cannot
+ * be reasoned about should be removed before it is defended. The
+ * measured justification for the change was weak anyway: enlarging the
+ * ring does not reduce control latency (the writer drains continuously,
+ * so a send waits for room for one block regardless of size) and the
+ * prefetch gate reads a percentage, which works at any size.
+ *
+ * If the corruption survives this, the ring is exonerated and the search
+ * moves on with one fewer thing in it. That is the point. */
+#define PCM_RING_BYTES          (64 * 1024)
 #define PCM_CHUNK_BYTES         (4 * 1024)
 
 /*
@@ -630,8 +635,32 @@ static volatile int      s_seek_pct = -1;
 static volatile TickType_t s_seek_asked;
 static const char *volatile s_seek_why = "";
 
+/*
+ * True between entering and leaving play_file(), i.e. whenever there is
+ * a decode loop to service a request.
+ *
+ * Needed because s_seek_pct is a request to a loop that may not exist.
+ * At the end of a playlist nothing is playing, so a seek sits in the
+ * variable until the next track starts -- and is then applied to that
+ * track, which is not what was asked for and is fifteen seconds late.
+ * That is exactly what happened on hardware: prev pressed after the last
+ * track ended, then serviced when an unrelated folder was started.
+ */
+static volatile bool s_decoding;
+
 static void request_seek(int pct, const char *why)
 {
+    /*
+     * Refused rather than queued when there is nothing to seek in. A
+     * request with no reader is not pending, it is lost -- and a lost
+     * request that fires later, against a different song, is worse than
+     * one that never fires at all.
+     */
+    if (!s_decoding) {
+        ESP_LOGI(TAG, "seek (%s) ignored: nothing playing", why);
+        return;
+    }
+
     if (s_seek_pct >= 0) {
         /* The previous request never made it to the decoder. Said out
          * loud: from the outside this is indistinguishable from a button
@@ -1267,7 +1296,9 @@ static void media_task(void *arg)
         /* Out of the way of the track starting. See media_settle(). */
         if (!media_settle(gen, MEDIA_ART_DELAY_MS, "cover")) continue;
 
+        HEAP_CHECK("before do_art");
         do_art(path, gen);
+        HEAP_CHECK("after do_art");
 
         /* A track change during the cover makes the walk pointless too --
          * s_media_want is already set for the new one, and starting this
@@ -1287,6 +1318,7 @@ static void media_task(void *arg)
             !media_settle(gen, MEDIA_WALK_DELAY_MS, "envelope")) continue;
 
         do_walk(path);
+        HEAP_CHECK("after do_walk");
         if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
                                    "%s", path);
 
@@ -1305,6 +1337,7 @@ static void media_task(void *arg)
         if (gen == s_track_gen) {
             mediacache_pin(path);
             prefetch_next();
+            HEAP_CHECK("after prefetch");
         }
     }
 }
@@ -1312,6 +1345,17 @@ static void media_task(void *arg)
 /* Hand a chosen path to the decode loop. */
 static void request_track(const char *path)
 {
+    /*
+     * Any outstanding seek was aimed at the track being left. Carrying
+     * it into the next one means starting a song at a position chosen
+     * for a different song -- or, at the end of a playlist, resurrecting
+     * a press from a minute ago.
+     */
+    if (s_seek_pct >= 0) {
+        ESP_LOGI(TAG, "dropping unserviced seek (%s): track changed", s_seek_why);
+        s_seek_pct = -1;
+    }
+
     snprintf(s_pending, sizeof(s_pending), "%s", path);
     s_pending_ready = true;
 }
@@ -1404,6 +1448,12 @@ static void ui_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(bdown ? 20 : 100));
             continue;
         }
+
+        /* Asked every repaint rather than cached on track change: the
+         * chooser can load a different folder underneath, and a next
+         * button greyed against a playlist that no longer exists is
+         * worse than one that is briefly right for the wrong reason. */
+        st.has_next = playlist_has_next(browser_order());
 
         st.title = s_tags.title[0] ? s_tags.title : s_display_name;
         st.artist = s_tags.artist;
@@ -1590,6 +1640,14 @@ static track_end_t play_file(const char *path)
     decoder_t *dec = decoder_open(path);
     if (!dec) return TRACK_ENDED;
 
+    /*
+     * Set after the open succeeds, not before: decoder_open() on a
+     * Xing-less MP3 scans the whole file, and a seek accepted during
+     * that scan would have no loop to reach for a long time -- which is
+     * the bug this flag exists to prevent, in miniature.
+     */
+    s_decoding = true;
+
     /* Tell storage.c not to unmount underneath this FILE*. It will still
      * mark the volume absent the moment the card stops answering -- the
      * loop below watches for that -- but the unmount itself waits until
@@ -1605,10 +1663,19 @@ static track_end_t play_file(const char *path)
                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!pcm || !st) {
         ESP_LOGE(TAG, "out of memory");
-        free(pcm);
-        free(st);
+        /* heap_caps_malloc'd, so heap_caps_free'd. free() happens to work
+         * for PSRAM in IDF today, but pairing the allocator is not
+         * something to leave to happening-to-work on the one path that
+         * only runs when memory is already in trouble. */
+        heap_caps_free(pcm);
+        heap_caps_free(st);
         decoder_close(dec);
         storage_hold(STORAGE_COUNT);
+        /* Set just above, and there is no loop after this return. Left
+         * true, every later seek would be accepted for a decode loop
+         * that does not exist -- reintroducing the queued-forever bug on
+         * the one path where it would be hardest to spot. */
+        s_decoding = false;
         return TRACK_ENDED;
     }
 
@@ -1786,11 +1853,9 @@ static track_end_t play_file(const char *path)
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
                 ESP_ERROR_CHECK(i2s_set_rate((uint32_t)info.sample_rate));
+                HEAP_CHECK("before ring create");
                 s_ring_pct = 0;
-                s_pcm = xStreamBufferCreateWithCaps(PCM_RING_BYTES,
-                                                    PCM_CHUNK_BYTES,
-                                                    MALLOC_CAP_SPIRAM |
-                                                    MALLOC_CAP_8BIT);
+                s_pcm = xStreamBufferCreate(PCM_RING_BYTES, PCM_CHUNK_BYTES);
                 s_decode_done = false;
                 s_writer_done = false;
                 xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
@@ -1900,16 +1965,23 @@ static track_end_t play_file(const char *path)
          * buffer is freed -- so at no point is there a reachable handle
          * to a freed buffer.
          *
-         * WithCaps allocated it, so WithCaps has to free it. The plain
-         * vStreamBufferDelete() frees through the default heap and the
-         * ring is in PSRAM -- a mismatch that happens once per track and
-         * would not necessarily fault straight away.
+         * Plain create, plain delete: the allocator pairing that the
+         * WithCaps version had to get right is simply not present now.
          */
+        HEAP_CHECK("before ring delete");
         s_ring_pct = -1;
         StreamBufferHandle_t doomed = s_pcm;
         s_pcm = NULL;
-        vStreamBufferDeleteWithCaps(doomed);
+        vStreamBufferDelete(doomed);
     }
+    /* No loop from here on, so no seek can be serviced. Cleared before
+     * the log line rather than after, so nothing can slip in between. */
+    s_decoding = false;
+    if (s_seek_pct >= 0) {
+        ESP_LOGI(TAG, "dropping unserviced seek (%s): track over", s_seek_why);
+        s_seek_pct = -1;
+    }
+
     /* Why, not just that. "finished" on a track the user skipped out of
      * reads as the skip having been ignored until the next line arrives. */
     ESP_LOGI(TAG, "%s, %d blocks",

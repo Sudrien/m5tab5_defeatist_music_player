@@ -141,6 +141,13 @@ const char *playlist_peek_next(play_order_t order)
     return s_paths[n];
 }
 
+bool playlist_has_next(play_order_t order)
+{
+    if (s_count <= 0) return false;
+    if (order == PLAY_ORDER_SHUFFLE) return true;   /* see the header */
+    return s_current >= 0 && s_current + 1 < s_count;
+}
+
 const char *playlist_next(play_order_t order)
 {
     if (s_count <= 0) return NULL;
