@@ -60,6 +60,7 @@ What do you mean no audio over Bluetooth
 - Sleep timer
 - ~~classic BT dongle support~~
 - UAC dongle support (usb to bluetooth adapter for PS5)
+- pause/ noting playing should explictly turn off the speaker/amp circuit? (see whine below)
 
 ## Potential issues
 
