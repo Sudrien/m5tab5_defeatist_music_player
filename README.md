@@ -46,6 +46,7 @@ What do you mean no audio over Bluetooth
 - is fast file seek enabled? I think it is?
 - setting storage
 - turn off autoplay on boot
+- more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 
 ## Potential issues
 
