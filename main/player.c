@@ -62,6 +62,7 @@
 #include "browser.h"
 #include "decoder.h"
 #include "framewalk.h"
+#include "hid.h"
 #include "playlist.h"
 #include "storage.h"
 #include "touch.h"
@@ -421,6 +422,51 @@ static volatile uint32_t s_len_sec;
  * length is known -- see decoder_can_seek(). */
 static volatile bool     s_can_seek;
 static volatile bool     s_screen_off;
+
+/*
+ * A press from the headset's inline remote, waiting for the UI task.
+ *
+ * hid.c calls back on its own polling task, which owns a live URB and
+ * must not block, so it publishes and returns -- the same rule as
+ * s_ring_pct. The UI task picks this up and pushes it through the SAME
+ * switch the on-screen buttons go through, so the two sources cannot
+ * drift in behaviour and both log the same line.
+ *
+ * A single slot, and a second press before the first is serviced
+ * overwrites it. The UI polls at 20-50 Hz and no thumb produces two
+ * presses inside 20 ms; a queue here would buy nothing and would let a
+ * stuck button build a backlog that plays out after it is released.
+ */
+static volatile int s_hid_action = -1;   /* a ui_action_kind_t, or -1 */
+static volatile int s_hid_value;
+
+static void hid_button(hid_button_t button)
+{
+    int vol;
+    switch (button) {
+    case HID_BTN_MUTE:
+        s_hid_action = UI_ACTION_MUTE;
+        break;
+    case HID_BTN_VOL_UP:
+    case HID_BTN_VOL_DOWN:
+        /* Five points a press. The on-screen slider is 528 px for 100
+         * points, so a step is about the smallest move a finger makes on
+         * it -- the two controls should not disagree about what "a bit
+         * louder" means. */
+        vol = s_volume + (button == HID_BTN_VOL_UP ? 5 : -5);
+        if (vol < 0) vol = 0;
+        if (vol > 100) vol = 100;
+        s_hid_value = vol;
+        s_hid_action = UI_ACTION_VOLUME;
+        break;
+    case HID_BTN_MIC_MUTE:
+        /* There is no microphone in this program -- uac.c does not open
+         * the RX interface. Logged by hid.c and dropped here rather than
+         * quietly mapped onto something else, because a mic-mute key
+         * that pauses the music is worse than one that does nothing. */
+        break;
+    }
+}
 
 /*
  * The chooser hands a path back here.
@@ -1698,7 +1744,25 @@ static void ui_task(void *arg)
         st.battery_charging = battery_charging();
 
         const bool down = bdown;
-        const ui_action_t act = ui_touch(&st, down, bx, by);
+        ui_action_t act = ui_touch(&st, down, bx, by);
+
+        /*
+         * The remote, when the panel had nothing to say.
+         *
+         * Touch wins if both landed in the same iteration -- a finger on
+         * the glass is the more deliberate of the two, and dispatching
+         * both would be two actions from one pass, which is the thing
+         * "one press is one action" exists to prevent.
+         *
+         * Deliberately not gated on screen_off: the point of a remote is
+         * that it works with the player in a pocket. A volume key does
+         * not wake the screen either, for the same reason.
+         */
+        if (act.kind == UI_ACTION_NONE && s_hid_action >= 0) {
+            act.kind = (ui_action_kind_t)s_hid_action;
+            act.value = s_hid_value;
+            s_hid_action = -1;
+        }
 
         /*
          * One line per press, at the point they are dispatched rather
@@ -2402,6 +2466,13 @@ void app_main(void)
      * analog path is what plays until one is. */
     if (uac_init() != ESP_OK) {
         ESP_LOGW(TAG, "no USB audio support this boot; analog output only");
+    }
+
+    /* The remote on the same headset. Also not fatal: a device with no
+     * HID interface, or a HID interface that will not claim, leaves the
+     * on-screen controls doing everything they already did. */
+    if (hid_init(hid_button) != ESP_OK) {
+        ESP_LOGW(TAG, "no USB remote support this boot");
     }
 
     /*

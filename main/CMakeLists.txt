@@ -1,6 +1,6 @@
 idf_component_register(
     SRCS "player.c" "decoder.c" "albumart.c" "covertag.c" "mediacache.c" "ui.c" "gfx.c" "touch.c" "audio_out.c"
-         "battery.c" "storage.c" "usbhost.c" "uac.c" "playlist.c" "browser.c" "duration.c" "framewalk.c" "waveform.c"
+         "battery.c" "storage.c" "usbhost.c" "uac.c" "hid.c" "playlist.c" "browser.c" "duration.c" "framewalk.c" "waveform.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_driver_i2c esp_driver_i2s esp_driver_sdmmc
              esp_driver_jpeg esp_lcd esp_lcd_touch fatfs sdmmc
