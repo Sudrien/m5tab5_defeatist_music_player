@@ -176,6 +176,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_NEXT:        return "next";
     case UI_ACTION_SEEK:        return "seek";
     case UI_ACTION_VOLUME:      return "volume";
+    case UI_ACTION_MUTE:        return "mute";
     }
     return "?";
 }
@@ -324,7 +325,7 @@ static void moon_centre(int *cx, int *cy)
 /* Widgets                                                             */
 /* ------------------------------------------------------------------ */
 
-static void draw_slider(int x0, int x1, int y, int pct)
+static void draw_slider_c(int x0, int x1, int y, int pct, uint16_t fill)
 {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
@@ -334,8 +335,13 @@ static void draw_slider(int x0, int x1, int y, int pct)
     /* Thin remainder first, then the thick fill over its left end, so the
      * two never disagree by a pixel at the join. */
     gfx_fill_rect(x0, y - TRACK_THIN / 2, w, TRACK_THIN, C_TRACK);
-    gfx_fill_rect(x0, y - TRACK_THICK / 2, split - x0, TRACK_THICK, C_FILL);
+    gfx_fill_rect(x0, y - TRACK_THICK / 2, split - x0, TRACK_THICK, fill);
     gfx_fill_circle(split, y, THUMB_R, C_THUMB);
+}
+
+static void draw_slider(int x0, int x1, int y, int pct)
+{
+    draw_slider_c(x0, x1, y, pct, C_FILL);
 }
 
 static void draw_play_pause(bool playing)
@@ -409,16 +415,54 @@ static void draw_moon(void)
  * right. The first version drew the cone as a triangle whose height shrank
  * with x, which is an arrow pointing right -- the flare has to grow with
  * x, not shrink. */
-static void draw_speaker(void)
+/*
+ * Row 8's left margin. The icon was decoration; it is a button now.
+ *
+ * SPK_HALF is 26 and the test below adds no padding, so the box is
+ * 28..80 and the volume slider's padded box starts at 82. They do not
+ * touch, which is the rule row 7 already follows: boxes that overlap and
+ * are disambiguated by test order work right up until the order changes.
+ * A 52 px target is 4.5 mm at 294 PPI, which is smaller than the
+ * transport buttons and larger than a fingertip needs for an icon that
+ * sits alone in a margin.
+ */
+#define SPK_HALF    (26)
+
+static void spk_centre(int *cx, int *cy)
 {
     int x0, x1, y;
     vol_bounds(&x0, &x1, &y);
-    const int cx = x0 - 42, cy = y;
+    *cx = x0 - 42;
+    *cy = y;
+}
 
-    gfx_fill_rect(cx - 13, cy - 6, 9, 13, C_ICON);      /* body */
+/*
+ * Muted draws a slash through the cone, not a greyed icon.
+ *
+ * Grey is what this file uses for "this button does nothing" -- next at
+ * the end of a folder, the battery outline with no reading. Mute is the
+ * opposite: the control is working and is the reason there is no sound.
+ * A greyed speaker would say the mute button is unavailable.
+ */
+static void draw_speaker(bool muted)
+{
+    int cx, cy;
+    spk_centre(&cx, &cy);
+    const uint16_t c = muted ? C_FILL : C_ICON;
+
+    gfx_fill_rect(cx - 13, cy - 6, 9, 13, c);       /* body */
     for (int dx = 0; dx <= 15; dx++) {              /* cone, flaring right */
         const int half = 4 + dx;
-        gfx_fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, C_ICON);
+        gfx_fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, c);
+    }
+
+    if (!muted) return;
+
+    /* A 3 px diagonal, drawn as one short run per row so it needs no
+     * line primitive -- the same trick draw_skip() uses for its
+     * triangles. */
+    for (int i = -20; i <= 20; i++) {
+        gfx_fill_rect(cx + i - 1, cy - i - 1, 3, 3, C_FILL);
     }
 }
 
@@ -777,9 +821,20 @@ void ui_draw(const ui_state_t *st)
     }
 
     vol_bounds(&x0, &x1, &y);
-    draw_slider(x0, x1, y, s_drag == 1 ? s_drag_pct : st->volume);
+    /*
+     * The slider keeps showing the level, dimmed, rather than dropping
+     * to zero.
+     *
+     * Muting is not setting the volume to nothing; it is suspending it.
+     * A slider that ran to the left end would lose the only record of
+     * where it is going back to, and unmuting would look like the player
+     * had picked a number. Dim says "this is not in effect right now",
+     * which is what is true.
+     */
+    draw_slider_c(x0, x1, y, s_drag == 1 ? s_drag_pct : st->volume,
+                  st->muted ? C_ICON_OFF : C_FILL);
 
-    draw_speaker();
+    draw_speaker(st->muted);
     draw_battery(st->battery_pct, st->battery_charging);
     draw_folder();
     draw_moon();
@@ -936,6 +991,16 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
     moon_centre(&cx, &cy);
     if (in_box(x, y, cx, cy, ICON_HALF)) {
         act.kind = UI_ACTION_SCREEN_OFF;
+        return act;
+    }
+
+    /* Before the volume slider, and with a box that does not reach it --
+     * see SPK_HALF. in_box() is not used because it adds HIT_PAD_X, and
+     * the padded box would overlap the slider's. */
+    spk_centre(&cx, &cy);
+    if (x >= cx - SPK_HALF && x <= cx + SPK_HALF &&
+        y >= cy - ICON_HALF - HIT_PAD_Y && y <= cy + ICON_HALF + HIT_PAD_Y) {
+        act.kind = UI_ACTION_MUTE;
         return act;
     }
 

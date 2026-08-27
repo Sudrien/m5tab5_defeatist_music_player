@@ -104,6 +104,7 @@ static uint8_t  s_channels;
 static uint8_t  s_volume = 50;
 
 static volatile route_t s_route = ROUTE_SPEAKER;
+static volatile bool    s_muted;
 
 /* The last uac.c generation this file has reacted to. Watched rather
  * than uac_present() polled, so a headset unplugged and replugged
@@ -124,7 +125,18 @@ static int16_t *s_scratch;
 
 static inline bool soft_gain(void)
 {
-    return s_route == ROUTE_USB && !uac_has_volume_control();
+    /*
+     * Muted always takes the software path, whatever the device offers.
+     *
+     * "Set the device volume to zero" is not the same statement as
+     * silence: the control is a feature-unit setting whose bottom step
+     * is whatever the device decided it is, and on more than a few parts
+     * that is quiet rather than nothing. Zeroing the samples is the only
+     * version of mute that cannot be argued with, and it costs one pass
+     * over a 4 KB block.
+     */
+    if (s_route != ROUTE_USB) return false;
+    return s_muted || !uac_has_volume_control();
 }
 
 /* The jack's poll task decides nothing on its own any more -- it feeds
@@ -338,8 +350,14 @@ const char *audio_out_route_name(void)
  */
 static void analog_set(bool enabled)
 {
-    reg_write(s_es8388, ES8388_REG_DACCONTROL3, enabled ? 0x00 : ES8388_DACMUTE_BIT);
-    speaker_set(enabled && !s_headphones);
+    /* Muted is the same silence as "USB has the route": the DAC is
+     * muted and the amp is off. One condition rather than two states,
+     * because a mute applied while USB is playing has to survive the
+     * device being unplugged -- and it does, because this is re-run from
+     * arbitrate() on the way back. */
+    const bool on = enabled && !s_muted;
+    reg_write(s_es8388, ES8388_REG_DACCONTROL3, on ? 0x00 : ES8388_DACMUTE_BIT);
+    speaker_set(on && !s_headphones);
 }
 
 /*
@@ -467,7 +485,8 @@ esp_err_t audio_out_write(const void *data, size_t len)
 
         if (soft_gain() && s_scratch) {
             if (n > GAIN_SCRATCH_BYTES) n = GAIN_SCRATCH_BYTES;
-            apply_gain((const int16_t *)src, s_scratch, n / sizeof(int16_t), s_volume);
+            apply_gain((const int16_t *)src, s_scratch, n / sizeof(int16_t),
+                       s_muted ? 0 : s_volume);
             out = s_scratch;
         }
 
@@ -520,6 +539,21 @@ esp_err_t audio_out_set_volume(uint8_t percent)
      */
     uac_set_volume(percent);
     return es8388_set_volume(percent);
+}
+
+bool audio_out_muted(void) { return s_muted; }
+
+void audio_out_set_mute(bool muted)
+{
+    s_muted = muted;
+
+    /* The USB path needs nothing said to it: soft_gain() reads s_muted
+     * on the way past and apply_gain() scales by zero. The analog path
+     * is two register writes and they have to happen now rather than at
+     * the next route change. */
+    analog_set(s_route != ROUTE_USB);
+
+    ESP_LOGI(TAG, "%s (%s)", muted ? "muted" : "unmuted", audio_out_route_name());
 }
 
 esp_err_t audio_out_init(i2c_master_bus_handle_t bus,

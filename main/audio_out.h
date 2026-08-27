@@ -76,6 +76,16 @@ esp_err_t audio_out_write(const void *data, size_t len);
 /* 0-100. */
 esp_err_t audio_out_set_volume(uint8_t percent);
 
+/*
+ * Silence without forgetting the level.
+ *
+ * Applied at whichever output holds the route, and re-applied when the
+ * route changes -- muting and then unplugging a USB headset must not
+ * come back on the speaker.
+ */
+void audio_out_set_mute(bool muted);
+bool audio_out_muted(void);
+
 /* "speaker", "headphones" -- for the log. Never NULL. */
 const char *audio_out_route_name(void);
 
