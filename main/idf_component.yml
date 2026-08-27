@@ -16,6 +16,11 @@ dependencies:
   # IDF.
   espressif/usb_host_msc: "^1.1.0"
 
+  # USB audio host, for the UAC output path. Same story as the MSC driver
+  # above: the host stack is in IDF, this is the class driver on top of
+  # it. Both sit on the one bus that usbhost.c owns.
+  espressif/usb_host_uac: "^1.5.0"
+
   # Both, because the controller is probed rather than assumed: rev 1 Tab5
   # is ILI9881C + GT911, rev 2 is ST7121/ST7123 + ST7123. Dropping the one
   # your board does not have saves a little flash and guarantees the other

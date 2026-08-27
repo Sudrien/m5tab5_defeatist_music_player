@@ -63,6 +63,7 @@
 #include "playlist.h"
 #include "storage.h"
 #include "touch.h"
+#include "uac.h"
 #include "ui.h"
 #include "usbhost.h"
 #include "waveform.h"
@@ -2556,6 +2557,13 @@ void app_main(void)
      * registers one. */
     ESP_ERROR_CHECK(usbhost_init(s_exp2));
     ESP_ERROR_CHECK(storage_init());
+
+    /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
+     * device: no headset plugged in is the normal way to boot, and the
+     * analog path is what plays until one is. */
+    if (uac_init() != ESP_OK) {
+        ESP_LOGW(TAG, "no USB audio support this boot; analog output only");
+    }
 
     /*
      * And power it, unconditionally.
