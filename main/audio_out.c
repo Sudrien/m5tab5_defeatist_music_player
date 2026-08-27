@@ -10,6 +10,10 @@
  * second copy is the thing that drifts. Reading the register back and
  * clearing bit 1 needs to know only about bit 1.
  *
+ * The routing rule this file now implements is one line long: if a USB
+ * audio device is attached and can take the format, it wins. See the
+ * comment above arbitrate().
+ *
  * SPDX-License-Identifier: MIT
  */
 
@@ -18,11 +22,13 @@
 #include "driver/gpio.h"
 #include "driver/i2s_std.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "audio_out.h"
+#include "uac.h"
 
 static const char *TAG = "tab5_audio";
 
@@ -58,6 +64,34 @@ static const char *TAG = "tab5_audio";
 #define HP_DETECT_ACTIVE_LOW    (0)
 #define HP_POLL_MS              (200)
 
+/* ES8388 DACCONTROL3, bit 2 = DACMute. Not written by es8388_init(),
+ * which leaves it at its reset default of unmuted. */
+#define ES8388_REG_DACCONTROL3  (25)
+#define ES8388_DACMUTE_BIT      (1 << 2)
+
+/*
+ * How long uac_write() will wait for room in the device's ring.
+ *
+ * A USB frame is 1 ms and the driver's ring holds about 93 ms, so a
+ * healthy stream never comes near this. It is a stall detector, not a
+ * flow control: past this the device is not draining and the honest
+ * thing is to drop the block and say so rather than to stall the writer
+ * task, which is the task the transport buttons are waiting behind.
+ */
+#define UAC_WRITE_TIMEOUT_MS    (200)
+
+/* Software gain works a chunk at a time out of this rather than in
+ * place, because the buffer handed to audio_out_write() belongs to the
+ * caller and scaling it in place would quietly modify the ring's data.
+ * 4 KB matches PCM_CHUNK_BYTES; a larger block is split. */
+#define GAIN_SCRATCH_BYTES      (4 * 1024)
+
+typedef enum {
+    ROUTE_SPEAKER = 0,
+    ROUTE_HEADPHONES,
+    ROUTE_USB,
+} route_t;
+
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_exp1;
 static i2c_master_dev_handle_t s_es8388;
@@ -67,6 +101,26 @@ static volatile bool s_headphones;
 static uint32_t s_rate;
 static uint8_t  s_channels;
 static uint8_t  s_volume = 50;
+
+static volatile route_t s_route = ROUTE_SPEAKER;
+
+/* The last uac.c generation this file has reacted to. Watched rather
+ * than uac_present() polled, so a headset unplugged and replugged
+ * between two blocks is noticed as a change rather than as "still
+ * there". */
+static uint32_t s_uac_seen;
+
+/* Set when the device has no volume control the driver can reach, which
+ * is most of the cheap ones. The slider has to keep working either way,
+ * so the gain is applied to the samples on the way out. */
+static bool     s_soft_gain;
+static int16_t *s_scratch;
+
+/* The jack's poll task decides nothing on its own any more -- it feeds
+ * one input into arbitrate(), which is defined below it because it needs
+ * the codec helpers. */
+static void arbitrate(void);
+static void analog_set(bool enabled);
 
 /* ------------------------------------------------------------------ */
 /* I2C helpers                                                         */
@@ -231,9 +285,13 @@ static void headphone_task(void *arg)
         if (plugged != last) {
             last = plugged;
             s_headphones = plugged;
-            speaker_set(!plugged);
-            ESP_LOGI(TAG, "headphones %s, speaker %s",
-                     plugged ? "in" : "out", plugged ? "muted" : "on");
+            ESP_LOGI(TAG, "headphones %s", plugged ? "in" : "out");
+            /* Not speaker_set() directly. The jack is one input to the
+             * routing decision rather than the whole of it now: with a
+             * USB device playing, unplugging the headphones must not
+             * switch the speaker back on underneath it. */
+            arbitrate();
+            if (s_route != ROUTE_USB) analog_set(true);
         }
         vTaskDelay(pdMS_TO_TICKS(HP_POLL_MS));
     }
@@ -241,7 +299,117 @@ static void headphone_task(void *arg)
 
 const char *audio_out_route_name(void)
 {
-    return s_headphones ? "headphones" : "speaker";
+    switch (s_route) {
+    case ROUTE_USB:        return "USB audio";
+    case ROUTE_HEADPHONES: return "headphones";
+    default:               return "speaker";
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Routing                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Everything analog off, or back on according to the jack.
+ *
+ * Two things, not one. The amp enable alone is not enough: with
+ * headphones in and SPK_EN already low, cutting only the amp leaves the
+ * ES8388 driving OUT1 and the jack playing the same track the USB
+ * headset is playing, a few milliseconds apart. So the DAC is muted as
+ * well, which covers both outputs at once and is one I2C write.
+ *
+ * The I2S channel is deliberately left running and at the right rate.
+ * Stopping it would drop MCLK, and the ES8388 stops answering on I2C
+ * without MCLK -- so unmuting on the way back would be a codec
+ * re-init rather than a register write. It costs a clock running into a
+ * muted DAC, which is the state the part is in between tracks anyway.
+ */
+static void analog_set(bool enabled)
+{
+    reg_write(s_es8388, ES8388_REG_DACCONTROL3, enabled ? 0x00 : ES8388_DACMUTE_BIT);
+    speaker_set(enabled && !s_headphones);
+}
+
+/*
+ * The rule: a USB audio device that can take the format wins.
+ *
+ * It outranks the headphone jack, which outranks the speaker, and it
+ * does so unconditionally rather than as a preference the user sets.
+ * The argument is that plugging a USB DAC or headset into a device is
+ * not an ambiguous act -- nobody connects one and then expects the
+ * built-in speaker to keep playing -- and it is exactly the argument the
+ * jack already wins on. The jack has had this behaviour since the first
+ * version; this adds a rung above it rather than a new kind of rule.
+ *
+ * "Can take the format" is doing real work in that sentence. There is no
+ * resampler here, so a device that only offers 48 kHz is not an output
+ * for a 44.1 kHz file, and the correct thing is to fall back to the
+ * analog path rather than to play it 9% fast. That decision is per
+ * format, so it is re-made on every track: an album of 44.1 kHz files
+ * with one 48 kHz track in it will route to USB, drop to the speaker for
+ * that track, and go back.
+ *
+ * Called from audio_out_set_format() and from audio_out_write() when the
+ * generation moves, so a headset plugged in mid-track is picked up at
+ * the next block rather than at the next track.
+ */
+static void arbitrate(void)
+{
+    s_uac_seen = uac_generation();
+
+    route_t want = s_headphones ? ROUTE_HEADPHONES : ROUTE_SPEAKER;
+
+    if (uac_present() && s_rate && s_channels) {
+        const esp_err_t err = uac_stream_start(s_rate, s_channels);
+        if (err == ESP_OK) {
+            want = ROUTE_USB;
+        } else if (err == ESP_ERR_NOT_SUPPORTED) {
+            ESP_LOGI(TAG, "USB device cannot take %lu Hz %u ch; staying analog",
+                     (unsigned long)s_rate, s_channels);
+        }
+    }
+
+    if (want == s_route) return;
+
+    if (want == ROUTE_USB) {
+        analog_set(false);
+        /* Volume is asked of the device once per route change, not per
+         * track: the answer cannot change while the same device is
+         * attached, and uac_set_volume() latches the no. */
+        s_soft_gain = (uac_set_volume(s_volume) != ESP_OK);
+    } else {
+        if (s_route == ROUTE_USB) {
+            uac_stream_stop();
+            analog_set(true);
+            es8388_set_volume(s_volume);
+        }
+        s_soft_gain = false;
+    }
+
+    s_route = want;
+    ESP_LOGI(TAG, "output: %s%s", audio_out_route_name(),
+             (want == ROUTE_USB && s_soft_gain) ? " (software volume)" : "");
+}
+
+/*
+ * Scale a block by the volume percentage, into the scratch buffer.
+ *
+ * Linear in amplitude rather than in dB, which is the wrong curve for a
+ * volume control and is the same wrong curve the ES8388 path uses --
+ * es8388_set_volume() maps a percentage linearly onto the mixer's
+ * register steps. Matching it is the point: the slider should not feel
+ * different depending on what is plugged in. If that curve is ever
+ * fixed, both of these change together.
+ *
+ * Returns the number of samples written, always the number asked for.
+ */
+static void apply_gain(const int16_t *src, int16_t *dst, size_t samples, uint8_t percent)
+{
+    const int32_t g = (int32_t)percent;
+    for (size_t i = 0; i < samples; i++) {
+        dst[i] = (int16_t)((src[i] * g) / 100);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -249,24 +417,88 @@ const char *audio_out_route_name(void)
 esp_err_t audio_out_set_format(uint32_t rate, uint8_t channels)
 {
     if (rate == 0 || channels == 0) return ESP_ERR_INVALID_ARG;
-    if (rate == s_rate && channels == s_channels) return ESP_OK;
 
-    ESP_RETURN_ON_ERROR(i2s_set_rate(rate), TAG, "rate");
+    if (rate != s_rate) {
+        /* Set even when the USB path is about to win it. The fallback
+         * has to be instant -- a device unplugged mid-track re-routes at
+         * the next block, and reconfiguring the I2S clock there would
+         * mean disabling the channel with audio in flight. One reconfig
+         * per track buys a fallback that is a route change and nothing
+         * else. */
+        ESP_RETURN_ON_ERROR(i2s_set_rate(rate), TAG, "rate");
+    }
     s_rate = rate;
     s_channels = channels;
+
+    arbitrate();
     return ESP_OK;
 }
 
 esp_err_t audio_out_write(const void *data, size_t len)
 {
-    size_t written = 0;
-    return i2s_channel_write(s_tx, data, len, &written, portMAX_DELAY);
+    /* A plug event between blocks. Cheap enough to test every time: it
+     * is a load and a compare, and the alternative is a headset that
+     * does not take over until the next track. */
+    if (uac_generation() != s_uac_seen) arbitrate();
+
+    if (s_route != ROUTE_USB) {
+        size_t written = 0;
+        return i2s_channel_write(s_tx, data, len, &written, portMAX_DELAY);
+    }
+
+    const uint8_t *src = (const uint8_t *)data;
+    size_t remain = len;
+    while (remain) {
+        size_t n = remain;
+        const void *out = src;
+
+        if (s_soft_gain && s_scratch) {
+            if (n > GAIN_SCRATCH_BYTES) n = GAIN_SCRATCH_BYTES;
+            apply_gain((const int16_t *)src, s_scratch, n / sizeof(int16_t), s_volume);
+            out = s_scratch;
+        }
+
+        const esp_err_t err = uac_write(out, n, UAC_WRITE_TIMEOUT_MS);
+        if (err == ESP_ERR_INVALID_STATE) {
+            /* The device went away between the generation check and the
+             * write, which is the ordinary way a headset is unplugged.
+             * Re-route and put the rest of this block out of whatever
+             * answered. */
+            arbitrate();
+            if (s_route != ROUTE_USB) {
+                size_t written = 0;
+                return i2s_channel_write(s_tx, src, remain, &written, portMAX_DELAY);
+            }
+            return err;
+        }
+        if (err != ESP_OK) {
+            /* A timeout is a device that has stopped draining. The block
+             * is dropped rather than retried: the writer task is what
+             * the transport buttons are queued behind, and a stalled
+             * device must not become a dead play button. */
+            ESP_LOGW(TAG, "USB output dropped %u bytes (%s)",
+                     (unsigned)n, esp_err_to_name(err));
+            return err;
+        }
+
+        src += n;
+        remain -= n;
+    }
+    return ESP_OK;
 }
 
 esp_err_t audio_out_set_volume(uint8_t percent)
 {
     if (percent > 100) percent = 100;
     s_volume = percent;
+
+    if (s_route == ROUTE_USB) {
+        /* Software gain needs no call at all -- audio_out_write() reads
+         * s_volume on the way past. The codec is left where it is so a
+         * fallback lands at the right level rather than at the level it
+         * had when the device was plugged in. */
+        if (!s_soft_gain) uac_set_volume(percent);
+    }
     return es8388_set_volume(percent);
 }
 
@@ -284,6 +516,17 @@ esp_err_t audio_out_init(i2c_master_bus_handle_t bus,
     s_channels = 2;
 
     ESP_RETURN_ON_ERROR(es8388_init(), TAG, "es8388");
+
+    /* Internal rather than PSRAM: it is 4 KB, it is touched once per
+     * block on the task that must not stall, and PSRAM is already
+     * carrying the shadow framebuffer and the cover cache. */
+    s_scratch = heap_caps_malloc(GAIN_SCRATCH_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_scratch) {
+        /* Not fatal. Without it a device with no volume control plays at
+         * full scale and the slider does nothing, which is worse than
+         * this line and better than not booting. */
+        ESP_LOGW(TAG, "no gain scratch buffer; USB volume will be fixed");
+    }
 
     if (xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;
