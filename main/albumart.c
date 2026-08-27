@@ -20,6 +20,7 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_rom_md5.h"
 
 #include "pngle.h"
 
@@ -491,6 +492,39 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     in = jpeg_alloc_decoder_mem(jpeg_len, &in_cfg, &in_size);
     ESP_GOTO_ON_FALSE(in, ESP_ERR_NO_MEM, cleanup, TAG, "jpeg in buf");
     memcpy(in, jpeg, jpeg_len);
+
+    /*
+     * What the decoder is about to be handed, hashed.
+     *
+     * The same 145926-byte cover decodes on some tracks and fails on
+     * others with "marker parsed by the decoder is not supported by the
+     * hardware", reproducibly, from files that are byte-identical off
+     * the card -- confirmed by extracting both with ffmpeg and comparing
+     * pixel signatures. So either the bytes arriving here are not the
+     * bytes on the card, or they are perfect and the engine is the
+     * problem. Nothing in the log distinguishes those, and they want
+     * completely different fixes.
+     *
+     * Hashed from `in` rather than from `jpeg`, deliberately: `in` is
+     * the DMA-reachable copy the hardware actually reads, so this covers
+     * the ID3 extraction, the read off the card AND the memcpy above.
+     * Hashing the source would leave the last of those untested.
+     *
+     * MD5 from ROM: no code size, no dependency, and collision
+     * resistance is irrelevant when the question is "are these the same
+     * bytes twice".
+     */
+    {
+        md5_context_t md5;
+        uint8_t digest[16];
+        esp_rom_md5_init(&md5);
+        esp_rom_md5_update(&md5, in, (uint32_t)jpeg_len);
+        esp_rom_md5_final(digest, &md5);
+
+        char hex[33];
+        for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", digest[i]);
+        ESP_LOGI(TAG, "jpeg in: %u bytes, md5 %s", (unsigned)jpeg_len, hex);
+    }
 
     const jpeg_decode_memory_alloc_cfg_t out_cfg = {
         .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
