@@ -25,6 +25,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
@@ -32,6 +33,7 @@
 
 #include "usb/uac_host.h"
 
+#include "battery.h"
 #include "uac.h"
 #include "usbhost.h"
 
@@ -125,6 +127,23 @@ static uint8_t  s_channels;
 
 static char s_product[64];
 
+/*
+ * Attach time and error count, for the line printed on the way out.
+ *
+ * A USB audio device that drops off the bus after a while leaves almost
+ * nothing behind: the driver logs a pipe that is no longer active, which
+ * is the symptom rather than the cause, and by the time anything here
+ * runs the device is already gone. These two numbers plus the pack
+ * voltage are what distinguish the three things it can be -- a rail
+ * sagging under the device's own draw, a device failing on its own
+ * schedule, and a stream this code stopped feeding -- and none of them
+ * are distinguishable from "HCD Pipe not in active state" alone.
+ *
+ * Not a fix. This is the instrumentation that says which fix to write.
+ */
+static int64_t  s_attach_us;
+static uint32_t s_xfer_errors;
+
 /* Set once, on the first failure, so the fallback to software gain is
  * decided once rather than probed per volume change -- a drag emits one
  * of these every poll. */
@@ -212,6 +231,9 @@ static void report(uac_host_device_handle_t dev, const uac_host_dev_info_t *info
              info->iface_num, info->addr);
     ESP_LOGI(TAG, "  %-12s %04X:%04X", "VID:PID", info->VID, info->PID);
     if (s_product[0]) ESP_LOGI(TAG, "  %-12s %s", "product", s_product);
+    /* The pack at the moment a device arrives, so the reading on the way
+     * out has something to be compared against. */
+    ESP_LOGI(TAG, "  %-12s %d mV", "pack", battery_mv());
 
     for (uint8_t alt = 1; alt <= info->iface_alt_num; alt++) {
         uac_host_dev_alt_param_t p;
@@ -364,6 +386,12 @@ static void device_event_cb(uac_host_device_handle_t dev,
         s_present = false;
         s_streaming = false;
         s_generation++;
+        /* Printed here rather than in handle_disconnect(), because this
+         * runs at the moment the device went away and that runs after
+         * the writer has finished whatever it was in the middle of. */
+        ESP_LOGW(TAG, "device dropped after %d ms, %lu transfer errors, pack %d mV",
+                 (int)((esp_timer_get_time() - s_attach_us) / 1000),
+                 (unsigned long)s_xfer_errors, battery_mv());
         {
             const uac_queue_msg_t msg = {
                 .addr = 0, .iface_num = 0, .kind = MSG_DETACH,
@@ -373,7 +401,18 @@ static void device_event_cb(uac_host_device_handle_t dev,
         break;
 
     case UAC_HOST_DEVICE_EVENT_TRANSFER_ERROR:
-        ESP_LOGW(TAG, "transfer error");
+        /* Rate limited: an isochronous endpoint that has started failing
+         * fails every frame, and a thousand identical lines a second
+         * buries the thing that caused it. The first few and then every
+         * 256th, which is enough to tell "one glitch" from "it never
+         * recovered". */
+        s_xfer_errors++;
+        if (s_xfer_errors <= 4 || (s_xfer_errors % 256) == 0) {
+            ESP_LOGW(TAG, "transfer error (%lu so far, %d ms in, pack %d mV)",
+                     (unsigned long)s_xfer_errors,
+                     (int)((esp_timer_get_time() - s_attach_us) / 1000),
+                     battery_mv());
+        }
         break;
 
     default:
@@ -446,6 +485,8 @@ static void handle_connect(uint8_t addr, uint8_t iface_num)
     s_no_hw_volume = false;
     s_rate = 0;
     s_channels = 0;
+    s_attach_us = esp_timer_get_time();
+    s_xfer_errors = 0;
     xSemaphoreGive(s_lock);
 
     s_present = true;

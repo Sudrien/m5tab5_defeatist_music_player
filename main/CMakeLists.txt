@@ -4,7 +4,7 @@ idf_component_register(
     INCLUDE_DIRS "."
     REQUIRES driver esp_driver_i2c esp_driver_i2s esp_driver_sdmmc
              esp_driver_jpeg esp_lcd esp_lcd_touch fatfs sdmmc
-             usb usb_host_msc usb_host_uac
+             usb usb_host_msc usb_host_uac esp_timer
     PRIV_REQUIRES pngle minimp3 ark10
 )
 
