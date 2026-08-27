@@ -111,11 +111,21 @@ static volatile route_t s_route = ROUTE_SPEAKER;
  * there". */
 static uint32_t s_uac_seen;
 
-/* Set when the device has no volume control the driver can reach, which
- * is most of the cheap ones. The slider has to keep working either way,
- * so the gain is applied to the samples on the way out. */
-static bool     s_soft_gain;
+/* The slider has to keep working whatever the device offers, so when
+ * there is no control the driver can reach the gain is applied to the
+ * samples on the way out.
+ *
+ * Asked per block rather than latched at route change: the answer
+ * arrives asynchronously now -- uac_set_volume() publishes and the UAC
+ * event task performs the transfer -- so the route can be taken before
+ * the first attempt has been made. A volatile read is cheaper than being
+ * wrong for the first second of every track. */
 static int16_t *s_scratch;
+
+static inline bool soft_gain(void)
+{
+    return s_route == ROUTE_USB && !uac_has_volume_control();
+}
 
 /* The jack's poll task decides nothing on its own any more -- it feeds
  * one input into arbitrate(), which is defined below it because it needs
@@ -375,17 +385,15 @@ static void arbitrate(void)
 
     if (want == ROUTE_USB) {
         analog_set(false);
-        /* Volume is asked of the device once per route change, not per
-         * track: the answer cannot change while the same device is
-         * attached, and uac_set_volume() latches the no. */
-        s_soft_gain = (uac_set_volume(s_volume) != ESP_OK);
-    } else {
-        if (s_route == ROUTE_USB) {
-            uac_stream_stop();
-            analog_set(true);
-            es8388_set_volume(s_volume);
-        }
-        s_soft_gain = false;
+        /* Published, not performed. The device's own control is tried on
+         * the UAC event task; until it answers, soft_gain() reports true
+         * and the samples are scaled instead. Either way the slider
+         * works from the first block. */
+        uac_set_volume(s_volume);
+    } else if (s_route == ROUTE_USB) {
+        uac_stream_stop();
+        analog_set(true);
+        es8388_set_volume(s_volume);
     }
 
     s_route = want;
@@ -393,8 +401,7 @@ static void arbitrate(void)
      * load here that is switched on and off by a routing decision, so a
      * rail that sags when one starts playing shows up as a step between
      * two of these lines and as nothing at all without them. */
-    ESP_LOGI(TAG, "output: %s%s (pack %d mV)", audio_out_route_name(),
-             (want == ROUTE_USB && s_soft_gain) ? " (software volume)" : "",
+    ESP_LOGI(TAG, "output: %s (pack %d mV)", audio_out_route_name(),
              battery_mv());
 }
 
@@ -458,7 +465,7 @@ esp_err_t audio_out_write(const void *data, size_t len)
         size_t n = remain;
         const void *out = src;
 
-        if (s_soft_gain && s_scratch) {
+        if (soft_gain() && s_scratch) {
             if (n > GAIN_SCRATCH_BYTES) n = GAIN_SCRATCH_BYTES;
             apply_gain((const int16_t *)src, s_scratch, n / sizeof(int16_t), s_volume);
             out = s_scratch;
@@ -498,13 +505,20 @@ esp_err_t audio_out_set_volume(uint8_t percent)
     if (percent > 100) percent = 100;
     s_volume = percent;
 
-    if (s_route == ROUTE_USB) {
-        /* Software gain needs no call at all -- audio_out_write() reads
-         * s_volume on the way past. The codec is left where it is so a
-         * fallback lands at the right level rather than at the level it
-         * had when the device was plugged in. */
-        if (!s_soft_gain) uac_set_volume(percent);
-    }
+    /*
+     * Both, unconditionally, and neither blocks.
+     *
+     * uac_set_volume() is two stores now; it used to take the UAC lock
+     * and perform a USB control transfer, on this task -- which is the
+     * UI task, dispatching every other button in the same loop. A drag
+     * put fifty of those a second behind the mutex the audio writer
+     * holds for the length of a write.
+     *
+     * The codec is set even while USB has the route, so a device
+     * unplugged mid-track falls back at the right level rather than at
+     * whatever it was when the device arrived.
+     */
+    uac_set_volume(percent);
     return es8388_set_volume(percent);
 }
 

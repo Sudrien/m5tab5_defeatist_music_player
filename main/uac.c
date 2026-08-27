@@ -144,10 +144,24 @@ static char s_product[64];
 static int64_t  s_attach_us;
 static uint32_t s_xfer_errors;
 
-/* Set once, on the first failure, so the fallback to software gain is
- * decided once rather than probed per volume change -- a drag emits one
- * of these every poll. */
-static bool s_no_hw_volume;
+/*
+ * The volume the UI last asked for, and whether the device turned out to
+ * have a control for it.
+ *
+ * A published pair, written by anyone and applied by the event task.
+ * uac_set_volume() used to do the control transfer on its caller's task,
+ * which is the UI task -- so a volume drag put fifty attempts a second
+ * behind the mutex the audio writer holds for the length of a write, in
+ * the loop that also dispatches play, next, seek and the folder button.
+ * That is a self-inflicted stall in the one task that must not stall.
+ *
+ * s_hw_volume is false until the first attempt has been made and false
+ * forever once one has failed, so the software-gain fallback is decided
+ * once rather than probed per change.
+ */
+static volatile uint8_t s_want_volume = 50;
+static volatile bool    s_volume_dirty;
+static volatile bool    s_hw_volume;
 
 bool     uac_present(void)    { return s_present; }
 bool     uac_streaming(void)  { return s_streaming; }
@@ -344,28 +358,40 @@ esp_err_t uac_write(const void *data, size_t len, uint32_t timeout_ms)
     return ret;
 }
 
-esp_err_t uac_set_volume(uint8_t percent)
+bool uac_has_volume_control(void) { return s_hw_volume; }
+
+/* Publishes and returns. Two volatile stores; no lock, no transfer, no
+ * possibility of blocking behind the writer. */
+void uac_set_volume(uint8_t percent)
 {
-    if (!s_lock) return ESP_ERR_INVALID_STATE;
-    if (s_no_hw_volume) return ESP_ERR_NOT_SUPPORTED;
-    if (percent > 100) percent = 100;
+    s_want_volume = (percent > 100) ? 100 : percent;
+    s_volume_dirty = true;
+}
+
+/* The other half, on the event task. Tried once per attach; a failure
+ * latches the software-gain fallback rather than being retried, because
+ * the answer cannot change while the same device is attached. */
+static void apply_volume(void)
+{
+    static bool tried_and_failed;
+
+    s_volume_dirty = false;
+    if (tried_and_failed) return;
+
+    const uint8_t want = s_want_volume;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t ret = ESP_ERR_INVALID_STATE;
-    if (s_dev) ret = uac_host_device_set_volume(s_dev, percent);
+    if (s_dev) ret = uac_host_device_set_volume(s_dev, want);
     xSemaphoreGive(s_lock);
 
-    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-        /* Latched, not retried. Plenty of class-compliant devices --
-         * the C-Media parts in particular -- have no feature unit the
-         * driver can reach, and a volume drag emits one of these every
-         * poll. Probing fifty times a second to learn the same no is
-         * both noisy and slow. */
-        s_no_hw_volume = true;
+    if (ret == ESP_OK) {
+        s_hw_volume = true;
+    } else if (ret != ESP_ERR_INVALID_STATE) {
+        tried_and_failed = true;
+        s_hw_volume = false;
         ESP_LOGI(TAG, "no device volume control; gain applied in software");
-        ret = ESP_ERR_NOT_SUPPORTED;
     }
-    return ret;
 }
 
 /* ------------------------------------------------------------------ */
@@ -482,7 +508,8 @@ static void handle_connect(uint8_t addr, uint8_t iface_num)
      * track is playing, and a stream running with nothing written to it
      * is isochronous bandwidth spent on silence. */
     s_dev = dev;
-    s_no_hw_volume = false;
+    s_hw_volume = false;
+    s_volume_dirty = true;      /* apply the UI's level to the new device */
     s_rate = 0;
     s_channels = 0;
     s_attach_us = esp_timer_get_time();
@@ -512,7 +539,21 @@ static void uac_task(void *arg)
     (void)arg;
     uac_queue_msg_t msg;
     while (1) {
-        if (xQueueReceive(s_queue, &msg, portMAX_DELAY) != pdTRUE) continue;
+        /*
+         * A timeout rather than portMAX_DELAY, because this task now
+         * owns the volume control transfer as well as the plug events.
+         *
+         * Polling a flag at 20 Hz rather than queueing each change: only
+         * the latest value matters, a drag emits one per UI poll, and a
+         * four-deep queue would overflow within a fifth of a second of
+         * dragging. Coalescing is the correct behaviour here and falls
+         * out of the flag for free.
+         */
+        if (xQueueReceive(s_queue, &msg, pdMS_TO_TICKS(50)) != pdTRUE) {
+            if (s_volume_dirty) apply_volume();
+            continue;
+        }
+        if (s_volume_dirty) apply_volume();
 
         switch (msg.kind) {
         case MSG_ATTACH_TX:
