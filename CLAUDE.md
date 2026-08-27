@@ -880,64 +880,196 @@ and already handled; it matters far more now, because the poll retries
 forever rather than once at boot, so a leaked host is a guaranteed failure
 a second later instead of a one-off.
 
-### The USB port is off until there is a reason
+### The USB port is powered at boot
 
-VBUS is not brought up at boot. Neither is the host stack -- powering the
-port but leaving the stack uninstalled would spin a drive up and then
-ignore it, which is the worst of both. `storage_usb_enable()` does the
-whole sequence: host stack, class driver, then bus power, in that order,
-so a drive already in the port is enumerated by a stack that exists.
+It used to come up only when there was a reason: no card at boot, or the
+USB tab tapped in the chooser. Both of those are questions about **where
+the files are**, and that was the right gate while mass storage was the
+only thing on the bus.
 
-Two things ask for it, and nothing else does:
+It stops being right the moment audio is on it. A USB audio device is not
+a file source, and it cannot announce itself through a dark port -- so
+with a card in the slot and nobody in the chooser, a headset plugged into
+this player was invisible for as long as the card kept working. "Highest
+priority output" is not implementable on a port you only switch on when
+you go looking for music files.
 
-1. **No card at boot.** A player with nothing to play should look at the
-   other port rather than sit there empty. Boot only, deliberately -- a
-   card pulled later is a removal, not a search for media, and tying it to
-   removal would mean a card reseated twice had powered the port
-   permanently as a side effect. "Card present but unreadable" counts as
-   no card, because nothing mounted either way.
-2. **The USB tab is selected**, which is the user saying the same thing by
-   hand.
+So `app_main()` calls `usbhost_start()` unconditionally. What is lost is a
+milliamp or two on a board with nothing plugged in -- which is the state
+the port was in anyway. It is still one-way: cutting VBUS again would yank
+a mounted drive or a playing headset out from under whatever is using it.
 
-It is one-way. Cutting VBUS again would yank a mounted drive out from
-under whatever is reading it, and the saving is a port with nothing
-plugged into it -- which is the state it was already in.
+**`usbhost.c` owns the bus, not `storage.c`.** There are two class drivers
+on it now and exactly one host stack and one VBUS enable underneath them.
+Class drivers register before the port comes up and are installed in
+registration order, between `usb_host_install()` and VBUS -- which is the
+ordering `storage.c` already documented, and it matters for the same
+reason: a device already in the port enumerates the instant power arrives
+and should meet a stack that exists.
 
-The work happens on the poll task, not on the caller's: three I2C writes
-and a 100 ms settle for the port's inrush, and the two callers are the
-boot path and a touch event. Neither should block on it.
+Two rules in that file are worth not undoing:
+
+- **Registration after the port is up is refused, not honoured late.** A
+  class driver installed after enumeration is never offered the devices
+  already attached, so it would sit there looking installed and seeing
+  nothing until somebody unplugged and replugged.
+- **One class failing does not take the port down for the others.** A
+  build where the MSC driver cannot allocate should still play a headset.
+
+`USB5V_EN` is still P3 of the expander at 0x44, still needs three
+registers in the order direction, out-of-high-Z, drive, and the high-Z one
+is still the easy one to miss. That note moved with the code.
 
 ### A greyed tab is still a button
 
-This is the one place the chooser departs from a normal tab strip, and it
-follows from rule 2: if the port is only powered by selecting its tab,
-then the tab has to be selectable while there is nothing behind it. Grey
-means "nothing here yet", not "not a button".
+Grey means "nothing here yet", not "not a button". The underline is drawn
+for the selected tab whether or not anything is mounted -- in grey rather
+than red when it is empty -- because a strip with no underline at all
+reads as a lost tap.
 
-So the underline is drawn for the selected tab whether or not anything is
-mounted -- in grey rather than red when it is empty. A strip with no
-underline at all reads as a lost tap.
+This used to be structural: the port was only powered by selecting its
+tab, so the tab **had** to be selectable or there was no way to ask. That
+reason is gone with the on-demand power. What is left is the ordinary one
+-- a tab that ignores taps while a drive spins up reads as a lost tap --
+so the behaviour stays and the justification is weaker. Do not treat it as
+load-bearing any more.
 
 The path row carries the reason instead of a path:
 
 | State | Row reads |
 | --- | --- |
 | No card | `no card in the slot` |
-| USB tab, port dark | `tap again to power the USB port` |
 | USB tab, port up, no drive | `USB port on - waiting for a drive` |
 
-`storage_usb_powered()` deliberately reports the *request*, not the
-completed bring-up. The poll task can be a second behind the tap, and for
-that second the row would otherwise tell the user to tap again -- which
-either does nothing or reads as the first tap having missed. For the same
-reason the request flag is cleared only on failure, never on the way in:
-clearing it first leaves a window where neither flag is set and the label
-flickers back mid-bring-up.
+`storage_usb_powered()` still reports the *request* rather than the
+completed bring-up, so the third state -- `USB port coming up` -- exists
+only for the few milliseconds between `usbhost_start()` and VBUS going
+high at boot. Nobody can tap their way into it any more.
 
-One consequence worth stating: **the chooser no longer moves the tab on
-its own.** It used to fall back to whatever else was mounted when the
-shown volume vanished. That would have undone the tap that powered the
-port, about a second before the drive it was waiting for turned up.
+## USB audio output, and why it wins
+
+`uac.c` is the USB Audio Class output and `audio_out.c` decides when it
+plays. The rule is one line: **a USB audio device that can take the format
+wins.** It outranks the headphone jack, which outranks the speaker.
+
+Unconditional rather than a preference, for the same reason the jack has
+always beaten the speaker without asking: plugging a DAC or a headset into
+a player is not an ambiguous act. This adds a rung above the existing rule
+rather than inventing a new kind of rule.
+
+### "Can take the format" is doing real work
+
+There is no resampler. A device that only offers 48 kHz is not an output
+for a 44.1 kHz file, and the correct fallback is the analog path -- not
+handing over the bytes anyway, which is a semitone flat and 9% fast and
+reads as a broken player rather than as an unsupported device.
+
+So the decision is per format and re-made on every track. An album of
+44.1 kHz files with one 48 kHz track in it routes to USB, drops to the
+speaker for that track, and goes back. That is visible in the log and it
+is not a bug.
+
+This is also the one inversion from the UAC example this was ported from.
+`uac_example.c` picked the first 16-bit PCM alternate and took its first
+listed rate, which is right when you are looping a microphone into a
+speaker and only need the two ends to agree with each other. A player
+already has a rate -- the file's -- so the search runs the other way:
+state a rate and a channel count, get an alternate that offers exactly
+that, or get `ESP_ERR_NOT_SUPPORTED`.
+
+### Muting the amplifier is not enough
+
+With headphones in, `SPK_EN` is already low. Cutting only the amp when USB
+takes over therefore leaves the ES8388 driving OUT1, and the 3.5 mm jack
+plays the same track as the USB headset a few milliseconds behind it.
+
+So the DAC is muted as well -- `DACCONTROL3` bit 2, one write, both output
+pairs at once.
+
+**The I2S channel stays running, and stays at the right rate.** Stopping
+it drops MCLK, and the ES8388 stops answering on I2C without MCLK, so
+coming back would be a codec re-init rather than a register write. The
+rate is set even on tracks that route to USB, so a device unplugged
+mid-track falls back in one block instead of having to reconfigure a clock
+with audio in flight. The cost is a clock running into a muted DAC, which
+is the state the part is in between tracks anyway.
+
+**The jack's poll task no longer drives `SPK_EN` directly.** It is one
+input to `arbitrate()` now. Unplugging headphones while a USB device is
+playing must not switch the speaker on underneath it.
+
+### The device handle is the exception to the publish-a-value rule
+
+This file says, at length, never to share a handle across tasks. `uac.c`
+has to: writing audio means calling the driver with the handle, and the
+writer is not the task that opens or closes it.
+
+So `s_dev` is under a mutex, and the disconnect callback **does not
+close**. It publishes `s_present = false` and queues; the event task does
+the close with the lock held. Closing a device while a writer sits inside
+`uac_host_device_write()` on it is precisely the class of bug the heap
+corruption section is about, and this one would be a genuine
+use-after-free rather than a stray read.
+
+A disconnect therefore costs the length of one in-flight write, bounded by
+the caller's timeout. `uac_present()` reads the published bool and never
+takes the lock, so the UI cannot block behind a write in flight.
+
+### A stalled device drops the block
+
+`uac_write()` waits up to 200 ms for room. A USB frame is 1 ms and the
+driver ring holds about 93 ms, so a healthy stream never comes near it --
+it is a stall detector, not flow control. Past it the block is dropped and
+logged rather than retried, because the writer task is what the transport
+buttons are queued behind and a wedged device must not become a dead play
+button.
+
+### The volume slider works either way
+
+Asked of the device once per route change, not per track, and the failure
+is latched. Most of the cheap class-compliant parts -- the C-Media ones in
+particular -- have no feature unit the driver can reach, and a volume drag
+emits one request per poll; probing fifty times a second to learn the same
+no is both noisy and slow.
+
+When there is no device control, gain is applied to the samples on the way
+out, into a scratch buffer rather than in place, because the block belongs
+to the caller's ring. The curve is linear in amplitude, which is the wrong
+curve for a volume control and is deliberately the *same* wrong curve
+`es8388_set_volume()` uses: the slider should not feel different depending
+on what is plugged in. If that is ever fixed, both change together.
+
+### The microphone is ignored
+
+`UAC_HOST_DRIVER_EVENT_RX_CONNECTED` is logged and nothing is opened.
+Nothing in a music player reads audio in, and an open RX interface costs a
+ring buffer and isochronous bandwidth for a stream that would only be
+discarded. The example opened it because it was looping mic to speaker.
+
+Note that a headset is **two logical UAC devices**, one Audio Streaming
+interface each, and the driver's connect callback fires per interface
+rather than per device. A second TX interface is left closed rather than
+arbitrated: there is one pair of ears and no way to ask which.
+
+### The stream is not started at attach
+
+There is no format to start it in until a track is playing, and a stream
+running with nothing written to it is isochronous bandwidth spent on
+silence.
+
+### What this does not do yet
+
+- **Nothing on screen says which output is playing.**
+  `audio_out_route_name()` exists and only the log reads it. The transport
+  bar has no room for a ninth row and the honest place is probably next to
+  the volume slider.
+- **No resampling**, per above, so a 44.1 kHz-only device and a 48 kHz
+  file fall back to the speaker rather than converting.
+- **UAC 2.0 is untested.** The driver claims it; the device this was
+  written against is a UAC 1.0 C-Media part.
+- **Bus power is still USB 2.0.** A bus-powered DAC that wants more than
+  the port will give brown-outs rather than failing to enumerate, which is
+  the same caveat the mass-storage note already carries.
 
 ### Joining paths is not a snprintf
 
