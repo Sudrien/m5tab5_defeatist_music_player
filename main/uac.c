@@ -375,6 +375,24 @@ static void apply_volume(void)
 {
     static bool tried_and_failed;
 
+    /*
+     * Nothing to set the volume on until the stream is running.
+     *
+     * handle_connect() raises the dirty flag so the UI's level lands on
+     * a newly attached device, but the interface is opened at alternate
+     * 0 and only resumed when a track states its format -- so between
+     * those two moments the driver correctly refuses:
+     *
+     *   E uac-host: uac_host_device_set_volume(2632):
+     *               device not ready or active
+     *
+     * The retry a moment later worked, so this was noise rather than a
+     * fault, and it looked exactly like the failure that latches the
+     * software-gain fallback. Left set rather than cleared: the request
+     * is still outstanding and the next pass is 50 ms away.
+     */
+    if (!s_streaming) return;
+
     s_volume_dirty = false;
     if (tried_and_failed) return;
 
