@@ -1740,6 +1740,19 @@ static void ui_task(void *arg)
         st.can_seek = s_can_seek;
         st.screen_off = s_screen_off;
         st.stats_valid = s_stats_valid;
+
+        /*
+         * Paused, or between tracks with nothing open -- shut the
+         * amplifier down. Called every iteration and a compare when
+         * unchanged; audio_out.c owns the hold that stops a track
+         * boundary powering the output stage down and straight back up.
+         *
+         * The analog stage only. The USB port stays powered and a UAC
+         * device stays enumerated, because re-enumerating on every play
+         * press would cost seconds of silence to save power on a bus
+         * that is feeding the headset anyway.
+         */
+        audio_out_set_idle(!s_playing || !s_decoding);
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
 

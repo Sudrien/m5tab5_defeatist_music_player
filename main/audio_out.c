@@ -65,6 +65,22 @@ static const char *TAG = "tab5_audio";
 #define HP_DETECT_ACTIVE_LOW    (0)
 #define HP_POLL_MS              (200)
 
+/*
+ * How long the player has to have been idle before the amplifier is
+ * actually shut down.
+ *
+ * The gap between two tracks is a gap in which nothing is being written,
+ * and it is a few hundred milliseconds at most. Reacting to it would
+ * power the output stage down and straight back up between every pair of
+ * tracks on an album -- an audible click on a boundary that gapless
+ * playback exists to make silent, which is a poor trade for a second and
+ * a half of amplifier.
+ *
+ * Only the shutdown waits. Coming back is immediate: a deferred wake
+ * would clip the start of whatever just started.
+ */
+#define IDLE_HOLD_MS            (1500)
+
 /* ES8388 DACCONTROL3, bit 2 = DACMute. Not written by es8388_init(),
  * which leaves it at its reset default of unmuted. */
 #define ES8388_REG_DACCONTROL3  (25)
@@ -106,6 +122,14 @@ static uint8_t  s_volume = 50;
 static volatile route_t s_route = ROUTE_SPEAKER;
 static volatile bool    s_muted;
 
+/*
+ * s_idle is what the output stage has been told; s_idle_want is what the
+ * player says. They differ only while the hold below is running.
+ */
+static volatile bool s_idle_want;
+static volatile bool s_idle;
+static TickType_t    s_idle_since;
+
 /* The last uac.c generation this file has reacted to. Watched rather
  * than uac_present() polled, so a headset unplugged and replugged
  * between two blocks is noticed as a change rather than as "still
@@ -144,6 +168,7 @@ static inline bool soft_gain(void)
  * the codec helpers. */
 static void arbitrate(void);
 static void analog_set(bool enabled);
+static void idle_apply(bool idle);
 
 /* ------------------------------------------------------------------ */
 /* I2C helpers                                                         */
@@ -316,6 +341,17 @@ static void headphone_task(void *arg)
             arbitrate();
             if (s_route != ROUTE_USB) analog_set(true);
         }
+        /* The deferred half of audio_out_set_idle(). Signed tick
+         * difference, not "now > then": the counter wraps every 49 days
+         * at 1 kHz and the naive form is wrong once per wrap, on a
+         * device people leave running. Same reasoning as
+         * TOUCH_SETTLE_MS in touch.c. */
+        if (s_idle_want && !s_idle &&
+            (int32_t)(xTaskGetTickCount() - s_idle_since) >=
+                (int32_t)pdMS_TO_TICKS(IDLE_HOLD_MS)) {
+            idle_apply(true);
+        }
+
         vTaskDelay(pdMS_TO_TICKS(HP_POLL_MS));
     }
 }
@@ -350,12 +386,13 @@ const char *audio_out_route_name(void)
  */
 static void analog_set(bool enabled)
 {
-    /* Muted is the same silence as "USB has the route": the DAC is
-     * muted and the amp is off. One condition rather than two states,
-     * because a mute applied while USB is playing has to survive the
-     * device being unplugged -- and it does, because this is re-run from
-     * arbitrate() on the way back. */
-    const bool on = enabled && !s_muted;
+    /* Muted, idle and "USB has the route" are the same silence: the DAC
+     * is muted and the amp is off. One condition rather than three
+     * states, because each has to survive the others changing -- a mute
+     * applied while USB is playing has to outlast the device being
+     * unplugged, and it does, because this is re-run from arbitrate() on
+     * the way back. */
+    const bool on = enabled && !s_muted && !s_idle;
     reg_write(s_es8388, ES8388_REG_DACCONTROL3, on ? 0x00 : ES8388_DACMUTE_BIT);
     speaker_set(on && !s_headphones);
 }
@@ -554,6 +591,34 @@ void audio_out_set_mute(bool muted)
     analog_set(s_route != ROUTE_USB);
 
     ESP_LOGI(TAG, "%s (%s)", muted ? "muted" : "unmuted", audio_out_route_name());
+}
+
+/* The analog stage only. Nothing here touches the USB port: a paused
+ * player keeps its UAC device enumerated and its stream open, because
+ * re-enumerating on every play press would cost seconds of silence to
+ * save power on a bus that is powering the headset anyway. */
+static void idle_apply(bool idle)
+{
+    if (idle == s_idle) return;
+    s_idle = idle;
+    analog_set(s_route != ROUTE_USB);
+    ESP_LOGI(TAG, "amplifier %s", idle ? "off (idle)" : "on");
+}
+
+void audio_out_set_idle(bool idle)
+{
+    if (idle == s_idle_want) return;
+    s_idle_want = idle;
+
+    if (!idle) {
+        /* Immediately, and on the caller's task. Two I2C writes, and the
+         * alternative is up to HP_POLL_MS of a track's opening bar
+         * played into a disabled amplifier. */
+        idle_apply(false);
+        return;
+    }
+    /* Going quiet waits out IDLE_HOLD_MS on the poll task below. */
+    s_idle_since = xTaskGetTickCount();
 }
 
 esp_err_t audio_out_init(i2c_master_bus_handle_t bus,

@@ -86,6 +86,25 @@ esp_err_t audio_out_set_volume(uint8_t percent);
 void audio_out_set_mute(bool muted);
 bool audio_out_muted(void);
 
+/*
+ * Nothing is being written -- paused, or no track open.
+ *
+ * Shuts down the analog output stage: the NS4150B's enable and the
+ * codec's DAC. An amplifier driving silence is still an amplifier, and
+ * the board has an audible whine on the speaker while charging that it
+ * has no business producing with nothing playing.
+ *
+ * The USB-A port is NOT affected. VBUS stays up and a UAC device stays
+ * enumerated and streaming a paused stream; cutting bus power here would
+ * unplug a headset every time somebody hit pause, and re-enumerating on
+ * play is seconds of nothing. This is the amplifier, not the port.
+ *
+ * Call it freely -- it is a compare when the state has not changed.
+ * Going idle is deferred (see IDLE_HOLD_MS); coming back is immediate,
+ * because the first moments of a track must not be clipped.
+ */
+void audio_out_set_idle(bool idle);
+
 /* "speaker", "headphones" -- for the log. Never NULL. */
 const char *audio_out_route_name(void);
 
