@@ -34,70 +34,41 @@ static usb_host_client_handle_t s_client;
 static hid_button_cb_t          s_cb;
 
 /*
- * Which bit of report byte 0 is which button, and whether that button
- * might be a latching switch.
+ * Which bit of report byte 0 is which button.
  *
- * THE BIT NUMBERS ARE AN INFERENCE, NOT A READING. The device stalls EP0
- * for its report descriptor, so there is nothing to parse and no way to
- * derive them. They are the usual Consumer Control page ordering --
- * Volume Increment 0xE9, Volume Decrement 0xEA, Mute 0xE2 -- laid out
- * one bit per button in the first byte, which is what these remotes
- * almost always are.
+ * The bit numbers started as an inference -- the device stalls EP0 for
+ * its report descriptor, so there was nothing to derive them from -- and
+ * the logging added alongside them has confirmed the mapping:
  *
- * So: if a button does the wrong thing, this is a table edit and not a
- * mystery. Every change to byte 0 is logged as hex next to the names it
- * resolved to, at info level, precisely so the two can be compared
- * without going and getting another build:
+ *   remote: 02 00 00 00 -> +Vol-      press
+ *   remote: 00 00 00 00 -> -Vol-      release
+ *   remote: 04 00 00 00 -> +Mute      line-out mute
+ *   remote: 08 00 00 00 -> +MicMute   line-in mute, a different key
  *
- *   remote: 01 00 00 00 -> Vol+
- *   remote: 00 00 00 00
+ * Bit 2 is the line-out mute and bit 3 is the line-in mute. Two separate
+ * buttons: a session that presses them in turn produces a report
+ * alternating between 0x04 and 0x08, which is a fact about how they were
+ * pressed and not about the device.
  *
- * A bit with no entry is logged as "bitN" and does nothing.
+ * The bug that made mute appear to latch on was in the dispatch, not in
+ * this table. HID_BTN_MIC_MUTE is dropped by player.c -- correctly, there
+ * being no microphone in this program -- so every press of the line-in
+ * key left no trace at all, and alternating the two keys looked like a
+ * mute button that had stopped responding.
  *
- * `toggle` is a different kind of claim from the bit number. It does not
- * say the button IS latching -- it says this button is one whose second
- * edge could mean something, so measure it rather than assume. See
- * dispatch_bit(). Volume keys are false: they are momentary by
- * construction, nobody ships a latching volume-up, and measuring them
- * would turn a long press into a spurious extra step.
+ * If a button does the wrong thing, this is still a table edit, and the
+ * hex above is still logged unconditionally to make it one.
  */
 static const struct {
     uint8_t      bit;
     hid_button_t button;
     const char  *name;
-    bool         toggle;
 } BUTTON_BITS[] = {
-    { 0, HID_BTN_VOL_UP,   "Vol+",    false },
-    { 1, HID_BTN_VOL_DOWN, "Vol-",    false },
-    { 2, HID_BTN_MUTE,     "Mute",    true  },
-    { 3, HID_BTN_MIC_MUTE, "MicMute", true  },
+    { 0, HID_BTN_VOL_UP,   "Vol+"    },
+    { 1, HID_BTN_VOL_DOWN, "Vol-"    },
+    { 2, HID_BTN_MUTE,     "Mute"    },   /* line out: toggles the player */
+    { 3, HID_BTN_MIC_MUTE, "MicMute" },   /* line in: logged, no action */
 };
-
-/*
- * How long a toggle-capable bit has to stay set before its release is
- * read as a second press rather than as letting go.
- *
- * This is the whole of the discrimination, and it is a timing threshold
- * because nothing else distinguishes the two devices. A momentary button
- * whose state the software tracks and a latching switch that reports its
- * own state emit the SAME bytes -- 04 then 00 -- and differ only in
- * when. A thumb releases a button in well under 400 ms. A latched
- * switch sits there until somebody comes back to it, which is at best
- * the better part of a second later and usually many.
- *
- * Getting it wrong in either direction is survivable and visible: a
- * momentary press held past the threshold fires twice and cancels out,
- * a latching switch flicked faster than it fires once and inverts. Both
- * say so in the log, which is why the decision is logged rather than
- * only acted on.
- */
-#define LATCH_HOLD_MS   (400)
-
-typedef enum {
-    MODE_UNKNOWN = 0,
-    MODE_MOMENTARY,     /* released quickly; software owns the state */
-    MODE_LATCHING,      /* held until pressed again; the switch owns it */
-} bit_mode_t;
 
 typedef struct {
     usb_device_handle_t dev;
@@ -106,11 +77,6 @@ typedef struct {
     uint8_t itf_num;
     uint8_t prev0;              /* byte 0 of the last report */
     bool    have_prev;
-
-    /* Per-bit, because one remote can carry both kinds: the volume keys
-     * on this headset are momentary and the mute may not be. */
-    TickType_t rise_tick[8];
-    bit_mode_t mode[8];
 } hid_ctx_t;
 
 /*
@@ -138,57 +104,27 @@ static int entry_for_bit(int bit)
 }
 
 /*
- * One edge on one bit.
+ * Rising edges only. A press sets a bit; the clear that follows is the
+ * release.
  *
- * A rising edge is always a press and always dispatches. What to do with
- * the falling edge is the question this file could not answer by
- * inspection, because the two possibilities are byte-identical:
+ * The timing heuristic that used to live here -- measure how long a bit
+ * stays set, and read a slow release as a second press -- is gone. It
+ * existed to tell a latching switch from a momentary button whose state
+ * the software owns, and this remote is the plain second thing: the keys
+ * are momentary and the mute state belongs to the player. There was
+ * nothing to discriminate, and a threshold with nothing to discriminate
+ * is only a way to get it wrong later.
  *
- *   momentary + software state   press -> 04, release -> 00
- *   latching switch              press -> 04, press again -> 00
- *
- * Both send 04 and then 00. The only thing that differs is how long 04
- * lasts, so that is what is measured. Under LATCH_HOLD_MS the release is
- * a thumb coming off a button and is ignored -- the player already
- * toggled on the press. Over it, the bit was sitting latched and the
- * return to 0 is the second press, so it dispatches.
- *
- * The decision is logged the first time it is made for each bit, because
- * a mute button that fires twice per press and a mute button that fires
- * once look the same from the outside -- silent -- and this line is what
- * separates them.
- *
- * Bits not marked `toggle` never dispatch on release at all. A volume
- * key held for a second is a person deciding, not two presses.
+ * HID_BTN_MIC_MUTE is dispatched to player.c and dropped there rather
+ * than filtered out here, so the press still appears in the log above. A
+ * key that does nothing and says nothing is indistinguishable from one
+ * whose reports are not arriving, which is exactly how the mute bug hid.
  */
-static void dispatch_bit(hid_ctx_t *ctx, int bit, bool rising)
+static void dispatch_bit(hid_ctx_t *ctx, int bit)
 {
+    (void)ctx;
     const int e = entry_for_bit(bit);
-    if (e < 0) return;
-
-    if (rising) {
-        ctx->rise_tick[bit] = xTaskGetTickCount();
-        if (s_cb) s_cb(BUTTON_BITS[e].button);
-        return;
-    }
-
-    if (!BUTTON_BITS[e].toggle) return;
-
-    const uint32_t held_ms =
-        (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - ctx->rise_tick[bit]);
-    const bool latching = held_ms >= LATCH_HOLD_MS;
-    const bit_mode_t mode = latching ? MODE_LATCHING : MODE_MOMENTARY;
-
-    if (ctx->mode[bit] != mode) {
-        ctx->mode[bit] = mode;
-        ESP_LOGI(TAG, "%s is %s (held %lu ms); release %s a second press",
-                 BUTTON_BITS[e].name,
-                 latching ? "a latching switch" : "momentary",
-                 (unsigned long)held_ms,
-                 latching ? "counts as" : "does not count as");
-    }
-
-    if (latching && s_cb) s_cb(BUTTON_BITS[e].button);
+    if (e >= 0 && s_cb) s_cb(BUTTON_BITS[e].button);
 }
 
 static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
@@ -205,6 +141,15 @@ static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
     /* Repeats while a button is held carry nothing and would be one line
      * per poll interval. Only changes are logged or acted on. */
     if (!first && now == was) return;
+
+    /* The first report states where things already are rather than
+     * reporting a press, so it is recorded and logged and never
+     * dispatched. Cheap insurance: a device that came up with a bit
+     * already set would otherwise mute the player on plug-in. */
+    if (first) {
+        ESP_LOGI(TAG, "remote: initial state %02X", now);
+        return;
+    }
 
     const uint8_t changed = (uint8_t)(now ^ was);
     if (!changed) return;
@@ -248,9 +193,9 @@ static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
 
     ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "", names);
 
+    const uint8_t rising = (uint8_t)(now & ~was);
     for (int bit = 0; bit < 8; bit++) {
-        if (!(changed & (1 << bit))) continue;
-        dispatch_bit(ctx, bit, (now & (1 << bit)) != 0);
+        if (rising & (1 << bit)) dispatch_bit(ctx, bit);
     }
 }
 
