@@ -16,11 +16,11 @@
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #include "sdmmc_cmd.h"
 
-#include "usb/usb_host.h"
 #include "usb/msc_host.h"
 #include "usb/msc_host_vfs.h"
 
 #include "storage.h"
+#include "usbhost.h"
 
 static const char *TAG = "tab5_storage";
 
@@ -39,37 +39,13 @@ static const char *TAG = "tab5_storage";
  * layer spec, so name it here. */
 #define SD_OCR_CCS_BIT          (1UL << 30)
 
-/* ---- USB-A bus power ----
+/* Files a volume must hold open at once -- see MAX_OPEN_FILES below.
  *
- * USB5V_EN is P3 of the PI4IOE5V6416 at 0x44 -- the second expander, not
- * the one carrying SPK_EN and the resets. Three registers, in this order,
- * and all three matter:
- *
- *   IO_DIR   (0x03) bit 3 = 1   make P3 an output
- *   OUT_H_IM (0x07) bit 3 = 0   take it out of high impedance
- *   OUT_SET  (0x05) bit 3 = 1   drive it high
- *
- * The high-impedance register is the one that is easy to miss: the
- * expander parks pins high-Z after reset, so writing OUT_SET alone leaves
- * P3 floating and VBUS off, with nothing on the P4 side reporting a
- * fault. This is the same trap io_expanders_init() already documents for
- * expander 1 and SPK_EN.
- *
- * player.c's PI4IOE2_IO_DIR (0xB9) already has bit 3 set, which is
- * exactly what distinguishes it from M5Unified's 0xB1 -- that value puts
- * P3 back to an input and the port stays dark. The direction write is
- * repeated here anyway so this file does not depend on that constant
- * keeping its current value.
+ * Bus power and the host stack are NOT here any more. USB5V_EN, the
+ * usb_host_install() call and the library task moved to usbhost.c when a
+ * second class driver appeared on the same port; this file installs the
+ * mass-storage class driver and owns the mounts, and nothing else.
  */
-#define PI4IOE_REG_IO_DIR       (0x03)
-#define PI4IOE_REG_OUT_SET      (0x05)
-#define PI4IOE_REG_OUT_HIGH_Z   (0x07)
-#define USB5V_EN_BIT            (1 << 3)
-#define I2C_TIMEOUT_MS          (1000)
-
-/* Long enough for the port's inrush to settle before the host stack
- * starts driving bus resets at whatever is plugged in. */
-#define USB_VBUS_SETTLE_MS      (100)
 
 /* How often the card slot is looked at. There is no card-detect line on
  * this board -- M5's BSP passes GPIO_NUM_NC for it -- so presence is
@@ -89,18 +65,10 @@ static const char *TAG = "tab5_storage";
 
 static sdmmc_card_t *s_card;
 static sd_pwr_ctrl_handle_t s_pwr;
-static i2c_master_dev_handle_t s_exp2;
 
 static volatile bool s_mounted[STORAGE_COUNT];
 static volatile uint32_t s_generation;
 static volatile int s_held = STORAGE_COUNT;
-
-/* The port is off until something asks. s_usb_want is the request, set
- * from the boot path or from a touch; s_usb_up is what the poll task has
- * actually done about it. Two flags rather than one because the work is
- * I2C plus a 100 ms settle and must not happen on the asking task. */
-static volatile bool s_usb_want;
-static bool s_usb_up;
 
 static msc_host_device_handle_t s_msc_dev;
 static msc_host_vfs_handle_t s_msc_vfs;
@@ -158,14 +126,11 @@ uint32_t storage_generation(void) { return s_generation; }
 
 void storage_hold(storage_id_t id) { s_held = id; }
 
-void storage_usb_enable(void) { s_usb_want = true; }
-
-/* True once the port has been *asked* for, not only once it is up.
- *
- * The poll task can be a second behind the tap, and for that second the
- * chooser would otherwise tell the user to tap again -- which either does
- * nothing or, worse, reads as the first tap having missed. */
-bool storage_usb_powered(void) { return s_usb_up || s_usb_want; }
+/* Both now answered by the bus owner. Kept as one-line forwards rather
+ * than deleted so browser.c and player.c do not have to learn about
+ * usbhost.c to ask a question about the USB volume. */
+void storage_usb_enable(void) { usbhost_start(); }
+bool storage_usb_powered(void) { return usbhost_powered(); }
 
 /* ------------------------------------------------------------------ */
 /* microSD                                                             */
@@ -244,34 +209,6 @@ static void sd_unmount(void)
 /* USB mass storage                                                    */
 /* ------------------------------------------------------------------ */
 
-static esp_err_t usb_vbus(bool on)
-{
-    if (!s_exp2) return ESP_ERR_INVALID_STATE;
-
-    uint8_t reg, val;
-    esp_err_t err;
-
-    struct { uint8_t reg; bool set; } steps[] = {
-        { PI4IOE_REG_IO_DIR,     true  },   /* output          */
-        { PI4IOE_REG_OUT_HIGH_Z, false },   /* out of high-Z   */
-        { PI4IOE_REG_OUT_SET,    on    },   /* drive           */
-    };
-
-    for (size_t i = 0; i < sizeof(steps) / sizeof(steps[0]); i++) {
-        reg = steps[i].reg;
-        err = i2c_master_transmit_receive(s_exp2, &reg, 1, &val, 1, I2C_TIMEOUT_MS);
-        if (err != ESP_OK) return err;
-        val = steps[i].set ? (val | USB5V_EN_BIT) : (val & (uint8_t)~USB5V_EN_BIT);
-        const uint8_t buf[2] = { reg, val };
-        err = i2c_master_transmit(s_exp2, buf, sizeof(buf), I2C_TIMEOUT_MS);
-        if (err != ESP_OK) return err;
-    }
-
-    ESP_LOGI(TAG, "USB-A VBUS %s (expander 0x44, P3)", on ? "on" : "off");
-    if (on) vTaskDelay(pdMS_TO_TICKS(USB_VBUS_SETTLE_MS));
-    return ESP_OK;
-}
-
 /* Runs on the class driver's own task; does nothing but forward. */
 static void msc_event_cb(const msc_host_event_t *event, void *arg)
 {
@@ -279,45 +216,17 @@ static void msc_event_cb(const msc_host_event_t *event, void *arg)
     if (s_msc_events) xQueueSend(s_msc_events, event, 0);
 }
 
-static void usb_lib_task(void *arg)
+/* Registered with usbhost.c and called by it, on the bus task, after the
+ * host stack is installed and before VBUS goes high. */
+static esp_err_t msc_class_install(void)
 {
-    (void)arg;
-    while (1) {
-        uint32_t flags = 0;
-        usb_host_lib_handle_events(portMAX_DELAY, &flags);
-        if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-            usb_host_device_free_all();
-        }
-    }
-}
-
-/* Host stack, class driver, then bus power -- in that order, so the
- * enumeration of a drive that is already in the port is handled by a
- * stack that exists rather than dropped on the floor. */
-static esp_err_t usb_bring_up(void)
-{
-    s_msc_events = xQueueCreate(4, sizeof(msc_host_event_t));
-    if (!s_msc_events) return ESP_ERR_NO_MEM;
-
-    const usb_host_config_t host_cfg = {
-        .skip_phy_setup = false,
-        .intr_flags = ESP_INTR_FLAG_LEVEL1,
-    };
-    ESP_RETURN_ON_ERROR(usb_host_install(&host_cfg), TAG, "usb_host_install");
-
-    if (xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 5, NULL) != pdPASS) {
-        return ESP_ERR_NO_MEM;
-    }
-
     const msc_host_driver_config_t msc_cfg = {
         .create_backround_task = true,
         .task_priority = 5,
         .stack_size = 4096,
         .callback = msc_event_cb,
     };
-    ESP_RETURN_ON_ERROR(msc_host_install(&msc_cfg), TAG, "msc_host_install");
-
-    return usb_vbus(true);
+    return msc_host_install(&msc_cfg);
 }
 
 static void usb_attach(uint8_t addr)
@@ -388,26 +297,6 @@ static void storage_task(void *arg)
     (void)arg;
 
     while (1) {
-        if (s_usb_want && !s_usb_up) {
-            /* The request is not cleared on the way in. Clearing it first
-             * leaves a window where neither flag is set and the chooser
-             * reverts its label to "tap to power" mid-bring-up; it is
-             * cleared only on failure, which is exactly when that label
-             * is the truth again. */
-            const esp_err_t err = usb_bring_up();
-            if (err == ESP_OK) {
-                s_usb_up = true;
-                /* The tab redraws to say "powered, waiting" rather than
-                 * "tap to power", which is the whole point of having
-                 * asked. */
-                s_generation++;
-            } else {
-                s_usb_want = false;
-                ESP_LOGW(TAG, "USB host unavailable (%s); microSD only",
-                         esp_err_to_name(err));
-            }
-        }
-
         msc_host_event_t ev;
         while (s_msc_events && xQueueReceive(s_msc_events, &ev, 0) == pdTRUE) {
             if (ev.event == MSC_DEVICE_CONNECTED) {
@@ -451,9 +340,12 @@ static void storage_task(void *arg)
     }
 }
 
-esp_err_t storage_init(i2c_master_dev_handle_t exp2)
+esp_err_t storage_init(void)
 {
-    s_exp2 = exp2;
+    s_msc_events = xQueueCreate(4, sizeof(msc_host_event_t));
+    if (!s_msc_events) return ESP_ERR_NO_MEM;
+    ESP_RETURN_ON_ERROR(usbhost_register_class("msc", msc_class_install),
+                        TAG, "register msc");
 
     const sd_pwr_ctrl_ldo_config_t ldo = { .ldo_chan_id = SD_LDO_CHAN };
     ESP_RETURN_ON_ERROR(sd_pwr_ctrl_new_on_chip_ldo(&ldo, &s_pwr), TAG, "sd ldo");

@@ -34,20 +34,22 @@ typedef enum {
 #define STORAGE_USB_MOUNT   "/usb"
 
 /*
- * exp2 is the PI4IOE5V6416 at 0x44. It is needed rather than optional:
- * USB5V_EN is P3 of that expander, not a GPIO, and the USB-A port is
- * electrically dead until it is driven high -- the host stack installs,
- * the class driver registers, and no device ever enumerates, with no
- * error anywhere.
+ * Mount the card if there is one, register the mass-storage class driver
+ * with usbhost.c, and start the poll task.
  *
- * The port is NOT brought up here. It stays dark until something asks;
- * see storage_usb_enable().
+ * usbhost_init() must have run first: this registers a class driver with
+ * it, and registration is refused once the port is up.
+ *
+ * Bus power is not this file's business any more. USB5V_EN, the host
+ * stack and the library task live in usbhost.c, because there are two
+ * class drivers on that port now and only one of them is looking for a
+ * filesystem.
  *
  * Returns ESP_OK once the poll task is running. Neither volume is
  * necessarily mounted at that point; that is what storage_present() is
  * for.
  */
-esp_err_t storage_init(i2c_master_dev_handle_t exp2);
+esp_err_t storage_init(void);
 
 /*
  * Power the USB-A port and install the host stack.

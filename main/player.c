@@ -64,6 +64,7 @@
 #include "storage.h"
 #include "touch.h"
 #include "ui.h"
+#include "usbhost.h"
 #include "waveform.h"
 
 static const char *TAG = "tab5_mp3";
@@ -2550,7 +2551,11 @@ void app_main(void)
      * ESP_ERROR_CHECK'd on the media itself: an empty slot and an empty
      * port are a normal way to boot now, and the chooser says so on
      * screen. */
-    ESP_ERROR_CHECK(storage_init(s_exp2));
+    /* The bus owner before anything that registers a class driver with
+     * it: registration is refused once the port is up, and storage_init()
+     * registers one. */
+    ESP_ERROR_CHECK(usbhost_init(s_exp2));
+    ESP_ERROR_CHECK(storage_init());
 
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
 
