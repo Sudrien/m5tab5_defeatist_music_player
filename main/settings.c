@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -155,15 +156,38 @@ static void write_file(void)
         /* A card can be write-protected, full, or gone. None of those
          * are worth retrying every three seconds forever, so the dirty
          * flag is cleared by the caller either way. */
-        ESP_LOGW(TAG, "cannot write %s", tmp);
+        ESP_LOGW(TAG, "cannot write %s (%s)", tmp, strerror(errno));
         return;
     }
 
     fprintf(f, "# m5tab5 defeatist music player\n");
     fprintf(f, "volume=%u\n", s_volume);
 
-    if (fflush(f) != 0 || fclose(f) != 0) {
-        ESP_LOGW(TAG, "write failed; leaving the previous file alone");
+    /*
+     * Separated, and both report errno.
+     *
+     * "write failed" said nothing about which call failed or why, which
+     * is not enough to act on: a full card, a card that went away
+     * mid-write, and an exhausted file handle table all produce that one
+     * line and want three different fixes.
+     *
+     * fclose() releases the stream whether or not it succeeds, so it is
+     * called even when the flush failed -- returning early on the flush
+     * would leak a FILE and, with MAX_OPEN_FILES what it is, a handful
+     * of those would stop the player opening tracks.
+     */
+    const bool flushed = (fflush(f) == 0);
+    const int flush_errno = errno;
+    const bool closed = (fclose(f) == 0);
+
+    if (!flushed || !closed) {
+        ESP_LOGW(TAG, "write failed (%s); leaving the previous file alone",
+                 strerror(flushed ? errno : flush_errno));
+        /* The half-written temp file is removed rather than left for the
+         * next write to overwrite. It is not a valid settings file and
+         * the rotation never looks at it, so leaving it is just litter
+         * on somebody's card. */
+        remove(tmp);
         return;
     }
 
