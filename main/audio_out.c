@@ -28,6 +28,7 @@
 #include "freertos/task.h"
 
 #include "audio_out.h"
+#include "battery.h"
 #include "uac.h"
 
 static const char *TAG = "tab5_audio";
@@ -388,8 +389,13 @@ static void arbitrate(void)
     }
 
     s_route = want;
-    ESP_LOGI(TAG, "output: %s%s", audio_out_route_name(),
-             (want == ROUTE_USB && s_soft_gain) ? " (software volume)" : "");
+    /* The pack voltage on every route change. A USB device is the only
+     * load here that is switched on and off by a routing decision, so a
+     * rail that sags when one starts playing shows up as a step between
+     * two of these lines and as nothing at all without them. */
+    ESP_LOGI(TAG, "output: %s%s (pack %d mV)", audio_out_route_name(),
+             (want == ROUTE_USB && s_soft_gain) ? " (software volume)" : "",
+             battery_mv());
 }
 
 /*
