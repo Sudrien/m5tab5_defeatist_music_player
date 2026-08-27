@@ -101,6 +101,34 @@ dependencies:
     - esp32s31
     - linux
     version: 1.2.0
+  espressif/usb_host_uac:
+    component_hash: 02f7e669b4dae033347e4523acaed4b8c402290a887878d396811c4bee47cc46
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.5.*
+    - name: idf
+      require: private
+      version: '>=5.0'
+    - name: espressif/usb
+      registry_url: https://components.espressif.com
+      require: public
+      rules:
+      - if: idf_version >=6.0
+      - if: target not in ["linux"]
+      version: ^1.0.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32s31
+    - esp32p4
+    - esp32h4
+    - linux
+    version: 1.5.0
   idf:
     source:
       type: idf
@@ -111,7 +139,8 @@ direct_dependencies:
 - espressif/esp_lcd_touch_gt911
 - espressif/esp_lcd_touch_st7123
 - espressif/usb_host_msc
+- espressif/usb_host_uac
 - idf
-manifest_hash: 1efc0a0a603fbbd8cf6fa6685fa2b9fdbcd097f61c198c9209a216aa009b90b8
+manifest_hash: e4369e2372f3ee2eb6d0fb970b86ca460a3f0966511e1d4f346e571a70f3cdd0
 target: esp32p4
 version: 2.0.0
