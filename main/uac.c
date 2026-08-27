@@ -58,10 +58,32 @@ static const char *TAG = "tab5_uac";
 
 #define EVENT_QUEUE_DEPTH       (4)
 
+/*
+ * The queue carries this rather than a uac_host_driver_event_t.
+ *
+ * The two enums the driver hands out overlap in name and not in type.
+ * Connections arrive as uac_host_driver_event_t on the driver callback
+ * (RX_CONNECTED, TX_CONNECTED); the disconnect arrives as
+ * uac_host_device_event_t on the *device* callback, and
+ * UAC_HOST_DRIVER_EVENT_DISCONNECTED -- despite the name -- is a value
+ * of the latter. Putting all three in one field typed as the former is
+ * a -Wswitch error, correctly: the compiler is pointing out that a case
+ * label is not a value the type can hold.
+ *
+ * So this file names the three things it actually queues and the two
+ * callbacks translate on the way in. That also decouples the queue from
+ * whichever enum upstream decides these belong to next.
+ */
+typedef enum {
+    MSG_ATTACH_TX = 0,      /* a speaker interface appeared   */
+    MSG_ATTACH_RX,          /* a microphone interface appeared */
+    MSG_DETACH,             /* the open device went away      */
+} uac_msg_kind_t;
+
 typedef struct {
-    uint8_t                 addr;
-    uint8_t                 iface_num;
-    uac_host_driver_event_t event;
+    uint8_t        addr;
+    uint8_t        iface_num;
+    uac_msg_kind_t kind;
 } uac_queue_msg_t;
 
 static QueueHandle_t s_queue;
@@ -344,8 +366,7 @@ static void device_event_cb(uac_host_device_handle_t dev,
         s_generation++;
         {
             const uac_queue_msg_t msg = {
-                .addr = 0, .iface_num = 0,
-                .event = UAC_HOST_DRIVER_EVENT_DISCONNECTED,
+                .addr = 0, .iface_num = 0, .kind = MSG_DETACH,
             };
             xQueueSend(s_queue, &msg, 0);
         }
@@ -369,7 +390,16 @@ static void driver_event_cb(uint8_t addr, uint8_t iface_num,
     (void)arg;
     /* Runs on the UAC driver's background task; opening a device here
      * would block it, the same reasoning as msc_event_cb(). */
-    const uac_queue_msg_t msg = { .addr = addr, .iface_num = iface_num, .event = event };
+    if (event != UAC_HOST_DRIVER_EVENT_RX_CONNECTED &&
+        event != UAC_HOST_DRIVER_EVENT_TX_CONNECTED) {
+        return;
+    }
+    const uac_queue_msg_t msg = {
+        .addr = addr,
+        .iface_num = iface_num,
+        .kind = (event == UAC_HOST_DRIVER_EVENT_TX_CONNECTED) ? MSG_ATTACH_TX
+                                                              : MSG_ATTACH_RX,
+    };
     xQueueSend(s_queue, &msg, 0);
 }
 
@@ -443,25 +473,22 @@ static void uac_task(void *arg)
     while (1) {
         if (xQueueReceive(s_queue, &msg, portMAX_DELAY) != pdTRUE) continue;
 
-        switch (msg.event) {
-        case UAC_HOST_DRIVER_EVENT_TX_CONNECTED:
+        switch (msg.kind) {
+        case MSG_ATTACH_TX:
             handle_connect(msg.addr, msg.iface_num);
             break;
 
-        case UAC_HOST_DRIVER_EVENT_DISCONNECTED:
+        case MSG_DETACH:
             handle_disconnect();
             break;
 
-        case UAC_HOST_DRIVER_EVENT_RX_CONNECTED:
+        case MSG_ATTACH_RX:
             /* A microphone. Left closed on purpose: nothing in this
              * program reads audio in, and an open RX interface costs a
              * ring buffer and isochronous bandwidth for a stream that
              * would only be discarded. The example opened it because it
              * was looping mic to speaker; a music player is not. */
             ESP_LOGI(TAG, "input interface (itf %u) ignored", msg.iface_num);
-            break;
-
-        default:
             break;
         }
     }
