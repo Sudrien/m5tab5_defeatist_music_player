@@ -51,32 +51,12 @@ typedef enum {
  */
 esp_err_t storage_init(void);
 
-/*
- * Power the USB-A port and install the host stack.
- *
- * Idempotent, and asynchronous: the work happens on the poll task, not on
- * the caller's. It is three I2C writes and a 100 ms settle for the port's
- * inrush, and the two callers are the boot path and a touch event, neither
- * of which should block on it.
- *
- * Nothing calls this on its own. The port comes up only when there is a
- * reason:
- *
- *   1. no card at boot -- a player with nothing to play should look on
- *      the other port rather than sit there empty, and
- *   2. the USB tab is selected in the chooser, which is the user saying
- *      the same thing by hand.
- *
- * Deliberately one-way. Cutting VBUS again would yank a mounted drive out
- * from under whatever is reading it, and the saving is a port with
- * nothing plugged into it -- which is the state it was left in.
- */
-void storage_usb_enable(void);
-
-/* Has the port been asked for? True from the moment of the request, not
- * from the moment the poll task acts on it -- see the note on the
- * definition. Distinguishes "no drive" from "no power", which is the
- * difference between waiting and tapping. */
+/* Has the port been asked for? True from the moment of the request
+ * rather than from the moment the bus task acts on it. The port is now
+ * powered unconditionally at boot, so this is only ever false for the
+ * few milliseconds of bring-up -- but the chooser draws a label off it,
+ * and a label that says "no port" for one frame is worse than one that
+ * says "waiting for a drive" for one frame too many. */
 bool storage_usb_powered(void);
 
 /* Mounted and readable right now. */
