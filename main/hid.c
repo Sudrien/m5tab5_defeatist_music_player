@@ -75,8 +75,6 @@ typedef struct {
     usb_transfer_t     *transfer;
     SemaphoreHandle_t   done;
     uint8_t itf_num;
-    uint8_t prev0;              /* byte 0 of the last report */
-    bool    have_prev;
 } hid_ctx_t;
 
 /*
@@ -104,14 +102,12 @@ static int entry_for_bit(int bit)
 }
 
 /*
- * Rising edges only. A press sets a bit; the clear that follows is the
- * release.
+ * One button, from a report that already is an event -- see hid_report().
  *
  * The timing heuristic that used to live here -- measure how long a bit
  * stays set, and read a slow release as a second press -- is gone. It
  * existed to tell a latching switch from a momentary button whose state
- * the software owns, and this remote is the plain second thing: the keys
- * are momentary and the mute state belongs to the player. There was
+ * the software owns, and the mute state belongs to the player. There was
  * nothing to discriminate, and a threshold with nothing to discriminate
  * is only a way to get it wrong later.
  *
@@ -127,42 +123,52 @@ static void dispatch_bit(hid_ctx_t *ctx, int bit)
     if (e >= 0 && s_cb) s_cb(BUTTON_BITS[e].button);
 }
 
+/*
+ * Every report is a press. There is no edge detection here, and that is
+ * the correction rather than an omission.
+ *
+ * The endpoint delivers a report when a key is pressed and not otherwise
+ * -- it is silent between presses rather than repeating the current
+ * state at the polling interval. What the earlier versions of this
+ * function did was reconstruct button state from a stream that was
+ * already a stream of events, and then suppress anything that did not
+ * change that state. On this remote that discards real presses, because
+ * the bits do not clear the way state bits would:
+ *
+ *   press Mute       04 00 00 00     dispatched
+ *   press Mute       04 00 00 00     identical, suppressed  <- lost
+ *   press MicMute    08 00 00 00     dispatched
+ *   press Mute       04 00 00 00     changed, dispatched
+ *
+ * Which is exactly the reported symptom: mute only worked again after
+ * mic-mute had been pressed, because mic-mute was the only thing that
+ * made the next mute report differ from the last one. The volume keys
+ * never showed it because they DO send a release -- 02 then 00 -- so
+ * their next press always differed.
+ *
+ * So the state is gone and every report dispatches whatever bits it
+ * carries. A report of 0x00 is a release and carries none.
+ *
+ * The risk this trades for is a device that repeats while a key is held:
+ * that would now toggle mute for as long as a finger is on it. Nothing
+ * in the captures does this -- seven seconds between a press and the
+ * next line -- and the log is one line per report, so a device that
+ * starts repeating says so immediately rather than presenting as a
+ * flickering mute.
+ */
 static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
 {
     if (len <= 0) return;
 
     const uint8_t now = data[0];
-    const uint8_t was = ctx->have_prev ? ctx->prev0 : 0;
-    const bool first = !ctx->have_prev;
-
-    ctx->prev0 = now;
-    ctx->have_prev = true;
-
-    /* Repeats while a button is held carry nothing and would be one line
-     * per poll interval. Only changes are logged or acted on. */
-    if (!first && now == was) return;
-
-    /* The first report states where things already are rather than
-     * reporting a press, so it is recorded and logged and never
-     * dispatched. Cheap insurance: a device that came up with a bit
-     * already set would otherwise mute the player on plug-in. */
-    if (first) {
-        ESP_LOGI(TAG, "remote: initial state %02X", now);
-        return;
-    }
-
-    const uint8_t changed = (uint8_t)(now ^ was);
-    if (!changed) return;
 
     /*
      * The raw report and the names it resolved to, on one line, at info.
      *
-     * Not behind a log level, deliberately. BUTTON_BITS is an inference,
-     * so the first thing anyone needs from this file is the evidence
-     * that it is right -- and putting that at debug means fetching
-     * another build to answer a question the running one already knew.
-     * It is one line per press; nothing that happens at the rate of a
-     * thumb needs rate limiting.
+     * Not behind a log level, deliberately. This mapping was arrived at
+     * by reading these lines -- twice, after two wrong readings -- so the
+     * evidence for it stays next to it. It is one line per press;
+     * nothing that happens at the rate of a thumb needs rate limiting.
      */
     char hex[3 * HID_MAX_IN_REPORT + 1];
     int n = 0;
@@ -174,28 +180,26 @@ static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
     int m = 0;
     names[0] = '\0';
     for (int bit = 0; bit < 8; bit++) {
-        if (!(changed & (1 << bit))) continue;
-        const bool rising = (now & (1 << bit)) != 0;
+        if (!(now & (1 << bit))) continue;
         const int e = entry_for_bit(bit);
-        m += snprintf(names + m, sizeof(names) - m, "%s%s%s",
-                      m ? " " : "",
-                      rising ? "+" : "-",
-                      e >= 0 ? BUTTON_BITS[e].name : "bit?");
-        if (e < 0) {
+        if (e >= 0) {
+            m += snprintf(names + m, sizeof(names) - m, "%s%s",
+                          m ? "+" : "", BUTTON_BITS[e].name);
+        } else {
             /* Named by number rather than swallowed. A button that does
              * nothing and says nothing is indistinguishable from one
-             * whose reports are not arriving, and those have completely
-             * different fixes. */
-            m += snprintf(names + m, sizeof(names) - m, "%d", bit);
+             * whose reports are not arriving -- which is how the last two
+             * faults in this file hid. */
+            m += snprintf(names + m, sizeof(names) - m, "%sbit%d",
+                          m ? "+" : "", bit);
         }
         if (m >= (int)sizeof(names) - 8) break;
     }
 
-    ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "", names);
+    ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "(release)", names);
 
-    const uint8_t rising = (uint8_t)(now & ~was);
     for (int bit = 0; bit < 8; bit++) {
-        if (rising & (1 << bit)) dispatch_bit(ctx, bit);
+        if (now & (1 << bit)) dispatch_bit(ctx, bit);
     }
 }
 
