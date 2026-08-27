@@ -34,35 +34,70 @@ static usb_host_client_handle_t s_client;
 static hid_button_cb_t          s_cb;
 
 /*
- * Which bit of report byte 0 is which button.
+ * Which bit of report byte 0 is which button, and whether that button
+ * might be a latching switch.
  *
- * THIS TABLE IS AN INFERENCE, NOT A READING. The device stalls EP0 for
- * its report descriptor, so there is nothing to parse and no way to
- * derive this. It is the usual Consumer Control page ordering -- Volume
- * Increment 0xE9, Volume Decrement 0xEA, Mute 0xE2 -- laid out one bit
- * per button in the first byte, which is what these remotes almost
- * always are and what the example this came from guesses.
+ * THE BIT NUMBERS ARE AN INFERENCE, NOT A READING. The device stalls EP0
+ * for its report descriptor, so there is nothing to parse and no way to
+ * derive them. They are the usual Consumer Control page ordering --
+ * Volume Increment 0xE9, Volume Decrement 0xEA, Mute 0xE2 -- laid out
+ * one bit per button in the first byte, which is what these remotes
+ * almost always are.
  *
  * So: if a button does the wrong thing, this is a table edit and not a
- * mystery. Every report is logged as hex at debug level next to the name
- * it was given, precisely so the two can be compared:
+ * mystery. Every change to byte 0 is logged as hex next to the names it
+ * resolved to, at info level, precisely so the two can be compared
+ * without going and getting another build:
  *
- *   idf.py monitor, then press one button, and
- *   esp_log_level_set("tab5_hid", ESP_LOG_DEBUG) shows
- *       report 01 00 00 00 -> Vol+
+ *   remote: 01 00 00 00 -> Vol+
+ *   remote: 00 00 00 00
  *
- * A bit with no entry is reported by number and does nothing.
+ * A bit with no entry is logged as "bitN" and does nothing.
+ *
+ * `toggle` is a different kind of claim from the bit number. It does not
+ * say the button IS latching -- it says this button is one whose second
+ * edge could mean something, so measure it rather than assume. See
+ * dispatch_bit(). Volume keys are false: they are momentary by
+ * construction, nobody ships a latching volume-up, and measuring them
+ * would turn a long press into a spurious extra step.
  */
 static const struct {
     uint8_t      bit;
     hid_button_t button;
     const char  *name;
+    bool         toggle;
 } BUTTON_BITS[] = {
-    { 0, HID_BTN_VOL_UP,   "Vol+"    },
-    { 1, HID_BTN_VOL_DOWN, "Vol-"    },
-    { 2, HID_BTN_MUTE,     "Mute"    },
-    { 3, HID_BTN_MIC_MUTE, "MicMute" },
+    { 0, HID_BTN_VOL_UP,   "Vol+",    false },
+    { 1, HID_BTN_VOL_DOWN, "Vol-",    false },
+    { 2, HID_BTN_MUTE,     "Mute",    true  },
+    { 3, HID_BTN_MIC_MUTE, "MicMute", true  },
 };
+
+/*
+ * How long a toggle-capable bit has to stay set before its release is
+ * read as a second press rather than as letting go.
+ *
+ * This is the whole of the discrimination, and it is a timing threshold
+ * because nothing else distinguishes the two devices. A momentary button
+ * whose state the software tracks and a latching switch that reports its
+ * own state emit the SAME bytes -- 04 then 00 -- and differ only in
+ * when. A thumb releases a button in well under 400 ms. A latched
+ * switch sits there until somebody comes back to it, which is at best
+ * the better part of a second later and usually many.
+ *
+ * Getting it wrong in either direction is survivable and visible: a
+ * momentary press held past the threshold fires twice and cancels out,
+ * a latching switch flicked faster than it fires once and inverts. Both
+ * say so in the log, which is why the decision is logged rather than
+ * only acted on.
+ */
+#define LATCH_HOLD_MS   (400)
+
+typedef enum {
+    MODE_UNKNOWN = 0,
+    MODE_MOMENTARY,     /* released quickly; software owns the state */
+    MODE_LATCHING,      /* held until pressed again; the switch owns it */
+} bit_mode_t;
 
 typedef struct {
     usb_device_handle_t dev;
@@ -71,6 +106,11 @@ typedef struct {
     uint8_t itf_num;
     uint8_t prev0;              /* byte 0 of the last report */
     bool    have_prev;
+
+    /* Per-bit, because one remote can carry both kinds: the volume keys
+     * on this headset are momentary and the mute may not be. */
+    TickType_t rise_tick[8];
+    bit_mode_t mode[8];
 } hid_ctx_t;
 
 /*
@@ -87,46 +127,130 @@ typedef struct {
  * report even though no remote here has two buttons close enough
  * together for it to happen by accident.
  */
+static const int BUTTON_COUNT = (int)(sizeof(BUTTON_BITS) / sizeof(BUTTON_BITS[0]));
+
+static int entry_for_bit(int bit)
+{
+    for (int i = 0; i < BUTTON_COUNT; i++) {
+        if (BUTTON_BITS[i].bit == bit) return i;
+    }
+    return -1;
+}
+
+/*
+ * One edge on one bit.
+ *
+ * A rising edge is always a press and always dispatches. What to do with
+ * the falling edge is the question this file could not answer by
+ * inspection, because the two possibilities are byte-identical:
+ *
+ *   momentary + software state   press -> 04, release -> 00
+ *   latching switch              press -> 04, press again -> 00
+ *
+ * Both send 04 and then 00. The only thing that differs is how long 04
+ * lasts, so that is what is measured. Under LATCH_HOLD_MS the release is
+ * a thumb coming off a button and is ignored -- the player already
+ * toggled on the press. Over it, the bit was sitting latched and the
+ * return to 0 is the second press, so it dispatches.
+ *
+ * The decision is logged the first time it is made for each bit, because
+ * a mute button that fires twice per press and a mute button that fires
+ * once look the same from the outside -- silent -- and this line is what
+ * separates them.
+ *
+ * Bits not marked `toggle` never dispatch on release at all. A volume
+ * key held for a second is a person deciding, not two presses.
+ */
+static void dispatch_bit(hid_ctx_t *ctx, int bit, bool rising)
+{
+    const int e = entry_for_bit(bit);
+    if (e < 0) return;
+
+    if (rising) {
+        ctx->rise_tick[bit] = xTaskGetTickCount();
+        if (s_cb) s_cb(BUTTON_BITS[e].button);
+        return;
+    }
+
+    if (!BUTTON_BITS[e].toggle) return;
+
+    const uint32_t held_ms =
+        (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - ctx->rise_tick[bit]);
+    const bool latching = held_ms >= LATCH_HOLD_MS;
+    const bit_mode_t mode = latching ? MODE_LATCHING : MODE_MOMENTARY;
+
+    if (ctx->mode[bit] != mode) {
+        ctx->mode[bit] = mode;
+        ESP_LOGI(TAG, "%s is %s (held %lu ms); release %s a second press",
+                 BUTTON_BITS[e].name,
+                 latching ? "a latching switch" : "momentary",
+                 (unsigned long)held_ms,
+                 latching ? "counts as" : "does not count as");
+    }
+
+    if (latching && s_cb) s_cb(BUTTON_BITS[e].button);
+}
+
 static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
 {
     if (len <= 0) return;
 
     const uint8_t now = data[0];
     const uint8_t was = ctx->have_prev ? ctx->prev0 : 0;
-    const uint8_t pressed = (uint8_t)(now & ~was);
+    const bool first = !ctx->have_prev;
 
     ctx->prev0 = now;
     ctx->have_prev = true;
 
-    if (esp_log_level_get(TAG) >= ESP_LOG_DEBUG) {
-        char hex[3 * HID_MAX_IN_REPORT + 1];
-        int n = 0;
-        for (int i = 0; i < len && i < HID_MAX_IN_REPORT; i++) {
-            n += snprintf(hex + n, sizeof(hex) - n, "%02X ", data[i]);
-        }
-        ESP_LOGD(TAG, "itf %u report %s", ctx->itf_num, hex);
+    /* Repeats while a button is held carry nothing and would be one line
+     * per poll interval. Only changes are logged or acted on. */
+    if (!first && now == was) return;
+
+    const uint8_t changed = (uint8_t)(now ^ was);
+    if (!changed) return;
+
+    /*
+     * The raw report and the names it resolved to, on one line, at info.
+     *
+     * Not behind a log level, deliberately. BUTTON_BITS is an inference,
+     * so the first thing anyone needs from this file is the evidence
+     * that it is right -- and putting that at debug means fetching
+     * another build to answer a question the running one already knew.
+     * It is one line per press; nothing that happens at the rate of a
+     * thumb needs rate limiting.
+     */
+    char hex[3 * HID_MAX_IN_REPORT + 1];
+    int n = 0;
+    for (int i = 0; i < len && i < HID_MAX_IN_REPORT; i++) {
+        n += snprintf(hex + n, sizeof(hex) - n, "%02X ", data[i]);
     }
 
-    if (!pressed) return;
+    char names[64];
+    int m = 0;
+    names[0] = '\0';
+    for (int bit = 0; bit < 8; bit++) {
+        if (!(changed & (1 << bit))) continue;
+        const bool rising = (now & (1 << bit)) != 0;
+        const int e = entry_for_bit(bit);
+        m += snprintf(names + m, sizeof(names) - m, "%s%s%s",
+                      m ? " " : "",
+                      rising ? "+" : "-",
+                      e >= 0 ? BUTTON_BITS[e].name : "bit?");
+        if (e < 0) {
+            /* Named by number rather than swallowed. A button that does
+             * nothing and says nothing is indistinguishable from one
+             * whose reports are not arriving, and those have completely
+             * different fixes. */
+            m += snprintf(names + m, sizeof(names) - m, "%d", bit);
+        }
+        if (m >= (int)sizeof(names) - 8) break;
+    }
+
+    ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "", names);
 
     for (int bit = 0; bit < 8; bit++) {
-        if (!(pressed & (1 << bit))) continue;
-
-        bool known = false;
-        for (size_t i = 0; i < sizeof(BUTTON_BITS) / sizeof(BUTTON_BITS[0]); i++) {
-            if (BUTTON_BITS[i].bit != bit) continue;
-            ESP_LOGI(TAG, "remote: %s", BUTTON_BITS[i].name);
-            if (s_cb) s_cb(BUTTON_BITS[i].button);
-            known = true;
-            break;
-        }
-        if (!known) {
-            /* Named by number rather than swallowed. A button that does
-             * nothing and says nothing is indistinguishable from a
-             * button that is not being received at all, and the two have
-             * completely different fixes. */
-            ESP_LOGI(TAG, "remote: unmapped bit %d (report byte 0 = 0x%02X)", bit, now);
-        }
+        if (!(changed & (1 << bit))) continue;
+        dispatch_bit(ctx, bit, (now & (1 << bit)) != 0);
     }
 }
 
