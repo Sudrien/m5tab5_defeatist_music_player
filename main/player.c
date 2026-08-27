@@ -23,8 +23,10 @@
  *      and the USB-A port's VBUS enable, now live in storage.c.
  *
  *   3. The ES8388 needs MCLK running before it will answer sensibly on
- *      I2S. We start the I2S channel (which drives MCLK) before writing
- *      the codec's DAC power-up registers.
+ *      I2S. The I2S channel (which drives MCLK) is started before the
+ *      codec's DAC power-up registers are written. That, the codec, the
+ *      amp enable and the headphone-detect line now live in
+ *      audio_out.c.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -35,7 +37,6 @@
 #include <string.h>
 
 #include "driver/i2c_master.h"
-#include "driver/i2s_std.h"
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -53,6 +54,7 @@
 #include "esp_idf_version.h"
 
 #include "albumart.h"
+#include "audio_out.h"
 #include "battery.h"
 #include "covertag.h"
 #include "heapcheck.h"
@@ -84,9 +86,6 @@ static const char *TAG = "tab5_mp3";
 #define PI4IOE1_IO_DIR          (0x7F)
 #define PI4IOE1_OUT_SET         (0x76)  /* P1 SPK_EN, P2 EXT5V, P4 LCD_RST, P5 TP_RST, P6 CAM_RST */
 
-/* ---- ES8388 ---- */
-#define ES8388_ADDR             (0x10)
-
 /* ---- Display: ST7121 MIPI-DSI, portrait native ---- */
 #define LCD_H_RES               (720)
 #define LCD_V_RES               (1280)
@@ -115,12 +114,6 @@ static const char *TAG = "tab5_mp3";
 #define PI4IOE_REG_PULL_EN      (0x0B)
 #define PI4IOE_REG_PULL_SEL     (0x0D)
 
-/* Input status. The PI4IOE5V6408 map used here runs Chip Reset 0x01,
- * IO Dir 0x03, Output 0x05, High-Z 0x07, Pull Enable 0x0B, Pull Select
- * 0x0D, Input Status 0x0F -- so this is the next register along. If the
- * probe below reads a constant, this address is the first thing to
- * doubt. */
-#define PI4IOE_REG_INPUT        (0x0F)
 #define PI4IOE_ADDR_2           (0x44)
 #define PI4IOE2_IO_DIR          (0xB9)
 
@@ -173,20 +166,12 @@ static const char *TAG = "tab5_mp3";
  */
 #define LOOP_STALL_MS           (400)
 
-/* ---- I2S ---- */
-#define I2S_MCLK_GPIO           (GPIO_NUM_30)
-#define I2S_BCLK_GPIO           (GPIO_NUM_27)
-#define I2S_LRCK_GPIO           (GPIO_NUM_29)
-#define I2S_DOUT_GPIO           (GPIO_NUM_26)   /* DSDIN: P4 -> codec */
-
 /* Input buffering now lives inside decoder.c -- minimp3_ex does its own
  * over its IO callbacks, and the esp_audio_codec path keeps a sliding
  * window. Only the PCM side is sized here. */
 
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_exp1, s_exp2;
-static i2c_master_dev_handle_t s_es8388;
-static i2s_chan_handle_t s_tx;
 
 /* ------------------------------------------------------------------ */
 /* I2C helpers                                                         */
@@ -248,64 +233,6 @@ static esp_err_t io_expanders_init(void)
 
     vTaskDelay(pdMS_TO_TICKS(100));     /* panel out of reset before first command */
     return ESP_OK;
-}
-
-/* ------------------------------------------------------------------ */
-/* Speaker / headphone                                                 */
-/* ------------------------------------------------------------------ */
-
-/*
- * SPK_EN (expander 1 P1) gates the NS4150B, and nothing gates it
- * automatically: with headphones in, the amp keeps driving the speaker
- * in parallel.
- *
- * Detect is expander 1 P7, active high -- set when a plug is
- * in. PI4IOE1_IO_DIR is 0x7F, so bit 7 is the one pin on that expander
- * configured as an input; the other seven are the resets and enables.
- *
- * Set HP_DETECT_MASK to 0 to get the identification mode back (logs
- * both expanders' input registers twice a second).
- */
-#define HP_DETECT_MASK          (0x80)
-#define HP_DETECT_ACTIVE_LOW    (0)
-
-static esp_err_t reg_read(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t *val)
-{
-    return i2c_master_transmit_receive(dev, &reg, 1, val, 1, I2C_TIMEOUT_MS);
-}
-
-static esp_err_t speaker_set(bool on)
-{
-    const uint8_t out = on ? PI4IOE1_OUT_SET : (PI4IOE1_OUT_SET & ~0x02);
-    return reg_write(s_exp1, PI4IOE_REG_OUT_SET, out);
-}
-
-static void headphone_task(void *arg)
-{
-    int last = -1;
-    while (1) {
-        uint8_t in1 = 0, in2 = 0;
-        reg_read(s_exp1, PI4IOE_REG_INPUT, &in1);
-        reg_read(s_exp2, PI4IOE_REG_INPUT, &in2);
-
-        if (HP_DETECT_MASK == 0) {
-            /* Identification mode: watch these while plugging in. */
-            ESP_LOGI(TAG, "expander inputs: 0x43=0x%02X 0x44=0x%02X", in1, in2);
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
-
-        (void)in2;
-        const bool raw = (in1 & HP_DETECT_MASK) != 0;
-        const int plugged = HP_DETECT_ACTIVE_LOW ? !raw : raw;
-        if (plugged != last) {
-            last = plugged;
-            speaker_set(!plugged);
-            ESP_LOGI(TAG, "headphones %s, speaker %s",
-                     plugged ? "in" : "out", plugged ? "muted" : "on");
-        }
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -414,104 +341,6 @@ static esp_err_t panel_init(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* I2S                                                                 */
-/* ------------------------------------------------------------------ */
-
-static esp_err_t i2s_init(uint32_t rate)
-{
-    i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-    chan.dma_desc_num = 8;
-    chan.dma_frame_num = 480;
-    chan.auto_clear = true;
-    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan, &s_tx, NULL), TAG, "i2s_new_channel");
-
-    i2s_std_config_t std = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(rate),
-        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT,
-                                                        I2S_SLOT_MODE_STEREO),
-        .gpio_cfg = {
-            .mclk = I2S_MCLK_GPIO,
-            .bclk = I2S_BCLK_GPIO,
-            .ws   = I2S_LRCK_GPIO,
-            .dout = I2S_DOUT_GPIO,
-            .din  = I2S_GPIO_UNUSED,
-            .invert_flags = { false, false, false },
-        },
-    };
-    /* ES8388 wants MCLK = 256 * Fs. */
-    std.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-
-    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx, &std), TAG, "init_std");
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "i2s_enable");
-    return ESP_OK;
-}
-
-static esp_err_t i2s_set_rate(uint32_t rate)
-{
-    i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
-    clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-    ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx), TAG, "disable");
-    ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(s_tx, &clk), TAG, "reconfig");
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "enable");
-    return ESP_OK;
-}
-
-/* ------------------------------------------------------------------ */
-/* ES8388 -- DAC playback path only                                    */
-/* ------------------------------------------------------------------ */
-
-/* vol: 0 = 0 dB, 33 = -99 dB (ES8388 LDACVOL/RDACVOL are 0.5 dB steps,
- * 0x00 loudest). Output mixer volume (reg 46/47) is a separate 0..0x21. */
-static esp_err_t es8388_set_volume(uint8_t percent)
-{
-    if (percent > 100) percent = 100;
-    uint8_t v = (uint8_t)((100 - percent) * 0x21 / 100);   /* 0 loud .. 0x21 mute */
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 46, 0x21 - v), TAG, "LOUT1VOL");
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 47, 0x21 - v), TAG, "ROUT1VOL");
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 48, 0x21 - v), TAG, "LOUT2VOL");
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 49, 0x21 - v), TAG, "ROUT2VOL");
-    return ESP_OK;
-}
-
-static esp_err_t es8388_init(void)
-{
-    ESP_RETURN_ON_ERROR(add_dev(ES8388_ADDR, &s_es8388), TAG, "es8388 add");
-
-    /* Reset, then out of reset. */
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 0, 0x80), TAG, "reset");
-    vTaskDelay(pdMS_TO_TICKS(10));
-    ESP_RETURN_ON_ERROR(reg_write(s_es8388, 0, 0x00), TAG, "unreset");
-
-    /* Codec in slave mode, DAC only. */
-    reg_write(s_es8388, 8,  0x00);  /* MASTERMODE: slave */
-    reg_write(s_es8388, 2,  0xF3);  /* power down DEM/STM while configuring */
-    reg_write(s_es8388, 1,  0x50);  /* ChipPower: analog on, ibias normal */
-    reg_write(s_es8388, 3,  0xFC);  /* ADC fully powered down */
-    reg_write(s_es8388, 0,  0x06);  /* internal VREF, DACMCLK from MCLK pin */
-
-    /* DAC: 16-bit I2S, no de-emphasis. */
-    reg_write(s_es8388, 23, 0x18);  /* DACCONTROL1: I2S, 16 bit */
-    reg_write(s_es8388, 24, 0x02);  /* DACCONTROL2: DACFsRatio 256 */
-    reg_write(s_es8388, 26, 0x00);  /* LDACVOL 0 dB */
-    reg_write(s_es8388, 27, 0x00);  /* RDACVOL 0 dB */
-    reg_write(s_es8388, 43, 0x80);  /* DACCONTROL21: DAC/ADC same LRCK, mixer on */
-
-    /* Output mixer: DAC straight to LOUT/ROUT, no ADC path. */
-    reg_write(s_es8388, 38, 0x09);
-    reg_write(s_es8388, 39, 0x90);  /* LD2LO on, LI2LO off */
-    reg_write(s_es8388, 42, 0x90);  /* RD2RO on, RI2RO off */
-
-    /* Power up DAC L/R and both output pairs:
-     *   OUT1 = headphone jack, OUT2 = NS4150B speaker amp. */
-    reg_write(s_es8388, 4,  0x3C);
-    reg_write(s_es8388, 2,  0x00);  /* release DEM/STM */
-
-    ESP_RETURN_ON_ERROR(es8388_set_volume(50), TAG, "volume");   /* matches s_volume */
-    ESP_LOGI(TAG, "ES8388 initialised (0x%02X)", ES8388_ADDR);
-    return ESP_OK;
-}
-
-/* ------------------------------------------------------------------ */
 /* Playback                                                            */
 /* ------------------------------------------------------------------ */
 
@@ -564,8 +393,7 @@ static void i2s_writer_task(void *arg)
         const size_t got = xStreamBufferReceive(s_pcm, buf, PCM_CHUNK_BYTES,
                                                 pdMS_TO_TICKS(100));
         if (got) {
-            size_t written = 0;
-            i2s_channel_write(s_tx, buf, got, &written, portMAX_DELAY);
+            audio_out_write(buf, got);
         } else if (s_decode_done && xStreamBufferIsEmpty(s_pcm)) {
             break;
         }
@@ -1895,7 +1723,7 @@ static void ui_task(void *arg)
             break;
         case UI_ACTION_VOLUME:
             s_volume = act.value;
-            es8388_set_volume((uint8_t)act.value);
+            audio_out_set_volume((uint8_t)act.value);
             break;
         case UI_ACTION_SEEK:
             request_seek(act.value, "slider");
@@ -2274,7 +2102,7 @@ static track_end_t play_file(const char *path)
             if (cur_rate == 0) {
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
-                ESP_ERROR_CHECK(i2s_set_rate((uint32_t)info.sample_rate));
+                ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
                 HEAP_CHECK("before ring create");
                 s_ring_pct = 0;
                 s_pcm = xStreamBufferCreate(PCM_RING_BYTES, PCM_CHUNK_BYTES);
@@ -2286,7 +2114,7 @@ static track_end_t play_file(const char *path)
                  * disabled, and doing that with audio queued is an
                  * audible click. Drain first. */
                 while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(1);
-                ESP_ERROR_CHECK(i2s_set_rate((uint32_t)info.sample_rate));
+                ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
             }
             cur_rate = (uint32_t)info.sample_rate;
             cur_chans = info.channels;
@@ -2544,9 +2372,10 @@ void app_main(void)
     ESP_ERROR_CHECK(panel_init());
     ESP_ERROR_CHECK(backlight_set(LCD_BRIGHTNESS_PERCENT));
 
-    /* MCLK must be running before the codec's DAC comes up. */
-    ESP_ERROR_CHECK(i2s_init(44100));
-    ESP_ERROR_CHECK(es8388_init());
+    /* I2S, the codec, the speaker amp and the headphone-detect task, all
+     * behind one call now -- see audio_out.h. 44100 is only what MCLK
+     * starts at; the first track states its own. */
+    ESP_ERROR_CHECK(audio_out_init(s_i2c_bus, s_exp1, 44100));
 
     /* Both volumes, and the poll task that keeps them up to date. Not
      * ESP_ERROR_CHECK'd on the media itself: an empty slot and an empty
@@ -2580,8 +2409,6 @@ void app_main(void)
      * on. Still one-way -- see usbhost.h.
      */
     usbhost_start();
-
-    xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
 
     /* The gauge is on the same bus as everything else and is allowed to
      * be absent: a board with no pack, or one wired differently, gets an
