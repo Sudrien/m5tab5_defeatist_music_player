@@ -1274,6 +1274,10 @@ static int ring_headroom_pct(void)
 #define PREFETCH_START_PCT      (75)
 #define PREFETCH_ABORT_PCT      (50)
 
+/* Consecutive unreadable tracks before the player stops walking the
+ * folder. See the note at the use site. */
+#define UNREADABLE_LIMIT        (3)
+
 /*
  * Republish the gauge.
  *
@@ -1985,9 +1989,25 @@ static void ui_task(void *arg)
 /* Why the track ended. The caller needs to tell "the file finished, go on
  * to the next one" from "something else was chosen, do not". */
 typedef enum {
-    TRACK_ENDED = 0,    /* end of file, or an unreadable one */
+    TRACK_ENDED = 0,    /* played to the end of the file */
     TRACK_INTERRUPTED,  /* the chooser picked something else */
     TRACK_MEDIA_GONE,   /* the card or drive was pulled */
+    /*
+     * Opened or decoded to nothing -- no audio came out of it.
+     *
+     * Split out of TRACK_ENDED because the caller treated the two
+     * identically and therefore advanced, which is right for a finished
+     * track and catastrophic for a folder on a card that has started
+     * timing out: every open fails instantly, so the player sprints
+     * through the entire playlist in under a second and lands at the end
+     * of the folder having played nothing.
+     *
+     * A volume that is still mounted but not answering is not the same
+     * as one that has been pulled, so this is not TRACK_MEDIA_GONE
+     * either: the card is there, it is just failing, and it may well
+     * come back.
+     */
+    TRACK_UNREADABLE,
 } track_end_t;
 
 static track_end_t play_file(const char *path)
@@ -2001,7 +2021,7 @@ static track_end_t play_file(const char *path)
     track_change_begin(path);
 
     decoder_t *dec = decoder_open(path);
-    if (!dec) return TRACK_ENDED;
+    if (!dec) return TRACK_UNREADABLE;
 
     /*
      * Set after the open succeeds, not before: decoder_open() on a
@@ -2039,7 +2059,7 @@ static track_end_t play_file(const char *path)
          * that does not exist -- reintroducing the queued-forever bug on
          * the one path where it would be hardest to spot. */
         s_decoding = false;
-        return TRACK_ENDED;
+        return TRACK_UNREADABLE;
     }
 
     uint32_t cur_rate = 0;
@@ -2359,9 +2379,18 @@ static track_end_t play_file(const char *path)
 
     /* Why, not just that. "finished" on a track the user skipped out of
      * reads as the skip having been ignored until the next line arrives. */
+    /* A track that ran to the end without producing a single block did
+     * not play. Reported as unreadable so the caller can count it, since
+     * "finished, 0 blocks" and "finished, 261 blocks" mean opposite
+     * things and only one of them is a reason to move on cheerfully. */
+    if (why == TRACK_ENDED && blocks == 0) why = TRACK_UNREADABLE;
+
+    /* Why, not just that. "finished" on a track the user skipped out of
+     * reads as the skip having been ignored until the next line arrives. */
     ESP_LOGI(TAG, "%s, %d blocks",
              why == TRACK_INTERRUPTED ? "interrupted"
              : why == TRACK_MEDIA_GONE ? "media gone"
+             : why == TRACK_UNREADABLE ? "unreadable"
                                        : "finished", blocks);
 
     free(pcm);
@@ -2409,6 +2438,7 @@ static bool autostart(char *out, size_t out_len)
  */
 static void player_loop(void)
 {
+    int fails = 0;      /* consecutive tracks that produced no audio */
     bool have = autostart(s_path, sizeof(s_path));
     if (!have) {
         ESP_LOGI(TAG, "nothing to play; opening the chooser");
@@ -2459,6 +2489,33 @@ static void player_loop(void)
             mediacache_clear();
             s_open_chooser = true;
             continue;
+        }
+
+        /*
+         * Stop after a run of tracks that produced no audio.
+         *
+         * One unreadable file in a folder is a bad rip and skipping it is
+         * the right answer. Several in a row is not a property of the
+         * files -- it is the card, and continuing means racing to the end
+         * of the folder in under a second, logging twenty-two "playing"
+         * lines for tracks nobody heard, and arriving at the chooser with
+         * the playlist exhausted and no indication of why.
+         *
+         * Three, because a folder can legitimately begin with a couple of
+         * duds and because three failures is already a tenth of a second
+         * when they are failing instantly.
+         */
+        if (why == TRACK_UNREADABLE) {
+            if (++fails >= UNREADABLE_LIMIT) {
+                ESP_LOGE(TAG, "%d tracks in a row played nothing; stopping. "
+                              "The volume is mounted but not readable.", fails);
+                s_open_chooser = true;
+                fails = 0;
+                continue;
+            }
+            ESP_LOGW(TAG, "%s played nothing; skipping", s_path);
+        } else {
+            fails = 0;
         }
 
         const char *next = playlist_next(browser_order());
