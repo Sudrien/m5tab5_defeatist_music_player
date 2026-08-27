@@ -384,6 +384,8 @@ static volatile bool s_decode_done;
  * So the writer says when it has gone. */
 static volatile bool s_writer_done;
 
+static void ring_publish(void);
+
 /* Drains the ring into I2S and nothing else, so the only thing it ever
  * blocks on is DMA. */
 static void i2s_writer_task(void *arg)
@@ -394,6 +396,8 @@ static void i2s_writer_task(void *arg)
     while (1) {
         const size_t got = xStreamBufferReceive(s_pcm, buf, PCM_CHUNK_BYTES,
                                                 pdMS_TO_TICKS(100));
+        ring_publish();
+
         if (got) {
             audio_out_write(buf, got);
         } else if (s_decode_done && xStreamBufferIsEmpty(s_pcm)) {
@@ -1269,6 +1273,42 @@ static int ring_headroom_pct(void)
  */
 #define PREFETCH_START_PCT      (75)
 #define PREFETCH_ABORT_PCT      (50)
+
+/*
+ * Republish the gauge.
+ *
+ * Called from the decode loop, which is where it used to live, AND from
+ * the writer task -- because the decode loop is exactly the task that
+ * stops running when the gauge matters most.
+ *
+ * PREFETCH_ABORT_PCT is checked against this number by a walk running on
+ * media_task, and that walk holds the card's VFS lock across 32 KB
+ * reads. The decode loop's next read blocks behind it, so it stops
+ * decoding, so it stops publishing -- and the gauge freezes at whatever
+ * it read last, which by construction is above PREFETCH_START_PCT
+ * because that is the gate the walk had to pass to start. The abort
+ * therefore never fires. The ring drains to nothing, the audio stops for
+ * as long as the scan takes, and the one number that could have stopped
+ * it is sitting there reporting the ring as healthy.
+ *
+ * The writer task is the right second publisher: it never touches the
+ * card, so nothing on the card can stop it, and it wakes on a 100 ms
+ * timeout even with an empty ring. A number whose freshness depends on
+ * the thing it is meant to be watching is not a gauge.
+ */
+static void ring_publish(void)
+{
+    s_ring_pct = (int)((xStreamBufferBytesAvailable(s_pcm) * 100) /
+                       PCM_RING_BYTES);
+
+    /* And act on it. Nothing else was: s_prefetch_abort was set on a
+     * track change and nowhere else, so the low-water threshold the
+     * prefetch documents was only ever consulted between stages, never
+     * during the one stage long enough to need it. */
+    if (s_ring_pct >= 0 && s_ring_pct < PREFETCH_ABORT_PCT) {
+        s_prefetch_abort = true;
+    }
+}
 
 /*
  * How long media_task waits after a track change before touching the
@@ -2257,11 +2297,7 @@ static track_end_t play_file(const char *path)
             src += sent;
             remain -= sent;
         }
-        /* Published here because this is the one place that both owns
-         * the handle and runs often enough for the number to be fresh:
-         * once per decoded block, about forty times a second. */
-        s_ring_pct = (int)((xStreamBufferBytesAvailable(s_pcm) * 100) /
-                           PCM_RING_BYTES);
+        ring_publish();
 
         const uint32_t send_ms =
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_send);
