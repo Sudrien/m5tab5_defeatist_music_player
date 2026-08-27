@@ -1318,9 +1318,9 @@ static void ring_publish(void)
  * How long media_task waits after a track change before touching the
  * card, and how full the ring has to be before it starts.
  *
- * media_task is already the lowest priority task in the program (1,
- * against 4 for the UI and 6 for the I2S writer), but priority only
- * decides who gets the CPU -- it does nothing about who gets the device.
+ * media_task is at priority 1, against 4 for the UI and 6 for the I2S
+ * writer, but priority only decides who gets the CPU -- it does nothing
+ * about who gets the device.
  * A background task at priority 1 issuing a 512 KB read still puts that
  * read in the same queue as the decoder's, and the decoder then waits
  * behind it no matter how important it is.
@@ -2638,6 +2638,32 @@ void app_main(void)
      * and carries a couple of 512-byte path buffers on the way -- so the
      * old size overflowed on the first folder with a long name in it. */
     xTaskCreate(ui_task, "ui", 8192, NULL, 4, NULL);
+
+    /*
+     * Above media_task before the decode loop starts.
+     *
+     * player_loop() runs on main_task, and main_task's priority is 1 --
+     * the same as media_task's. The comment on MEDIA_START_DELAY_MS
+     * described media_task as "the lowest priority task in the program",
+     * which was true of every task except the one it competes with.
+     *
+     * Equal priority means the scheduler round-robins them, so a
+     * background walk reading 32 KB at a time gets every other turn at
+     * the card against the decoder that is trying to keep the ring fed.
+     * At 40 MHz that mostly kept up. At 20 MHz it does not, and it shows
+     * as decoder_read blocked for three to twelve seconds while an
+     * envelope scan runs.
+     *
+     * 5 rather than 4: a starved decoder is a dropout and a starved UI
+     * is a slow button, and the decode loop blocks on the card anyway,
+     * so it yields the CPU for the whole time it is not needed.
+     *
+     * This does not make the card any faster and does not replace the
+     * time-and-depth throttle above -- priority still says nothing about
+     * who gets the device. It makes the two tasks unequal, which is what
+     * the throttle assumed all along.
+     */
+    vTaskPrioritySet(NULL, 5);
 
     /* Does not return. The volumes are never unmounted from here any
      * more; storage.c owns that, and it unmounts on removal rather than
