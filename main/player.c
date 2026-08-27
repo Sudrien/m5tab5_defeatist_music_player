@@ -1688,6 +1688,7 @@ static void ui_task(void *arg)
         st.album = s_tags.album;
         st.playing = s_playing;
         st.volume = s_volume;
+        st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;
@@ -1723,7 +1724,15 @@ static void ui_task(void *arg)
             break;
         case UI_ACTION_VOLUME:
             s_volume = act.value;
+            /* Moving the slider unmutes. Adjusting a control that is
+             * suspended and hearing nothing is the kind of thing people
+             * conclude is a broken player rather than a mute they
+             * forgot; every hardware volume knob behaves this way. */
+            if (audio_out_muted()) audio_out_set_mute(false);
             audio_out_set_volume((uint8_t)act.value);
+            break;
+        case UI_ACTION_MUTE:
+            audio_out_set_mute(!audio_out_muted());
             break;
         case UI_ACTION_SEEK:
             request_seek(act.value, "slider");
@@ -1824,6 +1833,7 @@ static void ui_task(void *arg)
          * forty times a second for nothing. */
         st.playing = s_playing;
         st.volume = s_volume;
+        st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;

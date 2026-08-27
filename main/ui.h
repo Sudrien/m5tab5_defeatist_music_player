@@ -27,6 +27,8 @@ typedef struct {
     const char *album;
     bool     playing;
     int      volume;        /* 0..100 */
+    bool     muted;         /* the slider still shows the level it will
+                             * return to -- see the note in ui.c */
     uint32_t pos_sec;
     uint32_t len_sec;       /* 0 when unknown -- seek bar renders empty */
 
@@ -78,6 +80,7 @@ typedef enum {
     UI_ACTION_NEXT,
     UI_ACTION_SEEK,         /* value = target percent 0..100 */
     UI_ACTION_VOLUME,       /* value = target percent 0..100 */
+    UI_ACTION_MUTE,         /* speaker icon, or the headset's mute key */
 } ui_action_kind_t;
 
 /* Name of an action, for logging. Never NULL. Lives beside the enum so a
