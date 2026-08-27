@@ -92,12 +92,32 @@ esp_err_t uac_write(const void *data, size_t len, uint32_t timeout_ms);
 /*
  * 0-100, matching the player's own scale.
  *
- * ESP_ERR_NOT_SUPPORTED when the device has no volume control the driver
- * can reach, which is common on the cheap C-Media parts. The caller is
- * expected to apply gain in software in that case rather than leaving
- * the slider dead -- see audio_out.c.
+ * Non-blocking, and that is the whole point of it: the value is
+ * published and the event task performs the USB control transfer. The
+ * caller is the UI task, a volume drag emits one of these per poll, and
+ * a control transfer means taking the lock the audio writer holds for
+ * the length of a write. Doing that on the UI task stalls the loop that
+ * dispatches every other button -- see the note on uac_task().
+ *
+ * Coalescing rather than queueing: only the latest value matters, so a
+ * drag that outruns the event task loses intermediate positions and
+ * lands on the right one.
  */
-esp_err_t uac_set_volume(uint8_t percent);
+void uac_set_volume(uint8_t percent);
+
+/*
+ * Whether the device has a volume control the driver can reach.
+ *
+ * False until the first attempt has been made, and false forever on the
+ * many class-compliant parts that have no feature unit -- the C-Media
+ * ones in particular. The caller applies gain in software when this is
+ * false rather than leaving the slider dead.
+ *
+ * Read per block rather than latched at route change, because the answer
+ * arrives asynchronously: the route can be taken before the first
+ * control transfer has been attempted.
+ */
+bool uac_has_volume_control(void);
 
 /* The device's product string, or "" -- for the log and the format card.
  * Never NULL. */
