@@ -64,6 +64,7 @@
 #include "framewalk.h"
 #include "hid.h"
 #include "playlist.h"
+#include "settings.h"
 #include "storage.h"
 #include "touch.h"
 #include "uac.h"
@@ -1801,6 +1802,7 @@ static void ui_task(void *arg)
             break;
         case UI_ACTION_VOLUME:
             s_volume = act.value;
+            settings_set_volume((uint8_t)act.value);
             /* Moving the slider unmutes. Adjusting a control that is
              * suspended and hearing nothing is the kind of thing people
              * conclude is a broken player rather than a mute they
@@ -2473,6 +2475,16 @@ void app_main(void)
      * registers one. */
     ESP_ERROR_CHECK(usbhost_init(s_exp2));
     ESP_ERROR_CHECK(storage_init());
+
+    /*
+     * After storage, because it needs a mounted volume to read from, and
+     * before anything asks for a setting. The volume it loads has to be
+     * pushed at audio_out.c explicitly: audio_out_init() has already run
+     * and left the codec at its own default of 50.
+     */
+    settings_init();
+    s_volume = settings_volume();
+    audio_out_set_volume((uint8_t)s_volume);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the
