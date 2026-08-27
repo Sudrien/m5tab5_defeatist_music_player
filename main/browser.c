@@ -158,25 +158,23 @@ static void go_up(void)
 }
 
 /*
- * Rule 2: selecting the USB tab is what powers the port.
+ * An absent volume's tab is still selectable, which is the one place
+ * this differs from a normal tab strip. The grey means "nothing here
+ * yet", not "not a button".
  *
- * So an absent volume's tab is still selectable, which is the one place
- * this differs from a normal tab strip. A greyed tab that ignored the tap
- * would leave the port dark with no way to ask for it -- the grey has to
- * mean "nothing here yet", not "not a button".
+ * It used to mean more than that: selecting the USB tab was what powered
+ * the port, so the tab HAD to be selectable or there was no way to ask.
+ * The port comes up at boot now -- a USB audio device cannot announce
+ * itself through a dark port, and waiting for someone to open the
+ * chooser was never a sensible gate on that -- so this is back to being
+ * an ordinary reason rather than a load-bearing one. The tab stays
+ * selectable anyway: a tab that ignores taps while the drive spins up
+ * reads as a lost tap.
  */
 static void select_tab(storage_id_t id)
 {
     const bool same = (id == s_tab);
     s_tab = id;
-
-    if (id == STORAGE_USB && !storage_usb_powered()) {
-        storage_usb_enable();
-        entries_free();
-        s_dir[0] = '\0';
-        s_dirty = true;
-        return;
-    }
 
     if (!storage_present(id)) {
         entries_free();
@@ -239,8 +237,10 @@ static const char *status_line(void)
 {
     if (s_dir[0]) return s_dir;
     if (s_tab == STORAGE_USB) {
+        /* The false branch is a few milliseconds of bring-up at boot,
+         * not a state anyone can tap their way into any more. */
         return storage_usb_powered() ? "USB port on - waiting for a drive"
-                                     : "tap again to power the USB port";
+                                     : "USB port coming up";
     }
     return "no card in the slot";
 }

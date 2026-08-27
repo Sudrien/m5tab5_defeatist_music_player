@@ -126,10 +126,9 @@ uint32_t storage_generation(void) { return s_generation; }
 
 void storage_hold(storage_id_t id) { s_held = id; }
 
-/* Both now answered by the bus owner. Kept as one-line forwards rather
- * than deleted so browser.c and player.c do not have to learn about
- * usbhost.c to ask a question about the USB volume. */
-void storage_usb_enable(void) { usbhost_start(); }
+/* Answered by the bus owner. Kept as a one-line forward rather than
+ * deleted so browser.c does not have to learn about usbhost.c to ask a
+ * question about the USB volume. */
 bool storage_usb_powered(void) { return usbhost_powered(); }
 
 /* ------------------------------------------------------------------ */
@@ -359,23 +358,21 @@ esp_err_t storage_init(void)
     }
 
     /*
-     * Rule 1: no card at boot, so look at the other port.
+     * The port is not conditional any more.
      *
-     * Boot only, deliberately. A card pulled later does not light the
-     * port -- that is a removal, not a search for media, and the chooser
-     * is one tap away for anyone who disagrees. Tying it to removal would
-     * also mean a card reseated twice had powered the port permanently as
-     * a side effect.
+     * It used to come up only when there was no card at boot or when the
+     * USB tab was tapped -- both of which are questions about where the
+     * FILES are. A USB audio device is not a file source, and it cannot
+     * announce itself through a dark port: with a card in the slot and
+     * nobody in the chooser, a headset plugged into this player would
+     * have been invisible for as long as the card kept working.
      *
-     * "Card present but unreadable" counts as no card here. The volume
-     * did not mount, so there is nothing to play from it either way.
+     * So app_main() powers the port at boot and this file no longer has
+     * an opinion about it. What is lost is a milliamp or two on a board
+     * with nothing plugged in, which is the state the port was in
+     * anyway; what is gained is that the highest-priority output can be
+     * detected at all.
      */
-    if (!s_mounted[STORAGE_SD]) {
-        ESP_LOGI(TAG, "no card at boot; powering the USB-A port");
-        storage_usb_enable();
-    } else {
-        ESP_LOGI(TAG, "card mounted; USB-A port left unpowered");
-    }
 
     if (xTaskCreate(storage_task, "storage", 4096, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;

@@ -2557,6 +2557,22 @@ void app_main(void)
     ESP_ERROR_CHECK(usbhost_init(s_exp2));
     ESP_ERROR_CHECK(storage_init());
 
+    /*
+     * And power it, unconditionally.
+     *
+     * The old rule was that the port came up when there was no card at
+     * boot, or when the USB tab was tapped. Both are questions about
+     * where the files are, and a USB audio device is not a file source.
+     * It also cannot announce itself through a dark port, so under the
+     * old rule a headset plugged into a player with a working card was
+     * invisible until somebody went looking for storage.
+     *
+     * Asynchronous: three I2C writes and a 100 ms inrush settle on the
+     * bus task, so this returns immediately and the rest of boot carries
+     * on. Still one-way -- see usbhost.h.
+     */
+    usbhost_start();
+
     xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL);
 
     /* The gauge is on the same bus as everything else and is allowed to
