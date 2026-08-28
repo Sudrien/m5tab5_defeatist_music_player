@@ -7,7 +7,9 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_memory_utils.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
@@ -60,6 +62,14 @@ static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
  * means one start stamp is enough; if that ever stops being true this
  * needs to move into the per-class arrays with it.
  */
+/*
+ * One internal DMA-capable staging buffer. Shared, and safe only because
+ * the lease serialises every reader -- it is touched between an acquire
+ * and the matching release and nowhere else.
+ */
+static uint8_t *s_bounce;
+static uint32_t s_bounced[STORAGE_IO_CLASSES];
+
 static int64_t  s_hold_t0;
 static uint64_t s_held_us[STORAGE_IO_CLASSES];
 static uint32_t s_worst_hold_ms[STORAGE_IO_CLASSES];
@@ -95,9 +105,29 @@ void storage_io_init(void)
     memset(s_worst_ms, 0, sizeof(s_worst_ms));
     memset(s_held_us, 0, sizeof(s_held_us));
     memset(s_worst_hold_ms, 0, sizeof(s_worst_hold_ms));
+    memset(s_bounced, 0, sizeof(s_bounced));
     s_phase_t0 = esp_timer_get_time();
 
-    ESP_LOGI(TAG, "storage arbiter up, %d KB chunks", STORAGE_IO_CHUNK / 1024);
+    /*
+     * 64-byte aligned for the cache line, MALLOC_CAP_DMA|INTERNAL so the
+     * sdmmc driver's esp_ptr_dma_capable() test passes and it uses the
+     * multi-sector burst rather than reading a sector at a time.
+     *
+     * Failure is not fatal: without it every read goes straight through
+     * as it did before, which is slow and correct. Loud, though, because
+     *16 KB of internal RAM going missing is worth knowing about on a
+     * board with 256 KB of it and a USB host stack next door.
+     */
+    s_bounce = heap_caps_aligned_alloc(64, STORAGE_IO_CHUNK,
+                                       MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL |
+                                       MALLOC_CAP_8BIT);
+    if (!s_bounce) {
+        ESP_LOGW(TAG, "no internal DMA buffer; reads will take the "
+                      "sector-at-a-time path");
+    }
+
+    ESP_LOGI(TAG, "storage arbiter up, %d KB chunks, bounce %s",
+             STORAGE_IO_CHUNK / 1024, s_bounce ? "on" : "OFF");
 }
 
 /* Most urgent class with somebody waiting, or STORAGE_IO_CLASSES for
@@ -224,6 +254,52 @@ static void count_bytes(storage_io_class_t cls, size_t n)
     xSemaphoreGive(s_lock);
 }
 
+/*
+ * True when the sdmmc driver can burst straight into this pointer.
+ *
+ * Four-byte alignment as well as DMA capability, because the driver
+ * requires both and a misaligned internal buffer fails the same way a
+ * PSRAM one does.
+ */
+static inline bool dma_ready(const void *p)
+{
+    return esp_ptr_dma_capable(p) && ((uintptr_t)p & 3u) == 0;
+}
+
+/*
+ * fread() into a destination the card may not be able to reach.
+ *
+ * The caller must already hold the lease: s_bounce is shared and that is
+ * what makes sharing it safe.
+ */
+static size_t read_staged(void *dst, size_t len, FILE *f,
+                          storage_io_class_t cls)
+{
+    if (!s_bounce || dma_ready(dst)) return fread(dst, 1, len, f);
+
+    uint8_t *p = (uint8_t *)dst;
+    size_t done = 0;
+
+    while (done < len) {
+        size_t want = len - done;
+        if (want > STORAGE_IO_CHUNK) want = STORAGE_IO_CHUNK;
+
+        const size_t got = fread(s_bounce, 1, want, f);
+        if (got) {
+            memcpy(p + done, s_bounce, got);
+            done += got;
+        }
+        if (got < want) break;          /* EOF or error; same as fread */
+    }
+
+    if (s_lock) {
+        xSemaphoreTake(s_lock, portMAX_DELAY);
+        s_bounced[cls]++;
+        xSemaphoreGive(s_lock);
+    }
+    return done;
+}
+
 size_t storage_io_fread(void *dst, size_t len, FILE *f,
                         storage_io_class_t cls)
 {
@@ -238,8 +314,11 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
      * of semaphore operations per 16 KB.
      */
     if (cls == STORAGE_IO_PLAYBACK) {
+        /* Still one lease for the whole read. The staging inside it is
+         * chunked, but nothing outranks playback, so letting go between
+         * chunks would only cost semaphore traffic. */
         storage_io_acquire(cls);
-        done = fread(p, 1, len, f);
+        done = read_staged(p, len, f, cls);
         storage_io_release();
         count_bytes(cls, done);
         return done;
@@ -250,7 +329,7 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
         if (want > STORAGE_IO_CHUNK) want = STORAGE_IO_CHUNK;
 
         storage_io_acquire(cls);
-        const size_t got = fread(p + done, 1, want, f);
+        const size_t got = read_staged(p + done, want, f, cls);
         storage_io_release();
 
         count_bytes(cls, got);
@@ -292,7 +371,9 @@ void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out)
     out->held_ms       = (uint32_t)(s_held_us[cls] / 1000);
     out->worst_hold_ms = s_worst_hold_ms[cls];
     out->worst_wait_ms = s_worst_ms[cls];
+    out->bounced       = s_bounced[cls];
 
+    s_bounced[cls] = 0;
     s_acquires[cls] = 0;
     s_bytes[cls] = 0;
     s_held_us[cls] = 0;
@@ -346,9 +427,10 @@ void storage_io_report(const char *phase)
 
         ESP_LOGI(TAG, "%s %s: %" PRIu32 " reads, %" PRIu32 " KB in %" PRIu32
                  " ms held of %" PRIu32 " ms (%" PRIu32 "%%), %" PRIu32
-                 " KB/s, worst hold %" PRIu32 " ms, worst wait %" PRIu32 " ms",
+                 " KB/s, worst hold %" PRIu32 " ms, worst wait %" PRIu32
+                 " ms, %" PRIu32 " bounced",
                  name, k_class_name[i], st.reads,
                  (uint32_t)(st.bytes / 1024), st.held_ms, phase_ms, pct,
-                 kbps, st.worst_hold_ms, st.worst_wait_ms);
+                 kbps, st.worst_hold_ms, st.worst_wait_ms, st.bounced);
     }
 }

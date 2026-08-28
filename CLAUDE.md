@@ -2089,6 +2089,76 @@ and it is the thing that will finally give the arbiter a contended window
 to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
 the only concurrent reader was the walk and 0101 switched it off.
 
+## 577 KB/s was the bounce path, not the card
+
+0102 predicted two outcomes and got the one that rules out the cheap fix:
+the open is **99% I/O**, not CPU. `10462 KB in 18110 ms held of 18271 ms`.
+minimp3's parsing is a rounding error.
+
+But the throughput it measured said something louder:
+
+| Window | KB/s |
+| --- | --- |
+| Track 1 open | 577 |
+| Track 1 playback | 571 |
+| Track 2 open | 577 |
+
+Four windows, two files, and -- across the 0101/0102 boundary -- two bus
+clocks, because `SDMMC_FREQ_HIGHSPEED` was accepted (`speed 40000 kHz`)
+and moved throughput by about 4%. **A rate that does not change when the
+bus clock doubles is not a bus rate.**
+
+577 KB/s is 1127 sectors per second: 0.89 ms per 512-byte sector, against
+about 26 us of data time for that sector at 40 MHz on four lines. The
+other 0.86 ms was per-transaction overhead, and the transaction count was
+being set by ESP-IDF's `sdmmc_read_sectors()` falling back to reading a
+sector at a time whenever `esp_ptr_dma_capable()` says no to the
+destination. It does not warn when it does this.
+
+Every large buffer here is PSRAM -- `decoder.c`'s input window,
+`framewalk.c`'s read buffer, minimp3's 128 KB IO buffer through `malloc()`
+with `SPIRAM_MALLOC_ALWAYSINTERNAL` at its 16 KB default -- so every read
+in the program took that path.
+
+`storage_io.c` now stages through one internal, 64-byte-aligned,
+DMA-capable buffer of `STORAGE_IO_CHUNK` and memcpy's out. One buffer,
+shared, safe because the lease already serialises readers. A destination
+that is already DMA-capable and 4-byte aligned skips it.
+
+**This is the second thing 0100 paid for.** Funnelling every read through
+one function is what makes this a change in one place rather than six.
+
+`bounced` in the report is the evidence: equal to `reads` means every
+destination in that window was PSRAM. If the throughput does not move and
+`bounced` is high, the hypothesis is wrong -- FatFs is entitled to stage a
+read through its own window buffer rather than passing our pointer to the
+driver, and the pointer tested here is the one given to `fread()`. Being
+wrong costs a memcpy.
+
+Two consequences to expect if it is right, neither of them the open:
+
+- **`worst hold` should fall**, and it is the floor on control latency.
+  221 ms at 577 KB/s is a 128 KB playback read; the same read at a burst
+  rate is a fraction of that, and the 229 ms seek delay goes with it.
+- **Everything gets faster, not just MP3.** Covers, tags, the walk, the
+  esp_audio_codec input window and any future gapless read sit behind the
+  same ceiling.
+
+The open itself stays roughly 99% I/O either way. It is a whole-file read
+and the only cure for that is not doing it -- `MP3D_DO_NOT_SCAN` with the
+index rebuilt from a background walk, which is 0104 and which this makes
+cheaper rather than replacing.
+
+### The phase denominator was measuring the wrong window
+
+0102's first track read `14798 ms held of 20979 ms (70%)`. The window runs
+from the previous report, which for the first track is boot, so it
+contained six seconds of somebody reading the chooser. Held over `open_ms`
+was 99.2%, matching every later track. `play_file()` now resets the phase
+at the open. A denominator that silently includes idle time gets the one
+number this was built to produce wrong in the one case nobody checks by
+eye.
+
 Known rough edge: `covertag.c` is classed `PREFETCH` for every caller,
 including the decode loop's own `load_tags()` at a track change. That read
 should be `PLAYBACK`. It is a few KB and nothing below it can starve it,

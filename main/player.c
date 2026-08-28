@@ -2282,6 +2282,20 @@ static track_end_t play_file(const char *path)
      * Two numbers, because they answer different questions. The
      * milliseconds are what the user waits. The KB are why.
      */
+    /*
+     * Reset the phase window so the open's percentage is measured against
+     * the open.
+     *
+     * 0102's first track reported "14798 ms held of 20979 ms (70%)" and
+     * the 70% was an artefact: the window ran from the previous report,
+     * which for the first track is boot, so it had six seconds of
+     * somebody reading the chooser in it. Held over open_ms was 99.2%,
+     * the same as every later track. A denominator that silently includes
+     * idle time makes the one number this was built to produce wrong in
+     * the one case nobody can check by eye.
+     */
+    (void)storage_io_phase_ms();
+
     const int64_t t_open = esp_timer_get_time();
     decoder_t *dec = decoder_open(path);
     const uint32_t open_ms = (uint32_t)((esp_timer_get_time() - t_open) / 1000);
