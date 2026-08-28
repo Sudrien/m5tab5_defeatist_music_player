@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -169,6 +170,25 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
              d->ex.info.layer,
              d->ex.detected_samples ? "Xing/LAME found, gapless trim active"
                                     : "no Xing header, no gapless trim");
+
+    /*
+     * What the index cost bought, so the trade is on one line when the
+     * time comes to take MP3D_DO_NOT_SCAN.
+     *
+     * ex.samples is int16 values across all channels -- the same units
+     * mp3dec_ex_seek() takes -- so the frame count is samples over
+     * channels, and dividing by the rate without dividing by channels
+     * first is the classic way to report half the duration of a stereo
+     * file.
+     */
+    if (d->ex.samples && d->ex.info.hz && d->ex.info.channels) {
+        const uint64_t frames = d->ex.samples / (uint64_t)d->ex.info.channels;
+        ESP_LOGI(TAG, "mp3: index built, %" PRIu64 " samples, %" PRIu32 " s, seekable",
+                 (uint64_t)d->ex.samples,
+                 (uint32_t)(frames / (uint64_t)d->ex.info.hz));
+    } else {
+        ESP_LOGI(TAG, "mp3: no index; duration unknown, not seekable");
+    }
     return ESP_OK;
 }
 

@@ -2007,6 +2007,88 @@ lease changed hands; the byte total says what came off the card, and it is
 the figure that identifies a whole-file pass nobody asked for. Expect the
 open on a Xing-less MP3 to report roughly the size of the file.
 
+## Bytes over wall-clock is not a throughput, and 0101 said it was
+
+0101's report gave 8551 KB read during a 15417 ms open, and that got read
+as 555 KB/s. It is not the card's rate. The open is a read and a parse
+taking turns -- minimp3 walks every frame header between buffers -- so
+bytes over wall-clock is the average of the two and attributes all of it
+to the card.
+
+0102 measures the lease instead. `held_ms` is time actually inside
+`fread()`, stamped at the outermost acquire and closed at the outermost
+release, and `bytes / held_ms` is the card with the parsing taken out.
+The line now reads:
+
+    open playback: 77 reads, 8551 KB in N ms held of 15417 ms (P%),
+                   K KB/s, worst hold H ms, worst wait 0 ms
+
+and the three figures answer three different questions:
+
+| Figure | Says |
+| --- | --- |
+| `K KB/s` | how fast the card actually is |
+| `P%` | how much of the window was I/O at all -- the rest is minimp3 |
+| `H ms` | the floor on control latency |
+
+**`H` is the one with a consequence attached.** The decode loop cannot
+look at a button while it is inside a read, so the longest single
+uninterruptible read is the shortest a button press can possibly take.
+0101 logged `seek (slider) waited 229 ms for the decode loop` and that is
+what it was. `SEND_SLICE_MS` slices the ring send at 20 ms against a ring
+that is not the bottleneck.
+
+The prediction worth writing down before the flash: if `P` is high, the
+card is slow and `MP3D_DO_NOT_SCAN` buys back only what a later walk would
+spend anyway. If `P` is low, the open is CPU-bound in minimp3's index
+build and `DO_NOT_SCAN` buys the whole fifteen seconds. Those want
+different patches, which is why 0102 is measurement and 0103 is not.
+
+## The card is mounted at High Speed, and falls back
+
+`SDMMC_FREQ_HIGHSPEED` (40 MHz) rather than `SDMMC_FREQ_DEFAULT` (20),
+which at 4-bit moves the bus ceiling from 10 MB/s to 20. The card in the
+test rig is SDHC, a class that supports High Speed; the previous value was
+half the bus for no stated reason.
+
+The frequency is **latched, not re-probed**. `sd_mount()` is the 1 Hz
+removal poll, and an empty slot fails it by timing out -- so a blind "try
+fast, then try slow" would double the cost of the commonest state in the
+program, which is nobody having put a card in, and would re-probe 40 MHz
+once a second forever on a board that cannot do it.
+
+Only a card that answered and then failed is evidence about the clock.
+`ESP_ERR_TIMEOUT` and `ESP_ERR_NOT_FOUND` are an empty slot and say
+nothing; `ESP_FAIL` is "no mountable filesystem", which is a formatting
+problem that would produce the same complaint at half the speed. Anything
+else drops to 20 MHz for good and says so.
+
+The `speed` line in the mount banner is `s_card->max_freq_khz`, which is
+what was negotiated rather than what was asked for, so a card that
+declines High Speed reports what it settled on.
+
+## Two more numbers, and why each exists
+
+- **`mp3: index built, N samples, N s, seekable`** in `decoder.c`, so
+  what the open's fifteen seconds bought is on one line next to what it
+  cost. `ex.samples` counts int16 values across all channels, the same
+  units `mp3dec_ex_seek()` takes, so the frame count is samples over
+  channels -- dividing by the rate without dividing by channels first
+  reports half the duration of a stereo file.
+- **`ring N%` on the first-sound line.** The decode loop has had the
+  entire open to fill the ring and the writer has not started draining
+  it, so a low number is the decoder losing a race it began with a head
+  start. That is the shape any gapless prefetch has to fit into.
+
+Deliberately **not** in 0102: the prefetch gate regression 0101 caused
+(`prefetch held off: ring at 61%, need 75%`, every track, because
+removing the walk let `media_task` reach the gate while the ring was
+still cold). Fixing it would put a second reader back on the card during
+playback and change the numbers this patch exists to collect. It is 0103,
+and it is the thing that will finally give the arbiter a contended window
+to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
+the only concurrent reader was the walk and 0101 switched it off.
+
 Known rough edge: `covertag.c` is classed `PREFETCH` for every caller,
 including the decode loop's own `load_tags()` at a track change. That read
 should be `PLAYBACK`. It is a few KB and nothing below it can starve it,

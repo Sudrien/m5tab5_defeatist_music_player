@@ -140,11 +140,65 @@ bool storage_usb_powered(void) { return usbhost_powered(); }
 /* microSD                                                             */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Try High Speed, fall back to the default.
+ *
+ * The mount was pinned at SDMMC_FREQ_DEFAULT, which is 20 MHz, and at
+ * 4-bit that is a 10 MB/s ceiling on a card the log reports as SDHC --
+ * a class of card that supports the 25 MB/s High Speed mode. Half the
+ * bus was being left alone for no stated reason.
+ *
+ * A fallback rather than a straight bump, because whether 40 MHz works
+ * is a property of the board's card slot and its routing, not of the
+ * card, and neither is visible from here. A player that will not mount
+ * is worse than a slow one -- which is the whole argument of this
+ * project -- so a failure at 40 retries at 20 before giving up, and the
+ * log says which one answered.
+ *
+ * `speed` in the mount banner is `s_card->max_freq_khz`, the negotiated
+ * rate rather than the requested one, so a card that declines High Speed
+ * reports what it actually settled on.
+ */
+static esp_err_t sd_mount_at(bool verbose, int freq_khz);
+
+/*
+ * Latched, not re-tried per mount. sd_mount() is the 1 Hz poll, and an
+ * empty slot fails it by timing out -- so a blind "try fast, then try
+ * slow" would double the cost of the commonest case in the program,
+ * which is nobody having put a card in. It would also re-probe 40 MHz
+ * once a second forever on a board that cannot do it.
+ */
+static int s_sd_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
 static esp_err_t sd_mount(bool verbose)
+{
+    const esp_err_t err = sd_mount_at(verbose, s_sd_freq_khz);
+    if (err == ESP_OK) return ESP_OK;
+
+    /*
+     * Only a card that answered and then failed is evidence about the
+     * clock. ESP_ERR_TIMEOUT and ESP_ERR_NOT_FOUND are an empty slot,
+     * which is the poll's normal state and says nothing; ESP_FAIL is
+     * "no mountable filesystem", which is a formatting problem and
+     * would produce the same complaint at half the speed.
+     */
+    if (err == ESP_ERR_TIMEOUT || err == ESP_ERR_NOT_FOUND || err == ESP_FAIL) {
+        return err;
+    }
+
+    if (s_sd_freq_khz == SDMMC_FREQ_DEFAULT) return err;
+
+    ESP_LOGW(TAG, "mount failed at %d kHz (%s); dropping to %d kHz for good",
+             s_sd_freq_khz, esp_err_to_name(err), SDMMC_FREQ_DEFAULT);
+    s_sd_freq_khz = SDMMC_FREQ_DEFAULT;
+    return sd_mount_at(verbose, s_sd_freq_khz);
+}
+
+static esp_err_t sd_mount_at(bool verbose, int freq_khz)
 {
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.slot = SDMMC_HOST_SLOT_0;          /* the default is slot 1 */
-    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
+    host.max_freq_khz = freq_khz;
     host.pwr_ctrl_handle = s_pwr;
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
