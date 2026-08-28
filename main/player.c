@@ -95,56 +95,68 @@ static const char *TAG = "tab5_mp3";
 #define DSI_DATA_LANES          (2)
 #define DSI_LANE_RATE_MBPS      (965)
 /*
- * 24 Hz, down from ~57.3 Hz.
+ * Back to 70 MHz, which is ~57.3 Hz. 29 MHz blanked the panel.
  *
- * The DPI peripheral reads the framebuffer out of PSRAM continuously and
- * cannot wait: miss a line and the DSI bridge raises an underrun, the
- * panel goes cyan for a frame, and the ISR in esp_lcd_panel_dpi.c prints
+ * The reasoning that got it to 29 still stands as far as it goes. The
+ * DPI peripheral reads the framebuffer out of PSRAM continuously and
+ * cannot wait; miss a line and the DSI bridge underruns, the panel goes
+ * cyan for a frame, and the ISR in esp_lcd/dsi/esp_lcd_panel_dpi.c
+ * prints
  *
  *   can't fetch data from external memory fast enough, underrun happens
  *
- * Nothing in this program can yield to that fetch. It is a DMA master on
- * the AXI bus rather than a task, so no priority and no delay reaches
- * it -- the same argument "Priority is not a device throttle" makes
- * about the card, one bus over. The only lever is how much it asks for.
- *
- * At 720x1280 RGB565 a frame is 1.84 MB, so the rate IS the bandwidth:
+ * Nothing here can yield to that fetch -- it is a DMA master on the AXI
+ * bus rather than a task -- so the only lever is how much it asks for,
+ * and at 1.84 MB a frame the refresh rate IS the bandwidth:
  *
  *   total = (720+2+40+40) x (1280+20+24+200) = 802 x 1524 = 1,222,248
- *   70 MHz / 1,222,248 = 57.3 Hz -> 105 MB/s, continuous
- *   29 MHz / 1,222,248 = 23.7 Hz ->  44 MB/s, continuous
+ *   70 MHz -> 57.3 Hz -> 105 MB/s
+ *   50 MHz -> 40.9 Hz ->  75 MB/s
+ *   29 MHz -> 23.7 Hz ->  44 MB/s
  *
- * 61 MB/s handed back, before anything else is optimised. What buys it
- * is a refresh rate nobody looks for on a music player: the only things
- * that move are a clock at 1 Hz, a seek bar that follows it, and a
- * marquee that was already stepped from ui_draw() rather than a timer.
+ * What that reasoning left out is that the rate is not ours to choose
+ * freely. The ST7121 runs its own timing generator locked to the
+ * incoming VSYNC, and below its lock range it stops driving the glass
+ * rather than degrading: backlight on, esp_lcd_panel_init() returning
+ * ESP_OK, the log clean to the last line, and a black screen. There is
+ * no error anywhere, because from the SoC's side nothing failed.
  *
- * 29 rather than 30 because dpi_clock_freq_mhz is an integer and 30
- * gives 24.5 Hz. Either is fine; this one is under the target rather
- * than over it, which is the side to be on when the whole point is to
- * ask for less.
+ * 24 Hz is under that floor. Where the floor actually is has not been
+ * measured -- 70 is the only rate this panel is known to hold, which is
+ * why it is what this reverts to rather than something in between.
  *
- * DSI_LANE_RATE_MBPS is deliberately NOT lowered with it. The lane rate
- * costs no PSRAM bandwidth -- it is the wire, not the memory -- and it
- * only has to stay above what the pixel clock demands, which it now does
- * by a much wider margin. At 29 MHz the link simply idles longer between
- * bursts. If this ever produces a sheared or misaligned picture rather
- * than a clean one, that is the mismatch to go and look at, and the
- * recomputed figure is around 620 against a documented floor of 480.
+ * To find it, walk down one step at a time and reflash at each:
  *
- * Two consequences worth expecting rather than debugging:
+ *   60 -> 49.1 Hz -> 90 MB/s
+ *   55 -> 45.0 Hz -> 83 MB/s
+ *   50 -> 40.9 Hz -> 75 MB/s
+ *   45 -> 36.8 Hz -> 68 MB/s
  *
- *   - Tearing gets more visible. There is one framebuffer and it is
- *     written while the panel is reading it; at 24 Hz a blit has a
- *     longer window to land mid-frame. The shadow buffer stops the
- *     half-drawn states from being displayed, not the seam.
- *   - There is no longer any point repainting faster than this. ui_task
- *     runs at 50 Hz under a finger and 25 Hz while a title travels, and
- *     both are now above the rate the panel can show. Left alone here
- *     because it is a separate change and this one should be measurable
- *     on its own.
+ * and take one step back from wherever it goes dark. Two things to know
+ * while doing it:
+ *
+ *   - The number here is not the number on the wire.
+ *     dpi_panel_create() divides the source clock by an INTEGER, via
+ *     mipi_dsi_hal_host_dpi_calculate_divider(), so the rate is the
+ *     nearest the divider allows and not what is written above. Log the
+ *     divider before trusting any of the figures in this comment.
+ *   - DSI_LANE_RATE_MBPS is deliberately not moved with it. The lane
+ *     rate is the wire, not the memory, and costs no PSRAM bandwidth; it
+ *     only has to stay above what the pixel clock demands, which it does
+ *     by an increasing margin as this comes down. If a low rate ever
+ *     gives a sheared or misaligned picture rather than a black one,
+ *     that is the mismatch to go and look at, against a documented floor
+ *     of 480.
+ *
+ * And the honest conclusion from the attempt: this is the smaller and
+ * riskier of the two levers. The clock buys tens of MB/s and can blank
+ * the panel. ui_draw() spends around 160 MB/s repainting the transport
+ * bar at 50 Hz under a finger -- a full 560-row clear, a 720-column
+ * envelope loop, a 560-row blit, a bubble memcpy and a second blit --
+ * and shrinking that carries no risk of anything going dark. Do that
+ * first.
  */
-#define DPI_CLOCK_MHZ           (29)
+#define DPI_CLOCK_MHZ           (70)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 

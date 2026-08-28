@@ -5,6 +5,13 @@ cmake_minimum_required(VERSION 3.16)
 # miniz.c as SRCS and those files have to exist by the time it looks.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/vendored.cmake)
 
+# Vendor a patched, exFAT-enabled fatfs into components/ if it is not
+# there yet. Must run before project.cmake for the same reason as the
+# line above, and one more: IDF collects component Kconfig files during
+# that scan, so a fatfs that appears afterwards contributes no CONFIG_*
+# symbols and ffconf.h fails to compile against them.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/exfat.cmake)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5tab5_defeatist_music_player)
 
