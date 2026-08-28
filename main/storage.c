@@ -122,6 +122,11 @@ bool storage_join_path(char *out, size_t out_len, const char *dir, const char *n
     return true;
 }
 
+bool storage_is_hidden(const char *name)
+{
+    return !name || name[0] == '.';
+}
+
 uint32_t storage_generation(void) { return s_generation; }
 
 void storage_hold(storage_id_t id) { s_held = id; }
