@@ -1036,7 +1036,6 @@ static void track_change_begin(const char *path)
     load_tags(path);
 
     ui_clear_art();
-    ui_capture_background();
 }
 
 static void load_track_visuals(const char *path)
@@ -1061,7 +1060,6 @@ static void load_track_visuals(const char *path)
      * is painted back. On a track change it is a second clear of an
      * already black area, which is a memset nobody can see. */
     ui_clear_art();
-    ui_capture_background();
 
     /* Both of the slow jobs for this track, requested rather than done,
      * and both on one task. Anything in flight for the outgoing track was
@@ -1172,7 +1170,6 @@ static void show_format_card(const char *path, long bytes, uint32_t gen)
     lines[n++] = "no cover art";
 
     ui_show_art_info(lines, n);
-    ui_capture_background();
 }
 
 static void do_art(const char *path, uint32_t gen)
@@ -1295,9 +1292,6 @@ static void do_art(const char *path, uint32_t gen)
         ui_clear_art();
     }
 
-    /* After the art, not before -- this snapshots what the finger
-     * bubble has to put back. */
-    ui_capture_background();
 }
 
 /*
@@ -2835,7 +2829,6 @@ void app_main(void)
         ESP_LOGW(TAG, "no touch -- playing through with no controls");
     }
     ESP_ERROR_CHECK(ui_init(s_panel, LCD_H_RES, LCD_V_RES));
-    ui_capture_background();
     /* 4 KB was enough when this task only drew the bar. The chooser runs
      * on it too now, and that reaches opendir()/readdir() through FatFs
      * and carries a couple of 512-byte path buffers on the way -- so the

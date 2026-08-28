@@ -156,10 +156,20 @@ most specific to least: this track, the record it is on, the person who
 made it.
 
 Played portion of the seek bar and the set portion of volume are both red;
-the remainder of each is grey. Dragging either raises a ring indicator
-offset above the finger, so the thing being adjusted is never under the
-hand. Volume applies live during a drag, because you want to hear it. Seek
-fires once on release -- re-decoding on every poll would thrash the card.
+the remainder of each is grey. Volume applies live during a drag, because
+you want to hear it. Seek fires once on release -- re-decoding on every
+poll would thrash the card.
+
+**A seek drag turns row 3 red and puts the target in it.** Both clocks,
+together, so they still add up to the length. That is the whole feedback:
+the digits are already the right size, in the right place, and are the
+number a seek is adjusting. The colour is what makes it honest -- same
+place and same size as the playing clock, so without it a dragged clock
+reads as a seek that already happened, seconds before the decode loop has
+been asked. Red is requested, grey is playing, which is the distinction
+the envelope one row up already draws in the same two colours. A volume
+drag leaves row 3 alone: it is not a position, and the slider's own fill
+plus the sound in your ears is the readout.
 
 Hit targets are padded well past the drawn shapes (`HIT_PAD_X`,
 `HIT_PAD_Y`). Row 7's five centres are spaced so the padded boxes do not
@@ -274,11 +284,11 @@ for the old font and silently four pixels off for this one.
 If the layout is ever moved again, two things are load-bearing rather than
 aesthetic:
 
-- `BUBBLE_ABOVE` has to exceed `SEEK_Y`, or the bubble overlaps the bar.
-  That is not cosmetic: the bar is blitted before the bubble is drawn, so
-  any part of the bubble inside it gets written to the framebuffer and
-  never pushed, and shows stale pixels until the next frame clears them.
 - Row 7's centres have to keep the padded hit boxes apart. See above.
+
+`BUBBLE_ABOVE` used to be the other entry here. Nothing `ui_task` draws
+reaches above `s_bar_top` any more, and that is worth keeping true --
+anything that breaks it needs its own erase path and its own blit.
 
 ## Text rows
 
@@ -805,26 +815,51 @@ Ogg is walked now -- see below. AAC, TS and AMR remain: those state a
 frame length and nothing about the content, so they produce a duration and
 no envelope.
 
-### The seek bubble reads as a time
+### The seek target reads as a time
 
-Volume shows a percentage, seek shows MM:SS -- a seek bubble reading "46"
-is a unitless number on a bar whose two ends are already clocks. It needs
-`len_sec`, so on a format with no duration it falls back to the
-percentage.
+A seek drag reading "46" would be a unitless number on a bar whose two
+ends are already clocks. That observation is what eventually retired the
+bubble entirely: if the answer wants to be MM:SS, the two MM:SS fields
+already on screen are the place for it. A format with no duration has no
+target to show and the drag is refused anyway -- see "Length and
+seekability are different questions".
 
-### The finger bubble tracks x only
+### The finger bubble is gone
 
-Following the finger vertically as well put the bubble at a different
-height depending on where in the padded hit box the press landed, which
-reads as the indicator jumping rather than as a value changing. It now
-sits at a fixed height measured from the seek bar, so both sliders raise
-it to the same place.
+It was a 128 px disc raised above the finger during a drag, showing MM:SS
+for seek and a percentage for volume. The argument was that the thing
+being adjusted should not sit under the hand.
 
-Erasing it needs `ui_capture_background()`. The bar is cleared wholesale
-every frame, but the bubble deliberately reaches above the bar onto the
-cover art, which is not -- so a strip of the artwork is saved once after
-the cover is drawn and memcpy'd back before each repaint. Without that a
-drag leaves a trail of bubbles across the cover.
+Row 3 answers that better and already existed. What a seek drag adjusts
+is a position; row 3 shows positions, in 20x38 seven-segment digits at
+the two ends of the panel, where the eye already goes for that number.
+The bubble was a second, smaller rendering of the same value somewhere
+worse. Volume needed no readout at all.
+
+What it cost was out of proportion:
+
+- **It was the only thing `ui_task` ever drew above `s_bar_top`.** It
+  reached onto the cover art, which is not cleared each frame, so erasing
+  it needed a saved strip -- `s_bubble_bg`, captured by
+  `ui_capture_background()` from five call sites across three tasks,
+  freed and reallocated by `media_task` while `ui_task` memcpy'd 190 KB
+  out of it, with `s_bubble_top` and `s_bubble_h` torn alongside. A
+  shared pointer with no owner, which is the one thing this file has a
+  rule against. See "Never share a handle across tasks".
+- **It cost a second `gfx_blit()` per drag poll**, plus two 190 KB
+  memcpys, at 50 Hz. Roughly 40 MB/s of PSRAM bandwidth on a bus the DPI
+  peripheral reads flat out and cannot be made to wait for.
+- **It made "the two writers own disjoint bands" false.** It is true now:
+  `media_task` owns rows 0..`UI_ART_H`-1, `ui_task` owns the rest, and
+  the only thing they contend for is the transfer.
+
+`BUBBLE_ABOVE` had to exceed `SEEK_Y` or the bubble overlapped the bar,
+and that constraint is listed above as load-bearing. It is gone with the
+thing it constrained. Row 7's hit-box spacing is still real. Do not
+reintroduce the first by putting something else above the bar.
+
+`gfx_ring()`, `gfx_ring_arc()` and `gfx_draw_small_time_centred()` went
+with it; nothing else called them.
 
 ### Seek
 

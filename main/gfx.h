@@ -69,10 +69,6 @@ esp_err_t gfx_blit_err(int y0, int y1);
 void gfx_px(int x, int y, uint16_t c);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t c);
 void gfx_fill_circle(int cx, int cy, int r, uint16_t c);
-void gfx_ring(int cx, int cy, int r, int thick, uint16_t c);
-
-/* Arc from 12 o'clock, clockwise, covering pct of the circle. */
-void gfx_ring_arc(int cx, int cy, int r, int thick, int pct, uint16_t c);
 
 /* Seven-segment metrics, exported because callers lay out around them. */
 #define GFX_DIG_W       (20)
@@ -105,7 +101,6 @@ void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c);
  */
 void gfx_draw_time_dashes(int x, int y, uint16_t c);
 
-void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c);
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c);
 
 /*

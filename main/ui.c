@@ -4,12 +4,10 @@
  * SPDX-License-Identifier: MIT
  */
 
-#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
 #include "esp_check.h"
-#include "esp_heap_caps.h"
 #include "esp_log.h"
 
 #include "gfx.h"
@@ -55,8 +53,6 @@ static const char *TAG = "tab5_ui";
  * is a 5 px change of colour, so there is a line as well. */
 #define C_PLAYHEAD  RGB(0xFF, 0xFF, 0xFF)
 
-#define C_BUBBLE_BG RGB(0x1A, 0x1A, 0x1A)
-#define C_BUBBLE_ED RGB(0x44, 0x44, 0x44)
 
 /* Two thicknesses, and the asymmetry is the point: the filled part is
  * thick so progress reads from arm's length, the remainder is thin so it
@@ -125,33 +121,52 @@ static const char *TAG = "tab5_ui";
 #define HIT_PAD_Y   (30)
 #define HIT_PAD_X   (14)
 
-/* Finger bubble.
+/*
+ * There is no finger bubble any more, and this is where it was.
  *
- * It tracks the finger horizontally only. Following the finger vertically
- * as well meant it sat at a different height depending on where in the
- * padded hit box the press landed, which reads as the indicator jumping
- * around rather than as a value changing. Fixed height, and the height is
- * measured from the seek bar so both sliders raise it to the same place.
+ * It was a 128 px disc raised above the finger during a drag, showing the
+ * value being set: MM:SS for seek, a percentage for volume. The argument
+ * for it was that the thing being adjusted should not sit under the hand.
  *
- * It also has to be erased. Everything else here is inside the bar, which
- * is cleared wholesale every frame; the bubble deliberately reaches above
- * the bar onto the cover art, which is not. Hence s_bubble_bg, a saved
- * strip of the art captured once, restored before each repaint. Without
- * it a drag leaves a trail of previous bubbles across the artwork. */
-#define BUBBLE_R    (64)
-/* Measured from the seek bar down to the bubble's bottom edge, so it must
- * exceed SEEK_Y or the bubble overlaps the bar. That overlap is not
- * cosmetic: the bar is blitted before the bubble is drawn, so any part of
- * the bubble inside it is written to the framebuffer and never pushed,
- * showing stale pixels until the next frame clears them. */
-#define BUBBLE_ABOVE (SEEK_Y + 36)
-
+ * That argument was answered better by a row that already existed. What a
+ * seek drag adjusts is a position, and row 3 shows positions -- in
+ * seven-segment digits at 20x38, at the two ends of the panel, in the
+ * place the eye is already going for that number. The bubble was a second
+ * and smaller rendering of the same value somewhere worse. Volume needs
+ * no readout at all: the slider's own fill is the level, and volume
+ * applies live during the drag, so the feedback is in the ears.
+ *
+ * What it cost was out of proportion to that. The bubble was the only
+ * thing ui_task ever drew above s_bar_top, and everything awkward here
+ * followed from it:
+ *
+ *   - It reached onto the cover art, which is not cleared each frame, so
+ *     erasing it needed a saved strip -- s_bubble_bg, captured by
+ *     ui_capture_background() from five call sites across three tasks,
+ *     freed and reallocated by media_task while ui_task memcpy'd 190 KB
+ *     out of it. A shared pointer with no owner, which is the one thing
+ *     this project has a rule against.
+ *   - It forced a second gfx_blit() per drag poll, plus two 190 KB
+ *     memcpys, at 50 Hz. Around 40 MB/s of PSRAM bandwidth on a bus the
+ *     DPI peripheral is already reading flat out.
+ *   - It made "the two writers own disjoint bands" false. It is true now:
+ *     media_task owns rows 0..UI_ART_H-1 and ui_task owns the rest, and
+ *     the only thing they contend for is the transfer.
+ *
+ * BUBBLE_ABOVE had to exceed SEEK_Y or the bubble overlapped the bar, and
+ * row 7's spacing had to keep the padded hit boxes apart. The second
+ * constraint is still real. The first is gone with the thing it
+ * constrained; do not reintroduce it by putting something else up there.
+ */
 static uint16_t *s_fb;
 static int s_w, s_h;
 static int s_bar_top;
 
 /* Live drag state. -1 = nothing being dragged. */
 static int s_drag = -1;         /* 0 = seek, 1 = volume */
+/* s_drag_x is still tracked: draw_slider_c() and the envelope both need
+ * the finger's x to show where the value is. Only the bubble wanted it in
+ * order to follow the hand. */
 static int s_drag_x, s_drag_y;
 static int s_drag_pct;
 static bool s_was_down;
@@ -184,8 +199,6 @@ const char *ui_action_name(ui_action_kind_t k)
 #define DOUBLE_TAP_MS   (400)
 static TickType_t s_prev_tick;
 
-/* Saved cover-art strip behind the bubble, and whether a bubble was drawn
- * last frame (so the restore only costs anything while dragging). */
 /*
  * Marquee state for the title.
  *
@@ -201,10 +214,6 @@ static int  s_marq_off;         /* pixels the string is shifted left */
 static int  s_marq_dir = 1;
 static int  s_marq_hold;
 static bool s_marq_active;
-
-static uint16_t *s_bubble_bg;
-static int s_bubble_top, s_bubble_h;
-static bool s_bubble_shown;
 
 /*
  * Bounce, rather than wrap.
@@ -249,11 +258,6 @@ static void marquee_step(const char *title, int over)
 bool ui_animating(void)
 {
     return s_marq_active;
-}
-
-static int bubble_cy(void)
-{
-    return s_bar_top + SEEK_Y - BUBBLE_ABOVE - BUBBLE_R;
 }
 
 /* ------------------------------------------------------------------ */
@@ -543,37 +547,11 @@ static void draw_battery(int pct, bool charging)
 
 /* ------------------------------------------------------------------ */
 
-/* Copy the band the bubble can occupy out of the framebuffer. Called once
- * the cover art is on screen -- before that there is nothing worth
- * saving. */
-void ui_capture_background(void)
-{
-    if (!s_fb) return;
-    free(s_bubble_bg);
-    s_bubble_top = bubble_cy() - BUBBLE_R - 2;
-    if (s_bubble_top < 0) s_bubble_top = 0;
-    s_bubble_h = (bubble_cy() + BUBBLE_R + 2) - s_bubble_top;
-    if (s_bubble_top + s_bubble_h > s_bar_top) s_bubble_h = s_bar_top - s_bubble_top;
-    if (s_bubble_h <= 0) { s_bubble_bg = NULL; return; }
-
-    s_bubble_bg = heap_caps_malloc((size_t)s_w * s_bubble_h * sizeof(uint16_t),
-                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_bubble_bg) {
-        ESP_LOGW(TAG, "no room to save the bubble background; drags will smear");
-        return;
-    }
-    memcpy(s_bubble_bg, &s_fb[s_bubble_top * s_w],
-           (size_t)s_w * s_bubble_h * sizeof(uint16_t));
-}
-
 void ui_clear_art(void)
 {
     if (!s_fb) return;
     gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
     gfx_blit(0, s_bar_top);
-    /* The saved strip is now a strip of black, which is exactly what the
-     * bubble should put back until the next cover is drawn over it. */
-    s_bubble_shown = false;
 }
 
 /*
@@ -615,18 +593,6 @@ void ui_show_art_info(const char *const *lines, int n)
     }
 
     gfx_blit(0, s_bar_top);
-
-    /* What the finger bubble has to put back has just changed. */
-    s_bubble_shown = false;
-}
-
-static void bubble_restore(void)
-{
-    if (!s_bubble_bg || !s_bubble_shown) return;
-    memcpy(&s_fb[s_bubble_top * s_w], s_bubble_bg,
-           (size_t)s_w * s_bubble_h * sizeof(uint16_t));
-    gfx_blit(s_bubble_top, s_bubble_top + s_bubble_h);
-    s_bubble_shown = false;
 }
 
 esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h)
@@ -650,10 +616,6 @@ void ui_draw(const ui_state_t *st)
          * panel just burns PSRAM bandwidth the decoder wants. */
         return;
     }
-
-    /* Put the artwork back before anything else, or the previous frame's
-     * bubble stays on it. */
-    if (s_drag < 0) bubble_restore();
 
     gfx_fill_rect(0, s_bar_top, s_w, UI_BAR_H, C_BG);
 
@@ -756,14 +718,45 @@ void ui_draw(const ui_state_t *st)
         gfx_draw_time_dashes(TIME_PAD, ty, C_TRACK);
         gfx_draw_time_dashes(s_w - GFX_TIME_W - TIME_PAD, ty, C_TRACK);
     } else {
-        gfx_draw_time(TIME_PAD, ty, st->pos_sec, C_ICON);
+        /*
+         * While a seek drag is in progress these two show where the
+         * finger is, not where the audio is, and are drawn in the fill
+         * colour to say so.
+         *
+         * This is what replaced the bubble, and the colour is the whole
+         * of what makes it honest. The digits are in the same place and
+         * the same size either way, so without it a dragged clock is
+         * indistinguishable from a counting one -- it would read as the
+         * seek having already happened, several seconds before the
+         * decode loop has even been asked. Red says requested; grey says
+         * playing. Same distinction the envelope already draws with the
+         * same two colours, one row up.
+         *
+         * Only the seek drag. A volume drag leaves these alone: it is not
+         * a position, the slider's own fill is already showing the level,
+         * and it applies live so the answer arrives in the ears before
+         * any of this is repainted.
+         *
+         * Both clocks move together. Showing the target on the left and
+         * the real remainder on the right would put two numbers on screen
+         * that do not add up to the length.
+         */
+        const bool seeking = (s_drag == 0 && st->len_sec > 0);
+        const uint32_t shown_sec = seeking
+            ? (uint32_t)((uint64_t)st->len_sec * s_drag_pct / 100)
+            : st->pos_sec;
+        const uint16_t clock_c = seeking ? C_FILL : C_ICON;
+
+        gfx_draw_time(TIME_PAD, ty, shown_sec, clock_c);
 
         if (st->len_sec > 0) {
-            const uint32_t left = (st->len_sec > st->pos_sec)
-                                ? st->len_sec - st->pos_sec : 0;
+            const uint32_t left = (st->len_sec > shown_sec)
+                                ? st->len_sec - shown_sec : 0;
             gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left,
-                              C_ICON);
+                              clock_c);
         } else {
+            /* No duration, so no target either -- pct_from_x() has
+             * nothing to scale against and the drag is refused anyway. */
             gfx_draw_time(s_w - GFX_TIME_W - TIME_PAD, ty, 0, C_TRACK);
         }
     }
@@ -851,36 +844,6 @@ void ui_draw(const ui_state_t *st)
     draw_play_pause(st->playing);
 
     gfx_blit(s_bar_top, s_h);
-
-    /* Bubble last, and in its own band above the bar. Restoring the saved
-     * strip first is what erases the previous position -- the alternative,
-     * redrawing the whole cover, costs a full-screen blit per drag poll. */
-    if (s_drag >= 0 && s_bubble_bg) {
-        memcpy(&s_fb[s_bubble_top * s_w], s_bubble_bg,
-               (size_t)s_w * s_bubble_h * sizeof(uint16_t));
-
-        int bx = s_drag_x;
-        if (bx < BUBBLE_R + 2) bx = BUBBLE_R + 2;
-        if (bx > s_w - BUBBLE_R - 2) bx = s_w - BUBBLE_R - 2;
-        const int by = bubble_cy();
-
-        gfx_fill_circle(bx, by, BUBBLE_R, C_BUBBLE_BG);
-        gfx_ring(bx, by, BUBBLE_R, 3, C_BUBBLE_ED);
-        gfx_ring(bx, by, BUBBLE_R - 16, 7, C_TRACK);
-        gfx_ring_arc(bx, by, BUBBLE_R - 16, 7, s_drag_pct, C_FILL);
-        /* Seek reads as a time, volume as a percentage. A seek bubble
-         * showing "46" is a number with no units on a bar whose two ends
-         * are already clocks. */
-        if (s_drag == 0 && st->len_sec > 0) {
-            const uint32_t t = (uint32_t)((uint64_t)st->len_sec * s_drag_pct / 100);
-            gfx_draw_small_time_centred(bx, by - GFX_SDIG_H / 2, t, C_THUMB);
-        } else {
-            gfx_draw_pct_centred(bx, by - GFX_SDIG_H / 2, s_drag_pct, C_THUMB);
-        }
-
-        gfx_blit(s_bubble_top, s_bubble_top + s_bubble_h);
-        s_bubble_shown = true;
-    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1023,10 +986,10 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
      * Seek, but only when there is something to seek within.
      *
      * With no duration the bar has no scale, so a drag has nothing to
-     * mean: the bubble showed a bare percentage, the thumb followed the
-     * finger, and on release the player logged "seek ignored" and the
-     * thumb snapped back. That is a control that looks live and is not,
-     * which is worse than one that plainly does nothing.
+     * mean: the split followed the finger, the clocks had nothing to
+     * count against, and on release the player logged "seek ignored" and
+     * everything snapped back. That is a control that looks live and is
+     * not, which is worse than one that plainly does nothing.
      *
      * The test is seekability, not length. Those came apart the moment
      * duration.c started reading lengths out of containers: an Ogg has a
