@@ -14,6 +14,17 @@ idf_component_register(
 # before the heap went bad. See its header for why that is the question
 # worth asking. Pair with CONFIG_HEAP_POISONING_COMPREHENSIVE to catch
 # the write itself rather than the next free.
+# The waveform scan, off by default as of 0101. Build with
+#   idf.py -DWAVEFORM=1 build
+# to put it back. It reads the whole file to draw the seek bar's envelope,
+# which on a Xing-less MP3 is the second whole-file read of the same track
+# -- decoder_open()'s index build is the first. Off until that duplication
+# is resolved; the code is intentionally still compiled, see do_walk().
+if(WAVEFORM)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE WAVEFORM_SCAN=1)
+    message(STATUS "waveform envelope scan ENABLED")
+endif()
+
 if(HEAPCHECK)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE HEAPCHECK=1)
     message(STATUS "heap integrity checkpoints ENABLED (slow)")

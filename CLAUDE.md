@@ -1952,6 +1952,61 @@ headers in `albumart.c`, `framewalk_supports()`'s four-byte sniff. A lease
 costs two semaphore operations and those reads are shorter than that. Only
 `albumart.c`'s APIC frame, which is the cover itself, takes one.
 
+## The envelope scan is off, and what the first flash showed
+
+`WAVEFORM_SCAN` is 0. `idf.py -DWAVEFORM=1 build` puts it back. The code
+is gated with a plain `if` rather than `#if` so it still compiles and is
+still type-checked -- a switched-off feature that stops building cannot be
+switched on to compare against.
+
+The first flash of the arbiter measured this, on an 8.7 MB Xing-less MP3:
+
+    press -> sound          15.4 s on the first track, 18.9 s on the second
+    decoder_open()          15.4 s of it
+    framewalk_scan()        a second whole-file pass, reporting 273 s
+
+Both passes read the same file. `MP3D_SEEK_TO_SAMPLE` reads it to build
+minimp3's sample index, which yields the frame count and the duration; the
+walk then reads it again for the frame count, the duration and the
+envelope. Two of the three answers were already known. On track two the
+gap was long enough for `amplifier off (idle)` to fire in the middle of
+it, so the audible result was a click, seventeen seconds of nothing, and a
+click back on.
+
+None of that is contention -- both opens happened with nothing else
+touching the card -- so the arbiter neither caused it nor could have
+helped. It is one read that is inherently slow and one that is redundant,
+and the redundant one is the one that can be switched off today.
+
+What switching it off costs: the seek bar falls back to the plain slider,
+which is a path that already existed and is already drawn while a scan is
+in flight. Duration survives on MP3 because the open's index supplies it.
+Raw ADTS and AMR lose their only source of a length and will show 00:00 --
+the walk was the sole answer there, which is the argument for the walk
+coming back rather than being deleted.
+
+## What the log now says
+
+Three additions, all aimed at the gap between a press and a sound:
+
+- **`open took N ms`**, timed around `decoder_open()` alone.
+- **`first sound N ms after the press`**, spanning
+  `track_change_begin()`, the open and the first decoded block -- the
+  whole interval during which the screen is blank and nothing plays.
+  Logged on the first block only.
+- **`storage_io_report(phase)`** at three points: after the open, after a
+  failed open, and at the end of the track. The phase label is what makes
+  the numbers mean anything, because the counters reset on read: the
+  `open` window is measured against an otherwise idle card, and the
+  `track` window is steady-state playback with whatever background work
+  got in alongside it. Playback's worst wait in the second window is the
+  arbiter's actual result.
+
+`bytes` was added to the stats for this. A read count says how often the
+lease changed hands; the byte total says what came off the card, and it is
+the figure that identifies a whole-file pass nobody asked for. Expect the
+open on a Xing-less MP3 to report roughly the size of the file.
+
 Known rough edge: `covertag.c` is classed `PREFETCH` for every caller,
 including the decode loop's own `load_tags()` at a track change. That read
 should be `PLAYBACK`. It is a few KB and nothing below it can starve it,

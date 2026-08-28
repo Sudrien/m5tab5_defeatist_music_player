@@ -48,6 +48,7 @@ static int                 s_depth;
 static int                 s_waiting[STORAGE_IO_CLASSES];
 
 static uint32_t s_acquires[STORAGE_IO_CLASSES];
+static uint64_t s_bytes[STORAGE_IO_CLASSES];
 static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
 static int      s_nest_warned;
 
@@ -76,6 +77,7 @@ void storage_io_init(void)
     s_owner_task = NULL;
     memset(s_waiting, 0, sizeof(s_waiting));
     memset(s_acquires, 0, sizeof(s_acquires));
+    memset(s_bytes, 0, sizeof(s_bytes));
     memset(s_worst_ms, 0, sizeof(s_worst_ms));
 
     ESP_LOGI(TAG, "storage arbiter up, %d KB chunks", STORAGE_IO_CHUNK / 1024);
@@ -187,6 +189,18 @@ bool storage_io_should_yield(storage_io_class_t cls)
     return yield;
 }
 
+/* Counted here rather than in acquire(), because a lease is not a
+ * quantity: the playback path takes one lease for a whole read and the
+ * background path takes one per chunk, so acquires alone would make the
+ * two incomparable. */
+static void count_bytes(storage_io_class_t cls, size_t n)
+{
+    if (!s_lock || !n) return;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_bytes[cls] += n;
+    xSemaphoreGive(s_lock);
+}
+
 size_t storage_io_fread(void *dst, size_t len, FILE *f,
                         storage_io_class_t cls)
 {
@@ -204,6 +218,7 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
         storage_io_acquire(cls);
         done = fread(p, 1, len, f);
         storage_io_release();
+        count_bytes(cls, done);
         return done;
     }
 
@@ -215,6 +230,7 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
         const size_t got = fread(p + done, 1, want, f);
         storage_io_release();
 
+        count_bytes(cls, got);
         done += got;
         if (got < want) break;      /* EOF or error; same as fread */
     }
@@ -241,32 +257,38 @@ bool storage_io_read_at(FILE *f, long off, void *dst, size_t len,
 }
 
 void storage_io_stats(storage_io_class_t cls, uint32_t *acquires,
-                      uint32_t *worst_wait_ms)
+                      uint64_t *bytes, uint32_t *worst_wait_ms)
 {
     if (cls >= STORAGE_IO_CLASSES) return;
     if (!s_lock) {
         if (acquires) *acquires = 0;
+        if (bytes) *bytes = 0;
         if (worst_wait_ms) *worst_wait_ms = 0;
         return;
     }
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (acquires) *acquires = s_acquires[cls];
+    if (bytes) *bytes = s_bytes[cls];
     if (worst_wait_ms) *worst_wait_ms = s_worst_ms[cls];
     s_acquires[cls] = 0;
+    s_bytes[cls] = 0;
     s_worst_ms[cls] = 0;
     xSemaphoreGive(s_lock);
 }
 
-void storage_io_report(void)
+void storage_io_report(const char *phase)
 {
     if (!s_lock) return;
 
     for (int i = 0; i < STORAGE_IO_CLASSES; i++) {
         uint32_t n = 0, worst = 0;
-        storage_io_stats((storage_io_class_t)i, &n, &worst);
+        uint64_t bytes = 0;
+        storage_io_stats((storage_io_class_t)i, &n, &bytes, &worst);
         if (!n) continue;
-        ESP_LOGI(TAG, "%s: %" PRIu32 " reads, worst wait %" PRIu32 " ms",
-                 k_class_name[i], n, worst);
+        ESP_LOGI(TAG, "%s %s: %" PRIu32 " reads, %" PRIu32 " KB, "
+                 "worst wait %" PRIu32 " ms",
+                 phase ? phase : "?", k_class_name[i], n,
+                 (uint32_t)(bytes / 1024), worst);
     }
 }
