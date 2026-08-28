@@ -42,29 +42,32 @@ What do you mean no audio over Bluetooth
 - drag to seek (most formats, some just don't support it)
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
-- gapless playback is supposedly set up, but not well tested.
+- USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too! USB A port only. 
+- pause cuts power to the amp
+- some sdram caching. If I can get a full minute without the screen blinking cyan on seeks, I will.
 
 ## What could happen
-- I think there is nothing in dependencies stopping form using esp-idf 6.1
+- I think there is nothing in dependencies stopping from using esp-idf 6.1
 - build file lists faster
-- is fast file seek enabled? I think it is?
-- setting storage (defeatist.dat + defeatist.bak)
+- setting storage (defeatist.dat + defeatist.bak) actually being used for more than volume level
 - turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
 - ReplayGain / loudness normalization
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
-- per file resume
+- resume at last file
 - 'Crossfade on manual skip (separate from gapless) is a common "why doesn't this exist" complaint on small players.'
 - Sleep timer
-- ~~classic BT dongle support~~
-- UAC dongle support (usb to bluetooth adapter for PS5)
-- pause/ noting playing should explictly turn off the speaker/amp circuit? (see whine below)
+- gapless playback is supposedly set up, but music cache does not actually follow it yet
 
+## What could not happen with current published code
+- classic BT dongle support
+- per file resume
+  
 ## Potential issues
 
-- Charging from usb C + inserted battery + display on can lead to a speaker whine. I have not noticed it with the headset port
+- Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n.
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
 - I can never tell if the peaking I'm hearing is a buffer underun of record needle noise encoded in the music, personally. 
