@@ -139,7 +139,7 @@ static esp_err_t sd_mount(bool verbose)
 {
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     host.slot = SDMMC_HOST_SLOT_0;          /* the default is slot 1 */
-    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+    host.max_freq_khz = SDMMC_FREQ_DEFAULT;
     host.pwr_ctrl_handle = s_pwr;
 
     sdmmc_slot_config_t slot = SDMMC_SLOT_CONFIG_DEFAULT();
