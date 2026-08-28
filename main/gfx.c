@@ -200,47 +200,6 @@ void gfx_fill_circle(int cx, int cy, int r, uint16_t c)
     }
 }
 
-void gfx_ring(int cx, int cy, int r, int thick, uint16_t c)
-{
-    const int inner = r - thick;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            const int d2 = dx * dx + dy * dy;
-            if (d2 <= r * r && d2 >= inner * inner) gfx_px(cx + dx, cy + dy, c);
-        }
-    }
-}
-
-void gfx_ring_arc(int cx, int cy, int r, int thick, int pct, uint16_t c)
-{
-    if (pct <= 0) return;
-    if (pct > 100) pct = 100;
-    const int inner = r - thick;
-    /* 1024ths of a turn, integer only -- no atan2f per pixel. */
-    const int limit = (pct * 1024) / 100;
-    for (int dy = -r; dy <= r; dy++) {
-        for (int dx = -r; dx <= r; dx++) {
-            const int d2 = dx * dx + dy * dy;
-            if (d2 > r * r || d2 < inner * inner) continue;
-            /* Angle from 12 o'clock, clockwise, in 1024ths. Quadrant
-             * dispatch plus a linear ramp inside each -- close enough for
-             * a 46 px indicator and free of floating point. */
-            const int ax = dx, ay = -dy;
-            int a;
-            const int adx = ax < 0 ? -ax : ax;
-            const int ady = ay < 0 ? -ay : ay;
-            const int denom = adx + ady;
-            if (denom == 0) continue;
-            const int frac = (adx * 256) / denom;   /* 0 at vertical */
-            if (ax >= 0 && ay >= 0)      a = frac;              /* 0..256   */
-            else if (ax >= 0)            a = 512 - frac;        /* 256..512 */
-            else if (ay < 0)             a = 512 + frac;        /* 512..768 */
-            else                         a = 1024 - frac;       /* 768..1024*/
-            if (a <= limit) gfx_px(cx + dx, cy + dy, c);
-        }
-    }
-}
-
 /* ------------------------------------------------------------------ */
 /* Seven-segment digits                                                */
 /* ------------------------------------------------------------------ */
@@ -318,32 +277,6 @@ void gfx_draw_time_neg(int x, int y, uint32_t sec, uint16_t c)
     gfx_draw_time(x + GFX_DIG_W + GFX_DIG_GAP, y, sec, c);
 }
 
-void gfx_draw_small_time_centred(int cx, int y, uint32_t sec, uint16_t c)
-{
-    uint32_t m = sec / 60;
-    const uint32_t s2 = sec % 60;
-    if (m > 99) m = 99;
-
-    const int run = 4 * GFX_SDIG_W + 3 * GFX_SDIG_GAP + GFX_SDIG_W / 2 + GFX_SDIG_GAP;
-    int x = cx - run / 2;
-
-    seg_digit(x, y, (int)(m / 10), GFX_SDIG_W, GFX_SDIG_H, GFX_SDIG_T, c);
-    x += GFX_SDIG_W + GFX_SDIG_GAP;
-    seg_digit(x, y, (int)(m % 10), GFX_SDIG_W, GFX_SDIG_H, GFX_SDIG_T, c);
-    x += GFX_SDIG_W + GFX_SDIG_GAP;
-
-    gfx_fill_rect(x + 1, y + GFX_SDIG_H / 3, GFX_SDIG_T, GFX_SDIG_T, c);
-    gfx_fill_rect(x + 1, y + (2 * GFX_SDIG_H) / 3, GFX_SDIG_T, GFX_SDIG_T, c);
-    x += GFX_SDIG_W / 2 + GFX_SDIG_GAP;
-
-    seg_digit(x, y, (int)(s2 / 10), GFX_SDIG_W, GFX_SDIG_H, GFX_SDIG_T, c);
-    x += GFX_SDIG_W + GFX_SDIG_GAP;
-    seg_digit(x, y, (int)(s2 % 10), GFX_SDIG_W, GFX_SDIG_H, GFX_SDIG_T, c);
-}
-
-/* A percentage, centred on cx. 100 needs three digits, 0-99 needs two, and
- * the run is centred either way so the number does not shuffle sideways as
- * it crosses 100. */
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c)
 {
     if (pct < 0) pct = 0;

@@ -95,12 +95,6 @@ typedef struct {
 
 esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h);
 
-/* Save the strip of cover art the finger bubble draws over. Call once the
- * artwork is on screen; without it a drag smears bubbles across the
- * cover, because the bubble is the one thing here that draws outside the
- * bar. */
-void ui_capture_background(void);
-
 /* Blank the area above the bar.
  *
  * Needed once tracks follow one another: the cover is drawn by
