@@ -188,15 +188,47 @@ bool storage_io_read_at(FILE *f, long off, void *dst, size_t len,
  * precisely because the number that would have shown it was frozen.
  */
 /*
- * `bytes` is what turned the first flash from a guess into a number. A
- * count of reads says how often the lease changed hands; the byte total
- * says what was actually pulled off the card, which is the figure that
- * identifies a whole-file pass nobody asked for. On a Xing-less MP3 the
- * open reports the size of the file, because that is what
- * MP3D_SEEK_TO_SAMPLE reads to build its index.
+ * Everything the arbiter knows about one class, for one window.
+ *
+ * A struct rather than six out-parameters because the list stopped being
+ * memorable at four, and because the interesting figures are ratios
+ * between members rather than any one of them:
+ *
+ *   bytes / held_ms       throughput while actually inside a read. THIS
+ *                         is the card's speed. Bytes over wall-clock is
+ *                         not, and 0101 reported the latter and called
+ *                         it the former -- 8551 KB over a 15.4 s open
+ *                         read as 555 KB/s, but the open is a read and a
+ *                         parse taking turns and that number is their
+ *                         average, not the card's rate.
+ *   held_ms / phase_ms    how much of the window was spent in I/O at
+ *                         all. Low means the time went somewhere else,
+ *                         and on the open the only somewhere else is
+ *                         minimp3 walking frame headers.
+ *   worst_hold_ms         the longest single uninterruptible read. This
+ *                         is the floor on control latency, because the
+ *                         decode loop cannot look at a button while it
+ *                         is inside one -- which is what the 229 ms
+ *                         "seek waited for the decode loop" was.
+ *   worst_wait_ms         the longest anything waited for the lease.
+ *                         This is the arbiter's own cost, and the only
+ *                         number here that 0100 can be blamed for.
+ *
+ * Reading resets, so two reports bracket a window.
  */
-void storage_io_stats(storage_io_class_t cls, uint32_t *acquires,
-                      uint64_t *bytes, uint32_t *worst_wait_ms);
+typedef struct {
+    uint32_t reads;
+    uint64_t bytes;
+    uint32_t held_ms;           /* summed time inside fread() */
+    uint32_t worst_hold_ms;     /* longest single lease */
+    uint32_t worst_wait_ms;     /* longest wait to be granted one */
+} storage_io_stat_t;
+
+void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out);
+
+/* Wall-clock milliseconds since the last report, and reset. The
+ * denominator for held_ms. */
+uint32_t storage_io_phase_ms(void);
 
 /*
  * Log every class that did anything, then reset.

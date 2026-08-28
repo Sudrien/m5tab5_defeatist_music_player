@@ -50,6 +50,20 @@ static int                 s_waiting[STORAGE_IO_CLASSES];
 static uint32_t s_acquires[STORAGE_IO_CLASSES];
 static uint64_t s_bytes[STORAGE_IO_CLASSES];
 static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
+
+/*
+ * Time actually spent inside fread(), which is the measurement 0101 was
+ * missing and guessed at instead.
+ *
+ * Taken at the outermost acquire and closed at the outermost release, so
+ * a nested lease is counted once rather than twice. One holder at a time
+ * means one start stamp is enough; if that ever stops being true this
+ * needs to move into the per-class arrays with it.
+ */
+static int64_t  s_hold_t0;
+static uint64_t s_held_us[STORAGE_IO_CLASSES];
+static uint32_t s_worst_hold_ms[STORAGE_IO_CLASSES];
+static int64_t  s_phase_t0;
 static int      s_nest_warned;
 
 static const char *k_class_name[STORAGE_IO_CLASSES] = {
@@ -79,6 +93,9 @@ void storage_io_init(void)
     memset(s_acquires, 0, sizeof(s_acquires));
     memset(s_bytes, 0, sizeof(s_bytes));
     memset(s_worst_ms, 0, sizeof(s_worst_ms));
+    memset(s_held_us, 0, sizeof(s_held_us));
+    memset(s_worst_hold_ms, 0, sizeof(s_worst_hold_ms));
+    s_phase_t0 = esp_timer_get_time();
 
     ESP_LOGI(TAG, "storage arbiter up, %d KB chunks", STORAGE_IO_CHUNK / 1024);
 }
@@ -136,10 +153,11 @@ void storage_io_acquire(storage_io_class_t cls)
             s_owner_task = me;
             s_depth = 1;
 
-            const uint32_t waited =
-                (uint32_t)((esp_timer_get_time() - t0) / 1000);
+            const int64_t now = esp_timer_get_time();
+            const uint32_t waited = (uint32_t)((now - t0) / 1000);
             s_acquires[cls]++;
             if (waited > s_worst_ms[cls]) s_worst_ms[cls] = waited;
+            s_hold_t0 = now;
 
             xSemaphoreGive(s_lock);
             return;
@@ -166,6 +184,11 @@ void storage_io_release(void)
         xSemaphoreGive(s_lock);
         return;
     }
+
+    const uint64_t held_us = (uint64_t)(esp_timer_get_time() - s_hold_t0);
+    s_held_us[s_owner] += held_us;
+    const uint32_t held_ms = (uint32_t)(held_us / 1000);
+    if (held_ms > s_worst_hold_ms[s_owner]) s_worst_hold_ms[s_owner] = held_ms;
 
     s_busy = false;
     s_owner_task = NULL;
@@ -256,39 +279,76 @@ bool storage_io_read_at(FILE *f, long off, void *dst, size_t len,
     return storage_io_fread(dst, len, f, cls) == len;
 }
 
-void storage_io_stats(storage_io_class_t cls, uint32_t *acquires,
-                      uint64_t *bytes, uint32_t *worst_wait_ms)
+void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out)
 {
-    if (cls >= STORAGE_IO_CLASSES) return;
-    if (!s_lock) {
-        if (acquires) *acquires = 0;
-        if (bytes) *bytes = 0;
-        if (worst_wait_ms) *worst_wait_ms = 0;
-        return;
-    }
+    if (cls >= STORAGE_IO_CLASSES || !out) return;
+
+    memset(out, 0, sizeof(*out));
+    if (!s_lock) return;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
-    if (acquires) *acquires = s_acquires[cls];
-    if (bytes) *bytes = s_bytes[cls];
-    if (worst_wait_ms) *worst_wait_ms = s_worst_ms[cls];
+    out->reads         = s_acquires[cls];
+    out->bytes         = s_bytes[cls];
+    out->held_ms       = (uint32_t)(s_held_us[cls] / 1000);
+    out->worst_hold_ms = s_worst_hold_ms[cls];
+    out->worst_wait_ms = s_worst_ms[cls];
+
     s_acquires[cls] = 0;
     s_bytes[cls] = 0;
+    s_held_us[cls] = 0;
+    s_worst_hold_ms[cls] = 0;
     s_worst_ms[cls] = 0;
     xSemaphoreGive(s_lock);
+}
+
+uint32_t storage_io_phase_ms(void)
+{
+    if (!s_lock) return 0;
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const int64_t now = esp_timer_get_time();
+    const uint32_t ms = (uint32_t)((now - s_phase_t0) / 1000);
+    s_phase_t0 = now;
+    xSemaphoreGive(s_lock);
+    return ms;
 }
 
 void storage_io_report(const char *phase)
 {
     if (!s_lock) return;
 
+    const uint32_t phase_ms = storage_io_phase_ms();
+    const char *name = phase ? phase : "?";
+
     for (int i = 0; i < STORAGE_IO_CLASSES; i++) {
-        uint32_t n = 0, worst = 0;
-        uint64_t bytes = 0;
-        storage_io_stats((storage_io_class_t)i, &n, &bytes, &worst);
-        if (!n) continue;
-        ESP_LOGI(TAG, "%s %s: %" PRIu32 " reads, %" PRIu32 " KB, "
-                 "worst wait %" PRIu32 " ms",
-                 phase ? phase : "?", k_class_name[i], n,
-                 (uint32_t)(bytes / 1024), worst);
+        storage_io_stat_t st;
+        storage_io_stats((storage_io_class_t)i, &st);
+        if (!st.reads) continue;
+
+        /*
+         * Throughput is bytes over HELD time, not over the phase. That
+         * distinction is the entire point of this line: it is the card's
+         * rate with the parsing between reads taken out, and the gap
+         * between it and the bytes-over-phase figure is how much of the
+         * window was not I/O at all.
+         *
+         * Integer arithmetic in KB/s: bytes/1024 over held_ms/1000 is
+         * (bytes * 1000) / (held_ms * 1024), computed in 64-bit because
+         * a 10 MB read overflows the numerator in 32.
+         */
+        uint32_t kbps = 0;
+        if (st.held_ms) {
+            kbps = (uint32_t)((st.bytes * 1000ULL) / ((uint64_t)st.held_ms * 1024ULL));
+        }
+
+        /* Share of the window spent inside a read, as a percentage. */
+        const uint32_t pct = phase_ms ? (st.held_ms * 100) / phase_ms : 0;
+
+        ESP_LOGI(TAG, "%s %s: %" PRIu32 " reads, %" PRIu32 " KB in %" PRIu32
+                 " ms held of %" PRIu32 " ms (%" PRIu32 "%%), %" PRIu32
+                 " KB/s, worst hold %" PRIu32 " ms, worst wait %" PRIu32 " ms",
+                 name, k_class_name[i], st.reads,
+                 (uint32_t)(st.bytes / 1024), st.held_ms, phase_ms, pct,
+                 kbps, st.worst_hold_ms, st.worst_wait_ms);
     }
 }

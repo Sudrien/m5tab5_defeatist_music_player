@@ -2656,10 +2656,17 @@ static track_end_t play_file(const char *path)
          * Logged once per track, on the first block only.
          */
         if (blocks == 0) {
+            /* The ring gauge at the moment sound starts. The decode loop
+             * has had the whole open to fill it and the writer has not
+             * started draining, so a low number here is the decoder
+             * losing a race it began with a head start -- which is the
+             * shape a gapless prefetch has to fit into, and the reason
+             * this is worth a line rather than being inferred later from
+             * the absence of an underrun. */
             ESP_LOGI(TAG, "first sound %" PRIu32 " ms after the press "
-                     "(open was %" PRIu32 " ms of it)",
+                     "(open was %" PRIu32 " ms of it), ring %d%%",
                      (uint32_t)((esp_timer_get_time() - t_start) / 1000),
-                     open_ms);
+                     open_ms, ring_headroom_pct());
         }
 
         blocks++;
