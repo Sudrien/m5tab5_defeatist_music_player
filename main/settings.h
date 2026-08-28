@@ -52,7 +52,7 @@ uint8_t settings_volume(void);
  * marks the file dirty; the write happens later on a task of its own.
  *
  * Safe to call from a drag emitting fifty of these a second. See
- * SETTLE_MS in settings.c for why the write does not follow each one.
+ * SETTINGS_SETTLE_MS in settings.c for why the write does not follow each one.
  */
 void settings_set_volume(uint8_t percent);
 
