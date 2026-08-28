@@ -187,9 +187,27 @@ bool storage_io_read_at(FILE *f, long off, void *dst, size_t len,
  * exists to make visible -- the failure mode it replaces was invisible
  * precisely because the number that would have shown it was frozen.
  */
+/*
+ * `bytes` is what turned the first flash from a guess into a number. A
+ * count of reads says how often the lease changed hands; the byte total
+ * says what was actually pulled off the card, which is the figure that
+ * identifies a whole-file pass nobody asked for. On a Xing-less MP3 the
+ * open reports the size of the file, because that is what
+ * MP3D_SEEK_TO_SAMPLE reads to build its index.
+ */
 void storage_io_stats(storage_io_class_t cls, uint32_t *acquires,
-                      uint32_t *worst_wait_ms);
-void storage_io_report(void);
+                      uint64_t *bytes, uint32_t *worst_wait_ms);
+
+/*
+ * Log every class that did anything, then reset.
+ *
+ * `phase` names the window being closed, so two calls bracket a span:
+ * report("open") right after decoder_open() attributes everything the
+ * open did to the open, and report("track") at the end attributes the
+ * rest to playback. Without the phase the two are one undifferentiated
+ * total and the expensive half cannot be told from the cheap one.
+ */
+void storage_io_report(const char *phase);
 
 #ifdef __cplusplus
 }

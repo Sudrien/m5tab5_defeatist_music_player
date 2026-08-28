@@ -38,6 +38,7 @@
 
 #include "driver/i2c_master.h"
 #include "esp_check.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -74,6 +75,25 @@
 #include "waveform.h"
 
 static const char *TAG = "tab5_mp3";
+
+/*
+ * The envelope scan, off unless -DWAVEFORM=1.
+ *
+ * It is a whole-file read that produces a frame count, a duration and a
+ * loudness envelope. On the files that motivated it -- Xing-less MP3 --
+ * decoder_open() has already read the whole file to build minimp3's seek
+ * index by the time this runs, so the same 8.7 MB goes past twice for two
+ * answers that overlap. Measured on an 8.7 MB track: 15.4 s in the open,
+ * then a 273 s envelope from a second pass.
+ *
+ * Gated rather than deleted, and gated with a plain `if` rather than
+ * `#if`, so every line below still compiles and is still type-checked
+ * against the rest of the file. Dead code that stops building is dead
+ * code that cannot be switched back on to compare against.
+ */
+#ifndef WAVEFORM_SCAN
+#define WAVEFORM_SCAN   (0)
+#endif
 
 /* ---- I2C bus: same pins the display example uses ---- */
 #define BSP_I2C_NUM             (0)
@@ -1362,6 +1382,10 @@ static void do_art(const char *path, uint32_t gen)
  */
 static void do_walk(const char *path)
 {
+    /* Silent: the reason is logged once at boot rather than once per
+     * track, since it does not change while the firmware is running. */
+    if (!WAVEFORM_SCAN) return;
+
     /*
      * A cached envelope, which is the entire point of caching it: the
      * walk is a whole-file read, so returning to a track otherwise costs
@@ -1696,7 +1720,7 @@ static void prefetch_next(void)
     if (gen != s_track_gen) return;
 
     /* ---- envelope ---- */
-    if (!mediacache_walk(next)) {
+    if (WAVEFORM_SCAN && !mediacache_walk(next)) {
         if (!prefetch_ok(PREFETCH_START_PCT)) {
             ESP_LOGI(TAG, "prefetch stopped before the envelope (ring %d%%)",
                      ring_headroom_pct());
@@ -1834,7 +1858,11 @@ static void media_task(void *arg)
          * that the better the cache did, the less prefetching happened,
          * which is precisely backwards.
          */
-        if (strcmp(path, s_walked_path) != 0) {
+        /* WAVEFORM_SCAN gates the settle as well as the walk. Waiting
+         * 2.5 s to then do nothing is the kind of thing that survives a
+         * feature being switched off and is only found later, as a
+         * prefetch that starts inexplicably late. */
+        if (WAVEFORM_SCAN && strcmp(path, s_walked_path) != 0) {
             /* The expensive one: a whole-file read, so it waits longest
              * and is the first thing dropped when the track moves on. A
              * cached envelope skips the wait, because do_walk() will not
@@ -2240,10 +2268,30 @@ static track_end_t play_file(const char *path)
      * the whole file to build a seek index, and until it returns the
      * screen would otherwise still be showing the track that just
      * ended. */
+    const int64_t t_start = esp_timer_get_time();
     track_change_begin(path);
 
+    /*
+     * Timed because the first flash put 15.4 s and 18.9 s between the
+     * press and the sound, and nothing in the log attributed them. The
+     * arbiter report immediately after closes the window on the open
+     * alone: on a Xing-less MP3 it shows one playback reader pulling the
+     * entire file, which is MP3D_SEEK_TO_SAMPLE building its index and
+     * not, as it first looked, contention with anything.
+     *
+     * Two numbers, because they answer different questions. The
+     * milliseconds are what the user waits. The KB are why.
+     */
+    const int64_t t_open = esp_timer_get_time();
     decoder_t *dec = decoder_open(path);
-    if (!dec) return TRACK_UNREADABLE;
+    const uint32_t open_ms = (uint32_t)((esp_timer_get_time() - t_open) / 1000);
+    if (!dec) {
+        storage_io_report("failed open");
+        return TRACK_UNREADABLE;
+    }
+
+    ESP_LOGI(TAG, "open took %" PRIu32 " ms", open_ms);
+    storage_io_report("open");
 
     /*
      * Set after the open succeeds, not before: decoder_open() on a
@@ -2599,6 +2647,21 @@ static track_end_t play_file(const char *path)
         s_frames_chans = info.channels > 0 ? (uint32_t)info.channels : 1;
         s_frames_out = frames_out;
 
+        /*
+         * The number the listener actually experiences: press to sound,
+         * not open to sound. It spans track_change_begin(), the open and
+         * the first decode, because that is the span during which the
+         * screen is blank and nothing is playing.
+         *
+         * Logged once per track, on the first block only.
+         */
+        if (blocks == 0) {
+            ESP_LOGI(TAG, "first sound %" PRIu32 " ms after the press "
+                     "(open was %" PRIu32 " ms of it)",
+                     (uint32_t)((esp_timer_get_time() - t_start) / 1000),
+                     open_ms);
+        }
+
         blocks++;
     }
 
@@ -2666,6 +2729,14 @@ static track_end_t play_file(const char *path)
              : why == TRACK_MEDIA_GONE ? "media gone"
              : why == TRACK_UNREADABLE ? "unreadable"
                                        : "finished", blocks);
+
+    /* Closes the window the open's report opened. Everything here is
+     * steady-state playback plus whatever background work got in
+     * alongside it, which is the comparison worth having: playback's
+     * worst wait in this window is the arbiter's actual result, while
+     * the same figure in the "open" window is measured against an
+     * otherwise idle card. */
+    storage_io_report("track");
 
     free(pcm);
     free(st);
@@ -2865,6 +2936,13 @@ void app_main(void)
      * what this replaced, and that one played.
      */
     storage_io_init();
+
+    /* Once per boot, next to the arbiter line, because "why is there no
+     * waveform" is otherwise answered only by reading CMakeLists. */
+    if (!WAVEFORM_SCAN) {
+        ESP_LOGI(TAG, "waveform scan disabled at build time "
+                      "(idf.py -DWAVEFORM=1 build to re-enable)");
+    }
 
     ESP_ERROR_CHECK(storage_init());
 
