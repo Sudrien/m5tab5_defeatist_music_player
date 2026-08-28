@@ -21,6 +21,54 @@ CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
 CONFIG_IDF_EXPERIMENTAL_FEATURES=y
 
+# --- display bandwidth ----------------------------------------------
+#
+# The other half of the underrun fix; DPI_CLOCK_MHZ in player.c is the
+# demand side and this is the supply side.
+#
+# The DPI peripheral scans the framebuffer out of PSRAM continuously and
+# has no way to wait. When it cannot fetch a line in time the DSI bridge
+# raises an underrun, the panel goes cyan for a frame, and the ISR in
+# esp_lcd/dsi/esp_lcd_panel_dpi.c prints
+#
+#   can't fetch data from external memory fast enough, underrun happens
+#
+# which is the line to grep for before believing any of this helped.
+#
+# SPIRAM_SPEED_200M above and COMPILER_OPTIMIZATION_PERF below were
+# already set and are two of the four Espressif names for this symptom.
+# These are the other two.
+#
+# Neither cache can hold a 1.8 MB framebuffer, so this is about working
+# sets and transaction count rather than about keeping the picture
+# resident. 256 KB is enough for the band ui_draw() is actually touching
+# -- 720x560 is 806 KB, but waveform_draw_bar()'s column loop walks a
+# 720x64 strip, and that fits. Longer lines turn the DPI's perfectly
+# sequential read into fewer, larger fetches for the same bytes, which is
+# where the overhead goes.
+#
+# Longer lines cut the other way for that same column loop: a one-pixel
+# fill uses two bytes of whatever line it pulls, so doubling the line
+# doubles what is wasted. If the cyan stops and drags feel worse, that
+# loop wants rewriting row-major and this option is not the thing to
+# revert.
+CONFIG_CACHE_L2_CACHE_256KB=y
+CONFIG_CACHE_L2_CACHE_LINE_128B=y
+
+# Espressif lists this one too and it is deliberately left off.
+#
+# It moves .text and .rodata out of flash and into PSRAM, which is the
+# bus the underrun is about: it buys faster instruction fetch by putting
+# instruction fetch on the contended side. That may well be a net win --
+# the L2 absorbs most of it and flash is the slower part -- but it is the
+# one option here that can make the thing it is meant to fix worse, and
+# turning it on in the same flash as the two above means never learning
+# which of the three did anything.
+#
+# So: take the cache options, confirm the log line is gone, then enable
+# this on its own and confirm it stayed gone.
+# CONFIG_SPIRAM_XIP_FROM_PSRAM=y
+
 # Enabling PSRAM grows the bootloader. Size-optimising it keeps it under
 # 0x6000 so the partition table can stay at 0x8000 and partitions.csv
 # (app0 @ 0x10000) remains valid.
