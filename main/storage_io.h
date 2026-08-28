@@ -128,6 +128,54 @@ typedef enum {
 #define STORAGE_IO_CHUNK    (16 * 1024)
 
 /*
+ * THE BOUNCE BUFFER, AND WHY EVERY READ IN THIS PROGRAM WAS SLOW
+ *
+ * 0102 measured 577 KB/s inside fread(), stable to +/-1% across two
+ * files, two bus clocks and four windows. A rate that does not move when
+ * the bus clock doubles is not a bus rate. 577 KB/s is 1127 sectors per
+ * second, or 0.89 ms per 512-byte sector, against roughly 26 us of actual
+ * data time for that sector at 40 MHz on four lines -- so about 0.86 ms
+ * per sector was going somewhere with nothing to do with the card.
+ *
+ * ESP-IDF's sdmmc_read_sectors() tests the destination with
+ * esp_ptr_dma_capable(). When that fails it does not refuse and it does
+ * not warn: it reads the transfer one sector at a time through a
+ * temporary internal buffer. Throughput then becomes a function of
+ * transaction count and is indifferent to the clock, which is exactly the
+ * signature above.
+ *
+ * Every large buffer in this program is PSRAM, deliberately and for
+ * reasons stated where each is allocated -- decoder.c's input window,
+ * framewalk.c's read buffer, and minimp3's own 128 KB IO buffer through
+ * malloc() with SPIRAM_MALLOC_ALWAYSINTERNAL left at its 16 KB default.
+ * PSRAM is not DMA-capable for this peripheral, so every one of them took
+ * the slow path.
+ *
+ * The fix is one internal, cache-aligned, DMA-capable buffer of
+ * STORAGE_IO_CHUNK, read into and then memcpy'd out to wherever the
+ * caller actually wants the bytes. The card sees a destination it can
+ * burst into; the caller keeps its PSRAM buffer and its reasons for it. A
+ * 16 KB write to PSRAM at 200 MHz is tens of microseconds against
+ * milliseconds of card time, so the copy is not a cost worth weighing.
+ *
+ * One buffer, shared, and safe because the lease already serialises every
+ * reader. That is the second thing 0100 has paid for: this is a change in
+ * one function rather than in six.
+ *
+ * A destination that is already DMA-capable and 4-byte aligned skips the
+ * bounce and reads straight through, so nothing pays a copy to fix a
+ * problem it did not have. `bounced` in the stats counts the ones that
+ * did, which is also the diagnostic: if it equals `reads`, every
+ * destination in that window was PSRAM.
+ *
+ * IF THIS IS WRONG it will be obvious rather than subtle -- the bounced
+ * count will be high and the throughput will not move. That is a real
+ * possibility: the pointer tested here is the one handed to fread(), and
+ * FatFs is entitled to stage a read through its own window buffer rather
+ * than passing it down to the driver. Being wrong costs a memcpy.
+ */
+
+/*
  * Safe to call before this is initialised: every function degrades to
  * calling straight through to stdio, which is exactly the old behaviour.
  * That is deliberate -- settings.c reads before app_main() has got here,
@@ -222,6 +270,7 @@ typedef struct {
     uint32_t held_ms;           /* summed time inside fread() */
     uint32_t worst_hold_ms;     /* longest single lease */
     uint32_t worst_wait_ms;     /* longest wait to be granted one */
+    uint32_t bounced;           /* reads whose destination was not DMA-capable */
 } storage_io_stat_t;
 
 void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out);
