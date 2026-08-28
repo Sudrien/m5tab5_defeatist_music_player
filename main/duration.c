@@ -16,6 +16,7 @@
 #endif
 
 #include "duration.h"
+#include "storage_io.h"
 
 static const char *TAG = "tab5_dur";
 
@@ -40,10 +41,12 @@ static inline uint64_t le64(const uint8_t *p)
     return ((uint64_t)le32(p + 4) << 32) | le32(p);
 }
 
+/* Same chokepoint as covertag.c's, for the same reason. These reads are
+ * a few hundred bytes each except the Ogg path's 64 KB tail window,
+ * which is the one that wanted breaking up. */
 static bool read_at(FILE *f, long off, void *buf, size_t len)
 {
-    if (fseek(f, off, SEEK_SET) != 0) return false;
-    return fread(buf, 1, len, f) == len;
+    return storage_io_read_at(f, off, buf, len, STORAGE_IO_PREFETCH);
 }
 
 static long file_size(FILE *f)

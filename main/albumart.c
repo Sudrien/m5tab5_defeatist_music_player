@@ -25,6 +25,7 @@
 #include "pngle.h"
 
 #include "albumart.h"
+#include "storage_io.h"
 #include "gfx.h"
 
 static const char *TAG = "tab5_art";
@@ -114,7 +115,15 @@ esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len
 
         uint8_t *frame = malloc(fsz);
         if (!frame) return ESP_ERR_NO_MEM;
-        if (fread(frame, 1, fsz, f) != fsz) { free(frame); return ESP_ERR_INVALID_SIZE; }
+        /* The APIC frame is the cover itself -- the one read in this file
+         * big enough to matter, and the half-megabyte that used to sit in
+         * front of the decoder's next refill. The ten-byte header reads
+         * around it are left alone: a lease costs two semaphore
+         * operations and those reads are shorter than that. */
+        if (storage_io_fread(frame, fsz, f, STORAGE_IO_PREFETCH) != fsz) {
+            free(frame);
+            return ESP_ERR_INVALID_SIZE;
+        }
 
         size_t i = 0;
         const uint8_t enc = frame[i++];

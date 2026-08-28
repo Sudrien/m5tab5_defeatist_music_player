@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "covertag.h"
+#include "storage_io.h"
 
 static const char *TAG = "tab5_cover";
 
@@ -41,10 +42,19 @@ static inline uint32_t syncsafe32(const uint8_t *p)
            ((uint32_t)(p[2] & 0x7F) << 7)  |  (uint32_t)(p[3] & 0x7F);
 }
 
+/*
+ * Every read in this file goes through here, which is what makes the
+ * arbiter a one-function change: the lease is taken around each read
+ * inside the parser rather than around the parser.
+ *
+ * Wrapping covertag_extract_art() instead would have been one line in
+ * player.c and would have put the starvation straight back -- a single
+ * lease held across a 512 KB cover is the uninterruptible read this is
+ * meant to break up. storage_io.c logs that mistake if it is ever made.
+ */
 static bool read_at(FILE *f, long off, void *buf, size_t len)
 {
-    if (fseek(f, off, SEEK_SET) != 0) return false;
-    return fread(buf, 1, len, f) == len;
+    return storage_io_read_at(f, off, buf, len, STORAGE_IO_PREFETCH);
 }
 
 static long file_size(FILE *f)

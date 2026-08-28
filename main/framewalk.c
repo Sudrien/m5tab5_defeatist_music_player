@@ -14,6 +14,7 @@
 #endif
 
 #include "framewalk.h"
+#include "storage_io.h"
 
 static const char *TAG = "tab5_walk";
 
@@ -56,7 +57,14 @@ static bool fill(reader_t *r)
     }
     if (r->len >= BUF_SIZE) return true;
 
-    const size_t got = fread(r->buf + r->len, 1, BUF_SIZE - r->len, r->f);
+    /* Background class, and the reason the arbiter exists. This is the
+     * 32 KB read that used to sit in front of the decoder's next refill
+     * holding FatFs's volume lock; it is now two 16 KB leases that let
+     * go in between, so the decoder waits for a chunk rather than for
+     * the rest of the file. The buffer size is unchanged -- only the
+     * number of times this lets go is. */
+    const size_t got = storage_io_fread(r->buf + r->len, BUF_SIZE - r->len,
+                                        r->f, STORAGE_IO_BACKGROUND);
     r->len += got;
     if (got == 0) r->eof = true;
     return r->len > 0;
