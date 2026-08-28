@@ -505,6 +505,30 @@ static volatile bool s_decode_done;
  * So the writer says when it has gone. */
 static volatile bool s_writer_done;
 
+/*
+ * Set by play_file() before it waits for the writer, and the reason the
+ * pause gate below is not simply "if (!s_playing)".
+ *
+ * Teardown ends with two spins -- drain the ring on TRACK_ENDED, then
+ * wait for s_writer_done -- and both are waiting on the writer to move.
+ * A writer parked on a pause never does, so pausing at the wrong moment
+ * would hang the decode loop against a task that is deliberately not
+ * running, with the seek and next-track paths gone with it. Being
+ * paused during teardown means the last few seconds of a finished track
+ * play out; deadlocking means the player stops answering.
+ *
+ * Declared with the other two rather than near the flag it overrides,
+ * because these three are one handshake and reading them apart is how
+ * the deadlock got written in the first place.
+ */
+static volatile bool s_writer_stop;
+
+/* Tentative declaration. The definition, with the rest of the shared
+ * player state, is further down; the writer needs the name here and the
+ * writer comes first in the file. Kept static rather than extern so it
+ * stays internal to this translation unit like everything around it. */
+static volatile bool s_playing;
+
 static void ring_publish(void);
 
 /* Drains the ring into I2S and nothing else, so the only thing it ever
@@ -515,6 +539,40 @@ static void i2s_writer_task(void *arg)
     if (!buf) { s_writer_done = true; vTaskDelete(NULL); return; }
 
     while (1) {
+        /*
+         * Pause stops the writer, which is the only place it can stop.
+         *
+         * It used to stop the decode loop instead -- see the comment on
+         * PCM_RING_BYTES. That was right when the ring held 0.37 s: stall
+         * the producer, the consumer empties in a third of a second, done.
+         * At 10 MB the ring holds 59 seconds, and stalling the producer
+         * left the writer to play all of it out. Pause fell silent up to
+         * a minute after the press, with audio_out_set_idle() cutting the
+         * amp somewhere in the middle of that, so the symptom read as
+         * "it started playing while paused" rather than as a late pause.
+         *
+         * The ring got 160x bigger and this was not revisited. That is
+         * what makes it worth stating rather than just fixing: pause
+         * against a buffer is only immediate at the end of the buffer the
+         * listener actually hears, and the correct end does not depend on
+         * the size. Whatever PCM_RING_BYTES becomes, this stays right.
+         *
+         * The ring is deliberately NOT drained. Its contents are still
+         * the correct next samples, so resume is instantaneous and costs
+         * the card nothing -- which on a card that stalls decoder_read()
+         * for five seconds at a time is the difference between resuming
+         * and resuming into the next stall.
+         *
+         * 20 ms rather than the 50 ms the decode loop used. That was the
+         * latency of noticing an unpause on a path that then had to refill
+         * a ring; this is the latency of the first sample after one, and
+         * 50 ms of it is audible as a lag on the button.
+         */
+        if (!s_playing && !s_writer_stop) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
         const size_t got = xStreamBufferReceive(s_pcm, buf, PCM_CHUNK_BYTES,
                                                 pdMS_TO_TICKS(100));
         ring_publish();
@@ -540,7 +598,7 @@ static void i2s_writer_task(void *arg)
  * versa, and a torn read here costs one frame of a slightly wrong slider
  * position. A lock would cost the decoder a blocking call per frame to
  * protect against that. */
-static volatile bool     s_playing = true;
+static volatile bool     s_playing = true;   /* declared above the writer */
 static volatile int      s_volume = 50;
 static volatile uint32_t s_pos_sec;
 static volatile uint32_t s_len_sec;
@@ -1945,6 +2003,21 @@ static void ui_task(void *arg)
          * press would cost seconds of silence to save power on a bus
          * that is feeding the headset anyway.
          */
+        /*
+         * Unchanged, and worth saying why it did not need changing.
+         *
+         * These two used to coincide: pause stopped the decode loop, so
+         * !s_playing and a stalled decoder were the same event and the
+         * amp went down once. They have come apart -- the decoder now
+         * runs on through a pause until the ring is full -- but the
+         * condition is an OR, so pause still idles the amp on the press
+         * and the reason is now the s_playing half rather than the
+         * s_decoding half. Same result, different term.
+         *
+         * The ordering is better than it was, too. The amp cuts as the
+         * writer stops rather than up to a minute before it, which is the
+         * gap the old behaviour played its buffer out into.
+         */
         audio_out_set_idle(!s_playing || !s_decoding);
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
@@ -2300,9 +2373,21 @@ static track_end_t play_file(const char *path)
             }
         }
 
-        while (!s_playing && !s_pending_ready) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
+        /*
+         * No pause stall here any more; i2s_writer_task() holds it.
+         *
+         * The decode loop carries on filling the ring while paused and
+         * then blocks in xStreamBufferSend() once it is full, which is
+         * the same place it blocks during ordinary playback. Pausing now
+         * leaves the ring full rather than draining it, so resume needs
+         * nothing from the card.
+         *
+         * What was lost with the stall is the escape below it, which is
+         * why that check moved up here rather than staying where it was:
+         * a track chosen while paused used to break out of this loop
+         * because the stall was watching for it. Nothing waits now, so
+         * the check has to be reached on its own.
+         */
 
         /* A choice made while paused has to end the track, or the new
          * file waits behind a pause the user has already moved on from. */
@@ -2421,6 +2506,7 @@ static track_end_t play_file(const char *path)
                 }
                 s_decode_done = false;
                 s_writer_done = false;
+                s_writer_stop = false;
                 xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
             } else if ((uint32_t)info.sample_rate != cur_rate) {
                 /* i2s_channel_reconfig_std_clock() needs the channel
@@ -2524,6 +2610,11 @@ static track_end_t play_file(const char *path)
          *
          * A track that ended on its own drains, because those last
          * fractions of a second are the end of the song. */
+        /* Release the writer from any pause before waiting on it. Both
+         * of the spins below need it to run, and neither can be the
+         * thing that unpauses it. */
+        s_writer_stop = true;
+
         if (why == TRACK_ENDED) {
             while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(pdMS_TO_TICKS(10));
         } else {
