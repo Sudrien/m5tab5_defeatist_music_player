@@ -407,6 +407,24 @@ static StreamBufferHandle_t s_pcm;
 static volatile int s_ring_pct = -1;
 
 /*
+ * What the decode loop has produced, published for the writer.
+ *
+ * The position shown is decoded-minus-queued, and only the writer runs
+ * for the whole time the ring is draining -- the decode loop exits as
+ * soon as the file is finished, which at 10 MB is up to a minute before
+ * the last sample is heard. Computing the position in the decode loop
+ * therefore froze it at (length - ring contents) for the rest of the
+ * track: the remaining-time display stuck at -00:59 and stayed there.
+ *
+ * Three plain integers rather than a handle, for the reason above: an
+ * int cannot dangle. The writer holds the ring anyway, so it is the one
+ * task that can ask how much is still queued at any moment.
+ */
+static volatile uint64_t s_frames_out;
+static volatile uint32_t s_frames_rate;
+static volatile uint32_t s_frames_chans = 2;
+
+/*
  * The ring's memory, allocated once and never freed.
  *
  * Separate from the handle because the handle is per track and this is
@@ -1341,10 +1359,43 @@ static int ring_headroom_pct(void)
  * timeout even with an empty ring. A number whose freshness depends on
  * the thing it is meant to be watching is not a gauge.
  */
+/*
+ * Seconds heard, from frames decoded minus frames still queued.
+ *
+ * Decoded is not played: the ring sits between the decoder and the
+ * speaker, and every sample in it has been counted by the decode loop
+ * and not yet heard. That was always true and never mattered -- at 64 KB
+ * the ring held 0.37 s, under the resolution of the display -- but at
+ * 10 MB it is a minute, and the position ran a minute ahead of the audio.
+ *
+ * Called from the writer task, which is the one task that runs for the
+ * whole life of the ring. The decode loop exits when the file ends and
+ * the writer keeps going until the ring is empty, so computing this in
+ * the decode loop froze the display at (length - 59 s) and left the
+ * remaining time stuck at -00:59 for the last minute of every track.
+ *
+ * Two bytes per sample per channel, so bytes / (2 * channels) is the
+ * queued frame count. Subtracted in frames rather than seconds so a
+ * large number is not rounded twice, and clamped because the ring can
+ * report more than has been decoded right after a seek reset.
+ */
+static void pos_publish(size_t queued)
+{
+    const uint32_t rate = s_frames_rate;
+    if (!rate) return;
+
+    const uint32_t chans = s_frames_chans ? s_frames_chans : 1;
+    const uint64_t queued_frames = queued / (2 * chans);
+    const uint64_t decoded = s_frames_out;
+    const uint64_t heard = decoded > queued_frames ? decoded - queued_frames : 0;
+    s_pos_sec = (uint32_t)(heard / rate);
+}
+
 static void ring_publish(void)
 {
-    s_ring_pct = (int)((xStreamBufferBytesAvailable(s_pcm) * 100) /
-                       PCM_RING_BYTES);
+    const size_t queued = xStreamBufferBytesAvailable(s_pcm);
+    s_ring_pct = (int)((queued * 100) / PCM_RING_BYTES);
+    pos_publish(queued);
 
     /* And act on it. Nothing else was: s_prefetch_abort was set on a
      * track change and nowhere else, so the low-water threshold the
@@ -2107,6 +2158,10 @@ static track_end_t play_file(const char *path)
     int cur_chans = 0;
     int blocks = 0;
     uint64_t frames_out = 0;
+    /* Cleared with the local it mirrors, so a new track cannot briefly
+     * show the previous one's position. */
+    s_frames_out = 0;
+    s_frames_rate = 0;
     track_end_t why = TRACK_ENDED;
 
     load_track_visuals(path);
@@ -2390,36 +2445,16 @@ static track_end_t play_file(const char *path)
                      send_ms, ring_headroom_pct());
         }
         /* Position from samples decoded, not from bytes read: with VBR
-         * the two disagree, and this is the number the slider shows. */
+         * the two disagree, and this is the number the slider shows.
+         *
+         * Published rather than turned into seconds here. The conversion
+         * needs the ring's occupancy at the moment it is asked, and this
+         * loop stops running a minute before the audio does -- see
+         * pos_publish(). */
         frames_out += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
-
-        /*
-         * Minus whatever is still queued, because decoded is not played.
-         *
-         * frames_out counts what has come out of the decoder, and the
-         * ring sits between the decoder and the speaker. Every sample in
-         * it has been counted here and not yet heard, so the position is
-         * ahead of the audio by exactly the ring's contents.
-         *
-         * That was always true and never mattered: at 64 KB the ring
-         * held 0.37 s, which is less than the second the display shows.
-         * At 10 MB it holds ~59 s, and the slider runs to a minute
-         * before the first bar is audible.
-         *
-         * Two bytes per sample per channel, so the queued frame count is
-         * bytes / (2 * channels). Subtracted in frames rather than
-         * seconds to avoid rounding a large number twice, and clamped
-         * because the ring can briefly report more than has been
-         * decoded right after a seek reset.
-         */
-        if (cur_rate) {
-            const uint32_t chans = info.channels > 0 ? (uint32_t)info.channels : 1;
-            const size_t queued = s_pcm ? xStreamBufferBytesAvailable(s_pcm) : 0;
-            const uint64_t queued_frames = queued / (2 * chans);
-            const uint64_t heard = frames_out > queued_frames
-                                 ? frames_out - queued_frames : 0;
-            s_pos_sec = (uint32_t)(heard / cur_rate);
-        }
+        s_frames_rate = cur_rate;
+        s_frames_chans = info.channels > 0 ? (uint32_t)info.channels : 1;
+        s_frames_out = frames_out;
 
         blocks++;
     }
