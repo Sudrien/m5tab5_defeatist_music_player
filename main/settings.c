@@ -35,12 +35,22 @@ static const char *TAG = "tab5_settings";
  * Three seconds is longer than any drag and shorter than the gap between
  * putting the player down and picking it up again.
  */
-#define SETTLE_MS       (3000)
+#define SETTINGS_SETTLE_MS      (3000)
 
-/* Long enough for the longest plausible file; anything longer is not a
- * settings file this program wrote and is treated as corrupt. */
-#define MAX_FILE_BYTES  (1024)
-#define LINE_MAX        (128)
+/*
+ * Long enough for the longest plausible file; anything longer is not a
+ * settings file this program wrote and is treated as corrupt.
+ *
+ * Prefixed because LINE_MAX is not ours: POSIX defines it in
+ * <limits.h>, sys/param.h pulls it in, and redefining it was a warning
+ * today and would be somebody else's confusing bug later. The others are
+ * prefixed for consistency rather than necessity -- a file where one
+ * constant is spelled differently from its neighbours invites the
+ * question of what is special about it, and the answer would be
+ * "nothing, it just collided once".
+ */
+#define SETTINGS_MAX_FILE_BYTES (1024)
+#define SETTINGS_MAX_LINE       (128)
 
 static uint8_t    s_volume = 50;
 static volatile bool s_dirty;
@@ -103,12 +113,12 @@ static bool load_file(const char *name)
     FILE *f = fopen(path, "r");
     if (!f) return false;
 
-    char line[LINE_MAX];
+    char line[SETTINGS_MAX_LINE];
     size_t total = 0;
     bool any = false;
     while (fgets(line, sizeof(line), f)) {
         total += strlen(line);
-        if (total > MAX_FILE_BYTES) {
+        if (total > SETTINGS_MAX_FILE_BYTES) {
             /* Not a file this program wrote. Stopping here rather than
              * reading on: whatever it is, the values taken from it so
              * far are as trustworthy as they are going to get, and the
@@ -212,7 +222,7 @@ static void settings_task(void *arg)
          * 1 kHz and "now > then" is wrong once per wrap on a device
          * people leave running. */
         if ((int32_t)(xTaskGetTickCount() - s_dirty_since) <
-            (int32_t)pdMS_TO_TICKS(SETTLE_MS)) {
+            (int32_t)pdMS_TO_TICKS(SETTINGS_SETTLE_MS)) {
             continue;
         }
 
