@@ -10,14 +10,36 @@
 #
 # Read the licensing note in the README before running this.
 #
-# Usage:  ./tools/enable_exfat.sh          from the project root
+# Usage:  ./tools/enable_exfat.sh             from the project root
 #         ./tools/enable_exfat.sh --revert
+#         ./tools/enable_exfat.sh --no-clean
+#
+# cmake/exfat.cmake runs this automatically at configure time with
+# --no-clean, so a fresh clone gets exFAT without anyone having to know
+# this file exists. Running it by hand still works and is what --revert
+# is for.
 #
 # SPDX-License-Identifier: MIT
 
 set -euo pipefail
 
 DEST="components/fatfs"
+
+# Whether to delete build/ and sdkconfig at the end. Doing that is right
+# when a human runs this against a tree that has already been built, and
+# is catastrophic when cmake runs it, since cmake is executing from
+# inside the directory it would remove.
+#
+# The deletion is not needed on the cmake path anyway: exfat.cmake runs
+# before project.cmake, so components/fatfs exists by the time IDF scans
+# for components and its Kconfig is picked up in the same configure that
+# created it. There is no stale sdkconfig to escape, because the
+# sdkconfig is generated after this has run.
+CLEAN=1
+if [ "${1:-}" = "--no-clean" ]; then
+    CLEAN=0
+    shift || true
+fi
 
 if [ "${1:-}" = "--revert" ]; then
     rm -rf "$DEST" build sdkconfig
@@ -38,7 +60,14 @@ if [ ! -d "$SRC" ]; then
     exit 1
 fi
 
+# Already patched. An error for a human -- who asked for this and should
+# be told it was a no-op -- and a silent success for cmake, which asks on
+# every single configure and would otherwise fail every build after the
+# first.
 if [ -e "$DEST" ]; then
+    if [ "$CLEAN" = "0" ]; then
+        exit 0
+    fi
     echo "$DEST already exists; delete it or run --revert first" >&2
     exit 1
 fi
@@ -138,8 +167,10 @@ echo
 # vendored ffconf.h against the stale config header. Symptom is
 # "CONFIG_FATFS_USE_LABEL undeclared". Force a regeneration rather than
 # leaving it to be remembered.
-rm -rf build sdkconfig
-echo "removed build/ and sdkconfig so Kconfig is regenerated"
-echo "(sdkconfig.defaults pins CONFIG_IDF_TARGET, so the target survives this)"
-echo
-echo "now run: idf.py build flash monitor"
+if [ "$CLEAN" = "1" ]; then
+    rm -rf build sdkconfig
+    echo "removed build/ and sdkconfig so Kconfig is regenerated"
+    echo "(sdkconfig.defaults pins CONFIG_IDF_TARGET, so the target survives this)"
+    echo
+    echo "now run: idf.py build flash monitor"
+fi
