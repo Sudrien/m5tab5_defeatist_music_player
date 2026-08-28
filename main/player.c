@@ -2392,7 +2392,34 @@ static track_end_t play_file(const char *path)
         /* Position from samples decoded, not from bytes read: with VBR
          * the two disagree, and this is the number the slider shows. */
         frames_out += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
-        if (cur_rate) s_pos_sec = (uint32_t)(frames_out / cur_rate);
+
+        /*
+         * Minus whatever is still queued, because decoded is not played.
+         *
+         * frames_out counts what has come out of the decoder, and the
+         * ring sits between the decoder and the speaker. Every sample in
+         * it has been counted here and not yet heard, so the position is
+         * ahead of the audio by exactly the ring's contents.
+         *
+         * That was always true and never mattered: at 64 KB the ring
+         * held 0.37 s, which is less than the second the display shows.
+         * At 10 MB it holds ~59 s, and the slider runs to a minute
+         * before the first bar is audible.
+         *
+         * Two bytes per sample per channel, so the queued frame count is
+         * bytes / (2 * channels). Subtracted in frames rather than
+         * seconds to avoid rounding a large number twice, and clamped
+         * because the ring can briefly report more than has been
+         * decoded right after a seek reset.
+         */
+        if (cur_rate) {
+            const uint32_t chans = info.channels > 0 ? (uint32_t)info.channels : 1;
+            const size_t queued = s_pcm ? xStreamBufferBytesAvailable(s_pcm) : 0;
+            const uint64_t queued_frames = queued / (2 * chans);
+            const uint64_t heard = frames_out > queued_frames
+                                 ? frames_out - queued_frames : 0;
+            s_pos_sec = (uint32_t)(heard / cur_rate);
+        }
 
         blocks++;
     }
