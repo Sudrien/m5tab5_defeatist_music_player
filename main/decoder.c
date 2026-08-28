@@ -12,6 +12,7 @@
 #include "esp_log.h"
 
 #include "decoder.h"
+#include "storage_io.h"
 
 /* minimp3_ex's default file IO uses open()/mmap(), which FatFs does not
  * provide. MINIMP3_NO_STDIO compiles that path out and leaves the
@@ -121,7 +122,11 @@ bool decoder_supports(const char *path)
 
 static size_t mp3_io_read(void *buf, size_t size, void *user)
 {
-    return fread(buf, 1, size, (FILE *)user);
+    /* Playback class: this is the read nothing may be queued in front
+     * of. minimp3 calls it during mp3dec_ex_open_cb()'s index build as
+     * well as during playback, which is the pause before the first
+     * sample -- that one wants the lease just as much. */
+    return storage_io_fread(buf, size, (FILE *)user, STORAGE_IO_PLAYBACK);
 }
 
 static int mp3_io_seek(uint64_t position, void *user)
@@ -250,8 +255,9 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
             memmove(d->inbuf, d->inbuf + d->in_pos, (size_t)keep);
             d->in_pos = 0;
             d->in_len = keep;
-            const size_t got = fread(d->inbuf + keep, 1,
-                                     (size_t)(ESP_IN_BUF - keep), d->f);
+            const size_t got = storage_io_fread(d->inbuf + keep,
+                                                (size_t)(ESP_IN_BUF - keep),
+                                                d->f, STORAGE_IO_PLAYBACK);
             d->in_len += (int)got;
             if (got == 0) d->eof = true;
         }

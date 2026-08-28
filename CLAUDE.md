@@ -1898,6 +1898,71 @@ If background reads ever need to be added, they go through
 `media_settle()` too. Lowering a priority instead will look like it
 worked on SD and fail on USB.
 
+**As of the arbiter this is half the answer.** `media_settle()` decides
+*when to start*; it has never had anything to say about a read already in
+flight. See below.
+
+## The card is arbitrated, not throttled
+
+`storage_io.c` is a lease on the device, taken per read, granted by class
+rather than by task priority:
+
+| Class | Who |
+| --- | --- |
+| `STORAGE_IO_PLAYBACK` | the decode loop, and nothing else |
+| `STORAGE_IO_PREFETCH` | the next track's tags, cover, envelope |
+| `STORAGE_IO_BACKGROUND` | the playing track's envelope, listings |
+
+Lower wins. The failure it removes is the one `ring_publish()` already
+describes and could only report: `media_task` enters a 32 KB `fread`,
+FatFs takes the volume lock, the decoder's next refill blocks behind it,
+the decode loop stops, and because the decode loop is what publishes
+`s_ring_pct` the gauge freezes above the abort threshold -- so the abort
+never fires. Adding the writer task as a second publisher made that gauge
+honest. It did not stop the read.
+
+**The lease does not make background reads shorter. It makes them
+interruptible.** `storage_io_fread()` reads exactly what it was asked for,
+in `STORAGE_IO_CHUNK` pieces, dropping the lease between them. The
+decoder's worst case becomes one chunk of the current device rather than
+the rest of somebody else's file.
+
+Three things worth not undoing:
+
+- **Wrap the read, never the parse.** `covertag.c` and `duration.c` both
+  funnel every read through their own `read_at()`, which is why each is a
+  one-function change. Wrapping `covertag_extract_art()` instead would
+  have been one line in `player.c`, would have compiled, and would have
+  put the starvation straight back -- one lease across a 512 KB cover is
+  the uninterruptible read this exists to break up. `storage_io_acquire()`
+  detects that nesting and logs it, once, rather than deadlocking on it:
+  a hang on the decode loop is worse than a wrong-but-working read.
+- **The wake is not the grant.** Releasing gives a binary semaphore, which
+  wakes one waiter, and FreeRTOS picks that one by task priority -- the
+  thing this file exists to not decide by. So every waiter also re-tests
+  on a 4 ms timer and correctness comes from the re-test. The cost is 4 ms
+  of grant latency when the wrong task is woken, against a ring holding
+  tens of seconds.
+- **`storage_io_stats()` is the thing to read when this looks wrong.**
+  PLAYBACK's worst wait should be roughly one chunk of the current device.
+  If it is not, somebody is holding a lease across a parse.
+
+Small reads are deliberately left unarbitrated -- the ten-byte ID3 frame
+headers in `albumart.c`, `framewalk_supports()`'s four-byte sniff. A lease
+costs two semaphore operations and those reads are shorter than that. Only
+`albumart.c`'s APIC frame, which is the cover itself, takes one.
+
+Known rough edge: `covertag.c` is classed `PREFETCH` for every caller,
+including the decode loop's own `load_tags()` at a track change. That read
+should be `PLAYBACK`. It is a few KB and nothing below it can starve it,
+so it is a wart rather than a bug; fixing it means passing a class into
+the `covertag_*` entry points rather than fixing it inside `read_at()`.
+
+One lease covers the card and the USB port together. That is wrong in
+principle -- a cover read from USB does not contend with a decode from SD
+-- and right in practice while nothing plays from one and reads the other.
+When that stops being true it grows a lease per `storage_id_t`.
+
 ## Nothing on screen may outlive the track it describes
 
 A track change is decided in `track_change_begin()`, and everything that

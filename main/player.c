@@ -66,6 +66,7 @@
 #include "playlist.h"
 #include "settings.h"
 #include "storage.h"
+#include "storage_io.h"
 #include "touch.h"
 #include "uac.h"
 #include "ui.h"
@@ -2855,6 +2856,16 @@ void app_main(void)
      * it: registration is refused once the port is up, and storage_init()
      * registers one. */
     ESP_ERROR_CHECK(usbhost_init(s_exp2));
+
+    /*
+     * Before storage_init(), because settings.c reads through the same
+     * arbiter and the first mount happens in there. It degrades to plain
+     * stdio if it is ever reached before this, which is the reason
+     * nothing here is ESP_ERROR_CHECK()ed: an unarbitrated player is
+     * what this replaced, and that one played.
+     */
+    storage_io_init();
+
     ESP_ERROR_CHECK(storage_init());
 
     /*
