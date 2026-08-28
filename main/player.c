@@ -94,7 +94,57 @@ static const char *TAG = "tab5_mp3";
 #define LCD_BITS_PER_PIXEL      (24)
 #define DSI_DATA_LANES          (2)
 #define DSI_LANE_RATE_MBPS      (965)
-#define DPI_CLOCK_MHZ           (70)
+/*
+ * 24 Hz, down from ~57.3 Hz.
+ *
+ * The DPI peripheral reads the framebuffer out of PSRAM continuously and
+ * cannot wait: miss a line and the DSI bridge raises an underrun, the
+ * panel goes cyan for a frame, and the ISR in esp_lcd_panel_dpi.c prints
+ *
+ *   can't fetch data from external memory fast enough, underrun happens
+ *
+ * Nothing in this program can yield to that fetch. It is a DMA master on
+ * the AXI bus rather than a task, so no priority and no delay reaches
+ * it -- the same argument "Priority is not a device throttle" makes
+ * about the card, one bus over. The only lever is how much it asks for.
+ *
+ * At 720x1280 RGB565 a frame is 1.84 MB, so the rate IS the bandwidth:
+ *
+ *   total = (720+2+40+40) x (1280+20+24+200) = 802 x 1524 = 1,222,248
+ *   70 MHz / 1,222,248 = 57.3 Hz -> 105 MB/s, continuous
+ *   29 MHz / 1,222,248 = 23.7 Hz ->  44 MB/s, continuous
+ *
+ * 61 MB/s handed back, before anything else is optimised. What buys it
+ * is a refresh rate nobody looks for on a music player: the only things
+ * that move are a clock at 1 Hz, a seek bar that follows it, and a
+ * marquee that was already stepped from ui_draw() rather than a timer.
+ *
+ * 29 rather than 30 because dpi_clock_freq_mhz is an integer and 30
+ * gives 24.5 Hz. Either is fine; this one is under the target rather
+ * than over it, which is the side to be on when the whole point is to
+ * ask for less.
+ *
+ * DSI_LANE_RATE_MBPS is deliberately NOT lowered with it. The lane rate
+ * costs no PSRAM bandwidth -- it is the wire, not the memory -- and it
+ * only has to stay above what the pixel clock demands, which it now does
+ * by a much wider margin. At 29 MHz the link simply idles longer between
+ * bursts. If this ever produces a sheared or misaligned picture rather
+ * than a clean one, that is the mismatch to go and look at, and the
+ * recomputed figure is around 620 against a documented floor of 480.
+ *
+ * Two consequences worth expecting rather than debugging:
+ *
+ *   - Tearing gets more visible. There is one framebuffer and it is
+ *     written while the panel is reading it; at 24 Hz a blit has a
+ *     longer window to land mid-frame. The shadow buffer stops the
+ *     half-drawn states from being displayed, not the seam.
+ *   - There is no longer any point repainting faster than this. ui_task
+ *     runs at 50 Hz under a finger and 25 Hz while a title travels, and
+ *     both are now above the rate the panel can show. Left alone here
+ *     because it is a separate change and this one should be measurable
+ *     on its own.
+ */
+#define DPI_CLOCK_MHZ           (29)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
