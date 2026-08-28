@@ -1237,9 +1237,41 @@ of scope the moment the second track started.
 The chooser draws over the artwork, so closing it has to repaint. That
 happens on the decode loop rather than the UI task, because it `fopen()`s
 the track and pushes a JPEG through the hardware codec, and the UI task
-has a 20 ms period. It is checked ahead of the pause wait and again in the
-idle path, or a chooser dismissed while paused -- or with nothing playing
-at all -- leaves its listing on screen.
+has a 20 ms period. It is checked at the top of the decode iteration and
+again in the idle path, or a chooser dismissed while paused -- or with
+nothing playing at all -- leaves its listing on screen.
+
+### Pause stops the writer, not the decoder
+
+It used to stop the decoder. That was right when the ring held 0.37 s:
+stall the producer and the consumer empties in a third of a second. At
+10 MB the ring holds 59 seconds, and stalling the producer left the
+writer to play all of it out -- pause fell silent up to a minute after
+the press, with `audio_out_set_idle()` cutting the amp somewhere in the
+middle, so the symptom read as the player starting up again on its own
+rather than as a late pause. The ring grew 160x and this was not
+revisited.
+
+Worth stating rather than just fixing: **pause against a buffer is only
+immediate at the end the listener hears, and which end that is does not
+depend on the size.** Whatever `PCM_RING_BYTES` becomes, the gate belongs
+in `i2s_writer_task()`.
+
+The ring is deliberately not drained. Its contents are still the correct
+next samples, so resume is instant and costs the card nothing -- which on
+a card that stalls `decoder_read()` for five seconds at a time is the
+difference between resuming and resuming into the next stall. The decode
+loop carries on filling and then blocks in `xStreamBufferSend()`, which
+is where it blocks during ordinary playback anyway.
+
+`s_writer_stop` exists because teardown ends with two spins -- drain the
+ring on `TRACK_ENDED`, then wait for `s_writer_done` -- and both wait on
+the writer to move. A writer parked on a pause never does, so pausing at
+the wrong moment would hang the decode loop against a task that is
+deliberately not running, taking the seek and next-track paths with it.
+Being paused during teardown means the tail of a finished track plays
+out. Deadlocking means the player stops answering. It is set before the
+waits and cleared with the other two flags when the next ring is made.
 
 ### Nothing to play is a screen, not an exit
 
