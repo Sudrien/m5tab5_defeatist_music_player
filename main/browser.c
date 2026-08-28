@@ -16,6 +16,7 @@
 #include "browser.h"
 #include "decoder.h"
 #include "gfx.h"
+#include "storage.h"
 
 static const char *TAG = "tab5_browser";
 
@@ -124,8 +125,8 @@ static void load_dir(const char *dir)
          * greyed. A card root is mostly System Volume Information and
          * stray .txt files, and a list where two thirds of the rows are
          * untappable is a worse list. */
+        if (storage_is_hidden(e->d_name)) continue;   /* . .. and dotfiles */
         if (!is_dir && !decoder_supports(e->d_name)) continue;
-        if (e->d_name[0] == '.') continue;      /* . .. and dotfiles */
 
         s_entries[s_count].name = strdup(e->d_name);
         if (!s_entries[s_count].name) break;

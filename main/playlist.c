@@ -67,6 +67,13 @@ esp_err_t playlist_load_dir(const char *dir)
     bool truncated = false;
     while ((e = readdir(d)) != NULL) {
         if (e->d_type == DT_DIR) continue;
+        /* Before decoder_supports(), because the entries this catches
+         * would pass it: an AppleDouble sidecar is called ._Track.mp3
+         * and holds a resource fork. The chooser has always hidden
+         * these; this list did not, so playing a folder written on a Mac
+         * queued eighteen entries for nine tracks and every other one
+         * decoded to nothing. */
+        if (storage_is_hidden(e->d_name)) continue;
         if (!decoder_supports(e->d_name)) continue;
         if (s_count >= PLAYLIST_MAX) { truncated = true; break; }
 

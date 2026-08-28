@@ -87,6 +87,23 @@ storage_id_t storage_of_path(const char *path);
  */
 bool storage_join_path(char *out, size_t out_len, const char *dir, const char *name);
 
+/*
+ * Should this directory entry be ignored entirely?
+ *
+ * True for "." and "..", for dotfiles, and therefore for the "._Name.mp3"
+ * AppleDouble sidecars macOS leaves on every FAT volume it touches. Those
+ * are the reason this is shared rather than a line in each scanner: they
+ * end in .mp3, so decoder_supports() says yes, and they contain a
+ * resource fork rather than audio -- a folder written on a Mac has one
+ * per track and they interleave with the real files.
+ *
+ * The rule lived in browser.c only, so the chooser hid them and
+ * "play folder" queued them. Two scanners disagreeing about what a file
+ * is is the kind of thing that stays broken because each one looks
+ * correct on its own.
+ */
+bool storage_is_hidden(const char *name);
+
 /* Bumped on every mount and every unmount. The chooser redraws its tabs
  * when this changes rather than re-statting the volumes every frame. */
 uint32_t storage_generation(void);
