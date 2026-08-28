@@ -128,24 +128,54 @@ static const char *TAG = "tab5_mp3";
  * waits on DMA and the decoder can stall for a whole SD read without
  * anyone hearing it.
  *
- * 64 KB is ~0.37 s of 44.1 kHz stereo: comfortably longer than a FAT
- * cluster read, short enough that seeking will not feel laggy later.
+ * 10 MB is ~59 s of 44.1 kHz stereo. That is far more than the worst
+ * observed stall -- decoder_read has been seen blocked for 11.4 s and
+ * 11.7 s -- and the excess is deliberate: the point of this size is to
+ * settle whether a ring can hide these pauses at all, not to be the
+ * right size. A ring that does not span the stall does not hide the
+ * stall, and 64 KB (0.37 s) tells you nothing about whether 12 s would
+ * have been enough.
  *
- * BACK to 64 KB and back to the ordinary allocator, after patch 06 moved
- * it to 256 KB in PSRAM via xStreamBufferCreateWithCaps().
+ * So this is a measurement, and 10 MB is the setting that cannot be
+ * blamed for an inconclusive result. If the pauses stop, the number
+ * comes down until they start again and the answer is one notch above
+ * that. If they do NOT stop at 59 s of buffer, the ring was never the
+ * lever and this whole approach is finished -- which is worth knowing in
+ * one flash rather than three.
  *
- * Not because the larger ring was shown to be the fault -- it was not --
- * but because it was the one thing about this allocation that changed
- * before the heap started getting corrupted, and a variable that cannot
- * be reasoned about should be removed before it is defended. The
- * measured justification for the change was weak anyway: enlarging the
- * ring does not reduce control latency (the writer drains continuously,
- * so a send waits for room for one block regardless of size) and the
- * prefetch gate reads a percentage, which works at any size.
+ * PSRAM is 32 MB, so this is under a third of it, against a cover cache
+ * and a 720x720 RGB565 enlargement that are the other large tenants.
  *
- * If the corruption survives this, the ring is exonerated and the search
- * moves on with one fewer thing in it. That is the point. */
-#define PCM_RING_BYTES          (64 * 1024)
+ * PATCH 06 DID THIS BEFORE AND WAS REVERTED. It moved the ring to 256 KB
+ * in PSRAM via xStreamBufferCreateWithCaps(), and was backed out during
+ * a heap corruption hunt -- not because the larger ring was shown to be
+ * the fault, but because it was the one thing about this allocation that
+ * had changed, and a variable that cannot be reasoned about should be
+ * removed before it is defended.
+ *
+ * So this deliberately does not reinstate that call. The storage is
+ * allocated once at boot and never freed, and the buffer is created
+ * static on top of it:
+ *
+ *   - xStreamBufferCreateStatic() allocates nothing, so there is no
+ *     allocator to pair with a matching free.
+ *   - vStreamBufferDelete() on a static buffer frees nothing -- it
+ *     checks the statically-allocated flag and returns -- so the
+ *     existing per-track delete stays exactly as it is, with all of its
+ *     reasoning about handle ordering intact.
+ *   - The PSRAM block is allocated in app_main() and outlives every
+ *     track, so nothing about the per-track path allocates or frees at
+ *     all.
+ *
+ * That is a different shape from what was reverted, and it is a smaller
+ * one: the reverted version created and destroyed a PSRAM allocation on
+ * every track boundary. This creates none.
+ *
+ * What it does not do is fix anything. An eleven-second read is still an
+ * eleven-second read; this buys enough slack to not hear it, which is
+ * worth having and is not the same as the card working.
+ */
+#define PCM_RING_BYTES          (10 * 1024 * 1024)
 #define PCM_CHUNK_BYTES         (4 * 1024)
 
 /*
@@ -375,6 +405,17 @@ static StreamBufferHandle_t s_pcm;
  * and is written before the ring goes away, not after.
  */
 static volatile int s_ring_pct = -1;
+
+/*
+ * The ring's memory, allocated once and never freed.
+ *
+ * Separate from the handle because the handle is per track and this is
+ * not. xStreamBufferCreateStatic() wants storage one byte larger than
+ * the usable size -- the implementation keeps head and tail distinct
+ * that way -- and it is the caller's job to know that.
+ */
+static StaticStreamBuffer_t s_pcm_struct;
+static uint8_t             *s_pcm_store;
 static volatile bool s_decode_done;
 
 /* The writer used to outlive the one and only file. Now that play_file()
@@ -2254,7 +2295,19 @@ static track_end_t play_file(const char *path)
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
                 HEAP_CHECK("before ring create");
                 s_ring_pct = 0;
-                s_pcm = xStreamBufferCreate(PCM_RING_BYTES, PCM_CHUNK_BYTES);
+                /* Static: no allocation here, and the matching delete
+                 * below frees nothing. If the boot allocation failed the
+                 * player runs without a ring rather than not at all --
+                 * checked below, because a NULL here is a silent hang. */
+                s_pcm = s_pcm_store
+                        ? xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
+                                                    s_pcm_store, &s_pcm_struct)
+                        : NULL;
+                if (!s_pcm) {
+                    ESP_LOGE(TAG, "no PCM ring; cannot play");
+                    why = TRACK_UNREADABLE;
+                    break;
+                }
                 s_decode_done = false;
                 s_writer_done = false;
                 xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
@@ -2262,6 +2315,17 @@ static track_end_t play_file(const char *path)
                 /* i2s_channel_reconfig_std_clock() needs the channel
                  * disabled, and doing that with audio queued is an
                  * audible click. Drain first. */
+                /* Up to PCM_RING_BYTES of audio to play out first, which
+                 * at 10 MB is a minute rather than the third of a second
+                 * this was written for.
+                 *
+                 * Only reachable on a sample rate change inside one file,
+                 * which no normal MP3 does -- but if one ever arrives,
+                 * this is a minute of apparent hang with the transport
+                 * unresponsive, not a pause. At the sizes this ring is
+                 * being tested at, the drain wants replacing with a
+                 * reset-and-accept-the-click before the size is made
+                 * permanent. */
                 while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(1);
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
             }
@@ -2558,6 +2622,21 @@ void app_main(void)
      * behind one call now -- see audio_out.h. 44100 is only what MCLK
      * starts at; the first track states its own. */
     ESP_ERROR_CHECK(audio_out_init(s_i2c_bus, s_exp1, 44100));
+
+    /*
+     * The PCM ring's storage, once, for the life of the program. One
+     * byte over PCM_RING_BYTES because that is what the static variant
+     * requires to tell a full ring from an empty one.
+     *
+     * Not fatal on failure: play_file() reports the track unreadable and
+     * the chooser comes up, which is a worse player than one with a ring
+     * and a better one than a boot loop.
+     */
+    s_pcm_store = heap_caps_malloc(PCM_RING_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_pcm_store) {
+        ESP_LOGE(TAG, "could not reserve %u KB for the PCM ring",
+                 (unsigned)(PCM_RING_BYTES / 1024));
+    }
 
     /* Both volumes, and the poll task that keeps them up to date. Not
      * ESP_ERROR_CHECK'd on the media itself: an empty slot and an empty
