@@ -1553,6 +1553,22 @@ static bool rg_holding(const char *path)
     return path && s_rg_path[0] && strcmp(s_rg_path, path) == 0;
 }
 
+/*
+ * The two big records here are heap, not stack.
+ *
+ * A replaygain_t is a shade over 3 KB -- the seek index alone is 256
+ * offsets and 256 sample positions -- and a framewalk_t is another
+ * kilobyte. As automatics they made this one frame about 4.5 KB of
+ * media_task's 8 KB stack, and replaygain_load() has records of its own
+ * below it. That overflowed on the second track: the frame was always
+ * this size, and the prefetch simply happened to be the call that ran
+ * out of room.
+ *
+ * PSRAM because neither record is touched by DMA and nothing here is in
+ * the audio path. A failed allocation is not fatal -- it means the same
+ * as a sidecar that would not load, which this already has an answer
+ * for.
+ */
 static bool sidecar_prime(const char *path)
 {
     const bool have_walk = (mediacache_walk(path) != NULL);
@@ -1564,39 +1580,55 @@ static bool sidecar_prime(const char *path)
     /* Everything already in RAM: no read at all. */
     if (have_walk && have_tags && have_art) return true;
 
-    replaygain_t rg;
-    if (!replaygain_load(path, &rg)) return have_walk;
-
-    if (!have_walk && rg.waveform.present && rg.waveform.columns > 0) {
-        framewalk_t w;
-        memset(&w, 0, sizeof(w));
-        w.has_levels = true;
-        w.columns = rg.waveform.columns;
-        w.sec     = rg.waveform.sec;
-        memcpy(w.level, rg.waveform.level, (size_t)rg.waveform.columns);
-        mediacache_put_walk(path, &w);
-        ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
-                 w.columns, w.sec);
+    replaygain_t *rg = heap_caps_malloc(sizeof(*rg),
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!rg) {
+        ESP_LOGW(TAG, "no room for a sidecar record; not priming");
+        return have_walk;
     }
 
-    if (!have_tags && rg.tags.present) {
+    if (!replaygain_load(path, rg)) {
+        heap_caps_free(rg);
+        return have_walk;
+    }
+
+    if (!have_walk && rg->waveform.present && rg->waveform.columns > 0) {
+        framewalk_t *w = heap_caps_malloc(sizeof(*w),
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (w) {
+            memset(w, 0, sizeof(*w));
+            w->has_levels = true;
+            w->columns = rg->waveform.columns;
+            w->sec     = rg->waveform.sec;
+            memcpy(w->level, rg->waveform.level, (size_t)rg->waveform.columns);
+            mediacache_put_walk(path, w);
+            ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
+                     w->columns, w->sec);
+            heap_caps_free(w);
+        }
+    }
+
+    if (!have_tags && rg->tags.present) {
         id3_tags_t t;
         memset(&t, 0, sizeof(t));
-        snprintf(t.title,  sizeof(t.title),  "%s", rg.tags.title);
-        snprintf(t.artist, sizeof(t.artist), "%s", rg.tags.artist);
-        snprintf(t.album,  sizeof(t.album),  "%s", rg.tags.album);
+        snprintf(t.title,  sizeof(t.title),  "%s", rg->tags.title);
+        snprintf(t.artist, sizeof(t.artist), "%s", rg->tags.artist);
+        snprintf(t.album,  sizeof(t.album),  "%s", rg->tags.album);
         mediacache_put_tags(path, &t);
     }
 
     /* Only the negative, and only when it is a positive statement that
      * there is none -- art.present with has_art false. An absent
      * section means nobody has looked, which is not the same claim. */
-    if (!have_art && rg.art.present && !rg.art.has_art) {
+    if (!have_art && rg->art.present && !rg->art.has_art) {
         mediacache_put_no_art(path);
         ESP_LOGI(TAG, "no cover art (sidecar)");
     }
 
-    return have_walk || (rg.waveform.present && rg.waveform.columns > 0);
+    const bool ret = have_walk ||
+                     (rg->waveform.present && rg->waveform.columns > 0);
+    heap_caps_free(rg);
+    return ret;
 }
 
 
