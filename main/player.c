@@ -2511,6 +2511,17 @@ static void ui_task(void *arg)
 
         switch (act.kind) {
         case UI_ACTION_PLAY_PAUSE:
+            /*
+             * With nothing decoding, this is the press that starts the
+             * restored track rather than a pause toggle. s_playing is
+             * the writer's gate and toggling it with no producer would
+             * silently do nothing, which reads as a dead button.
+             */
+            if (!s_decoding && s_path[0]) {
+                if (!s_playing) s_playing = true;
+                request_track(s_path);
+                break;
+            }
             s_playing = !s_playing;
             break;
         case UI_ACTION_VOLUME:
@@ -3461,6 +3472,69 @@ static bool autostart(char *out, size_t out_len)
     return false;
 }
 
+/* One attempt, whether or not it finds anything. A volume with no
+ * settings file, or one naming a track that has been deleted, is not a
+ * reason to keep asking every 100 ms for the rest of the session. */
+static bool s_restored;
+
+/*
+ * Load the settings off whatever is mounted and put their track on
+ * screen, stopped.
+ *
+ * Returns nothing because there is nothing useful to do about a
+ * failure: every step is allowed to come up empty and the answer to all
+ * of them is the chooser, which is already up.
+ */
+static void restore_last_track(void)
+{
+    for (int v = 0; v < STORAGE_COUNT; v++) {
+        if (!storage_present((storage_id_t)v)) continue;
+
+        const char *root = storage_mount_path((storage_id_t)v);
+        if (!root || !settings_note_path(root)) continue;
+
+        /* Whatever the file said, applied -- this is the same push
+         * player_loop() does when a track starts, and at this point it
+         * is the only one that has happened. */
+        s_volume = settings_volume();
+        audio_out_set_volume((uint8_t)s_volume);
+        ESP_LOGI(TAG, "volume %d from settings", s_volume);
+
+        s_restored = true;
+
+        const char *last = settings_track();
+        if (!last) return;
+
+        /* The file may be gone, or on the other volume, or renamed.
+         * Opening it is the only honest test and it is cheap. */
+        FILE *probe = fopen(last, "rb");
+        if (!probe) {
+            ESP_LOGI(TAG, "last track is gone: %s", last);
+            return;
+        }
+        fclose(probe);
+
+        /* Its folder becomes the list, so next and prev work from the
+         * first press without going through the chooser. */
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s", last);
+        char *slash = strrchr(dir, '/');
+        if (slash && slash != dir) {
+            *slash = '\0';
+            if (playlist_load_dir(dir) == ESP_OK) {
+                const int i = playlist_index_of(last);
+                if (i >= 0) playlist_set_current(i);
+            }
+        }
+
+        snprintf(s_path, sizeof(s_path), "%s", last);
+        load_track_visuals(s_path);
+        s_open_chooser = false;
+        ESP_LOGI(TAG, "ready to resume %s", s_path);
+        return;
+    }
+}
+
 /*
  * One track after another, forever.
  *
@@ -3472,8 +3546,22 @@ static bool autostart(char *out, size_t out_len)
 static void player_loop(void)
 {
     int fails = 0;      /* consecutive tracks that produced no audio */
-    bool have = autostart(s_path, sizeof(s_path));
-    if (!have) {
+
+    /*
+     * Chosen, not started.
+     *
+     * autostart() used to return straight into playback, so switching
+     * the player on made noise. It now only picks what the transport
+     * will play when it is pressed, which is also what
+     * restore_last_track() does with a better answer if the settings
+     * file has one -- and that runs a moment later, once a volume is
+     * mounted, and overrides this.
+     */
+    bool have = false;
+    if (autostart(s_path, sizeof(s_path))) {
+        load_track_visuals(s_path);
+        ESP_LOGI(TAG, "ready to play %s", s_path);
+    } else {
         ESP_LOGI(TAG, "nothing to play; opening the chooser");
         s_open_chooser = true;
     }
@@ -3490,6 +3578,24 @@ static void player_loop(void)
         }
 
         if (!have) {
+            /*
+             * The track this player was last put down on, restored but
+             * not started.
+             *
+             * It has to happen here rather than in app_main(): the
+             * settings file lives on the volume the music is on, and a
+             * USB drive is still enumerating when app_main() runs. The
+             * idle branch is where the player waits anyway, so it is
+             * where the volume turning up is noticed.
+             *
+             * Deliberately not autoplay. A player that starts making
+             * noise because it was switched on is a worse object than
+             * one that shows you where you were and waits to be asked.
+             * The transport is one press away and the track is already
+             * on screen with its envelope and its gain.
+             */
+            if (!s_restored) restore_last_track();
+
             /* Idle: no decode loop is running, so the repaint that
              * normally happens there has to happen here. Otherwise a
              * chooser dismissed with nothing playing leaves its listing
@@ -3515,6 +3621,7 @@ static void player_loop(void)
          * the player kept the 50 it booted with, and the next drag saved
          * that over the file.
          */
+        settings_set_track(s_path);
         if (settings_note_path(s_path)) {
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
