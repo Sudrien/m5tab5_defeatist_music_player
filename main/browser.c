@@ -346,6 +346,25 @@ void browser_draw(void)
             if (s_dir[0]) {                 /* it was there and went away */
                 entries_free();
                 s_dir[0] = '\0';
+            } else {
+                /*
+                 * Never landed anywhere, so there is no tap to respect.
+                 *
+                 * This is the boot case: the chooser comes up before
+                 * anything is mounted, defaults to the SD tab, and with
+                 * no card there is nothing behind it. A drive turning
+                 * up a second later left the user looking at an empty
+                 * SD listing with their music one untapped tab away.
+                 *
+                 * Adopting the volume that just appeared is not
+                 * overriding a choice, because none has been made.
+                 */
+                for (int i = 0; i < STORAGE_COUNT; i++) {
+                    if (!storage_present((storage_id_t)i)) continue;
+                    s_tab = (storage_id_t)i;
+                    load_dir(tab_root());
+                    break;
+                }
             }
         } else if (s_count == 0 || !s_dir[0]) {
             load_dir(s_dir[0] ? s_dir : tab_root());

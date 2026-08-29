@@ -3529,8 +3529,20 @@ static void restore_last_track(void)
 
         snprintf(s_path, sizeof(s_path), "%s", last);
         load_track_visuals(s_path);
-        s_open_chooser = false;
         ESP_LOGI(TAG, "ready to resume %s", s_path);
+
+        /*
+         * The chooser came up at boot with nothing mounted, so it has
+         * no volume and no directory. Now there is a track, and the
+         * chooser knows how to open at one -- same call the transport's
+         * folder button makes, which lands on the right tab with the
+         * right folder and the track marked.
+         *
+         * Reopened rather than closed: with nothing playing, a chooser
+         * showing the folder you were in is more use than the bar for a
+         * track that is stopped.
+         */
+        if (browser_is_open()) browser_open(s_path);
         return;
     }
 }
