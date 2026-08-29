@@ -3462,8 +3462,15 @@ void app_main(void)
      * the correct outcome. */
     /* Priority 1, below the UI at 4 and well below the decoder. Nothing
      * this task produces is worth a millisecond of the audio path. */
+    /*
+     * 16 KB, not 8. The frame that overflowed the old stack has been
+     * put on the heap, but play_file() still carries a replaygain_t and
+     * a framewalk_t together and is only a little smaller than the one
+     * that panicked. A task whose call graph passes 3 KB records around
+     * wants more headroom than 8 KB leaves it.
+     */
     mediacache_init();
-    xTaskCreate(media_task, "media", 8192, NULL, 1, NULL);
+    xTaskCreate(media_task, "media", 16384, NULL, 1, NULL);
 
     /* Touch after the panel, always: TP_RST and LCD_RST are released by
      * the same expander write, so before panel_init() there is nothing on
