@@ -2972,6 +2972,37 @@ static track_end_t play_file(const char *path)
      */
     bool visuals_pending = true;
 
+    /*
+     * The handoff, from this side. s_ring_play catches up when the
+     * previous track's ring runs dry; that is this track's first
+     * audible sample, so it is where its name and its bar belong.
+     *
+     * A macro, and checked in two places, because of where the decode
+     * loop actually spends its time once it is running ahead. With
+     * twenty seconds of the previous track still queued, this track
+     * fills its ring and parks in xStreamBufferSend() -- 15 s in one
+     * call, measured -- so a gate at the top of the loop does not run
+     * again until long after the handoff it is watching for:
+     *
+     *   I (357988) first sound 2194 ms after the press, ring 1%
+     *   W (376296) ring send blocked 15135 ms (ring 99%)
+     *   I (376297) tags from cache: "Handel..."
+     *
+     * Eighteen seconds of the previous track's title and a seek bar
+     * that had not moved. The send is already sliced at SEND_SLICE_MS
+     * so the transport stays responsive; this rides the same slices.
+     */
+#define VISUALS_GATE()                                                  \
+    do {                                                                \
+        if (visuals_pending && cur_rate != 0 &&                         \
+            s_ring_play == s_ring_fill) {                               \
+            visuals_pending = false;                                    \
+            s_frames_out = 0;                                           \
+            frames_out = 0;                                             \
+            load_track_visuals(path);                                   \
+        }                                                               \
+    } while (0)
+
     /* Consume any repaint the chooser left pending. It closed a moment
      * ago and set the flag, and the visuals gate above will draw this
      * track's cover when it becomes the audible one, so the flag is
@@ -3161,17 +3192,9 @@ static track_end_t play_file(const char *path)
          * the outside they are the same symptom. Only logged past the
          * threshold, so a healthy loop stays silent.
          */
-        /*
-         * The handoff, from this side. s_ring_play catches up when the
-         * previous track's ring runs dry; that is this track's first
-         * audible sample, so it is where its name and its bar belong.
-         */
-        if (visuals_pending && cur_rate != 0 && s_ring_play == s_ring_fill) {
-            visuals_pending = false;
-            s_frames_out = 0;
-            frames_out = 0;
-            load_track_visuals(path);
-        }
+        /* Checked here and inside the send below; see the note on
+         * VISUALS_GATE. */
+        VISUALS_GATE();
 
         const TickType_t t_read = xTaskGetTickCount();
 
@@ -3363,12 +3386,23 @@ static track_end_t play_file(const char *path)
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             src += sent;
             remain -= sent;
+            /* The handoff can happen while this call is parked on a
+             * full ring, which with decode-ahead is most of a track. */
+            VISUALS_GATE();
         }
         ring_publish();
 
         const uint32_t send_ms =
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_send);
-        if (send_ms > LOOP_STALL_MS) {
+        /*
+         * A full ring is a stall only if somebody is waiting for the
+         * audio. While the writer is still on the other ring this loop
+         * is a track ahead and blocking is the mechanism, not a fault
+         * -- 15 s of it is a correctly working decode-ahead. Pause is
+         * the same argument: the writer is stopped on purpose.
+         */
+        const bool running_ahead = (s_ring_play != s_ring_fill) || !s_playing;
+        if (send_ms > LOOP_STALL_MS && !running_ahead) {
             ESP_LOGW(TAG, "ring send blocked %" PRIu32 " ms (ring %d%%)",
                      send_ms, ring_headroom_pct());
         }
@@ -3579,6 +3613,7 @@ static track_end_t play_file(const char *path)
     s_pos_sec = 0;
     return why;
 }
+#undef VISUALS_GATE
 
 /* ------------------------------------------------------------------ */
 
