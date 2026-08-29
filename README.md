@@ -45,6 +45,7 @@ What do you mean no audio over Bluetooth
 - USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too! USB A port only. 
 - pause cuts power to the amp
 - some sdram caching. If I can get a full minute without the screen blinking cyan on seeks, I will.
+- ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
@@ -53,7 +54,6 @@ What do you mean no audio over Bluetooth
 - turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
-- ReplayGain / loudness normalization
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
 - resume at last file
