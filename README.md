@@ -46,6 +46,9 @@ What do you mean no audio over Bluetooth
 - pause cuts power to the amp
 - some sdram caching. If I can get a full minute without the screen blinking cyan on seeks, I will.
 - ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
+  - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
+  - Skipping or seeking during that first listen cancels it - it will try again next time.
+  - It all lands in a hidden `.songname.mp3.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again.
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1

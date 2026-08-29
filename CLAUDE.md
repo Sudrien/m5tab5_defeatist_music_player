@@ -590,6 +590,18 @@ worth doing and is not done here.
 
 ### The frame walk, for formats with no length at all
 
+> **Historical, as of 0206.** `framewalk.c` is deleted and everything in
+> this section and the Ogg one below it describes code that no longer
+> exists. It is kept because the reasoning is still the clearest
+> statement of what `global_gain` is and why it was the wrong thing to
+> draw: an encoder's bit budget, not the audio. The envelope now comes
+> from `loudness.c`, off the decoded PCM of a normal play -- real peak
+> magnitude, no extra file read, and it arrives as a by-product of
+> listening rather than as a scan scheduled around the ring.
+> `framewalk.h` keeps only `framewalk_t`, which the cache, the sidecar
+> and `waveform.c` still pass around.
+
+
 `duration.c` covers the containers that state their own length. Raw ADTS,
 AMR and a CBR MP3 with no Xing header state nothing -- there is no field
 to read, so the only honest answer is to count frames.
@@ -2121,25 +2133,40 @@ was wrong.
 3. **Gapless needs RAM caching.** Not started, but no longer blocked: it
    was impossible against a 19 s open and is merely unwritten against a
    1.5 s one.
-4. **ReplayGain envelope in a sidecar.** Not started. `WAVEFORM_SCAN`
-   stays 0 and the walk comes back with it -- the sidecar is what makes
-   the whole-file pass a once-per-file cost instead of a per-play one,
-   and re-enabling the walk before that would put the second read back.
+4. **ReplayGain envelope in a sidecar.** Done, 0200-0212, and it went
+   further than this entry imagined. The sidecar exists (`.<name>.rgcache`,
+   JSON Lines, one line, keyed on size and mtime), but the whole-file
+   walk it was meant to amortise is gone rather than cached: real
+   BS.1770 loudness and a real amplitude envelope are both measured off
+   the PCM that playback already decodes, so the first uninterrupted
+   play produces them and no pass over the file is ever scheduled.
+   `WAVEFORM_SCAN` is gone with the walk -- the feature is unconditional
+   because it costs nothing beyond a play you were having anyway.
+
+   The record also now carries tags, the format the decoder reports, and
+   whether the file has cover art, so a second play answers all of them
+   from one read instead of an ID3 parse and an eight-to-thirteen second
+   tag scan.
 
 ### What to do next, roughly in order
 
 - **Check `worst wait` now that prefetch runs.** It is the first real
   test of 0100 and the number that says whether the arbiter was worth it.
-- **ReplayGain sidecar**, `.file.ext.dat.tmp`, keyed on size and mtime.
-  The walk returns as its producer, and it can carry the seek index too,
-  which would let `MP3D_DO_NOT_SCAN` remove what is left of the open.
+- **The seek index.** The one piece of the sidecar that is defined,
+  tested and still unwired -- `replaygain_index_t`, (offset, sample)
+  pairs at a stored spacing. It is now the largest remaining win by a
+  wide margin: with tags, art, duration and the envelope all answered
+  from the sidecar, `index built` is essentially all of the 1.2-1.5 s
+  open. Wiring it means `decoder.c` handing minimp3 a prebuilt index
+  rather than `MP3D_DO_NOT_SCAN`'s absence of one, which is a change
+  inside the decoder's seek path rather than around it.
 - **Gapless**, which wants the next track decoding before the current one
   ends. At 0.85% card duty there is room; the ring is 10 MB and reaches
   0% at first sound, so the head start has to be built rather than
   assumed.
-- `MP3D_DO_NOT_SCAN` is **no longer urgent**. 1.2-1.5 s is not what is
-  wrong with the player, and the index buys real seeking and duration.
-  It is worth doing when the walk can supply the index instead.
+- `MP3D_DO_NOT_SCAN` is now the **only** thing between a press and
+  sound. Everything else on the open path is answered from the sidecar
+  before `decoder_open()` returns; this is what is left.
 
 ### Things left deliberately broken or unfinished
 

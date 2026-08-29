@@ -1194,7 +1194,7 @@ static void track_change_begin(const char *path)
      * real and simply one step downstream of its consumers.
      */
     rg_hold(path);
-    sidecar_prime(path);
+    const bool primed_here = sidecar_prime(path);
 
     s_fmt_rate = s_fmt_chans = s_fmt_kbps = 0;
     s_fmt_codec[0] = '\0';
@@ -1225,7 +1225,11 @@ static void track_change_begin(const char *path)
         if (mediacache_walk_copy(path, &s_walk_pending)) {
             waveform_set(&s_walk_pending);
             snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
-            ESP_LOGI(TAG, "envelope from cache at track change");
+            /* Quiet when sidecar_prime() a few lines up is what put it
+             * there: two lines describing one lookup reads as two. */
+            if (!primed_here) {
+                ESP_LOGI(TAG, "envelope from cache at track change");
+            }
         } else {
             waveform_set(NULL);
         }
@@ -1619,16 +1623,36 @@ static bool sidecar_prime(const char *path)
     /* Everything already in RAM: no read at all. */
     if (have_walk && have_tags && have_art) return true;
 
-    replaygain_t *rg = heap_caps_malloc(sizeof(*rg),
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!rg) {
-        ESP_LOGW(TAG, "no room for a sidecar record; not priming");
-        return have_walk;
-    }
+    /*
+     * The held record when there is one, and only then a load.
+     *
+     * rg_hold() runs on the line above the sidecar_prime() call in
+     * track_change_begin() and has the same record in memory already;
+     * reading the file again here was the read-it-twice shape the
+     * writes had before 0211, just cheaper.
+     *
+     * The other caller is media_task priming the NEXT track during
+     * prefetch. Nothing is held for that one, so it loads -- into
+     * PSRAM, because a replaygain_t is a shade over 3 KB and an
+     * automatic here is what overflowed media_task's stack.
+     */
+    replaygain_t *loaded = NULL;
+    const replaygain_t *rg;
 
-    if (!replaygain_load(path, rg)) {
-        heap_caps_free(rg);
-        return have_walk;
+    if (rg_holding(path)) {
+        rg = &s_rg;
+    } else {
+        loaded = heap_caps_malloc(sizeof(*loaded),
+                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!loaded) {
+            ESP_LOGW(TAG, "no room for a sidecar record; not priming");
+            return have_walk;
+        }
+        if (!replaygain_load(path, loaded)) {
+            heap_caps_free(loaded);
+            return have_walk;
+        }
+        rg = loaded;
     }
 
     if (!have_walk && rg->waveform.present && rg->waveform.columns > 0) {
@@ -1666,7 +1690,7 @@ static bool sidecar_prime(const char *path)
 
     const bool ret = have_walk ||
                      (rg->waveform.present && rg->waveform.columns > 0);
-    heap_caps_free(rg);
+    heap_caps_free(loaded);        /* NULL when the record was the held one */
     return ret;
 }
 
@@ -2579,10 +2603,14 @@ static track_end_t play_file(const char *path)
          * "no cover" answer are wanted for the first repaint, which
          * happens while the open is still running, and the whole point
          * of storing them was not to wait for a file read to get them.
+         *
+         * Held since track_change_begin(), so this is the same record
+         * the tags and the cover answer already came from -- no third
+         * read of one file, and no 3 KB copy of it either.
          */
-        replaygain_t have;
-        const bool got = replaygain_load(path, &have);
-        const bool known = got && have.loudness.present;
+        const bool got = rg_holding(path);
+        const replaygain_t *const have = &s_rg;
+        const bool known = got && have->loudness.present;
         measuring = !known;
 
         if (got) {
@@ -2590,25 +2618,25 @@ static track_end_t play_file(const char *path)
              * their answers without opening anything. Same copying
              * accessors as before -- mediacache.c reserves borrowed
              * pointers for media_task, and this is the decode loop. */
-            if (have.waveform.present && have.waveform.columns > 0) {
+            if (have->waveform.present && have->waveform.columns > 0) {
                 framewalk_t w;
                 memset(&w, 0, sizeof(w));
                 w.has_levels = true;
-                w.columns = have.waveform.columns;
-                w.sec     = have.waveform.sec;
-                memcpy(w.level, have.waveform.level,
-                       (size_t)have.waveform.columns);
+                w.columns = have->waveform.columns;
+                w.sec     = have->waveform.sec;
+                memcpy(w.level, have->waveform.level,
+                       (size_t)have->waveform.columns);
                 mediacache_put_walk(path, &w);
             }
-            if (have.tags.present) {
+            if (have->tags.present) {
                 id3_tags_t t;
                 memset(&t, 0, sizeof(t));
-                snprintf(t.title,  sizeof(t.title),  "%s", have.tags.title);
-                snprintf(t.artist, sizeof(t.artist), "%s", have.tags.artist);
-                snprintf(t.album,  sizeof(t.album),  "%s", have.tags.album);
+                snprintf(t.title,  sizeof(t.title),  "%s", have->tags.title);
+                snprintf(t.artist, sizeof(t.artist), "%s", have->tags.artist);
+                snprintf(t.album,  sizeof(t.album),  "%s", have->tags.album);
                 mediacache_put_tags(path, &t);
             }
-            if (have.art.present && !have.art.has_art) {
+            if (have->art.present && !have->art.has_art) {
                 mediacache_put_no_art(path);
             }
             /*
@@ -2619,8 +2647,8 @@ static track_end_t play_file(const char *path)
              * half later. decoder_open() overwrites it with its own
              * answer when it has one.
              */
-            if (have.format.present && have.format.sec) {
-                s_len_sec = have.format.sec;
+            if (have->format.present && have->format.sec) {
+                s_len_sec = have->format.sec;
             }
         }
 
@@ -2637,13 +2665,13 @@ static track_end_t play_file(const char *path)
             s_rg_active = false;
             s_rg_gain_db = 0.0f;
         } else {
-            const float g = replaygain_gain_db(&have.loudness);
+            const float g = replaygain_gain_db(&have->loudness);
             rg_scale = powf(10.0f, g / 20.0f);
             s_rg_active = true;
             s_rg_gain_db = g;
             ESP_LOGI(TAG, "replaygain: %.2f LUFS, peak %.2f dBFS -> %+.2f dB",
-                     (double)have.loudness.integrated_lufs,
-                     (double)have.loudness.sample_peak_dbfs, (double)g);
+                     (double)have->loudness.integrated_lufs,
+                     (double)have->loudness.sample_peak_dbfs, (double)g);
         }
     }
 
