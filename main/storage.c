@@ -10,6 +10,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
+#include "ff.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -125,6 +126,66 @@ bool storage_join_path(char *out, size_t out_len, const char *dir, const char *n
 bool storage_is_hidden(const char *name)
 {
     return !name || name[0] == '.';
+}
+
+/*
+ * The FAT hidden bit, for the files this program leaves lying around.
+ *
+ * A leading dot means "hidden" to us and to every Unix, and nothing at
+ * all to Windows or to the file browser on a phone. The card ends up
+ * with .defeatist.dat and a .rgcache next to every track, all of them
+ * plainly visible on the machine most likely to be looking at them, and
+ * a stranger's answer to a directory full of dotfiles is usually to
+ * delete them.
+ *
+ * FatFs can set the attribute; the VFS layer has no call for it, so
+ * this reaches past the VFS to f_chmod(). That needs the path as FatFs
+ * sees it -- a drive number and the path with the mount point removed
+ * -- and IDF does not publish which drive a mount was given. Rather
+ * than assume registration order (which puts the drive somewhere
+ * different depending on whether a card was present at boot), try each
+ * one and take the first that finds the file. FF_VOLUMES is 2 here, so
+ * this is at most one wasted call.
+ *
+ * Advisory throughout. A card that will not take the attribute, a
+ * FatFs built without f_chmod, a path on neither volume: the file is
+ * still written and still works, it is just visible.
+ */
+void storage_mark_hidden(const char *path)
+{
+#if FF_USE_CHMOD
+    const storage_id_t id = storage_of_path(path);
+    if (id == STORAGE_COUNT) return;
+
+    const char *mount = storage_mount_path(id);
+    if (!mount) return;
+
+    const char *rel = path + strlen(mount);     /* keeps the leading '/' */
+    if (*rel != '/') return;
+
+    for (int drv = 0; drv < FF_VOLUMES; drv++) {
+        char ff_path[640];
+        if (snprintf(ff_path, sizeof(ff_path), "%d:%s", drv, rel)
+            >= (int)sizeof(ff_path)) {
+            return;
+        }
+        if (f_chmod(ff_path, AM_HID, AM_HID) == FR_OK) return;
+    }
+
+    ESP_LOGD(TAG, "could not hide %s", path);
+#else
+    /*
+     * Logged once rather than per file: a build without f_chmod writes
+     * one of these per sidecar otherwise, which is noise about a
+     * cosmetic failure.
+     */
+    static bool said;
+    if (!said) {
+        said = true;
+        ESP_LOGI(TAG, "FatFs built without f_chmod; dotfiles stay visible on FAT");
+    }
+    (void)path;
+#endif
 }
 
 uint32_t storage_generation(void) { return s_generation; }
