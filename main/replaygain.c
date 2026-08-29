@@ -185,7 +185,107 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
         }
     }
 
-    ok = out->waveform.present || out->loudness.present;
+    const cJSON *ar = cJSON_GetObjectItemCaseSensitive(root, "art");
+    if (cJSON_IsObject(ar)) {
+        const cJSON *ha = cJSON_GetObjectItemCaseSensitive(ar, "has_art");
+        const cJSON *of = cJSON_GetObjectItemCaseSensitive(ar, "offset");
+        const cJSON *ln = cJSON_GetObjectItemCaseSensitive(ar, "length");
+        out->art.present = true;
+        out->art.has_art = cJSON_IsTrue(ha);
+        out->art.offset = cJSON_IsNumber(of) ? (uint32_t)of->valuedouble : 0;
+        out->art.length = cJSON_IsNumber(ln) ? (uint32_t)ln->valuedouble : 0;
+        /* A claimed cover with no length is not a location, it is a
+         * broken record. Demoted to a definite absence rather than
+         * believed, so the next look re-reads the tag. */
+        if (out->art.has_art && out->art.length == 0) out->art.present = false;
+    }
+
+    const cJSON *fm = cJSON_GetObjectItemCaseSensitive(root, "format");
+    if (cJSON_IsObject(fm)) {
+        const cJSON *sc = cJSON_GetObjectItemCaseSensitive(fm, "sec");
+        const cJSON *sr = cJSON_GetObjectItemCaseSensitive(fm, "sample_rate");
+        const cJSON *ch = cJSON_GetObjectItemCaseSensitive(fm, "channels");
+        const cJSON *kb = cJSON_GetObjectItemCaseSensitive(fm, "kbps");
+        const cJSON *cd = cJSON_GetObjectItemCaseSensitive(fm, "codec");
+        const cJSON *gd = cJSON_GetObjectItemCaseSensitive(fm, "enc_delay");
+        const cJSON *gp = cJSON_GetObjectItemCaseSensitive(fm, "enc_padding");
+        out->format.present = true;
+        out->format.sec = cJSON_IsNumber(sc) ? (uint32_t)sc->valuedouble : 0;
+        out->format.sample_rate = cJSON_IsNumber(sr) ? (uint32_t)sr->valuedouble : 0;
+        out->format.channels = cJSON_IsNumber(ch) ? (uint8_t)ch->valuedouble : 0;
+        out->format.kbps = cJSON_IsNumber(kb) ? (uint16_t)kb->valuedouble : 0;
+        if (cJSON_IsString(cd)) {
+            snprintf(out->format.codec, sizeof(out->format.codec), "%s",
+                     cd->valuestring);
+        }
+        /* Both or neither: a delay without a padding is half a trim and
+         * would clip the end of every gapless track that used it. */
+        out->format.has_gapless = cJSON_IsNumber(gd) && cJSON_IsNumber(gp);
+        if (out->format.has_gapless) {
+            out->format.enc_delay = (uint16_t)gd->valuedouble;
+            out->format.enc_padding = (uint16_t)gp->valuedouble;
+        }
+    }
+
+    const cJSON *tg = cJSON_GetObjectItemCaseSensitive(root, "tags");
+    if (cJSON_IsObject(tg)) {
+        const cJSON *ti = cJSON_GetObjectItemCaseSensitive(tg, "title");
+        const cJSON *ac = cJSON_GetObjectItemCaseSensitive(tg, "artist");
+        const cJSON *al = cJSON_GetObjectItemCaseSensitive(tg, "album");
+        out->tags.present = true;
+        if (cJSON_IsString(ti)) snprintf(out->tags.title, sizeof(out->tags.title), "%s", ti->valuestring);
+        if (cJSON_IsString(ac)) snprintf(out->tags.artist, sizeof(out->tags.artist), "%s", ac->valuestring);
+        if (cJSON_IsString(al)) snprintf(out->tags.album, sizeof(out->tags.album), "%s", al->valuestring);
+    }
+
+    const cJSON *ix = cJSON_GetObjectItemCaseSensitive(root, "index");
+    if (cJSON_IsObject(ix)) {
+        const cJSON *sp = cJSON_GetObjectItemCaseSensitive(ix, "spacing_sec");
+        const cJSON *of = cJSON_GetObjectItemCaseSensitive(ix, "offset");
+        const cJSON *sa = cJSON_GetObjectItemCaseSensitive(ix, "sample");
+        if (cJSON_IsArray(of) && cJSON_IsArray(sa) && cJSON_IsNumber(sp)) {
+            const int no = cJSON_GetArraySize(of);
+            const int ns = cJSON_GetArraySize(sa);
+            /* Ragged arrays mean a truncated or edited line. Taking the
+             * shorter would pair an offset with the wrong sample, which
+             * seeks to the wrong place silently -- worse than no index. */
+            if (no == ns && no > 0 && no <= REPLAYGAIN_INDEX_MAX) {
+                bool good = true;
+                for (int k = 0; k < no; k++) {
+                    const cJSON *a = cJSON_GetArrayItem(of, k);
+                    const cJSON *b = cJSON_GetArrayItem(sa, k);
+                    if (!cJSON_IsNumber(a) || !cJSON_IsNumber(b)) { good = false; break; }
+                    out->index.offset[k] = (uint32_t)a->valuedouble;
+                    out->index.sample[k] = (uint32_t)b->valuedouble;
+                }
+                /* Offsets past the end of the file are a record about a
+                 * different file that happened to match size and mtime,
+                 * or a corrupted one. Either way, not seekable. */
+                for (int k = 0; good && k < no; k++) {
+                    if (out->index.offset[k] >= filesize) good = false;
+                }
+                if (good) {
+                    out->index.present = true;
+                    out->index.count = no;
+                    out->index.spacing_sec = (uint32_t)sp->valuedouble;
+                }
+            }
+        }
+    }
+
+    const cJSON *at = cJSON_GetObjectItemCaseSensitive(root, "attempts");
+    if (cJSON_IsObject(at)) {
+        const cJSON *ab = cJSON_GetObjectItemCaseSensitive(at, "abandoned");
+        if (cJSON_IsNumber(ab)) {
+            out->attempts.present = true;
+            out->attempts.abandoned = (uint32_t)ab->valuedouble;
+        }
+    }
+
+    ok = out->waveform.present || out->loudness.present ||
+         out->art.present || out->format.present ||
+         out->tags.present || out->index.present ||
+         out->attempts.present;
 
 done:
     cJSON_Delete(root);
@@ -195,6 +295,17 @@ done:
 bool replaygain_load(const char *path, replaygain_t *out)
 {
     if (!path || !out) return false;
+
+    /*
+     * Cleared before anything can fail, so a false return leaves a
+     * readable all-absent record rather than whatever the caller's
+     * stack had. parse_line() clears it again on the way to a hit,
+     * which costs a memset nobody notices and means no caller has to
+     * remember that the struct is only valid when the bool is true --
+     * the kind of rule that holds right up until one call site forgets
+     * and reads a present flag out of uninitialised memory.
+     */
+    memset(out, 0, sizeof(*out));
 
     struct stat st;
     if (stat(path, &st) != 0) return false;
@@ -356,6 +467,67 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
         }
     }
 
+    if (rg->art.present) {
+        cJSON *ar = cJSON_AddObjectToObject(root, "art");
+        if (ar) {
+            cJSON_AddBoolToObject(ar, "has_art", rg->art.has_art);
+            if (rg->art.has_art) {
+                cJSON_AddNumberToObject(ar, "offset", (double)rg->art.offset);
+                cJSON_AddNumberToObject(ar, "length", (double)rg->art.length);
+            }
+        }
+    }
+
+    if (rg->format.present) {
+        cJSON *fm = cJSON_AddObjectToObject(root, "format");
+        if (fm) {
+            cJSON_AddNumberToObject(fm, "sec", (double)rg->format.sec);
+            cJSON_AddNumberToObject(fm, "sample_rate", (double)rg->format.sample_rate);
+            cJSON_AddNumberToObject(fm, "channels", (double)rg->format.channels);
+            cJSON_AddNumberToObject(fm, "kbps", (double)rg->format.kbps);
+            if (rg->format.codec[0]) {
+                cJSON_AddStringToObject(fm, "codec", rg->format.codec);
+            }
+            if (rg->format.has_gapless) {
+                cJSON_AddNumberToObject(fm, "enc_delay", (double)rg->format.enc_delay);
+                cJSON_AddNumberToObject(fm, "enc_padding", (double)rg->format.enc_padding);
+            }
+        }
+    }
+
+    if (rg->tags.present) {
+        cJSON *tg = cJSON_AddObjectToObject(root, "tags");
+        if (tg) {
+            /* Written even when empty: a track with no title tag is a
+             * fact, and omitting the key would make it look unread. */
+            cJSON_AddStringToObject(tg, "title", rg->tags.title);
+            cJSON_AddStringToObject(tg, "artist", rg->tags.artist);
+            cJSON_AddStringToObject(tg, "album", rg->tags.album);
+        }
+    }
+
+    if (rg->index.present && rg->index.count > 0) {
+        cJSON *ix = cJSON_AddObjectToObject(root, "index");
+        if (ix) {
+            cJSON_AddNumberToObject(ix, "spacing_sec",
+                                    (double)rg->index.spacing_sec);
+            cJSON *of = cJSON_AddArrayToObject(ix, "offset");
+            cJSON *sa = cJSON_AddArrayToObject(ix, "sample");
+            for (int k = 0; of && sa && k < rg->index.count; k++) {
+                cJSON_AddItemToArray(of, cJSON_CreateNumber((double)rg->index.offset[k]));
+                cJSON_AddItemToArray(sa, cJSON_CreateNumber((double)rg->index.sample[k]));
+            }
+        }
+    }
+
+    if (rg->attempts.present) {
+        cJSON *at = cJSON_AddObjectToObject(root, "attempts");
+        if (at) {
+            cJSON_AddNumberToObject(at, "abandoned",
+                                    (double)rg->attempts.abandoned);
+        }
+    }
+
     if (rg->loudness.present) {
         cJSON *ld = cJSON_AddObjectToObject(root, "loudness");
         if (ld) {
@@ -502,4 +674,95 @@ float replaygain_gain_db(const replaygain_loudness_t *l)
         if (g > REPLAYGAIN_MAX_BOOST_DB) g = REPLAYGAIN_MAX_BOOST_DB;
     }
     return g;
+}
+
+/* ------------------------------------------------------------------ */
+/* v3 sections. See replaygain.h -- nothing calls these yet.           */
+
+/* Every saver is the same three steps: stat for the key, load-or-empty
+ * so the other sections survive, overlay one section, append. Written
+ * out per section rather than behind a generic setter because the
+ * overlay is the only part that differs and a callback taking a void*
+ * would hide exactly the field assignments worth reading. */
+#define RG_SAVE_PROLOGUE(fail)                                            \
+    struct stat st;                                                       \
+    if (stat(path, &st) != 0) {                                           \
+        ESP_LOGW(TAG, "stat failed for %s; " fail, path);                 \
+        return ESP_FAIL;                                                  \
+    }                                                                     \
+    replaygain_t rg;                                                      \
+    load_or_empty(path, (uint32_t)st.st_size, (int64_t)st.st_mtime, &rg)
+
+#define RG_SAVE_APPEND()                                                  \
+    append_record(path, &rg, (uint32_t)st.st_size, (int64_t)st.st_mtime)
+
+esp_err_t replaygain_save_art(const char *path, bool has_art,
+                              uint32_t offset, uint32_t length)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+    /* A cover at a location with no bytes is not a cover. Refused here
+     * rather than written and rejected on the way back in. */
+    if (has_art && length == 0) return ESP_ERR_INVALID_ARG;
+
+    RG_SAVE_PROLOGUE("not caching art");
+    rg.art.present = true;
+    rg.art.has_art = has_art;
+    rg.art.offset  = has_art ? offset : 0;
+    rg.art.length  = has_art ? length : 0;
+    return RG_SAVE_APPEND();
+}
+
+esp_err_t replaygain_save_format(const char *path,
+                                 const replaygain_format_t *fmt)
+{
+    if (!path || !fmt) return ESP_ERR_INVALID_ARG;
+
+    RG_SAVE_PROLOGUE("not caching format");
+    rg.format = *fmt;
+    rg.format.present = true;
+    return RG_SAVE_APPEND();
+}
+
+esp_err_t replaygain_save_tags(const char *path, const char *title,
+                               const char *artist, const char *album)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+
+    RG_SAVE_PROLOGUE("not caching tags");
+    rg.tags.present = true;
+    snprintf(rg.tags.title,  sizeof(rg.tags.title),  "%s", title  ? title  : "");
+    snprintf(rg.tags.artist, sizeof(rg.tags.artist), "%s", artist ? artist : "");
+    snprintf(rg.tags.album,  sizeof(rg.tags.album),  "%s", album  ? album  : "");
+    return RG_SAVE_APPEND();
+}
+
+esp_err_t replaygain_save_index(const char *path, const uint32_t *offset,
+                                const uint32_t *sample, int count,
+                                uint32_t spacing_sec)
+{
+    if (!path || !offset || !sample || count <= 0 || !spacing_sec) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (count > REPLAYGAIN_INDEX_MAX) count = REPLAYGAIN_INDEX_MAX;
+
+    RG_SAVE_PROLOGUE("not caching index");
+    rg.index.present = true;
+    rg.index.count = count;
+    rg.index.spacing_sec = spacing_sec;
+    memcpy(rg.index.offset, offset, (size_t)count * sizeof(uint32_t));
+    memcpy(rg.index.sample, sample, (size_t)count * sizeof(uint32_t));
+    return RG_SAVE_APPEND();
+}
+
+esp_err_t replaygain_note_abandoned(const char *path)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+
+    RG_SAVE_PROLOGUE("not counting abandonment");
+    /* Increment whatever was there. load_or_empty() zeroed it if there
+     * was nothing, so a first abandonment lands at 1. */
+    const uint32_t was = rg.attempts.present ? rg.attempts.abandoned : 0;
+    rg.attempts.present = true;
+    rg.attempts.abandoned = was + 1;
+    return RG_SAVE_APPEND();
 }

@@ -108,12 +108,34 @@ extern "C" {
 #define REPLAYGAIN_COLUMNS          (720)
 
 /* The shape of the record. See "TWO VERSIONS" above. */
-#define REPLAYGAIN_FORMAT_VERSION   (2)
+#define REPLAYGAIN_FORMAT_VERSION   (3)
 
 /* Rewrite the file as one line once it passes this. Four or five lines
  * of a 720-column waveform, so an ordinary sidecar never reaches it and
  * one that has been re-measured repeatedly gets tidied. */
-#define REPLAYGAIN_COMPACT_BYTES    (8192)
+#define REPLAYGAIN_COMPACT_BYTES    (65536)
+
+/*
+ * Seek index. Entries are (byte offset, sample position) pairs at a
+ * fixed sample spacing, so a seek becomes a lookup and a short read
+ * rather than decoder_open()'s whole-file scan -- which is 1.2 to 1.8
+ * seconds of the open in every log taken so far, and nearly all of the
+ * delay before first sound.
+ *
+ * The spacing is coarse on purpose. minimp3's own index is per-frame,
+ * which for a 273 s track is ten thousand entries and far more
+ * precision than a finger on a 720 px bar can ask for: one pixel is
+ * about 380 ms there. Ten seconds per entry puts a 30 s track at 3
+ * entries and a 10 minute one at 60, and the decoder covers the
+ * remainder by decoding forward from the entry before the target --
+ * which it must be able to do anyway, since the target is rarely on a
+ * frame boundary.
+ *
+ * REPLAYGAIN_INDEX_MAX caps a very long file; past that the spacing
+ * doubles, the same way the envelope's does.
+ */
+#define REPLAYGAIN_INDEX_SPACING_SEC (10)
+#define REPLAYGAIN_INDEX_MAX         (256)
 
 typedef struct {
     bool     present;       /* is any of the rest of this meaningful */
@@ -132,11 +154,103 @@ typedef struct {
                              * see "SHORT TRACKS" in loudness.h */
 } replaygain_loudness_t;
 
+/*
+ * Cover art location.
+ *
+ * `present` is "this section was written", NOT "there is art". The
+ * distinction is the entire point: covertag.c currently answers "is
+ * there a cover" by scanning the tag, which the logs show landing eight
+ * to thirteen seconds into a track. Recording a definite no turns that
+ * into a stat, and recording where it is turns a scan into a seek --
+ * and covertag.c already computes both numbers on its way to the
+ * answer, so nothing new is being measured.
+ *
+ * So: section absent means nobody has looked. Section present with
+ * has_art false means somebody looked and there is none, which is a
+ * fact worth as much as an offset.
+ */
+typedef struct {
+    bool     present;
+    bool     has_art;
+    uint32_t offset;        /* byte offset of the image data */
+    uint32_t length;        /* bytes; 0 with has_art false */
+} replaygain_art_t;
+
+/*
+ * What the decoder reports once the file is open, so a listing can show
+ * it without opening anything. Duration lives here rather than in the
+ * waveform section, where it was only ever a side effect -- ADTS and
+ * AMR have no other source for it and duration.c pays for it every
+ * time.
+ */
+typedef struct {
+    bool     present;
+    uint32_t sec;           /* duration; 0 if genuinely unknown */
+    uint32_t sample_rate;
+    uint8_t  channels;
+    uint16_t kbps;
+    char     codec[8];      /* "mp3", "aac", "flac", ... */
+    /*
+     * Encoder delay and padding, when the file states them. Stored
+     * because a file that has them is re-parsed for them on every open,
+     * and a file that does not should not be re-checked for them at
+     * all. has_gapless separates "zero trim" from "no trim information",
+     * which are different files.
+     */
+    bool     has_gapless;
+    uint16_t enc_delay;
+    uint16_t enc_padding;
+} replaygain_format_t;
+
+/* Tags, so a listing does not open nine files to draw nine rows. Sized
+ * to match player.c's own buffers; anything longer is truncated there
+ * too, so storing more would be storing what nothing can display. */
+typedef struct {
+    bool present;
+    char title[64];
+    char artist[64];
+    char album[64];
+} replaygain_tags_t;
+
+/*
+ * Seek index. `spacing_sec` is what the entries are actually spaced at,
+ * which is not necessarily REPLAYGAIN_INDEX_SPACING_SEC -- a long file
+ * doubles it to stay under the cap, and a reader must use the stored
+ * value rather than the constant.
+ */
+typedef struct {
+    bool     present;
+    int      count;
+    uint32_t spacing_sec;
+    uint32_t offset[REPLAYGAIN_INDEX_MAX];   /* byte offset into the file */
+    uint32_t sample[REPLAYGAIN_INDEX_MAX];   /* sample position there */
+} replaygain_index_t;
+
+/*
+ * How many times a measurement was started and thrown away.
+ *
+ * A track that is always skipped through is otherwise indistinguishable
+ * from one never played, so it is measured from scratch on every play
+ * for ever. Counting the abandonments makes that visible, and lets a
+ * future policy stop trying, or accept a partial answer, after enough
+ * of them. Nothing acts on it yet; it is recorded so the history exists
+ * when something wants to.
+ */
+typedef struct {
+    bool     present;
+    uint32_t abandoned;
+} replaygain_attempts_t;
+
 typedef struct {
     uint32_t filesize;
     int64_t  mtime;
     replaygain_waveform_t waveform;
     replaygain_loudness_t loudness;
+    replaygain_art_t      art;
+    replaygain_format_t   format;
+    replaygain_tags_t     tags;
+    replaygain_index_t    index;
+    replaygain_attempts_t attempts;
 } replaygain_t;
 
 /*
@@ -179,6 +293,38 @@ esp_err_t replaygain_save_waveform(const char *path, const uint8_t *level,
  */
 esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
                                    float sample_peak_dbfs, uint32_t blocks);
+
+/*
+ * The v3 sections. Each merges into the record and leaves the others
+ * alone, exactly as the two above do -- the sections are produced at
+ * different moments by different code and none may clobber another.
+ *
+ * NOTHING CALLS THESE YET. This patch defines and tests the format; the
+ * producers and consumers are the next one. They are here now so the
+ * shape can be verified against a real read/write cycle before anything
+ * depends on it, rather than being designed and wired in one step and
+ * discovered to be wrong with sidecars already on cards.
+ */
+
+/* has_art false records a definite absence, which is the useful half --
+ * see replaygain_art_t. */
+esp_err_t replaygain_save_art(const char *path, bool has_art,
+                              uint32_t offset, uint32_t length);
+
+esp_err_t replaygain_save_format(const char *path,
+                                 const replaygain_format_t *fmt);
+
+esp_err_t replaygain_save_tags(const char *path, const char *title,
+                               const char *artist, const char *album);
+
+/* `spacing_sec` is stored alongside the entries; a reader must use it
+ * rather than assuming the constant. */
+esp_err_t replaygain_save_index(const char *path, const uint32_t *offset,
+                                const uint32_t *sample, int count,
+                                uint32_t spacing_sec);
+
+/* Records one abandoned measurement, incrementing whatever is there. */
+esp_err_t replaygain_note_abandoned(const char *path);
 
 /*
  * The gain to apply for a measured track, in dB.
