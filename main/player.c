@@ -1462,7 +1462,7 @@ static bool walk_prime(const char *path)
     return true;
 }
 
-static void do_walk(const char *path)
+static void do_walk(const char *path, bool primed)
 {
     /* Silent: the reason is logged once at boot rather than once per
      * track, since it does not change while the firmware is running. */
@@ -1473,20 +1473,26 @@ static void do_walk(const char *path)
      * walk is a whole-file read, so returning to a track otherwise costs
      * the same 30 MB it cost the first time. A kilobyte in PSRAM buys
      * that back.
+     *
+     * walk_prime() has already run and has already put a sidecar hit
+     * here, so this catches both caches. It logs only when it did NOT
+     * just fill the entry itself -- otherwise every sidecar hit printed
+     * "from sidecar" and "from cache" back to back, describing one
+     * lookup twice.
      */
     const framewalk_t *hit = mediacache_walk(path);
     if (hit) {
         memcpy(&s_walk, hit, sizeof(s_walk));
         s_wave_ready = true;
-        ESP_LOGI(TAG, "envelope from cache: %d columns", s_walk.columns);
+        if (!primed) {
+            ESP_LOGI(TAG, "envelope from cache: %d columns", s_walk.columns);
+        }
         return;
     }
 
-    /* The sidecar was pulled into the RAM cache by walk_prime(), which
-     * the caller runs before deciding whether to settle -- so a sidecar
-     * hit is the cache hit above by the time control reaches here, and
-     * there is no second disk read on this path. Anything still here
-     * has no envelope stored anywhere and has to be walked. */
+    /* Nothing in either cache: this track has no envelope stored
+     * anywhere and has to be walked, which is the only case the
+     * caller's settle was ever for. */
 
     FILE *f = storage_io_open(path, "rb");
     if (!f) return;
@@ -1829,7 +1835,18 @@ static void prefetch_next(void)
     if (gen != s_track_gen) return;
 
     /* ---- envelope ---- */
-    if (WAVEFORM_SCAN && !mediacache_walk(next)) {
+    /*
+     * walk_prime(), not mediacache_walk(): the sidecar counts as having
+     * the envelope, and asking only the RAM cache re-walked a track
+     * whose dotfile already held one. That is the same split 0204 fixed
+     * for the foreground walk, in the one place it did not reach --
+     * and it is the more expensive one, because the prefetch walk is a
+     * whole extra file read running against the playing track.
+     *
+     * A hit also leaves the entry in the RAM cache, which is what the
+     * track change is about to look for.
+     */
+    if (WAVEFORM_SCAN && !walk_prime(next)) {
         if (!prefetch_ok(PREFETCH_START_PCT)) {
             ESP_LOGI(TAG, "prefetch stopped before the envelope (ring %d%%)",
                      ring_headroom_pct());
@@ -1988,11 +2005,12 @@ static void media_task(void *arg)
              * caches, so the wait is skipped whenever the envelope can
              * be had without reading the whole file -- which is what
              * the settle was always for. */
-            if (!walk_prime(path) &&
+            const bool primed = walk_prime(path);
+            if (!primed &&
                 !media_settle(gen, MEDIA_WALK_DELAY_MS, MEDIA_MIN_RING_PCT,
                               "envelope")) continue;
 
-            do_walk(path);
+            do_walk(path, primed);
             HEAP_CHECK("after do_walk");
             if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
                                        "%s", path);
@@ -2479,8 +2497,39 @@ static track_end_t play_file(const char *path)
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
     {
         replaygain_t have;
-        const bool known = replaygain_load(path, &have) && have.loudness.present;
+        const bool got = replaygain_load(path, &have);
+        const bool known = got && have.loudness.present;
         measuring = !known;
+
+        /*
+         * The same record carries the envelope, and media_task is about
+         * to read this exact file again to get it -- two 2 KB reads of
+         * one sidecar, seconds apart, because each task loaded it
+         * independently. Handing the waveform straight to the cache
+         * here makes walk_prime() a RAM hit and the second read never
+         * happens.
+         *
+         * put_walk() and not the borrowing accessor: mediacache.c's
+         * contract reserves borrowed pointers for media_task, since a
+         * borrow outlives the lock. This is the decode loop, so it uses
+         * the copying side, which is safe from any task -- and that
+         * rules out testing for an existing entry first, since
+         * mediacache_walk() is the borrowing one. Writing
+         * unconditionally is the cheaper answer anyway: it is a
+         * kilobyte memcpy under the lock, against a re-read of the
+         * card if it is skipped.
+         */
+        if (got && have.waveform.present && have.waveform.has_levels &&
+            have.waveform.columns > 0) {
+            framewalk_t w;
+            memset(&w, 0, sizeof(w));
+            w.has_levels = true;
+            w.columns = have.waveform.columns;
+            w.frames  = have.waveform.frames;
+            w.sec     = have.waveform.sec;
+            memcpy(w.level, have.waveform.level, (size_t)have.waveform.columns);
+            mediacache_put_walk(path, &w);
+        }
 
         if (measuring) {
             loudness_reset(&s_loud);
