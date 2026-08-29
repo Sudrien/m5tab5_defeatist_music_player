@@ -292,6 +292,26 @@ static const char *TAG = "tab5_mp3";
 #define PCM_CHUNK_BYTES         (4 * 1024)
 
 /*
+ * Two rings, alternating, one track each.
+ *
+ * A track boundary is currently a drain: the decode loop waits for the
+ * ring to empty before it returns, so the next track cannot start
+ * decoding until the last sample of this one has been handed to I2S.
+ * Nothing can be decoded ahead into a buffer that is still being
+ * played, which is why there are two.
+ *
+ * This patch alternates them without overlapping them -- track N fills
+ * ring N&1 while the writer plays it out, exactly as before, and the
+ * next track fills the other one. Same behaviour, same drain, but the
+ * handoff the writer needs for gapless is now what actually moves
+ * playback from one track to the next, so it is exercised on every
+ * boundary before anything depends on it.
+ *
+ * 3.5 MB each, 7 MB total, against the single 10 MB ring this replaced.
+ */
+#define PCM_RINGS               (2)
+
+/*
  * How long the decode loop will sit in one xStreamBufferSend() before
  * coming up for air to look at the controls.
  *
@@ -516,6 +536,14 @@ static esp_err_t panel_init(void)
 /* Playback                                                            */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The ring the decoder is filling. An alias for s_ring[s_ring_fill],
+ * kept because everything that queues audio wants it and rewriting all
+ * of that to index would say nothing extra.
+ *
+ * NULL means no ring at all, which is a boot where the PSRAM could not
+ * be had. play_file() refuses tracks in that state.
+ */
 static StreamBufferHandle_t s_pcm;
 
 /*
@@ -579,8 +607,26 @@ static volatile uint32_t s_frames_chans = 2;
  * the usable size -- the implementation keeps head and tail distinct
  * that way -- and it is the caller's job to know that.
  */
-static StaticStreamBuffer_t s_pcm_struct;
-static uint8_t             *s_pcm_store;
+static StaticStreamBuffer_t s_pcm_struct[PCM_RINGS];
+static uint8_t             *s_pcm_store[PCM_RINGS];
+static StreamBufferHandle_t s_ring[PCM_RINGS];
+
+/*
+ * Which ring the decoder is filling and which one the writer is
+ * playing. Equal for all of one track; they differ from the moment a
+ * new track starts filling until the old one has been played out.
+ *
+ * Two plain ints rather than handles passed between tasks, for the same
+ * reason s_ring_pct is an int: an index cannot dangle, and the writer
+ * and the decode loop are on different cores.
+ *
+ * The decode loop owns s_ring_fill and only ever moves it to a ring the
+ * writer is not on. The writer owns s_ring_play and only ever moves it
+ * to s_ring_fill, and only once its own ring has run dry. Neither ever
+ * moves the other's, so there is nothing to lock.
+ */
+static volatile int s_ring_fill;
+static volatile int s_ring_play;
 
 /*
  * Set by play_file() before it drains the ring, and the reason the
@@ -658,7 +704,24 @@ static void i2s_writer_task(void *arg)
             continue;
         }
 
-        const size_t got = xStreamBufferReceive(s_pcm, buf, PCM_CHUNK_BYTES,
+        /*
+         * The handoff.
+         *
+         * The decoder has moved on to the other ring and this one has
+         * nothing left in it, so everything of the old track that will
+         * ever be heard has been. Moving to the ring being filled is
+         * what makes the next track audible, and doing it here -- in
+         * the task that owns playback -- is what makes it happen at the
+         * right sample rather than at the right moment.
+         */
+        const int play = s_ring_play;
+        if (play != s_ring_fill && xStreamBufferIsEmpty(s_ring[play])) {
+            s_ring_play = s_ring_fill;
+            continue;
+        }
+
+        const size_t got = xStreamBufferReceive(s_ring[s_ring_play], buf,
+                                                PCM_CHUNK_BYTES,
                                                 pdMS_TO_TICKS(100));
         ring_publish();
 
@@ -3182,6 +3245,25 @@ static track_end_t play_file(const char *path)
                     why = TRACK_UNREADABLE;
                     break;
                 }
+
+                /*
+                 * The other ring, always.
+                 *
+                 * The writer is on the one the previous track used and
+                 * moves across when it runs dry, so this track's first
+                 * samples go somewhere the writer is not reading -- the
+                 * property gapless needs, established here while the
+                 * drain below still guarantees the old ring is already
+                 * empty when we arrive.
+                 *
+                 * Reset rather than trusted: an interrupted track left
+                 * its tail in this ring two tracks ago, and the writer
+                 * has long since moved off it.
+                 */
+                s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
+                s_pcm = s_ring[s_ring_fill];
+                xStreamBufferReset(s_pcm);
+
                 s_ring_pct = 0;
                 s_writer_stop = false;
             } else if ((uint32_t)info.sample_rate != cur_rate) {
@@ -3313,7 +3395,20 @@ static track_end_t play_file(const char *path)
         s_writer_stop = true;
 
         if (why == TRACK_ENDED) {
-            while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(pdMS_TO_TICKS(10));
+            /*
+             * Both conditions, not just the empty one.
+             *
+             * The writer may still be on the previous track's ring when
+             * this track's decode finishes -- a very short track, or one
+             * skipped into. This ring being empty would then be true
+             * because nothing has been played from it yet rather than
+             * because everything has, and returning on that would cut
+             * the track off before a sample of it was heard.
+             */
+            while (s_ring_play != s_ring_fill ||
+                   !xStreamBufferIsEmpty(s_pcm)) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
         } else {
             xStreamBufferReset(s_pcm);
         }
@@ -3793,10 +3888,13 @@ void app_main(void)
      * the chooser comes up, which is a worse player than one with a ring
      * and a better one than a boot loop.
      */
-    s_pcm_store = heap_caps_malloc(PCM_RING_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_pcm_store) {
-        ESP_LOGE(TAG, "could not reserve %u KB for the PCM ring",
-                 (unsigned)(PCM_RING_BYTES / 1024));
+    for (int i = 0; i < PCM_RINGS; i++) {
+        s_pcm_store[i] = heap_caps_malloc(PCM_RING_BYTES + 1,
+                                          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!s_pcm_store[i]) {
+            ESP_LOGE(TAG, "could not reserve %u KB for PCM ring %d",
+                     (unsigned)(PCM_RING_BYTES / 1024), i);
+        }
     }
 
     /*
@@ -3814,10 +3912,16 @@ void app_main(void)
      * track rather than refusing to boot -- the chooser still works and
      * still says what is on the card.
      */
-    if (s_pcm_store) {
-        s_pcm = xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
-                                          s_pcm_store, &s_pcm_struct);
+    for (int i = 0; i < PCM_RINGS; i++) {
+        if (!s_pcm_store[i]) continue;
+        s_ring[i] = xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
+                                              s_pcm_store[i], &s_pcm_struct[i]);
     }
+    /* Both or neither. One ring would play, but every boundary would
+     * then behave differently from every other boundary, which is worse
+     * than a boot that says plainly it cannot play. */
+    s_ring_fill = s_ring_play = 0;
+    s_pcm = (s_ring[0] && s_ring[1]) ? s_ring[0] : NULL;
     if (s_pcm) {
         xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
     } else {
