@@ -2365,6 +2365,49 @@ said "if throughput does not move and `bounced` is high, this is wrong",
 and that is exactly what happened, which turned a wasted patch into a
 result.
 
+## The console drops lines, and a log is not a trace (0323-0325)
+
+Two patches went in chasing a stall that did not exist. The evidence was
+a missing log line, and the missing log line was the console.
+
+`first sound` stopped appearing on tracks started by a press. It is
+logged unconditionally on the first decoded block, there is no `continue`
+between the send and it, and the tracks in question decoded eighteen
+thousand blocks. Every path that could be read said it must print.
+
+0323 bracketed it: probes before the send and after it. On the failing
+runs *neither* fired, which appeared to prove the first block never
+reached the send. 0324 narrowed further, into the `cur_rate == 0` branch
+-- the only code between the format publish (whose `ogg: ...` line did
+appear) and the pre-send probe (which did not). That reading was airtight
+and wrong.
+
+The third run of 0324 printed every line and behaved identically to the
+two that had not. The lines were never not executed; they were executed
+and discarded. `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG` drops output when its
+TX buffer is full rather than blocking the task that logged it, and a
+track start emits six lines inside about 50 ms against a 256-byte
+buffer. 0325 raised it to 4 KB.
+
+Three things worth keeping from that:
+
+  - **A missing line is not an unexecuted line.** Absence of output is
+    evidence about the console as much as about the code. The tell is
+    shape: dropped output goes in contiguous runs with intact lines
+    either side, while a stall truncates and stays truncated.
+  - **Reproduce before narrowing.** Both probe patches were built on two
+    runs that agreed. A third run disagreed and was worth more than
+    either.
+  - **The buffer defers the loss, it does not remove it.** A host that
+    stops draining fills any buffer. If lines vanish again, look for a
+    burst first.
+
+Also worth stating plainly because it was asserted twice and was wrong
+twice: this was called cosmetic, then called a probable hang on the
+strength of a `HP_SYS_HP_WDT_RESET` that followed a monitor disconnect
+and had nothing to do with it. Neither claim was measured when it was
+made.
+
 ## 0103 was wrong, and what the negative result bought
 
 The bounce buffer did nothing. `bounced` came back 77 of 77 and 94 of 94,
