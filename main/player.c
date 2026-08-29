@@ -40,6 +40,7 @@
 #include "driver/i2c_master.h"
 #include "esp_check.h"
 #include "esp_timer.h"
+#include "esp_app_desc.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -3465,6 +3466,29 @@ void app_main(void)
      *
      * The USB stack is the same problem with more tasks: a drive being
      * enumerated logs a descriptor dump per device at info level. */
+    /*
+     * The line to start copying from.
+     *
+     * Everything above this is the ROM, the bootloader and IDF's own
+     * startup, which is the same on every boot and is not what anybody
+     * is looking at when they paste a log into a bug report. Everything
+     * below it is this program. The version is on the banner because a
+     * log without one cannot be matched to a tree -- a -dirty suffix
+     * here has already been the difference between a decoded backtrace
+     * that meant something and one that pointed at a comment.
+     *
+     * ESP_LOGW rather than I so it survives a build that has turned the
+     * info level down, and printed before anything else in app_main()
+     * so that a failure in the very first init is still below the
+     * banner.
+     */
+    {
+        const esp_app_desc_t *d = esp_app_get_description();
+        ESP_LOGW(TAG, "=== Defeatist Music Player === %s, IDF %s, built %s %s",
+                 d ? d->version : "?", d ? d->idf_ver : "?",
+                 d ? d->date : "?", d ? d->time : "?");
+    }
+
     esp_log_level_set("sdmmc_common", ESP_LOG_NONE);
     esp_log_level_set("sdmmc_init", ESP_LOG_NONE);
     esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_NONE);
