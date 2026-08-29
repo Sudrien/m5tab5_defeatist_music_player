@@ -3328,6 +3328,18 @@ static track_end_t play_file(const char *path)
             remain = (size_t)n * sizeof(int16_t);
         }
 
+        /* PROBE 0323 -- temporary, revert once the question is answered.
+         * Everything the first block knows before it is queued. If this
+         * line appears and "first sound" does not, the announce is being
+         * skipped; if neither appears, the first block never gets here. */
+        if (blocks == 0) {
+            ESP_LOGW(TAG, "probe: block 0 n=%d ch=%d rate=%d remain=%u "
+                          "pending=%d seek=%d fill=%d play=%d",
+                     n, info.channels, info.sample_rate, (unsigned)remain,
+                     (int)s_pending_ready, s_seek_pct,
+                     s_ring_fill, s_ring_play);
+        }
+
         const TickType_t t_send = xTaskGetTickCount();
         while (remain) {
             if (s_seek_pct >= 0 || s_pending_ready) break;
@@ -3364,6 +3376,13 @@ static track_end_t play_file(const char *path)
          *
          * Logged once per track, on the first block only.
          */
+        /* PROBE 0323 -- temporary. Reached means the announce below runs;
+         * the two together bracket everything between the send and it. */
+        if (blocks == 0) {
+            ESP_LOGW(TAG, "probe: block 0 sent, remain=%u ring=%d%%",
+                     (unsigned)remain, ring_headroom_pct());
+        }
+
         if (blocks == 0) {
             /* The ring gauge at the moment sound starts. The decode loop
              * has had the whole open to fill it and the writer has not
@@ -3380,6 +3399,11 @@ static track_end_t play_file(const char *path)
 
         blocks++;
     }
+
+    /* PROBE 0323 -- temporary. What the loop actually did, so a missing
+     * announce can be told apart from a loop that never ran. */
+    ESP_LOGW(TAG, "probe: loop exit blocks=%d why=%d fill=%d play=%d",
+             blocks, (int)why, s_ring_fill, s_ring_play);
 
     if (s_pcm) {
         /* Interrupted rather than finished: what is queued is the old
