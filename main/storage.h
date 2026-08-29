@@ -104,6 +104,20 @@ bool storage_join_path(char *out, size_t out_len, const char *dir, const char *n
  */
 bool storage_is_hidden(const char *name);
 
+/*
+ * Set the FAT hidden attribute on a file this program wrote.
+ *
+ * The dot prefix storage_is_hidden() looks for means nothing to
+ * Windows, so the settings file and the per-track sidecars show up as
+ * clutter on the machine people are most likely to plug the card into.
+ * This is the other half of hiding them.
+ *
+ * Call after the file is in place -- after the rename, not on the temp
+ * file, since the attribute travels with the name. Advisory: failure is
+ * silent and costs nothing but visibility.
+ */
+void storage_mark_hidden(const char *path);
+
 /* Bumped on every mount and every unmount. The chooser redraws its tabs
  * when this changes rather than re-statting the volumes every frame. */
 uint32_t storage_generation(void);
