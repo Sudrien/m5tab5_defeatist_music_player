@@ -15,6 +15,7 @@
 
 #include "settings.h"
 #include "storage.h"
+#include "storage_io.h"
 
 static const char *TAG = "tab5_settings";
 
@@ -189,7 +190,19 @@ static void write_file(void)
         return;
     }
 
-    FILE *f = fopen(tmp, "w");
+    /*
+     * Through the arbiter, like every other write in the program.
+     *
+     * This was plain stdio, which meant the one background writer on
+     * the volume was also the one that did not queue behind playback:
+     *
+     *   W (25824) tab5_mp3: decoder_read blocked 947 ms
+     *   I (26414) tab5_settings: saved /usb/.defeatist.dat (volume=21)
+     *
+     * -- worst hold 939 ms on that track against 7 ms on a track where
+     * nobody touched the volume.
+     */
+    FILE *f = storage_io_open(tmp, "w");
     if (!f) {
         /* A card can be write-protected, full, or gone. None of those
          * are worth retrying every three seconds forever, so the dirty
@@ -216,7 +229,7 @@ static void write_file(void)
      */
     const bool flushed = (fflush(f) == 0);
     const int flush_errno = errno;
-    const bool closed = (fclose(f) == 0);
+    const bool closed = (storage_io_close(f) == 0);
 
     if (!flushed || !closed) {
         ESP_LOGW(TAG, "write failed (%s); leaving the previous file alone",
@@ -229,9 +242,33 @@ static void write_file(void)
         return;
     }
 
+    /*
+     * One lease per operation, not one around all three.
+     *
+     * These are three FAT metadata operations and on a USB drive they
+     * are most of the cost of a save -- 1.5 s for a record under a
+     * kilobyte. Holding the lease across the set would make the
+     * decoder wait for all of it; taking it three times lets a
+     * playback read in between each, which is the whole point of the
+     * arbiter existing.
+     *
+     * Nothing here is atomic across the set anyway. The rotation is
+     * designed so that any prefix of it leaves a loadable file, which
+     * is exactly what makes interleaving safe.
+     */
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
     remove(bak);
+    storage_io_release();
+
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
     rename(dat, bak);       /* fails harmlessly on the first ever write */
-    if (rename(tmp, dat) != 0) {
+    storage_io_release();
+
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    const int installed = rename(tmp, dat);
+    storage_io_release();
+
+    if (installed != 0) {
         ESP_LOGW(TAG, "could not install %s", dat);
         return;
     }

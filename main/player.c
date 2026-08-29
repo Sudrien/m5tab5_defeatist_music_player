@@ -1628,13 +1628,77 @@ static void rg_hold(const char *path)
  * whether it has a cover, and those are worth keeping even though its
  * loudness is not.
  */
+/*
+ * The record handed to media_task to write, and the flag that transfers
+ * ownership of it.
+ *
+ * One slot, one producer (the decode loop, in rg_release()), one
+ * consumer (media_task). The producer allocates, fills, and sets the
+ * flag LAST; the consumer writes, frees, and clears the flag LAST. At
+ * no point do both touch the same allocation, so this needs no lock.
+ */
+static replaygain_t *s_rg_pending;
+static char          s_rg_pending_path[512];
+static volatile bool s_rg_pending_ready;
+
+/*
+ * Hand the record to media_task rather than writing it here.
+ *
+ * This ran inline at the end of play_file() and was, by the end, the
+ * entire gap between two tracks:
+ *
+ *   I (341534) tab5_mp3: finished, 15930 blocks
+ *   I (343098) tab5_rg: sidecar written: ... (994 bytes)
+ *   I (343100) tab5_mp3: playing 08 - Toki on White Waves
+ *
+ * 1.56 s to write 994 bytes, because it is not a write -- it is a
+ * remove, a rename, and a create, three FAT metadata operations on a
+ * USB drive, with the next track's open queued behind all of them.
+ *
+ * media_task is priority 1, does this kind of IO already, and nothing
+ * waits on it. The copy costs 3 KB of PSRAM for as long as the write
+ * takes.
+ *
+ * Two fallbacks to inline, both rare and both better than losing the
+ * record: no memory for the copy, and a previous hand-off still
+ * unclaimed. The second means two tracks ended within one media_task
+ * poll of each other, which takes a skip landing in exactly the wrong
+ * 50 ms.
+ */
 static void rg_release(void)
 {
     if (s_rg_dirty && s_rg_path[0]) {
-        replaygain_write(s_rg_path, &s_rg);
+        replaygain_t *copy = s_rg_pending_ready
+                             ? NULL
+                             : heap_caps_malloc(sizeof(*copy),
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (copy) {
+            memcpy(copy, &s_rg, sizeof(*copy));
+            snprintf(s_rg_pending_path, sizeof(s_rg_pending_path), "%s", s_rg_path);
+            s_rg_pending = copy;
+            s_rg_pending_ready = true;      /* last: this is the hand-off */
+        } else {
+            /* Whatever the reason, the record is this track's and is
+             * worth more than the boundary is. */
+            replaygain_write(s_rg_path, &s_rg);
+        }
     }
     s_rg_dirty = false;
     s_rg_path[0] = '\0';
+}
+
+/* media_task's half. Called at the top of its loop, so the write starts
+ * within one poll of the track ending and runs alongside the next
+ * track's open rather than in front of it. */
+static void rg_write_pending(void)
+{
+    if (!s_rg_pending_ready) return;
+
+    replaygain_t *rg = s_rg_pending;
+    if (rg) replaygain_write(s_rg_pending_path, rg);
+    s_rg_pending = NULL;
+    heap_caps_free(rg);
+    s_rg_pending_ready = false;             /* last: the slot is free again */
 }
 
 /* True when the held record is this track's. Guards every merge below:
@@ -2073,6 +2137,11 @@ static void media_task(void *arg)
     char path[512];
 
     while (1) {
+        /* Before the want check, so a sidecar handed over at a track
+         * boundary is written even while the next track's cover work is
+         * queued behind it. */
+        rg_write_pending();
+
         if (!s_media_want) {
             vTaskDelay(pdMS_TO_TICKS(50));
             continue;
