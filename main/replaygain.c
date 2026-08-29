@@ -509,3 +509,21 @@ esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
     }
     return err;
 }
+
+float replaygain_gain_db(const replaygain_loudness_t *l)
+{
+    if (!l || !l->present) return 0.0f;
+
+    float g = LOUDNESS_REFERENCE_LUFS - l->integrated_lufs;
+
+    if (g > 0.0f) {
+        /* Headroom the peak leaves. A peak of -3 dBFS can take +2 dB
+         * before it reaches -1. Only ever reduces the boost; a track
+         * with no headroom gets none. */
+        float room = -l->sample_peak_dbfs - REPLAYGAIN_HEADROOM_DB;
+        if (room < 0.0f) room = 0.0f;
+        if (g > room) g = room;
+        if (g > REPLAYGAIN_MAX_BOOST_DB) g = REPLAYGAIN_MAX_BOOST_DB;
+    }
+    return g;
+}
