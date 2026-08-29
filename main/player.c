@@ -3230,21 +3230,9 @@ static track_end_t play_file(const char *path)
             }
 
             if (cur_rate == 0) {
-                /* PROBE 0324 -- temporary, revert with 0323's.
-                 * The first-block branch is the only code between the
-                 * format publish (which the "ogg: ..." line proves is
-                 * reached) and 0323's pre-send probe (which is not), so
-                 * one of the three calls below is where the loop goes. */
-                ESP_LOGW(TAG, "probe: rate branch enter, rate=%d play=%d fill=%d "
-                              "playing=%d stop=%d",
-                         info.sample_rate, s_ring_play, s_ring_fill,
-                         (int)s_playing, (int)s_writer_stop);
-
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
-
-                ESP_LOGW(TAG, "probe: set_format returned");
                 /*
                  * The ring and the writer are made once in app_main()
                  * now, so a track start sets the rate and publishes an
@@ -3274,22 +3262,7 @@ static track_end_t play_file(const char *path)
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
-
-                /*
-                 * PROBE 0324 -- temporary.
-                 *
-                 * xStreamBufferReset() fails, and returns pdFAIL, if a
-                 * task is blocked on the buffer. The writer sits in
-                 * xStreamBufferReceive() with a 100 ms timeout, so on
-                 * the ring it is parked on that is a live possibility.
-                 * Before 0322 this call did not exist -- the ring was
-                 * freshly created here -- which matches when the
-                 * symptom appeared.
-                 */
-                ESP_LOGW(TAG, "probe: about to reset ring %d", s_ring_fill);
-                const BaseType_t reset_ok = xStreamBufferReset(s_pcm);
-                ESP_LOGW(TAG, "probe: reset ring %d -> %s", s_ring_fill,
-                         reset_ok == pdPASS ? "pass" : "FAIL");
+                xStreamBufferReset(s_pcm);
 
                 s_ring_pct = 0;
                 s_writer_stop = false;
@@ -3355,18 +3328,6 @@ static track_end_t play_file(const char *path)
             remain = (size_t)n * sizeof(int16_t);
         }
 
-        /* PROBE 0323 -- temporary, revert once the question is answered.
-         * Everything the first block knows before it is queued. If this
-         * line appears and "first sound" does not, the announce is being
-         * skipped; if neither appears, the first block never gets here. */
-        if (blocks == 0) {
-            ESP_LOGW(TAG, "probe: block 0 n=%d ch=%d rate=%d remain=%u "
-                          "pending=%d seek=%d fill=%d play=%d",
-                     n, info.channels, info.sample_rate, (unsigned)remain,
-                     (int)s_pending_ready, s_seek_pct,
-                     s_ring_fill, s_ring_play);
-        }
-
         const TickType_t t_send = xTaskGetTickCount();
         while (remain) {
             if (s_seek_pct >= 0 || s_pending_ready) break;
@@ -3403,13 +3364,6 @@ static track_end_t play_file(const char *path)
          *
          * Logged once per track, on the first block only.
          */
-        /* PROBE 0323 -- temporary. Reached means the announce below runs;
-         * the two together bracket everything between the send and it. */
-        if (blocks == 0) {
-            ESP_LOGW(TAG, "probe: block 0 sent, remain=%u ring=%d%%",
-                     (unsigned)remain, ring_headroom_pct());
-        }
-
         if (blocks == 0) {
             /* The ring gauge at the moment sound starts. The decode loop
              * has had the whole open to fill it and the writer has not
@@ -3426,11 +3380,6 @@ static track_end_t play_file(const char *path)
 
         blocks++;
     }
-
-    /* PROBE 0323 -- temporary. What the loop actually did, so a missing
-     * announce can be told apart from a loop that never ran. */
-    ESP_LOGW(TAG, "probe: loop exit blocks=%d why=%d fill=%d play=%d",
-             blocks, (int)why, s_ring_fill, s_ring_play);
 
     if (s_pcm) {
         /* Interrupted rather than finished: what is queued is the old
