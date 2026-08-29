@@ -329,11 +329,38 @@ static esp_err_t add_dev(uint8_t addr, i2c_master_dev_handle_t *out)
  * pins high-impedance after reset, so writing the value alone leaves
  * them floating -- amp off, panel dead, no error from either.
  */
+/*
+ * The first write of the boot, retried.
+ *
+ * A panic anywhere in the program resets the P4 without releasing the
+ * bus, and a slave interrupted mid-byte can sit on SDA into the next
+ * boot. The first transmit then NACKs -- which the v5 I2C master driver
+ * reports as ESP_ERR_INVALID_STATE -- and since app_main() checks this
+ * function, the recovery boot aborts before the panel is up. One crash
+ * becomes an unrecoverable loop with nothing on screen to say why.
+ *
+ * Three attempts 20 ms apart. A device that is genuinely absent still
+ * fails, 60 ms later; a bus that just needs a moment gets it.
+ */
+static esp_err_t reg_write_retry(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t val)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int i = 0; i < 3; i++) {
+        err = reg_write(dev, reg, val);
+        if (err == ESP_OK) {
+            if (i) ESP_LOGW(TAG, "expander answered on attempt %d", i + 1);
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+    return err;
+}
+
 static esp_err_t io_expanders_init(void)
 {
 
     ESP_RETURN_ON_ERROR(add_dev(PI4IOE_ADDR_1, &s_exp1), TAG, "expander 0x43 absent");
-    ESP_RETURN_ON_ERROR(reg_write(s_exp1, PI4IOE_REG_CHIP_RESET, 0xFF), TAG, "reset 1");
+    ESP_RETURN_ON_ERROR(reg_write_retry(s_exp1, PI4IOE_REG_CHIP_RESET, 0xFF), TAG, "reset 1");
     ESP_RETURN_ON_ERROR(reg_write(s_exp1, PI4IOE_REG_IO_DIR, PI4IOE1_IO_DIR), TAG, "dir 1");
     ESP_RETURN_ON_ERROR(reg_write(s_exp1, PI4IOE_REG_OUT_HIGH_Z, 0x00), TAG, "high-z 1");
     ESP_RETURN_ON_ERROR(reg_write(s_exp1, PI4IOE_REG_PULL_SEL, 0x7F), TAG, "pull sel 1");
