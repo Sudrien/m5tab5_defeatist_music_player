@@ -33,9 +33,11 @@
  * one, so any line is self-describing and the fallback is a real
  * fallback rather than a line with no key on it.
  *
- * The file is compacted -- rewritten as a single line -- once it grows
- * past REPLAYGAIN_COMPACT_BYTES, so re-measuring a track repeatedly
- * does not grow its sidecar without bound.
+ * The file is exactly one line. Every write serialises the whole merged
+ * record to a temp file and renames it over the old one, so re-measuring
+ * a track replaces its sidecar rather than extending it -- and at
+ * roughly a kilobyte it sits inside a single FAT cluster and cannot
+ * fragment.
  *
  * ANYTHING THAT IS NOT THIS FORMAT IS DUMPED
  *
@@ -110,10 +112,15 @@ extern "C" {
 /* The shape of the record. See "TWO VERSIONS" above. */
 #define REPLAYGAIN_FORMAT_VERSION   (3)
 
-/* Rewrite the file as one line once it passes this. Four or five lines
- * of a 720-column waveform, so an ordinary sidecar never reaches it and
- * one that has been re-measured repeatedly gets tidied. */
-#define REPLAYGAIN_COMPACT_BYTES    (65536)
+/*
+ * Read buffer for a sidecar. Not a growth cap: the file is rewritten
+ * whole on every write and is one line, so it does not grow. A record
+ * carrying every section including a 256-entry index is around 4 KB, so
+ * this is roughly double the largest thing that can be written -- room
+ * for a future section without room for a runaway allocation on the
+ * decode path.
+ */
+#define REPLAYGAIN_READ_MAX         (8192)
 
 /*
  * Seek index. Entries are (byte offset, sample position) pairs at a

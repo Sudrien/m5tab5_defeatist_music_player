@@ -321,12 +321,12 @@ bool replaygain_load(const char *path, replaygain_t *out)
 
     /* Small file by construction -- compaction keeps it so. Read it
      * whole rather than seeking around for line boundaries. */
-    char *buf = malloc(REPLAYGAIN_COMPACT_BYTES + 1);
+    char *buf = malloc(REPLAYGAIN_READ_MAX + 1);
     if (!buf) {
         storage_io_close(f);
         return false;
     }
-    const size_t got = fread(buf, 1, REPLAYGAIN_COMPACT_BYTES, f);
+    const size_t got = fread(buf, 1, REPLAYGAIN_READ_MAX, f);
     storage_io_close(f);
     buf[got] = '\0';
 
@@ -381,52 +381,9 @@ static void resample_levels(const uint8_t *src, int n, uint8_t *dst, int cols)
     }
 }
 
-/*
- * Is the file at `cache_path` JSONL written by this code at all?
- *
- * Deliberately NOT "does replaygain_load() succeed". That answers a
- * different question: load() also fails on a sidecar whose filesize or
- * mtime no longer match the track, and a stale-but-well-formed sidecar
- * must still be appended to like any other -- the new line supersedes
- * the old one and the reader already ignores what it supersedes.
- * Rewriting on staleness would be harmless but would silently discard
- * the previous record, which is the reader's job to do, not the
- * writer's.
- *
- * What this catches is content that is not this format at all. In
- * practice that is 0200's packed binary record: a firmware that had
- * already written sidecars gets reflashed, and the first 0201 write
- * appends valid JSON directly onto a 752-byte binary blob. Nothing
- * breaks -- replaygain_load() scans backwards from the end and never
- * reads far enough to reach the blob -- but the file carries the dead
- * bytes for ever, and any stricter reader, or anything that is not this
- * exact backwards scan, would choke on it.
- *
- * Cheap by construction: reads only the first byte. Every line this
- * code writes is a JSON object, so a sidecar in this format always
- * starts with '{'. Anything else -- 0200's "1CGR" magic, a truncated
- * write, a file some other tool left -- is not ours and gets dumped.
- *
- * An empty or missing file is "ours": there is nothing to dump, and the
- * open below creates it.
- */
-static bool sidecar_is_jsonl(const char *cache_path)
-{
-    FILE *f = storage_io_open(cache_path, "rb");
-    if (!f) return true;                 /* nothing there yet */
-
-    const int c = fgetc(f);
-    storage_io_close(f);
-
-    if (c == EOF) return true;           /* empty; nothing to dump */
-    return c == '{';
-}
 
 /*
- * Serialise `rg` as one line and add it to the sidecar -- appended
- * normally, or written over the whole file when it has grown past the
- * cap or when what is there is not this format (see
- * sidecar_is_jsonl()).
+ * Serialise `rg` and write it as the sidecar's only line.
  *
  * Read-modify-write is the caller's job: it loads, overlays its own
  * section and hands the whole thing here. That keeps the merge in one
@@ -545,22 +502,49 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
     if (!line) return ESP_ERR_NO_MEM;
 
     /*
-     * Rewrite rather than append in two cases: the file has grown past
-     * the cap, or what is already there is not this format at all (see
-     * sidecar_is_jsonl()). Both open "wb", which truncates -- the
-     * record being written already carries everything the earlier lines
-     * said, because the caller merged it before handing it here.
+     * Always one line, always the whole record, written to a temp file
+     * and renamed over the old one.
+     *
+     * Appending was the wrong call and a card showed why: a sidecar
+     * written across the v1, v2 and v3 formats held six lines, four of
+     * them dead, because sidecar_is_jsonl() only asks whether the first
+     * byte is '{' -- and a stale-version line is perfectly good JSONL.
+     * So a format bump never triggered a rewrite; it appended after the
+     * corpses, and every future bump would double them again.
+     *
+     * The deeper point is that appending never bought anything here.
+     * Every line is already a complete merged record, because the
+     * caller loads and overlays before calling: line N+1 says
+     * everything line N said. So an append writes the same bytes a
+     * rewrite would and keeps the old copy as well. The only argument
+     * for it was a torn write leaving the previous line readable, and
+     * temp-and-rename answers that better -- a crash leaves the old
+     * file whole, because the rename either happened or it did not.
+     *
+     * What this buys, beyond dropping the dead lines:
+     *
+     *   - The file is ~1.2 KB and stays there. A 64 KB cluster holds it
+     *     in one piece, so the sidecar cannot fragment. That is why
+     *     there is no size threshold any more -- the file never grows,
+     *     so there is nothing to compact and no boundary to straddle.
+     *     A growth cap of 65536 was in fact the worst possible value:
+     *     it permitted growth to exactly the cluster edge before
+     *     acting. The cap is gone; REPLAYGAIN_READ_MAX is now only the
+     *     size of the read buffer.
+     *
+     *   - A stale-version line cannot survive, because nothing survives.
+     *     Version handling stops needing a migration path at all.
      */
-    struct stat cst;
-    const bool too_big = (stat(cache_path, &cst) == 0 &&
-                          cst.st_size > REPLAYGAIN_COMPACT_BYTES);
-    const bool foreign = !sidecar_is_jsonl(cache_path);
-    const bool rewrite = too_big || foreign;
+    char tmp_path[620];
+    if ((int)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path)
+        >= (int)sizeof(tmp_path)) {
+        cJSON_free(line);
+        return ESP_ERR_INVALID_SIZE;
+    }
 
-
-    FILE *f = storage_io_open(cache_path, rewrite ? "wb" : "ab");
+    FILE *f = storage_io_open(tmp_path, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "could not open %s for writing", cache_path);
+        ESP_LOGW(TAG, "could not open %s for writing", tmp_path);
         cJSON_free(line);
         return ESP_FAIL;
     }
@@ -572,14 +556,23 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
     cJSON_free(line);
 
     if (!wrote || cerr != 0) {
-        ESP_LOGW(TAG, "write failed for %s", cache_path);
+        ESP_LOGW(TAG, "write failed for %s; keeping the old sidecar",
+                 tmp_path);
+        remove(tmp_path);
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "sidecar %s: %s",
-             foreign ? "rewritten (was not JSONL)"
-             : too_big ? "compacted" : "updated",
-             cache_path);
+    /* Atomic on FatFs: a directory entry update, not a copy. Either the
+     * new record is there or the old one still is. */
+    remove(cache_path);          /* FatFs rename() will not overwrite */
+    if (rename(tmp_path, cache_path) != 0) {
+        ESP_LOGW(TAG, "rename %s -> %s failed", tmp_path, cache_path);
+        remove(tmp_path);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "sidecar written: %s (%u bytes)", cache_path,
+             (unsigned)(len + 1));
     return ESP_OK;
 }
 
