@@ -17,6 +17,8 @@
 #include "storage.h"
 #include "storage_io.h"
 
+#include "cJSON.h"
+
 static const char *TAG = "tab5_settings";
 
 /*
@@ -64,8 +66,33 @@ static const char *TAG = "tab5_settings";
  * question of what is special about it, and the answer would be
  * "nothing, it just collided once".
  */
-#define SETTINGS_MAX_FILE_BYTES (1024)
-#define SETTINGS_MAX_LINE       (128)
+#define SETTINGS_MAX_LINE       (256)
+
+/*
+ * The file is append-only, and this is where it stops growing.
+ *
+ * Every save used to be a write plus a remove plus two renames -- four
+ * FAT operations to store one integer, and on a USB drive that was
+ * measured at nearly a second with the decoder waiting behind it:
+ *
+ *   W (47654) tab5_mp3: decoder_read blocked 920 ms
+ *   I (48320) tab5_settings: saved /usb/.defeatist.dat (volume=20)
+ *
+ * An append is one open, one write at a known offset, one close. It
+ * touches the last sector of the file and the directory entry's size;
+ * it does not walk or rewrite the FAT chain, and it does not create or
+ * destroy a directory entry. That is both faster and kinder to the
+ * flash, which is the same reason in two words.
+ *
+ * 64 KB because it is a whole number of clusters at every allocation
+ * size this program mounts with, so a file that reaches the cap has
+ * been rewritten in place the whole time rather than chasing new
+ * clusters. A record is on the order of tens of bytes, so the cap is
+ * thousands of saves away -- the compaction below is a rare event by
+ * construction, which is what makes it acceptable for it to be the
+ * expensive shape.
+ */
+#define SETTINGS_MAX_FILE_BYTES (64 * 1024)
 
 static uint8_t    s_volume = 50;
 static volatile bool s_dirty;
@@ -89,6 +116,10 @@ static const char *s_root;
  * not a request to restore someone else's preferences. */
 static bool s_loaded;
 
+/* The file's size as last known, so a save can tell an append from a
+ * compaction without stat()ing first. */
+static size_t s_bytes;
+
 uint8_t settings_volume(void) { return s_volume; }
 
 void settings_set_volume(uint8_t percent)
@@ -109,17 +140,40 @@ static bool path_for(char *out, size_t out_len, const char *name)
 }
 
 /*
- * One key=value line.
+ * One record.
  *
- * Unknown keys are skipped rather than treated as errors, which is what
- * makes a card survive moving between builds: an older firmware reading
- * a newer file keeps the settings it understands instead of throwing the
- * file away because of a line it has never heard of.
+ * JSON Lines: one object per line, appended, last one wins. Unknown
+ * keys are skipped rather than treated as errors, which is what makes a
+ * card survive moving between builds -- an older firmware reading a
+ * newer file keeps the settings it understands instead of throwing the
+ * file away because of a key it has never heard of.
+ *
+ * Lines that are not JSON are tried as the old `key=value` form, so a
+ * card written by an earlier build still loads. Nothing writes that
+ * form any more; the first append after a load leaves a JSON record
+ * below it, and the compaction eventually removes the rest.
  */
-static void parse_line(char *line)
+static bool parse_line(char *line)
 {
+    if (line[0] == '{') {
+        cJSON *root = cJSON_Parse(line);
+        if (!root) return false;
+
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "volume");
+        bool any = false;
+        if (cJSON_IsNumber(v)) {
+            int n = v->valueint;
+            if (n < 0)   n = 0;
+            if (n > 100) n = 100;
+            s_volume = (uint8_t)n;
+            any = true;
+        }
+        cJSON_Delete(root);
+        return any;
+    }
+
     char *eq = strchr(line, '=');
-    if (!eq) return;
+    if (!eq) return false;
     *eq = '\0';
     const char *key = line;
     const char *val = eq + 1;
@@ -129,139 +183,136 @@ static void parse_line(char *line)
         if (v < 0) v = 0;
         if (v > 100) v = 100;
         s_volume = (uint8_t)v;
-    } else {
-        ESP_LOGD(TAG, "unknown key '%s'", key);
+        return true;
     }
+    ESP_LOGD(TAG, "unknown key '%s'", key);
+    return false;
 }
 
+/*
+ * Every record in the file, in order, last one winning.
+ *
+ * Applying all of them rather than seeking to the end and reading one:
+ * a line can be truncated (power lost mid-append), and a line can be a
+ * legacy key=value that carries a key a later JSON record does not.
+ * Replaying the file is how both of those come out right, and at tens
+ * of bytes a record it is a single sequential read of at most 64 KB.
+ *
+ * s_bytes is left holding the file's size, which is what decides
+ * whether the next save appends or compacts.
+ */
 static bool load_file(const char *name)
 {
     char path[128];
     if (!path_for(path, sizeof(path), name)) return false;
 
-    FILE *f = fopen(path, "r");
+    FILE *f = storage_io_open(path, "r");
     if (!f) return false;
 
     char line[SETTINGS_MAX_LINE];
     size_t total = 0;
+    int records = 0;
     bool any = false;
+
     while (fgets(line, sizeof(line), f)) {
         total += strlen(line);
         if (total > SETTINGS_MAX_FILE_BYTES) {
-            /* Not a file this program wrote. Stopping here rather than
-             * reading on: whatever it is, the values taken from it so
-             * far are as trustworthy as they are going to get, and the
-             * defaults cover the rest. */
-            ESP_LOGW(TAG, "%s is too long; ignoring the remainder", name);
+            /* Past the cap the file cannot legitimately reach, so
+             * whatever this is, it is not ours. The values taken so far
+             * are as trustworthy as they are going to get. */
+            ESP_LOGW(TAG, "%s is longer than the cap; ignoring the rest", name);
             break;
         }
         line[strcspn(line, "\r\n")] = '\0';
         if (line[0] == '\0' || line[0] == '#') continue;
-        parse_line(line);
-        any = true;
+
+        records++;
+        /*
+         * A line that will not parse is not fatal and not even
+         * unexpected: the last one is the one a power cut can truncate,
+         * and every earlier line has already been superseded anyway.
+         */
+        if (parse_line(line)) any = true;
     }
-    fclose(f);
+    storage_io_close(f);
+
+    s_bytes = total;
+    if (any) ESP_LOGD(TAG, "%s: %d records, %u bytes", name, records,
+                      (unsigned)total);
     return any;
 }
 
 /*
- * Write, then rotate. The order is the whole point.
+ * One record, as a line.
  *
- * A truncated write must not be able to destroy the last good copy, and
- * on FAT there is no atomic replace to lean on. So the new file is
- * written under a third name and only once it is closed does anything
- * touch the other two:
- *
- *   1. write defeatist.tmp in full, flush, close
- *   2. remove defeatist.bak
- *   3. rename defeatist.dat -> defeatist.bak
- *   4. rename defeatist.tmp -> defeatist.dat
- *
- * Power lost between 2 and 4 leaves either .dat or .bak intact, and
- * load() tries them in that order. Power lost during 1 leaves both
- * untouched and costs a .tmp that the next write overwrites.
+ * Shared by the append and the compaction so there is one definition of
+ * what a record contains.
  */
-static void write_file(void)
+static int record_line(char *out, size_t out_len)
+{
+    return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+}
+
+/*
+ * Start the file again with a single current record.
+ *
+ * The expensive shape, kept for the one case that needs it: the file
+ * has reached the cap and cannot be appended to any more. This is the
+ * only path that still writes a temp file and renames over the old one,
+ * and it is the only path where that protection is worth its cost --
+ * everywhere else a lost write costs the newest of several thousand
+ * records, and here it would cost the file.
+ *
+ *   1. write .defeatist.tmp in full, flush, close
+ *   2. remove .defeatist.bak
+ *   3. rename .defeatist.dat -> .defeatist.bak
+ *   4. rename .defeatist.tmp -> .defeatist.dat
+ *
+ * Power lost between 2 and 4 leaves either .dat or .bak intact, and the
+ * load tries them in that order. Power lost during 1 leaves both
+ * untouched and costs a .tmp that the next compaction overwrites.
+ *
+ * The lease is taken per operation rather than once around the set, so
+ * a playback read can get in between them. Any prefix of the sequence
+ * leaves a loadable file, which is what makes that safe.
+ */
+static bool compact_file(void)
 {
     char tmp[128], dat[128], bak[128];
     if (!path_for(tmp, sizeof(tmp), TEMP_NAME) ||
         !path_for(dat, sizeof(dat), SETTINGS_NAME) ||
         !path_for(bak, sizeof(bak), BACKUP_NAME)) {
-        return;
+        return false;
     }
 
-    /*
-     * Through the arbiter, like every other write in the program.
-     *
-     * This was plain stdio, which meant the one background writer on
-     * the volume was also the one that did not queue behind playback:
-     *
-     *   W (25824) tab5_mp3: decoder_read blocked 947 ms
-     *   I (26414) tab5_settings: saved /usb/.defeatist.dat (volume=21)
-     *
-     * -- worst hold 939 ms on that track against 7 ms on a track where
-     * nobody touched the volume.
-     */
+    char line[SETTINGS_MAX_LINE];
+    const int len = record_line(line, sizeof(line));
+    if (len <= 0 || len >= (int)sizeof(line)) return false;
+
     FILE *f = storage_io_open(tmp, "w");
     if (!f) {
-        /* A card can be write-protected, full, or gone. None of those
-         * are worth retrying every three seconds forever, so the dirty
-         * flag is cleared by the caller either way. */
         ESP_LOGW(TAG, "cannot write %s (%s)", tmp, strerror(errno));
-        return;
+        return false;
     }
 
-    fprintf(f, "# m5tab5 defeatist music player\n");
-    fprintf(f, "volume=%u\n", s_volume);
-
-    /*
-     * Separated, and both report errno.
-     *
-     * "write failed" said nothing about which call failed or why, which
-     * is not enough to act on: a full card, a card that went away
-     * mid-write, and an exhausted file handle table all produce that one
-     * line and want three different fixes.
-     *
-     * fclose() releases the stream whether or not it succeeds, so it is
-     * called even when the flush failed -- returning early on the flush
-     * would leak a FILE and, with MAX_OPEN_FILES what it is, a handful
-     * of those would stop the player opening tracks.
-     */
+    const bool wrote = (fwrite(line, 1, (size_t)len, f) == (size_t)len);
     const bool flushed = (fflush(f) == 0);
-    const int flush_errno = errno;
+    const int  flush_errno = errno;
     const bool closed = (storage_io_close(f) == 0);
 
-    if (!flushed || !closed) {
-        ESP_LOGW(TAG, "write failed (%s); leaving the previous file alone",
+    if (!wrote || !flushed || !closed) {
+        ESP_LOGW(TAG, "compaction failed (%s); leaving the file alone",
                  strerror(flushed ? errno : flush_errno));
-        /* The half-written temp file is removed rather than left for the
-         * next write to overwrite. It is not a valid settings file and
-         * the rotation never looks at it, so leaving it is just litter
-         * on somebody's card. */
         remove(tmp);
-        return;
+        return false;
     }
 
-    /*
-     * One lease per operation, not one around all three.
-     *
-     * These are three FAT metadata operations and on a USB drive they
-     * are most of the cost of a save -- 1.5 s for a record under a
-     * kilobyte. Holding the lease across the set would make the
-     * decoder wait for all of it; taking it three times lets a
-     * playback read in between each, which is the whole point of the
-     * arbiter existing.
-     *
-     * Nothing here is atomic across the set anyway. The rotation is
-     * designed so that any prefix of it leaves a loadable file, which
-     * is exactly what makes interleaving safe.
-     */
     storage_io_acquire(STORAGE_IO_BACKGROUND);
     remove(bak);
     storage_io_release();
 
     storage_io_acquire(STORAGE_IO_BACKGROUND);
-    rename(dat, bak);       /* fails harmlessly on the first ever write */
+    rename(dat, bak);       /* fails harmlessly if there is no .dat yet */
     storage_io_release();
 
     storage_io_acquire(STORAGE_IO_BACKGROUND);
@@ -270,74 +321,75 @@ static void write_file(void)
 
     if (installed != 0) {
         ESP_LOGW(TAG, "could not install %s", dat);
-        return;
+        return false;
     }
 
-    /*
-     * After the rename, not on the temp file: the attribute belongs to
-     * the name, and the name the user sees is this one.
-     */
     storage_mark_hidden(dat);
-
-    ESP_LOGI(TAG, "saved %s (volume=%u)", dat, s_volume);
+    s_bytes = (size_t)len;
+    ESP_LOGI(TAG, "compacted %s (volume=%u)", dat, s_volume);
+    return true;
 }
 
 /*
- * Adopt a volume, which is the one a track is playing from.
+ * Append one record, or compact when the file is full.
  *
- * Called on every track start, so the common case is that the root has
- * not changed and this does nothing. When it has changed -- first
- * playback of the boot, or a switch between the card and a drive -- the
- * settings move with the music:
+ * The append is the whole point of the format. It is one open, one
+ * write and one close, it extends the last cluster rather than
+ * allocating or freeing any, and it never touches a second file -- so
+ * the decoder is not waiting behind a rename while somebody drags the
+ * volume slider.
  *
- *   - The first adoption of the session loads, because that is the
- *     boot-time load that used to happen in settings_init() and could
- *     not, since nothing was mounted yet.
- *   - Later ones do not load. The volume in force is the one the person
- *     has been listening at; replacing it from a file because they
- *     tapped the USB tab would be the player changing its own volume
- *     behind them. They are marked dirty instead, so the new volume
- *     gets a copy.
+ * A failed append leaves the previous records exactly as they were, and
+ * the previous record is one volume step away from the current one.
+ * That is the whole of the crash safety this needs, and it is why the
+ * rotation is not here.
  */
-bool settings_note_path(const char *path)
+static void write_file(void)
 {
-    const storage_id_t id = storage_of_path(path);
-    if (id == STORAGE_COUNT || !storage_present(id)) return false;
+    char dat[128];
+    if (!path_for(dat, sizeof(dat), SETTINGS_NAME)) return;
 
-    const char *root = storage_mount_path(id);
-    if (!root || (s_root && strcmp(root, s_root) == 0)) return false;
+    char line[SETTINGS_MAX_LINE];
+    const int len = record_line(line, sizeof(line));
+    if (len <= 0 || len >= (int)sizeof(line)) return;
 
-    s_root = root;
-
-    if (!s_loaded) {
-        s_loaded = true;
-        if (load_file(SETTINGS_NAME)) {
-            ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", s_root, SETTINGS_NAME, s_volume);
-        } else if (load_file(BACKUP_NAME)) {
-            /* The rotation in write_file() means this is the previous
-             * good copy, not a guess. Reaching it means the last write
-             * was interrupted. */
-            ESP_LOGW(TAG, "using %s after a bad or missing %s", BACKUP_NAME, SETTINGS_NAME);
-        } else if (load_file(LEGACY_NAME) || load_file(LEGACY_BACKUP)) {
-            ESP_LOGI(TAG, "loaded %s/%s (volume=%u); saving as %s from now on",
-                     s_root, LEGACY_NAME, s_volume, SETTINGS_NAME);
-            s_dirty = true;
-            s_dirty_since = xTaskGetTickCount();
-        } else {
-            ESP_LOGI(TAG, "no settings file on %s; using defaults", s_root);
-        }
-        /* True whether or not a file was found: the caller's question is
-         * "are the values in this module now the ones that apply", and
-         * after the first adoption they are, defaults included. */
-        return true;
+    if (s_bytes + (size_t)len > SETTINGS_MAX_FILE_BYTES) {
+        compact_file();
+        return;
     }
 
-    ESP_LOGI(TAG, "settings follow the music to %s", s_root);
-    s_dirty = true;
-    s_dirty_since = xTaskGetTickCount();
-    /* Nothing was loaded -- the settings in force travelled to the new
-     * volume, so the caller has nothing to apply. */
-    return false;
+    FILE *f = storage_io_open(dat, "a");
+    if (!f) {
+        /* Write-protected, full, or gone. None of those are worth
+         * retrying every three seconds forever, so the dirty flag is
+         * cleared by the caller either way. */
+        ESP_LOGW(TAG, "cannot append to %s (%s)", dat, strerror(errno));
+        return;
+    }
+
+    const bool wrote = (fwrite(line, 1, (size_t)len, f) == (size_t)len);
+    const bool flushed = (fflush(f) == 0);
+    const int  flush_errno = errno;
+    const bool closed = (storage_io_close(f) == 0);
+
+    if (!wrote || !flushed || !closed) {
+        /*
+         * The file may now end in a partial line. That is expected and
+         * handled: the load skips a line it cannot parse, and every
+         * line before it is a record that was good when it was written.
+         */
+        ESP_LOGW(TAG, "append failed (%s); the previous record stands",
+                 strerror(flushed ? errno : flush_errno));
+        return;
+    }
+
+    /* First write of the session on a volume that had no file: the dot
+     * hides it here, this hides it on FAT. Cheap enough to repeat. */
+    if (s_bytes == 0) storage_mark_hidden(dat);
+
+    s_bytes += (size_t)len;
+    ESP_LOGI(TAG, "saved %s (volume=%u, %u bytes)", dat, s_volume,
+             (unsigned)s_bytes);
 }
 
 static void settings_task(void *arg)
