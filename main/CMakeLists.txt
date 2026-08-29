@@ -1,10 +1,10 @@
 idf_component_register(
     SRCS "player.c" "decoder.c" "albumart.c" "covertag.c" "mediacache.c" "ui.c" "gfx.c" "touch.c" "audio_out.c"
-         "battery.c" "storage.c" "storage_io.c" "usbhost.c" "uac.c" "hid.c" "playlist.c" "settings.c" "browser.c" "duration.c" "framewalk.c" "waveform.c" "replaygain.c"
+         "battery.c" "storage.c" "storage_io.c" "usbhost.c" "uac.c" "hid.c" "playlist.c" "settings.c" "browser.c" "duration.c" "framewalk.c" "waveform.c" "replaygain.c" "loudness.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_driver_i2c esp_driver_i2s esp_driver_sdmmc
              esp_driver_jpeg esp_lcd esp_lcd_touch fatfs sdmmc
-             usb usb_host_msc usb_host_uac esp_timer
+             usb usb_host_msc usb_host_uac esp_timer json
     PRIV_REQUIRES pngle minimp3 ark10
 )
 

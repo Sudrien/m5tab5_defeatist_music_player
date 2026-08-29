@@ -1,78 +1,69 @@
 /*
- * replaygain.h -- a per-file sidecar so the frame walk is a once-per-file
- * cost rather than a once-per-play one.
+ * replaygain.h -- one sidecar file per track, holding whatever has been
+ * measured about it so far.
  *
- * framewalk.c already produces everything a ReplayGain-style pass needs
- * -- global_gain is a real per-granule loudness read at a fixed bit
- * offset, no decode involved -- but it is a whole-file read, and paying
- * that on every play of every track is the thing CLAUDE.md names as the
- * reason WAVEFORM_SCAN is off. A sidecar next to the file is what turns
- * "read the file" into "read a few hundred bytes", for every play after
- * the first.
+ * The file is JSON Lines: one JSON object per line, and the last line
+ * that parses and matches the track wins. It is still named
+ * "." + filename + ".rgcache" -- a dotfile, which storage_is_hidden()
+ * already excludes from every listing and playlist scan, so nothing had
+ * to learn to hide it.
  *
- * WHAT LIVES IN THE SIDECAR
+ * WHY JSONL RATHER THAN A PACKED STRUCT
  *
- *   filesize     4 bytes, from fstat()
- *   mtime        8 bytes, from fstat(), so an edited file invalidates
- *   waveform     the walk's envelope, resampled to REPLAYGAIN_COLUMNS
- *                (720, matching LCD_H_RES -- see below) and stored as
- *                one byte per column, "raw" bytes in the sense that
- *                framewalk_t's level[] already is: 0-255, no further
- *                encoding
+ * The first version of this file was a packed C struct, which is
+ * smaller and faster to parse and was the wrong shape for what this
+ * actually is. Two things pushed it over:
  *
- * Deliberately not the ReplayGain dB/peak pair (yet -- see "What this
- * does not do yet"). The waveform is the part that has to travel with
- * the record either way, since a UI redraw needs it and a gain
- * computation does not, so it goes in first and the record is shaped to
- * hold the rest without a version bump.
+ *   1. The sections arrive at different times. The waveform comes from
+ *      a frame walk, which can happen during a prefetch of a track
+ *      nobody has played yet. The loudness comes from a full,
+ *      uninterrupted play. Neither waits for the other, so a write of
+ *      one must not clobber the other -- which is a read-modify-write,
+ *      and a struct that grows a field is a version bump that discards
+ *      every sidecar on the card.
+ *   2. More metadata is expected. A format where adding a field costs
+ *      nothing and old readers ignore what they do not know is worth
+ *      more here than the bytes it costs.
  *
- * WHY 720, NOT FRAMEWALK_MAX_COLUMNS
+ * An append is also its own atomicity story: a line is written whole or
+ * it is not, and a torn final line -- power lost mid-write -- is
+ * detected by the reader, which falls back to the previous line. That
+ * replaced the temp-file-and-rename the packed version used. Every line
+ * therefore repeats filesize and mtime rather than relying on the first
+ * one, so any line is self-describing and the fallback is a real
+ * fallback rather than a line with no key on it.
  *
- * framewalk_t can carry up to FRAMEWALK_MAX_COLUMNS (1024) so the same
- * scan buffer would fit a wider panel without a rescan. The panel this
- * firmware actually draws to is fixed at LCD_H_RES = 720, and the
- * sidecar is a file format, not an in-memory buffer -- there is no
- * reason to spend flash-card bytes and a resample step on 304 columns
- * nothing here will ever read. REPLAYGAIN_COLUMNS is pinned at 720
- * rather than aliased to LCD_H_RES so the on-disk format has a value
- * that does not silently change if the panel does; bumping it is a
- * format version bump (see below), not a #define edit.
+ * The file is compacted -- rewritten as a single line -- once it grows
+ * past REPLAYGAIN_COMPACT_BYTES, so re-measuring a track repeatedly
+ * does not grow its sidecar without bound.
  *
- * KEYING: SIZE AND MTIME, NOT A HASH
+ * TWO VERSIONS, DELIBERATELY
  *
- * A content hash needs to read the file to invalidate the cache of not
- * having to read the file, which defeats the point. Size and mtime are
- * exactly what the browser's fstat() already has to hand back, and they
- * catch the case that matters -- the file on the card changed under
- * this sidecar -- without adding a second whole-file pass to the design
- * this exists to remove one from.
+ *   REPLAYGAIN_FORMAT_VERSION   the shape of the record
+ *   LOUDNESS_VERSION            what the loudness numbers MEAN
  *
- * WHERE THE SIDECAR LIVES
+ * They change for different reasons and must not invalidate each other.
+ * Adding a field is a format bump and should not throw away a perfectly
+ * good loudness measurement; changing the gate, the weighting, or
+ * sample peak to true peak is a loudness bump and should not throw away
+ * a waveform that took a whole-file read to produce. A stale loudness
+ * version is reported as has_loudness = false, so the next full play
+ * recomputes just that section.
  *
- * Next to the track, named "." + the track's filename + ".rgcache" --
- * a dotfile, which storage_is_hidden() already excludes from directory
- * listings for exactly this reason (it also covers the AppleDouble
- * sidecars macOS leaves). No new hiding logic is needed; the browser
- * and playlist scanners already skip anything starting with '.'.
+ * WHAT IS IN A LINE
  *
- * ATOMICITY
+ *   {"format_version":1,
+ *    "filesize":8760320,"mtime":1735500000,
+ *    "waveform":{"has_levels":true,"frames":10475,"sec":273,
+ *                "columns":720,"level":"<base64>"},
+ *    "loudness":{"version":1,"integrated_lufs":-18.4,
+ *                "sample_peak_dbfs":-1.2,"blocks":2711}}
  *
- * Written to a ".tmp" suffix and renamed over the final name.  A crash
- * or a card pulled mid-write leaves either the old sidecar (rename never
- * happened) or a stray ".tmp" (ignored by every reader, and overwritten
- * by the next write) -- never a half-written file masquerading as a
- * valid cache entry that replaygain_load() would otherwise trust.
- *
- * WHAT THIS DOES NOT DO YET
- *
- *  - No integrated/peak gain values. computing them from framewalk_t's
- *    per-granule levels is a separate patch from wiring the sidecar
- *    itself; REPLAYGAIN_VERSION exists so adding them later is a clean
- *    version bump rather than a reinterpretation of old sidecars.
- *  - No seek index. CLAUDE.md notes the sidecar "can carry the seek
- *    index too, which would let MP3D_DO_NOT_SCAN remove what is left of
- *    the open" -- also future, also why the header is versioned rather
- *    than assumed frozen.
+ * Either section may be absent. `columns` is what was actually filled,
+ * NOT always REPLAYGAIN_COLUMNS: a track too short to produce a full
+ * envelope stores the columns it has and the UI stretches them across
+ * the bar, which is better than padding with silence that never
+ * happened.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -85,73 +76,90 @@
 #include "esp_err.h"
 
 #include "framewalk.h"
+#include "loudness.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* On-disk column count. Not LCD_H_RES -- see "WHY 720" above. Bumping
- * this is a REPLAYGAIN_VERSION bump; old sidecars are simply rewritten,
- * they are never partially reinterpreted. */
-#define REPLAYGAIN_COLUMNS      (720)
-
-/* Bump whenever the on-disk layout changes shape. replaygain_load()
- * refuses anything else and the caller re-walks and rewrites, the same
- * path taken for a missing or stale sidecar -- a version mismatch is not
- * a corrupt file, it is a file written by different code. */
-#define REPLAYGAIN_VERSION      (2)
-
-/* In memory, this is what a completed lookup or a completed walk hands
- * around. On disk it is this same shape, minus the pointer indirection
- * -- see replaygain.c for the packed record.
+/*
+ * The most columns a waveform is stored with. Pinned rather than
+ * aliased to LCD_H_RES: this is a file format, and the panel changing
+ * should not silently change what is on the card. A walk that produced
+ * more than this is resampled down; one that produced fewer is stored
+ * at its own width, see `columns` in replaygain_waveform_t.
  */
+#define REPLAYGAIN_COLUMNS          (720)
+
+/* The shape of the record. See "TWO VERSIONS" above. */
+#define REPLAYGAIN_FORMAT_VERSION   (1)
+
+/* Rewrite the file as one line once it passes this. Four or five lines
+ * of a 720-column waveform, so an ordinary sidecar never reaches it and
+ * one that has been re-measured repeatedly gets tidied. */
+#define REPLAYGAIN_COMPACT_BYTES    (8192)
+
+typedef struct {
+    bool     present;       /* is any of the rest of this meaningful */
+    bool     has_levels;    /* false for AAC/AMR -- a frame count but no
+                             * per-frame loudness, so `level` is flat */
+    uint32_t frames;
+    uint32_t sec;
+    int      columns;       /* what was actually filled, <= REPLAYGAIN_COLUMNS */
+    uint8_t  level[REPLAYGAIN_COLUMNS];
+} replaygain_waveform_t;
+
+typedef struct {
+    bool     present;       /* false when absent, or written by a
+                             * different LOUDNESS_VERSION */
+    float    integrated_lufs;
+    float    sample_peak_dbfs;
+    uint32_t blocks;        /* gated blocks; 0 means the answer came
+                             * from the ungated fallback and is thin --
+                             * see "SHORT TRACKS" in loudness.h */
+} replaygain_loudness_t;
+
 typedef struct {
     uint32_t filesize;
-    int64_t  mtime;                          /* seconds, from st_mtime */
-    bool     has_levels;                     /* mirrors framewalk_t; false
-                                               * for AAC/AMR, where waveform
-                                               * is written flat-zero and
-                                               * must not be drawn as real */
-    uint32_t frames;                         /* mirrors framewalk_t.frames */
-    uint32_t sec;                            /* mirrors framewalk_t.sec --
-                                               * the duration for formats
-                                               * with no other source (raw
-                                               * ADTS, AMR); 0 elsewhere */
-    uint8_t  waveform[REPLAYGAIN_COLUMNS];    /* 0-255, raw levels */
+    int64_t  mtime;
+    replaygain_waveform_t waveform;
+    replaygain_loudness_t loudness;
 } replaygain_t;
 
 /*
- * Look up the sidecar for `path` (the track's own path, not the
- * sidecar's) and fill *out if it exists, matches the file's current
- * size and mtime, and was written by this version of the format.
+ * Read the sidecar for `path` (the track, not the sidecar).
  *
- * Blocking, and a handful of small reads -- no full-file pass. Safe to
- * call from any task; it opens its own handle via storage_io_open() and
- * does not touch the decoder's.
+ * Fills *out with whatever is present and current. Returns false only
+ * when there is nothing usable at all -- no file, no parsable line, or
+ * a size/mtime that no longer matches the track. A file with a waveform
+ * and no loudness returns true with `out->loudness.present` false, and
+ * that is the ordinary case for a track that has been walked but never
+ * played to the end.
  *
- * Returns false on a cache miss for any reason: no sidecar, size or
- * mtime mismatch, version mismatch, truncated or unreadable file. Every
- * one of those is answered the same way by the caller -- walk the track
- * and call replaygain_save() -- so the reason is logged here rather than
- * distinguished in the return value.
+ * Opens its own handle; safe from any task.
  */
 bool replaygain_load(const char *path, replaygain_t *out);
 
 /*
- * Write the sidecar for `path` from a completed framewalk_t.
+ * Store the waveform section, leaving any loudness section alone.
  *
- * Resamples w->level[] (up to FRAMEWALK_MAX_COLUMNS, however many the
- * walk actually filled) down to REPLAYGAIN_COLUMNS the same way
- * waveform.c resamples for the bar -- max per bucket, not mean, so a
- * transient that made the track's shape recognisable does not get
- * averaged back into the noise floor a second time.
- *
- * Written via a temp file and renamed into place; see "ATOMICITY" above.
- * Failure is logged and otherwise ignored by the caller -- a sidecar
- * that fails to write costs the next play a re-walk, which is the state
- * every play was in before this file existed.
+ * Resamples the walk down to REPLAYGAIN_COLUMNS if it produced more,
+ * using the max-per-bucket rule framewalk.c uses -- max rather than
+ * mean, so a transient survives the second downsample instead of being
+ * averaged into the floor twice. A walk with fewer columns is stored at
+ * its own width.
  */
-esp_err_t replaygain_save(const char *path, const framewalk_t *w);
+esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w);
+
+/*
+ * Store the loudness section, leaving any waveform section alone.
+ *
+ * Called once, after a track has played start to finish without a seek.
+ * `blocks` is loudness_finish()'s gated block count and is stored as
+ * the confidence figure rather than being turned into a boolean here.
+ */
+esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
+                                   float sample_peak_dbfs, uint32_t blocks);
 
 #ifdef __cplusplus
 }
