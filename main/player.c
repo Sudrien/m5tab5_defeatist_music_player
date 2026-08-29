@@ -841,6 +841,16 @@ static volatile bool     s_media_want;
  *   walk: 6043 frames, 157s, levels=1        <- and its envelope, again
  */
 static char              s_walked_path[512];
+/*
+ * Which track s_walk holds. media_task fills s_walk and raises
+ * s_wave_ready; the decode loop draws it. Those are two tasks and two
+ * tracks' worth of time apart, so without a name attached the flag says
+ * only "an envelope is ready", not whose -- and an envelope prepared for
+ * a track that was then skipped gets drawn over the one that replaced
+ * it. Seen as a 427-column Bach envelope sitting on a 523-column
+ * Couperin for five seconds.
+ */
+static char              s_wave_path[512];
 static volatile bool     s_scan_abort;
 
 /*
@@ -1147,6 +1157,29 @@ static void track_change_begin(const char *path)
 
 static void load_track_visuals(const char *path)
 {
+    /*
+     * Not while the chooser is up.
+     *
+     * Everything below this blits straight to the panel -- albumart_show()
+     * decodes a cover into the art strip, ui_clear_art() paints it out,
+     * ui_show_art_info() writes the fallback text. None of it goes
+     * through ui_draw(), which is what the browser branch in media_task
+     * skips with its `continue`, so a track change while the list is open
+     * painted the art strip over the top of it: a band of cover or of
+     * black across rows that were showing filenames a moment earlier.
+     *
+     * Skipped rather than queued, and s_repaint_art is what brings it
+     * back. Every browser exit already sets that flag -- play, play
+     * folder and cancel alike -- so the cover is drawn once, when there
+     * is a transport bar to draw it on. A track change with the chooser
+     * open is exactly the case that flag was added for; it just was not
+     * being consulted on this side.
+     */
+    if (browser_is_open()) {
+        s_repaint_art = true;
+        return;
+    }
+
     /*
      * No invalidation here any more -- track_change_begin() did it, at
      * the moment the track changed. What is left is the part that needs
@@ -1852,6 +1885,7 @@ static void media_task(void *arg)
                 const framewalk_t *hit = mediacache_walk(path);
                 if (hit) {
                     memcpy(&s_walk, hit, sizeof(s_walk));
+                    snprintf(s_wave_path, sizeof(s_wave_path), "%s", path);
                     s_wave_ready = true;
                 }
             }
@@ -2491,9 +2525,13 @@ static track_end_t play_file(const char *path)
             load_track_visuals(path);
         }
 
-        /* The scan landed. Drawn here rather than on the scan task so
-         * there is one writer to the framebuffer. */
-        if (s_wave_ready) {
+        /* The envelope landed. Drawn here rather than on the loading
+         * task so there is one writer to the framebuffer.
+         *
+         * Checked against the path first: media_task may have prepared
+         * this for a track that has since been skipped past, and the
+         * flag alone cannot tell. */
+        if (s_wave_ready && strcmp(s_wave_path, path) == 0) {
             s_wave_ready = false;
             /* Hand it over rather than draw it. The envelope is part of
              * the transport bar now, so it is drawn by ui_draw() on every
