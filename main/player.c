@@ -1035,6 +1035,12 @@ static void load_tags(const char *path)
             if (covertag_read_tags(af, &s_tags) == ESP_OK) {
                 ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
                          s_tags.title, s_tags.artist, s_tags.album);
+                /* Straight to the card. Written on the read that found
+                 * them rather than later, because later is a second
+                 * place that would have to know whether they came from
+                 * the file or from a cache that came from the card. */
+                replaygain_save_tags(path, s_tags.title, s_tags.artist,
+                                     s_tags.album);
                 /* Read here, stored by media_task. This runs on the
                  * decode loop, and storing is what evicts -- which is
                  * media_task's alone, because media_task is the one
@@ -1384,6 +1390,11 @@ static void do_art(const char *path, uint32_t gen)
          * survives. */
         if (xerr == ESP_ERR_NOT_FOUND || xerr == ESP_ERR_NOT_SUPPORTED) {
             mediacache_put_no_art(path);
+            /* And to the card, so the next boot does not pay the scan
+             * again. This is the eight-to-thirteen seconds the logs
+             * show before "no cover art in this file" -- recorded once,
+             * answered instantly for ever after. */
+            replaygain_save_art(path, false, 0, 0);
         }
 
         if (gen == s_track_gen) show_format_card(path, fsize, gen);
@@ -1442,37 +1453,77 @@ static void do_art(const char *path, uint32_t gen)
  * the audio.
  */
 /*
- * Put a track's stored envelope into the RAM cache, if it has one.
+ * Seed every RAM cache from the track's sidecar, in one read.
  *
- * The envelope now comes from the loudness pass -- peak magnitude off
- * the decoded PCM -- so there is nothing to compute here and no
- * whole-file read to schedule. This is a stat and a two-kilobyte read,
- * which is why it no longer sits behind a settle: the settle existed to
- * keep framewalk.c's whole-file scan off the card until the ring had a
- * cushion, and that scan is gone.
+ * The caches already have the gates -- mediacache_walk(),
+ * mediacache_tags(), mediacache_no_art() are each consulted before the
+ * expensive thing that would otherwise produce the answer. This fills
+ * them from disk so those gates hit on a track that has been played
+ * before, and the expensive things never run:
  *
- * Returns true when the cache now holds this track's envelope.
+ *   envelope   otherwise nothing until a full play finishes
+ *   tags       otherwise an ID3 read on every open
+ *   "no art"   otherwise a whole tag scan to learn the same nothing,
+ *              which the logs show landing eight to thirteen seconds in
+ *
+ * One replaygain_load() for all of it, because the record is one line
+ * and reading it three times would be three opens for the same 1 KB.
+ *
+ * Deliberately does NOT seed a positive cover. The sidecar stores where
+ * the image is, not the image; using that means a seek and a read,
+ * which belongs on the art path where the decode already happens, not
+ * here where it would block the open. The definite negative is the
+ * valuable half anyway -- it turns a scan into nothing at all.
+ *
+ * Returns true when the envelope specifically is now cached, which is
+ * the question the seek bar's caller asks.
  */
-static bool walk_prime(const char *path)
+static bool sidecar_prime(const char *path)
 {
-    if (mediacache_walk(path)) return true;
+    const bool have_walk = (mediacache_walk(path) != NULL);
+    id3_tags_t dummy;
+    const bool have_tags = mediacache_tags(path, &dummy);
+    const bool have_art  = mediacache_no_art(path) ||
+                           (mediacache_art(path, NULL) != NULL);
+
+    /* Everything already in RAM: no read at all. */
+    if (have_walk && have_tags && have_art) return true;
 
     replaygain_t rg;
-    if (!replaygain_load(path, &rg)) return false;
-    if (!rg.waveform.present || rg.waveform.columns <= 0) return false;
+    if (!replaygain_load(path, &rg)) return have_walk;
 
-    framewalk_t w;
-    memset(&w, 0, sizeof(w));
-    w.has_levels = true;
-    w.columns = rg.waveform.columns;
-    w.sec     = rg.waveform.sec;
-    memcpy(w.level, rg.waveform.level, (size_t)rg.waveform.columns);
+    if (!have_walk && rg.waveform.present && rg.waveform.columns > 0) {
+        framewalk_t w;
+        memset(&w, 0, sizeof(w));
+        w.has_levels = true;
+        w.columns = rg.waveform.columns;
+        w.sec     = rg.waveform.sec;
+        memcpy(w.level, rg.waveform.level, (size_t)rg.waveform.columns);
+        mediacache_put_walk(path, &w);
+        ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
+                 w.columns, w.sec);
+    }
 
-    mediacache_put_walk(path, &w);
-    ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
-             w.columns, w.sec);
-    return true;
+    if (!have_tags && rg.tags.present) {
+        id3_tags_t t;
+        memset(&t, 0, sizeof(t));
+        snprintf(t.title,  sizeof(t.title),  "%s", rg.tags.title);
+        snprintf(t.artist, sizeof(t.artist), "%s", rg.tags.artist);
+        snprintf(t.album,  sizeof(t.album),  "%s", rg.tags.album);
+        mediacache_put_tags(path, &t);
+    }
+
+    /* Only the negative, and only when it is a positive statement that
+     * there is none -- art.present with has_art false. An absent
+     * section means nobody has looked, which is not the same claim. */
+    if (!have_art && rg.art.present && !rg.art.has_art) {
+        mediacache_put_no_art(path);
+        ESP_LOGI(TAG, "no cover art (sidecar)");
+    }
+
+    return have_walk || (rg.waveform.present && rg.waveform.columns > 0);
 }
+
 
 
 /*
@@ -1769,7 +1820,7 @@ static void prefetch_next(void)
      * played has none to fetch and one that has been played has it in a
      * dotfile. This warms the RAM cache so the track change finds it.
      */
-    walk_prime(next);
+    sidecar_prime(next);
 
     int n = 0;
     size_t bytes = 0;
@@ -1881,7 +1932,7 @@ static void media_task(void *arg)
          * scan the wait was built around.
          */
         if (strcmp(path, s_walked_path) != 0) {
-            if (walk_prime(path)) {
+            if (sidecar_prime(path)) {
                 const framewalk_t *hit = mediacache_walk(path);
                 if (hit) {
                     memcpy(&s_walk, hit, sizeof(s_walk));
@@ -2371,38 +2422,58 @@ static track_end_t play_file(const char *path)
     static loudness_t s_loud;      /* static only because it is ~4 KB */
     bool measuring = false;
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
+    bool  fmt_saved = false;       /* the format line is written once */
     {
+        /*
+         * One load, everything it holds put to use.
+         *
+         * Before decoder_open() rather than after: the tags and the
+         * "no cover" answer are wanted for the first repaint, which
+         * happens while the open is still running, and the whole point
+         * of storing them was not to wait for a file read to get them.
+         */
         replaygain_t have;
         const bool got = replaygain_load(path, &have);
         const bool known = got && have.loudness.present;
         measuring = !known;
 
-        /*
-         * The same record carries the envelope, and media_task is about
-         * to read this exact file again to get it -- two 2 KB reads of
-         * one sidecar, seconds apart, because each task loaded it
-         * independently. Handing the waveform straight to the cache
-         * here makes walk_prime() a RAM hit and the second read never
-         * happens.
-         *
-         * put_walk() and not the borrowing accessor: mediacache.c's
-         * contract reserves borrowed pointers for media_task, since a
-         * borrow outlives the lock. This is the decode loop, so it uses
-         * the copying side, which is safe from any task -- and that
-         * rules out testing for an existing entry first, since
-         * mediacache_walk() is the borrowing one. Writing
-         * unconditionally is the cheaper answer anyway: it is a
-         * kilobyte memcpy under the lock, against a re-read of the
-         * card if it is skipped.
-         */
-        if (got && have.waveform.present && have.waveform.columns > 0) {
-            framewalk_t w;
-            memset(&w, 0, sizeof(w));
-            w.has_levels = true;
-            w.columns = have.waveform.columns;
-            w.sec     = have.waveform.sec;
-            memcpy(w.level, have.waveform.level, (size_t)have.waveform.columns);
-            mediacache_put_walk(path, &w);
+        if (got) {
+            /* Seed the RAM caches so load_tags() and do_art() find
+             * their answers without opening anything. Same copying
+             * accessors as before -- mediacache.c reserves borrowed
+             * pointers for media_task, and this is the decode loop. */
+            if (have.waveform.present && have.waveform.columns > 0) {
+                framewalk_t w;
+                memset(&w, 0, sizeof(w));
+                w.has_levels = true;
+                w.columns = have.waveform.columns;
+                w.sec     = have.waveform.sec;
+                memcpy(w.level, have.waveform.level,
+                       (size_t)have.waveform.columns);
+                mediacache_put_walk(path, &w);
+            }
+            if (have.tags.present) {
+                id3_tags_t t;
+                memset(&t, 0, sizeof(t));
+                snprintf(t.title,  sizeof(t.title),  "%s", have.tags.title);
+                snprintf(t.artist, sizeof(t.artist), "%s", have.tags.artist);
+                snprintf(t.album,  sizeof(t.album),  "%s", have.tags.album);
+                mediacache_put_tags(path, &t);
+            }
+            if (have.art.present && !have.art.has_art) {
+                mediacache_put_no_art(path);
+            }
+            /*
+             * The duration, before the decoder has found it. For a
+             * Xing-less MP3 that is a whole-file index build away, so
+             * this is the difference between a seek bar that works from
+             * the first repaint and one that appears a second and a
+             * half later. decoder_open() overwrites it with its own
+             * answer when it has one.
+             */
+            if (have.format.present && have.format.sec) {
+                s_len_sec = have.format.sec;
+            }
         }
 
         if (measuring) {
@@ -2603,6 +2674,10 @@ static track_end_t play_file(const char *path)
                 loudness_invalidate(&s_loud);
                 measuring = false;
                 ESP_LOGI(TAG, "loudness measurement dropped: seek");
+                /* Counted, so a track that is always seeked through is
+                 * distinguishable from one never played. Nothing acts
+                 * on it yet; the history has to exist first. */
+                replaygain_note_abandoned(path);
             }
 
             const int pct = s_seek_pct;
@@ -2709,6 +2784,28 @@ static track_end_t play_file(const char *path)
             s_fmt_chans = info.channels;
             s_fmt_kbps = info.bitrate_kbps;
             s_fmt_known = true;
+
+            /*
+             * To the card, once. Everything here is what the decoder
+             * reports after the open, so a listing can show it without
+             * opening anything -- and the duration especially, which
+             * for a Xing-less MP3 costs a whole-file index build to
+             * learn. `fmt_saved` keeps this to the first block rather
+             * than every one.
+             */
+            if (!fmt_saved) {
+                fmt_saved = true;
+                replaygain_format_t rf;
+                memset(&rf, 0, sizeof(rf));
+                rf.present = true;
+                rf.sec = s_len_sec;
+                rf.sample_rate = (uint32_t)info.sample_rate;
+                rf.channels = (uint8_t)info.channels;
+                rf.kbps = (uint16_t)info.bitrate_kbps;
+                snprintf(rf.codec, sizeof(rf.codec), "%s",
+                         info.codec ? info.codec : "");
+                replaygain_save_format(path, &rf);
+            }
 
             if (cur_rate == 0) {
                 /* First block: set the rate before anything is queued,
