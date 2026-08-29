@@ -218,8 +218,35 @@ static esp_err_t i2s_init(uint32_t rate)
     return ESP_OK;
 }
 
+/*
+ * The highest Fs this output stage can be clocked at.
+ *
+ * MCLK is 256 x Fs for the ES8388, so 96 kHz asks for 24.576 MHz and
+ * the P4's I2S clock divider refuses:
+ *
+ *   E i2s_std: i2s_std_calculate_clock(68): sample rate is too large
+ *
+ * 48 kHz is the highest that divides cleanly here, and it covers every
+ * consumer format this player is likely to meet. A file above it is
+ * refused rather than played at the wrong speed -- resampling is a
+ * bigger feature than this line, and half-speed audio is a worse answer
+ * than a skipped track and a log line.
+ */
+#define I2S_MAX_RATE_HZ         (48000)
+
+/* The rate the output stage is currently clocked at, so a caller can
+ * tell a reconfigure from a no-op before committing to one. */
+uint32_t audio_out_rate(void) { return s_rate; }
+
+bool audio_out_rate_supported(uint32_t rate)
+{
+    return rate > 0 && rate <= I2S_MAX_RATE_HZ;
+}
+
 static esp_err_t i2s_set_rate(uint32_t rate)
 {
+    if (!audio_out_rate_supported(rate)) return ESP_ERR_NOT_SUPPORTED;
+
     i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
     ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx), TAG, "disable");

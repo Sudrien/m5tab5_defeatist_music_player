@@ -3281,9 +3281,51 @@ static track_end_t play_file(const char *path)
             }
 
             if (cur_rate == 0) {
-                /* First block: set the rate before anything is queued,
-                 * so the reconfigure never happens mid-stream. */
-                ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
+                /*
+                 * A rate this output stage cannot take is a property of
+                 * the file, so it is reported like any other unplayable
+                 * file. It used to be ESP_ERROR_CHECK'd, which turned a
+                 * 96 kHz WAV in a folder into a reboot loop: the track
+                 * is chosen, the player panics, it comes back, and the
+                 * restored track is the one that panics.
+                 */
+                if (!audio_out_rate_supported((uint32_t)info.sample_rate)) {
+                    ESP_LOGW(TAG, "%d Hz is above what this output can clock; skipping",
+                             info.sample_rate);
+                    why = TRACK_UNREADABLE;
+                    break;
+                }
+
+                /*
+                 * The reconfigure disables the I2S channel, so it must
+                 * not happen with the previous track still playing out
+                 * of the other ring -- which, without the drain, is the
+                 * normal state at a boundary. Wait for the writer to
+                 * arrive before touching the clock.
+                 *
+                 * Only when the rate actually changes. An album at one
+                 * rate never waits, which is every album; this costs
+                 * the gapless property exactly on the boundaries where
+                 * the hardware cannot have it anyway.
+                 */
+                if ((uint32_t)info.sample_rate != audio_out_rate() &&
+                    s_ring_play != s_ring_fill) {
+                    ESP_LOGI(TAG, "rate change to %d Hz; draining first",
+                             info.sample_rate);
+                    while (s_ring_play != s_ring_fill) {
+                        if (s_pending_ready || s_seek_pct >= 0) break;
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                }
+
+                const esp_err_t ferr =
+                    audio_out_set_format((uint32_t)info.sample_rate, 2);
+                if (ferr != ESP_OK) {
+                    ESP_LOGW(TAG, "cannot play %d Hz (%s); skipping",
+                             info.sample_rate, esp_err_to_name(ferr));
+                    why = TRACK_UNREADABLE;
+                    break;
+                }
                 /*
                  * The ring and the writer are made once in app_main()
                  * now, so a track start sets the rate and publishes an
