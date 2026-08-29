@@ -143,6 +143,12 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
         /* 100 ms quarters; a block is four of them. */
         l->quarter_len = rate / 10;
         if (!l->quarter_len) l->quarter_len = 1;
+
+        /* 20 ms at this rate, scaled from the 44.1 kHz reference so a
+         * 48 kHz file gets the same span in time rather than in
+         * samples. */
+        l->env_span = (uint32_t)(((uint64_t)LOUDNESS_ENV_SPAN0 * rate) / 44100);
+        if (!l->env_span) l->env_span = 1;
         design_kweighting(l, rate);
     } else if (l->rate != rate || l->channels != (channels < LOUDNESS_MAX_CHANNELS
                                                   ? channels
@@ -164,6 +170,7 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
 
             const float ax = fabsf(x);
             if (ax > l->peak) l->peak = ax;
+            if (ax > l->env_peak) l->env_peak = ax;
 
             /* High shelf. */
             const float sy = l->sb0 * x + l->sb1 * l->shelf_x1[c]
@@ -186,6 +193,33 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
             l->hp_y1[c] = hy;
 
             l->quarter_sq[c][l->quarter_idx] += (double)hy * (double)hy;
+        }
+
+        /*
+         * Envelope. The per-sample peak across channels is already in
+         * hand from the loop above; this only tracks its max over the
+         * column and closes the column when the span is reached.
+         */
+        if (++l->env_pos >= l->env_span) {
+            l->env_pos = 0;
+            if (l->env_used < LOUDNESS_ENV_COLUMNS) {
+                l->env[l->env_used++] =
+                    (uint8_t)(l->env_peak * 255.0f + 0.5f);
+            }
+            l->env_peak = 0.0f;
+
+            if (l->env_used >= LOUDNESS_ENV_COLUMNS) {
+                /* Full: fold pairs together and double the span, so the
+                 * array now covers twice the time at half the detail
+                 * and there is room to keep going. Max, not mean. */
+                for (int k = 0; k < LOUDNESS_ENV_COLUMNS / 2; k++) {
+                    const uint8_t a = l->env[2 * k];
+                    const uint8_t b = l->env[2 * k + 1];
+                    l->env[k] = a > b ? a : b;
+                }
+                l->env_used = LOUDNESS_ENV_COLUMNS / 2;
+                l->env_span *= 2;
+            }
         }
 
         if (++l->quarter_samples >= l->quarter_len) {
@@ -262,4 +296,22 @@ bool loudness_finish(loudness_t *l, float *out_lufs, float *out_peak_dbfs,
     }
     if (out_blocks) *out_blocks = used;
     return true;
+}
+
+void loudness_envelope(const loudness_t *l, uint8_t *dst, int *out_cols)
+{
+    if (!l || !dst) { if (out_cols) *out_cols = 0; return; }
+
+    int n = l->env_used;
+    if (n > LOUDNESS_ENV_COLUMNS) n = LOUDNESS_ENV_COLUMNS;
+    if (n > 0) memcpy(dst, l->env, (size_t)n);
+
+    /*
+     * The column still being filled is deliberately left out. It covers
+     * less time than the others, so its peak is drawn from a smaller
+     * sample and reads lower for no reason the audio accounts for --
+     * a dip at the right edge of every track. One column of up to
+     * env_span samples is not worth a visible artefact.
+     */
+    if (out_cols) *out_cols = n;
 }

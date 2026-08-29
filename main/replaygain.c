@@ -140,8 +140,6 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
     if (cJSON_IsObject(wf)) {
         const cJSON *lv = cJSON_GetObjectItemCaseSensitive(wf, "level");
         const cJSON *cols = cJSON_GetObjectItemCaseSensitive(wf, "columns");
-        const cJSON *hl = cJSON_GetObjectItemCaseSensitive(wf, "has_levels");
-        const cJSON *fr = cJSON_GetObjectItemCaseSensitive(wf, "frames");
         const cJSON *sc = cJSON_GetObjectItemCaseSensitive(wf, "sec");
 
         if (cJSON_IsString(lv) && cJSON_IsNumber(cols)) {
@@ -160,10 +158,6 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
             if (n > 0) {
                 out->waveform.present = true;
                 out->waveform.columns = n;
-                out->waveform.has_levels = cJSON_IsBool(hl)
-                                           ? cJSON_IsTrue(hl) : true;
-                out->waveform.frames = cJSON_IsNumber(fr)
-                                       ? (uint32_t)fr->valuedouble : 0;
                 out->waveform.sec = cJSON_IsNumber(sc)
                                     ? (uint32_t)sc->valuedouble : 0;
             }
@@ -347,8 +341,6 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
     if (rg->waveform.present && rg->waveform.columns > 0) {
         cJSON *wf = cJSON_AddObjectToObject(root, "waveform");
         if (wf) {
-            cJSON_AddBoolToObject(wf, "has_levels", rg->waveform.has_levels);
-            cJSON_AddNumberToObject(wf, "frames", (double)rg->waveform.frames);
             cJSON_AddNumberToObject(wf, "sec", (double)rg->waveform.sec);
             cJSON_AddNumberToObject(wf, "columns", rg->waveform.columns);
 
@@ -431,9 +423,10 @@ static void load_or_empty(const char *path, uint32_t filesize, int64_t mtime,
     rg->mtime = mtime;
 }
 
-esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w)
+esp_err_t replaygain_save_waveform(const char *path, const uint8_t *level,
+                                   int columns, uint32_t sec)
 {
-    if (!path || !w) return ESP_ERR_INVALID_ARG;
+    if (!path || !level || columns <= 0) return ESP_ERR_INVALID_ARG;
 
     struct stat st;
     if (stat(path, &st) != 0) {
@@ -445,36 +438,19 @@ esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w)
     load_or_empty(path, (uint32_t)st.st_size, (int64_t)st.st_mtime, &rg);
 
     rg.waveform.present = true;
-    rg.waveform.has_levels = (w->has_levels && w->columns > 0);
-    rg.waveform.frames = w->frames;
-    rg.waveform.sec = w->sec;
+    rg.waveform.sec = sec;
 
-    if (w->columns <= 0) {
-        /* Nothing to draw. Still worth a record: the frame count and
-         * duration are real, and without them a format with no
-         * per-frame loudness pays for a whole-file walk on every play
-         * to learn the same nothing. */
-        rg.waveform.columns = 0;
-        rg.waveform.present = (w->frames > 0 || w->sec > 0);
-        memset(rg.waveform.level, 0, sizeof(rg.waveform.level));
-        /* A record with no columns cannot be serialised as a waveform
-         * section -- append_record() skips it -- so hold the counts in
-         * a zero-column section only if there is also a loudness
-         * section keeping the line alive. */
-    } else if (w->columns > REPLAYGAIN_COLUMNS) {
+    if (columns > REPLAYGAIN_COLUMNS) {
         rg.waveform.columns = REPLAYGAIN_COLUMNS;
-        resample_levels(w->level, w->columns, rg.waveform.level,
-                        REPLAYGAIN_COLUMNS);
+        resample_levels(level, columns, rg.waveform.level, REPLAYGAIN_COLUMNS);
     } else {
         /*
-         * Fewer columns than the panel is wide. Stored at its own
-         * width rather than stretched to 720 here: the UI can stretch
-         * a short envelope across the bar and it is the only thing
-         * that knows how wide the bar is, whereas padding it now would
-         * bake in silence the track does not contain.
+         * Stored at its own width rather than stretched to the panel.
+         * The UI knows how wide the bar is and this does not; padding
+         * here would bake in silence the track does not contain.
          */
-        rg.waveform.columns = w->columns;
-        memcpy(rg.waveform.level, w->level, (size_t)w->columns);
+        rg.waveform.columns = columns;
+        memcpy(rg.waveform.level, level, (size_t)columns);
     }
 
     return append_record(path, &rg, (uint32_t)st.st_size,

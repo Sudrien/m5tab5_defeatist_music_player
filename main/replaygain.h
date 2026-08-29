@@ -72,8 +72,7 @@
  *
  *   {"format_version":1,
  *    "filesize":8760320,"mtime":1735500000,
- *    "waveform":{"has_levels":true,"frames":10475,"sec":273,
- *                "columns":720,"level":"<base64>"},
+ *    "waveform":{"sec":273,"columns":426,"level":"<base64>"},
  *    "loudness":{"version":1,"integrated_lufs":-18.4,
  *                "sample_peak_dbfs":-1.2,"blocks":2711}}
  *
@@ -93,7 +92,6 @@
 
 #include "esp_err.h"
 
-#include "framewalk.h"
 #include "loudness.h"
 
 #ifdef __cplusplus
@@ -110,7 +108,7 @@ extern "C" {
 #define REPLAYGAIN_COLUMNS          (720)
 
 /* The shape of the record. See "TWO VERSIONS" above. */
-#define REPLAYGAIN_FORMAT_VERSION   (1)
+#define REPLAYGAIN_FORMAT_VERSION   (2)
 
 /* Rewrite the file as one line once it passes this. Four or five lines
  * of a 720-column waveform, so an ordinary sidecar never reaches it and
@@ -119,12 +117,9 @@ extern "C" {
 
 typedef struct {
     bool     present;       /* is any of the rest of this meaningful */
-    bool     has_levels;    /* false for AAC/AMR -- a frame count but no
-                             * per-frame loudness, so `level` is flat */
-    uint32_t frames;
-    uint32_t sec;
+    uint32_t sec;           /* duration, 0 if the pass never learned one */
     int      columns;       /* what was actually filled, <= REPLAYGAIN_COLUMNS */
-    uint8_t  level[REPLAYGAIN_COLUMNS];
+    uint8_t  level[REPLAYGAIN_COLUMNS];   /* peak magnitude, 0-255 */
 } replaygain_waveform_t;
 
 typedef struct {
@@ -161,13 +156,19 @@ bool replaygain_load(const char *path, replaygain_t *out);
 /*
  * Store the waveform section, leaving any loudness section alone.
  *
- * Resamples the walk down to REPLAYGAIN_COLUMNS if it produced more,
- * using the max-per-bucket rule framewalk.c uses -- max rather than
- * mean, so a transient survives the second downsample instead of being
- * averaged into the floor twice. A walk with fewer columns is stored at
- * its own width.
+ * `level` is peak magnitude per column from loudness_envelope(), taken
+ * off the decoded PCM during a play. Resampled down to
+ * REPLAYGAIN_COLUMNS if there are more, max per bucket so a transient
+ * survives; stored at its own width if there are fewer.
+ *
+ * Written on the same completed play that produces the loudness, so a
+ * track has both or neither. FORMAT_VERSION 2 exists because version 1
+ * stored framewalk.c's global_gain proxy under the same key: same
+ * shape, different meaning, and drawing one as the other would be
+ * wrong in a way nothing could see.
  */
-esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w);
+esp_err_t replaygain_save_waveform(const char *path, const uint8_t *level,
+                                   int columns, uint32_t sec);
 
 /*
  * Store the loudness section, leaving any waveform section alone.

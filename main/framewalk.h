@@ -1,24 +1,19 @@
 /*
- * framewalk.h -- one sequential pass over a compressed file, reading only
- * frame headers.
+ * framewalk.h -- the envelope carrier type.
  *
- * Two things come out of it and they share every byte of the work:
+ * This file used to declare a scanner that read global_gain out of
+ * every MP3 frame header to build a seek-bar envelope. That number is
+ * the encoder's quantisation-step choice -- how many bits a granule was
+ * worth -- which correlates with loudness because a busy passage gets
+ * more bits, and is not loudness. It was a whole-file read producing a
+ * proxy.
  *
- *   1. A frame count, which is the duration for the formats that do not
- *      state one -- raw ADTS, AMR, and a CBR MP3 with no Xing header.
- *      duration.c handles everything that does state one, in a couple of
- *      fread()s, and is always tried first; this is the backstop, not a
- *      replacement.
- *   2. A loudness envelope for the waveform.
- *
- * The point is that neither costs a decode. Every frame header states its
- * own length, so the walk is header -> skip -> header, and the audio data
- * is never touched. On MP3 the loudness comes free too: global_gain sits
- * in the side info at a fixed bit offset, which is a genuine per-granule
- * loudness value read without a Huffman table in sight.
- *
- * That makes the walk I/O bound rather than CPU bound, which is the whole
- * reason it is fast enough to run while a track plays.
+ * The envelope now comes from loudness.c, off the decoded PCM of a
+ * normal play: real peak magnitude, no extra read, and it arrives as a
+ * by-product of listening rather than as a scan scheduled around the
+ * ring. The scanner is gone; what is left is the struct the cache, the
+ * sidecar and waveform.c all pass around, kept under its old name
+ * because renaming it would touch far more than it would explain.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -26,16 +21,11 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
-
-#include "esp_err.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-/* Columns the caller wants. The framed layout is about 548 and the fill
- * layout 720, so this covers both with room to spare. */
 #define FRAMEWALK_MAX_COLUMNS   (1024)
 
 typedef struct {
@@ -56,32 +46,6 @@ typedef struct {
     int columns;
     uint8_t level[FRAMEWALK_MAX_COLUMNS];
 } framewalk_t;
-
-/*
- * Walk f from its current position to EOF.
- *
- * Blocking and sequential -- expects to be called from a low-priority
- * task after playback has started, not before it. The file position is
- * left at EOF; callers sharing a handle with a decoder must open their
- * own.
- *
- * `abort_flag`, when non-NULL, is polled every few hundred KB. Setting it
- * stops the walk and returns ESP_ERR_INVALID_STATE, which is how a track
- * change cancels a scan that is no longer wanted.
- */
-esp_err_t framewalk_scan(FILE *f, int columns, volatile bool *abort_flag,
-                         framewalk_t *out);
-
-/*
- * Is there a walker for this file at all?
- *
- * Cheap -- reads the first few bytes. Exists so the caller can decline to
- * read a whole file for nothing: an Ogg has no frame walker here, so the
- * scan read 30 MB off the card, reported zero frames and drew nothing.
- * That is a second of contention with the decoder in exchange for a log
- * line saying it failed.
- */
-bool framewalk_supports(FILE *f);
 
 #ifdef __cplusplus
 }
