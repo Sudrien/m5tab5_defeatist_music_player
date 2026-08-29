@@ -392,6 +392,77 @@ static void write_file(void)
              (unsigned)s_bytes);
 }
 
+/*
+ * Adopt a volume, which is the one a track is playing from.
+ *
+ * Called on every track start, so the common case is that the root has
+ * not changed and this does nothing. When it has changed -- first
+ * playback of the boot, or a switch between the card and a drive -- the
+ * settings move with the music:
+ *
+ *   - The first adoption of the session loads, because that is the
+ *     boot-time load that cannot happen in settings_init(): a USB drive
+ *     is still enumerating then.
+ *   - Later ones do not load. The volume in force is the one the person
+ *     has been listening at; replacing it from a file because they
+ *     tapped the USB tab would be the player changing its own volume
+ *     behind them. They are marked dirty instead, so the new volume
+ *     gets a copy.
+ *
+ * Returns true on that first adoption, meaning the values here are now
+ * the ones that apply and the caller has to push them at whatever acts
+ * on them. See settings.h.
+ */
+bool settings_note_path(const char *path)
+{
+    const storage_id_t id = storage_of_path(path);
+    if (id == STORAGE_COUNT || !storage_present(id)) return false;
+
+    const char *root = storage_mount_path(id);
+    if (!root || (s_root && strcmp(root, s_root) == 0)) return false;
+
+    s_root = root;
+    /* A different volume is a different file, and its size is not known
+     * until something reads it. */
+    s_bytes = 0;
+
+    if (!s_loaded) {
+        s_loaded = true;
+        if (load_file(SETTINGS_NAME)) {
+            ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", s_root, SETTINGS_NAME, s_volume);
+        } else if (load_file(BACKUP_NAME)) {
+            /* Only compaction writes that file, so reaching it means a
+             * compaction was interrupted. It is a real record, not a
+             * guess. */
+            ESP_LOGW(TAG, "using %s after a bad or missing %s", BACKUP_NAME, SETTINGS_NAME);
+            /* The size that came back is the backup's. The next save
+             * appends to SETTINGS_NAME, which is absent or unusable. */
+            s_bytes = 0;
+        } else if (load_file(LEGACY_NAME) || load_file(LEGACY_BACKUP)) {
+            ESP_LOGI(TAG, "loaded %s/%s (volume=%u); saving as %s from now on",
+                     s_root, LEGACY_NAME, s_volume, SETTINGS_NAME);
+            /* Same reason: load_file() left the legacy file's size here
+             * and the next save appends to the dotted one. */
+            s_bytes = 0;
+            s_dirty = true;
+            s_dirty_since = xTaskGetTickCount();
+        } else {
+            ESP_LOGI(TAG, "no settings file on %s; using defaults", s_root);
+        }
+        /* True whether or not a file was found: the caller's question is
+         * "are the values in this module now the ones that apply", and
+         * after the first adoption they are, defaults included. */
+        return true;
+    }
+
+    ESP_LOGI(TAG, "settings follow the music to %s", s_root);
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+    /* Nothing was loaded -- the settings in force travelled to the new
+     * volume, so the caller has nothing to apply. */
+    return false;
+}
+
 static void settings_task(void *arg)
 {
     (void)arg;
