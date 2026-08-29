@@ -37,6 +37,24 @@
  * past REPLAYGAIN_COMPACT_BYTES, so re-measuring a track repeatedly
  * does not grow its sidecar without bound.
  *
+ * ANYTHING THAT IS NOT THIS FORMAT IS DUMPED
+ *
+ * A sidecar whose first byte is not '{' was not written by this code,
+ * and the next write discards it entirely rather than appending to it.
+ * In practice that means 0200's packed binary record: a device with
+ * sidecars already on the card gets reflashed, and an append-only
+ * writer would otherwise put valid JSON directly onto a 752-byte
+ * binary blob. Nothing breaks when it does -- the reader scans
+ * backwards from the end and never reads far enough to reach the blob
+ * -- but the file carries the dead bytes for ever and any less
+ * forgiving reader would choke.
+ *
+ * Note the check is on FORMAT, not freshness. A sidecar that is
+ * well-formed but stale (its filesize or mtime no longer match the
+ * track) is still appended to like any other: the new line supersedes
+ * the old and the reader already ignores what it supersedes. Discarding
+ * on staleness would be the writer doing the reader's job.
+ *
  * TWO VERSIONS, DELIBERATELY
  *
  *   REPLAYGAIN_FORMAT_VERSION   the shape of the record

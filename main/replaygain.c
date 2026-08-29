@@ -277,7 +277,51 @@ static void resample_levels(const uint8_t *src, int n, uint8_t *dst, int cols)
 }
 
 /*
- * Serialise `rg` as one line and append it.
+ * Is the file at `cache_path` JSONL written by this code at all?
+ *
+ * Deliberately NOT "does replaygain_load() succeed". That answers a
+ * different question: load() also fails on a sidecar whose filesize or
+ * mtime no longer match the track, and a stale-but-well-formed sidecar
+ * must still be appended to like any other -- the new line supersedes
+ * the old one and the reader already ignores what it supersedes.
+ * Rewriting on staleness would be harmless but would silently discard
+ * the previous record, which is the reader's job to do, not the
+ * writer's.
+ *
+ * What this catches is content that is not this format at all. In
+ * practice that is 0200's packed binary record: a firmware that had
+ * already written sidecars gets reflashed, and the first 0201 write
+ * appends valid JSON directly onto a 752-byte binary blob. Nothing
+ * breaks -- replaygain_load() scans backwards from the end and never
+ * reads far enough to reach the blob -- but the file carries the dead
+ * bytes for ever, and any stricter reader, or anything that is not this
+ * exact backwards scan, would choke on it.
+ *
+ * Cheap by construction: reads only the first byte. Every line this
+ * code writes is a JSON object, so a sidecar in this format always
+ * starts with '{'. Anything else -- 0200's "1CGR" magic, a truncated
+ * write, a file some other tool left -- is not ours and gets dumped.
+ *
+ * An empty or missing file is "ours": there is nothing to dump, and the
+ * open below creates it.
+ */
+static bool sidecar_is_jsonl(const char *cache_path)
+{
+    FILE *f = storage_io_open(cache_path, "rb");
+    if (!f) return true;                 /* nothing there yet */
+
+    const int c = fgetc(f);
+    storage_io_close(f);
+
+    if (c == EOF) return true;           /* empty; nothing to dump */
+    return c == '{';
+}
+
+/*
+ * Serialise `rg` as one line and add it to the sidecar -- appended
+ * normally, or written over the whole file when it has grown past the
+ * cap or when what is there is not this format (see
+ * sidecar_is_jsonl()).
  *
  * Read-modify-write is the caller's job: it loads, overlays its own
  * section and hands the whole thing here. That keeps the merge in one
@@ -337,19 +381,20 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
     if (!line) return ESP_ERR_NO_MEM;
 
     /*
-     * Compact rather than append once the file has grown. Re-measuring
-     * a track appends a line each time, and without this a sidecar
-     * that is rewritten on every play grows for ever.
-     *
-     * "w" here rather than "a": the record being written already
-     * carries everything the earlier lines said, because the caller
-     * merged it.
+     * Rewrite rather than append in two cases: the file has grown past
+     * the cap, or what is already there is not this format at all (see
+     * sidecar_is_jsonl()). Both open "wb", which truncates -- the
+     * record being written already carries everything the earlier lines
+     * said, because the caller merged it before handing it here.
      */
     struct stat cst;
-    const bool compact = (stat(cache_path, &cst) == 0 &&
+    const bool too_big = (stat(cache_path, &cst) == 0 &&
                           cst.st_size > REPLAYGAIN_COMPACT_BYTES);
+    const bool foreign = !sidecar_is_jsonl(cache_path);
+    const bool rewrite = too_big || foreign;
 
-    FILE *f = storage_io_open(cache_path, compact ? "wb" : "ab");
+
+    FILE *f = storage_io_open(cache_path, rewrite ? "wb" : "ab");
     if (!f) {
         ESP_LOGW(TAG, "could not open %s for writing", cache_path);
         cJSON_free(line);
@@ -367,7 +412,9 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
         return ESP_FAIL;
     }
 
-    ESP_LOGI(TAG, "sidecar %s: %s", compact ? "compacted" : "updated",
+    ESP_LOGI(TAG, "sidecar %s: %s",
+             foreign ? "rewritten (was not JSONL)"
+             : too_big ? "compacted" : "updated",
              cache_path);
     return ESP_OK;
 }
