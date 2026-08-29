@@ -80,6 +80,17 @@ typedef struct {
      */
     bool  rg_active;
     float rg_gain_db;
+
+    /*
+     * True only while this play is actually measuring -- no stored
+     * loudness, nothing invalidated yet. The listening text is drawn
+     * from this rather than from the envelope being absent, because
+     * those are different states: a track whose envelope is in its
+     * sidecar but whose bar has not been handed it yet is not being
+     * listened to, and saying so would be a lie with a five second
+     * lifetime.
+     */
+    bool  rg_measuring;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */

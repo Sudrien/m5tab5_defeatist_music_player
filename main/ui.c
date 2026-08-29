@@ -755,20 +755,32 @@ void ui_draw(const ui_state_t *st)
         gfx_fill_rect(x0, y - UI_WAVE_H, x1 - x0, UI_WAVE_H, C_WAVE_FUTURE);
 
         /*
-         * And say why. An unshaped bar on first play and a shaped one
-         * ever after is otherwise unexplained -- worse, it looks like
-         * the waveform failed on this track. This is the one moment the
-         * measurement is worth mentioning, so it is mentioned here and
-         * nowhere else, in the same yellow the RG badge uses so the two
-         * read as the same feature.
+         * And say why -- but only when it is true.
+         *
+         * An unshaped bar on first play and a shaped one ever after is
+         * otherwise unexplained, and looks like the waveform failed on
+         * this track. This is the one moment the measurement is worth
+         * mentioning, in the same yellow the RG badge uses so the two
+         * read as one feature.
+         *
+         * Gated on rg_measuring, not on the envelope being missing.
+         * A track whose envelope is already in its sidecar is not being
+         * listened to, and the gap between the track starting and the
+         * bar being handed that envelope would otherwise put the words
+         * on screen for a few seconds of every replay -- claiming work
+         * that is not happening, on exactly the tracks that already did
+         * it. Same for a track whose measurement was dropped by a seek:
+         * nothing is listening any more, so nothing says it is.
          *
          * Behind the playhead, not above or below: the bar is 72 px of
          * empty grey and the text has nowhere better to be, and it is
          * drawn first so the playhead crosses over it rather than the
          * text sitting on top of the position.
          */
-        gfx_draw_text(x0 + 12, y - UI_WAVE_H / 2 - 8,
-                      "ReplayGain is listening...", 2, x1 - x0 - 24, C_RG);
+        if (st->rg_measuring) {
+            gfx_draw_text(x0 + 12, y - UI_WAVE_H / 2 - 8,
+                          "ReplayGain is listening...", 2, x1 - x0 - 24, C_RG);
+        }
 
         const int split = x0 + ((x1 - x0) * shown_pct) / 100;
         gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,

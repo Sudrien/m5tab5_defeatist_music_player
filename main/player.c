@@ -703,6 +703,7 @@ static volatile bool     s_open_chooser;
  * one. Published rather than fetched: the UI task cannot ask play_file()
  * anything -- the same rule s_ring_pct follows.
  */
+static volatile bool     s_rg_measuring = false;
 static volatile bool     s_rg_active = false;
 static volatile float    s_rg_gain_db = 0.0f;
 
@@ -851,6 +852,28 @@ static char              s_walked_path[512];
  * Couperin for five seconds.
  */
 static char              s_wave_path[512];
+
+/*
+ * The track's sidecar record, held open for the length of the track.
+ *
+ * Every fact learned during an open -- tags, whether there is a cover,
+ * the format the decoder reports -- used to be written the moment it
+ * was found, and each write was a load, a merge and a full rewrite. A
+ * log showed the cost: three saves during one open meant three loads
+ * and three rewrites of the same kilobyte within five seconds, on top
+ * of the read play_file() had already done to get the gain.
+ *
+ * So it is read once, merged into in memory, and written once when the
+ * track ends. s_rg_dirty is what says a write is owed; without it a
+ * track that taught us nothing new would rewrite its sidecar on every
+ * play for ever.
+ *
+ * Owned by the decode loop. media_task does its own short-lived loads
+ * for the prefetch and does not touch this.
+ */
+static replaygain_t      s_rg;
+static bool              s_rg_dirty;
+static char              s_rg_path[512];
 static volatile bool     s_scan_abort;
 
 /*
@@ -1035,12 +1058,15 @@ static void load_tags(const char *path)
             if (covertag_read_tags(af, &s_tags) == ESP_OK) {
                 ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
                          s_tags.title, s_tags.artist, s_tags.album);
-                /* Straight to the card. Written on the read that found
-                 * them rather than later, because later is a second
-                 * place that would have to know whether they came from
-                 * the file or from a cache that came from the card. */
-                replaygain_save_tags(path, s_tags.title, s_tags.artist,
-                                     s_tags.album);
+                /* Into the held record, not to the card: the write
+                 * happens once when the track ends. */
+                if (rg_holding(path) && !s_rg.tags.present) {
+                    s_rg.tags.present = true;
+                    snprintf(s_rg.tags.title,  sizeof(s_rg.tags.title),  "%s", s_tags.title);
+                    snprintf(s_rg.tags.artist, sizeof(s_rg.tags.artist), "%s", s_tags.artist);
+                    snprintf(s_rg.tags.album,  sizeof(s_rg.tags.album),  "%s", s_tags.album);
+                    s_rg_dirty = true;
+                }
                 /* Read here, stored by media_task. This runs on the
                  * decode loop, and storing is what evicts -- which is
                  * media_task's alone, because media_task is the one
@@ -1118,6 +1144,19 @@ static void track_change_begin(const char *path)
     s_len_sec = 0;
     s_can_seek = false;
     s_fmt_known = false;
+    /*
+     * The record first, before anything that could go and read the file
+     * for something it already holds.
+     *
+     * This used to sit inside play_file(), which runs after this
+     * function -- so load_tags() below re-read the ID3 and do_art()
+     * re-scanned for a cover that the sidecar already said was absent,
+     * and both then wrote back what was already there. The seeding was
+     * real and simply one step downstream of its consumers.
+     */
+    rg_hold(path);
+    sidecar_prime(path);
+
     s_fmt_rate = s_fmt_chans = s_fmt_kbps = 0;
     s_fmt_codec[0] = '\0';
 
@@ -1390,11 +1429,14 @@ static void do_art(const char *path, uint32_t gen)
          * survives. */
         if (xerr == ESP_ERR_NOT_FOUND || xerr == ESP_ERR_NOT_SUPPORTED) {
             mediacache_put_no_art(path);
-            /* And to the card, so the next boot does not pay the scan
-             * again. This is the eight-to-thirteen seconds the logs
-             * show before "no cover art in this file" -- recorded once,
-             * answered instantly for ever after. */
-            replaygain_save_art(path, false, 0, 0);
+            /* And into the held record, so the next boot does not pay
+             * the scan again -- the eight to thirteen seconds the logs
+             * show before this line. Written when the track ends. */
+            if (rg_holding(path) && !s_rg.art.present) {
+                s_rg.art.present = true;
+                s_rg.art.has_art = false;
+                s_rg_dirty = true;
+            }
         }
 
         if (gen == s_track_gen) show_format_card(path, fsize, gen);
@@ -1478,6 +1520,39 @@ static void do_art(const char *path, uint32_t gen)
  * Returns true when the envelope specifically is now cached, which is
  * the question the seek bar's caller asks.
  */
+/*
+ * Start holding `path`'s record. One read; everything the open is about
+ * to want is in memory afterwards.
+ */
+static void rg_hold(const char *path)
+{
+    if (!replaygain_load(path, &s_rg)) memset(&s_rg, 0, sizeof(s_rg));
+    snprintf(s_rg_path, sizeof(s_rg_path), "%s", path);
+    s_rg_dirty = false;
+}
+
+/*
+ * Write it back, if anything changed. Called when the track ends,
+ * whatever the reason -- a skipped track still learned its tags and
+ * whether it has a cover, and those are worth keeping even though its
+ * loudness is not.
+ */
+static void rg_release(void)
+{
+    if (s_rg_dirty && s_rg_path[0]) {
+        replaygain_write(s_rg_path, &s_rg);
+    }
+    s_rg_dirty = false;
+    s_rg_path[0] = '\0';
+}
+
+/* True when the held record is this track's. Guards every merge below:
+ * a fact learned about one track must not be filed under another. */
+static bool rg_holding(const char *path)
+{
+    return path && s_rg_path[0] && strcmp(s_rg_path, path) == 0;
+}
+
 static bool sidecar_prime(const char *path)
 {
     const bool have_walk = (mediacache_walk(path) != NULL);
@@ -2104,6 +2179,7 @@ static void ui_task(void *arg)
         st.playing = s_playing;
         st.volume = s_volume;
         st.rg_active = s_rg_active;
+        st.rg_measuring = s_rg_measuring;
         st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
@@ -2298,6 +2374,7 @@ static void ui_task(void *arg)
         st.playing = s_playing;
         st.volume = s_volume;
         st.rg_active = s_rg_active;
+        st.rg_measuring = s_rg_measuring;
         st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
@@ -2476,6 +2553,7 @@ static track_end_t play_file(const char *path)
             }
         }
 
+        s_rg_measuring = measuring;
         if (measuring) {
             loudness_reset(&s_loud);
             /*
@@ -2526,6 +2604,19 @@ static track_end_t play_file(const char *path)
          * that does not exist -- reintroducing the queued-forever bug on
          * the one path where it would be hardest to spot. */
         s_decoding = false;
+
+    /*
+     * One write, here, for everything this track taught us -- and only
+     * if it taught us something. A track played twice with nothing new
+     * to record does not touch the card at all the second time.
+     *
+     * After the loudness merge above and outside the TRACK_ENDED test,
+     * because a skipped track still learned its tags and whether it has
+     * a cover even though its loudness was thrown away.
+     */
+    rg_release();
+    s_rg_measuring = false;
+
     /* The gain belonged to this track. Left set, the bar would keep
      * claiming it during the gap before the next one starts. */
     s_rg_active = false;
@@ -2673,11 +2764,15 @@ static track_end_t play_file(const char *path)
             if (measuring) {
                 loudness_invalidate(&s_loud);
                 measuring = false;
+                s_rg_measuring = false;
                 ESP_LOGI(TAG, "loudness measurement dropped: seek");
                 /* Counted, so a track that is always seeked through is
-                 * distinguishable from one never played. Nothing acts
-                 * on it yet; the history has to exist first. */
-                replaygain_note_abandoned(path);
+                 * distinguishable from one never played. */
+                if (rg_holding(path)) {
+                    s_rg.attempts.present = true;
+                    s_rg.attempts.abandoned++;
+                    s_rg_dirty = true;
+                }
             }
 
             const int pct = s_seek_pct;
@@ -2793,7 +2888,7 @@ static track_end_t play_file(const char *path)
              * learn. `fmt_saved` keeps this to the first block rather
              * than every one.
              */
-            if (!fmt_saved) {
+            if (!fmt_saved && rg_holding(path)) {
                 fmt_saved = true;
                 replaygain_format_t rf;
                 memset(&rf, 0, sizeof(rf));
@@ -2804,7 +2899,13 @@ static track_end_t play_file(const char *path)
                 rf.kbps = (uint16_t)info.bitrate_kbps;
                 snprintf(rf.codec, sizeof(rf.codec), "%s",
                          info.codec ? info.codec : "");
-                replaygain_save_format(path, &rf);
+                /* Only when it actually differs, so a track whose
+                 * format was already recorded does not mark the record
+                 * dirty and rewrite an identical file every play. */
+                if (memcmp(&s_rg.format, &rf, sizeof(rf)) != 0) {
+                    s_rg.format = rf;
+                    s_rg_dirty = true;
+                }
             }
 
             if (cur_rate == 0) {
@@ -3022,7 +3123,16 @@ static track_end_t play_file(const char *path)
         float lufs = 0.0f, peak = 0.0f;
         uint32_t gated = 0;
         if (loudness_finish(&s_loud, &lufs, &peak, &gated)) {
-            replaygain_save_loudness(path, lufs, peak, gated);
+            if (rg_holding(path)) {
+                s_rg.loudness.present = true;
+                s_rg.loudness.integrated_lufs = lufs;
+                s_rg.loudness.sample_peak_dbfs = peak;
+                s_rg.loudness.blocks = gated;
+                s_rg_dirty = true;
+            }
+            ESP_LOGI(TAG, "loudness: %.2f LUFS, peak %.2f dBFS, %" PRIu32
+                          " gated blocks",
+                     (double)lufs, (double)peak, gated);
 
             /*
              * The envelope, from the same pass. This is where waveforms
@@ -3037,9 +3147,14 @@ static track_end_t play_file(const char *path)
             uint8_t env[LOUDNESS_ENV_COLUMNS];
             int cols = 0;
             loudness_envelope(&s_loud, env, &cols);
-            if (cols > 0) {
-                replaygain_save_waveform(path, env, cols,
-                                         s_len_sec ? s_len_sec : 0);
+            if (cols > 0 && rg_holding(path)) {
+                s_rg.waveform.present = true;
+                s_rg.waveform.sec = s_len_sec;
+                s_rg.waveform.columns =
+                    (cols > REPLAYGAIN_COLUMNS) ? REPLAYGAIN_COLUMNS : cols;
+                memcpy(s_rg.waveform.level, env,
+                       (size_t)s_rg.waveform.columns);
+                s_rg_dirty = true;
                 ESP_LOGI(TAG, "envelope from playback: %d columns", cols);
             }
         }
