@@ -12,6 +12,14 @@
  * all -- no card, no drive -- the settings live in memory for the
  * session and are written to the first volume that turns up.
  *
+ * JSON Lines, appended. Each save adds one object on its own line and
+ * the last valid line wins, so a save is one open-write-close at the
+ * end of the file rather than a temp file and a pair of renames -- both
+ * quicker and easier on the flash, since it extends the last cluster
+ * instead of allocating and freeing directory entries. The file is
+ * capped at 64 KB, which is thousands of saves; on reaching it the
+ * whole thing is rewritten as a single current record.
+ *
  * Text, not a packed struct. This is a card people pull out and put in a
  * computer, and a line saying `volume=35` is something they can read,
  * edit and delete; a binary blob with a CRC is something they can only
