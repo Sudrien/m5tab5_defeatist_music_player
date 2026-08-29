@@ -351,11 +351,6 @@ static void draw_slider_c(int x0, int x1, int y, int pct, uint16_t fill)
     gfx_fill_circle(split, y, THUMB_R, C_THUMB);
 }
 
-static void draw_slider(int x0, int x1, int y, int pct)
-{
-    draw_slider_c(x0, x1, y, pct, C_FILL);
-}
-
 static void draw_play_pause(bool playing)
 {
     int cx, cy;

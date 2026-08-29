@@ -2361,13 +2361,11 @@ static track_end_t play_file(const char *path)
          * kilobyte memcpy under the lock, against a re-read of the
          * card if it is skipped.
          */
-        if (got && have.waveform.present && have.waveform.has_levels &&
-            have.waveform.columns > 0) {
+        if (got && have.waveform.present && have.waveform.columns > 0) {
             framewalk_t w;
             memset(&w, 0, sizeof(w));
             w.has_levels = true;
             w.columns = have.waveform.columns;
-            w.frames  = have.waveform.frames;
             w.sec     = have.waveform.sec;
             memcpy(w.level, have.waveform.level, (size_t)have.waveform.columns);
             mediacache_put_walk(path, &w);
