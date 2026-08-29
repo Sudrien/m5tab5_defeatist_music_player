@@ -1013,7 +1013,7 @@ static void load_tags(const char *path)
     if (mediacache_tags(path, &s_tags)) {
         ESP_LOGI(TAG, "tags from cache: \"%s\"", s_tags.title);
     } else {
-        FILE *af = fopen(path, "rb");
+        FILE *af = storage_io_open(path, "rb");
         if (af) {
             if (covertag_read_tags(af, &s_tags) == ESP_OK) {
                 ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
@@ -1027,7 +1027,7 @@ static void load_tags(const char *path)
                 memset(&s_tags, 0, sizeof(s_tags));
                 ESP_LOGI(TAG, "no text tags in this file; showing the filename");
             }
-            fclose(af);
+            storage_io_close(af);
         }
     }
 
@@ -1039,6 +1039,27 @@ static void load_tags(const char *path)
         s_display_name = "";
     }
 }
+
+/*
+ * True from the moment a track change starts until the decode loop for
+ * it has finished, one way or another.
+ *
+ * The amplifier's idle hold is 1500 ms and its comment says why: the gap
+ * between two tracks "is a few hundred milliseconds at most", so waiting
+ * out a fixed 1.5 s stops a boundary clicking the output stage off and
+ * on. That was true when it was written. It stopped being true when the
+ * index build made the gap fifteen seconds -- invisible then, because
+ * the silence was so long that a click at either end of it was the least
+ * of the problem -- and it is false again now for a different reason:
+ * 0104 brought the gap to about 1.8 s, which is just over the hold, so
+ * every track change clicks off and back on 19 ms later.
+ *
+ * A fixed timeout cannot be right for a gap whose length depends on the
+ * size of the next file. So idle stops being inferred from "nothing is
+ * being decoded" and starts meaning what it says: nothing is going to be
+ * played soon. During a track change something certainly is.
+ */
+static volatile bool s_track_changing;
 
 static void track_change_begin(const char *path)
 {
@@ -1271,7 +1292,7 @@ static void do_art(const char *path, uint32_t gen)
         return;
     }
 
-    FILE *af = fopen(path, "rb");
+    FILE *af = storage_io_open(path, "rb");
     if (!af) return;
 
     long fsize = 0;
@@ -1296,11 +1317,11 @@ static void do_art(const char *path, uint32_t gen)
         jpg = (uint8_t *)cached;
         jpg_len = cached_len;
         xerr = ESP_OK;
-        fclose(af);
+        storage_io_close(af);
         ESP_LOGI(TAG, "cover from cache (%u bytes)", (unsigned)jpg_len);
     } else {
         xerr = covertag_extract_art(af, &jpg, &jpg_len);
-        fclose(af);
+        storage_io_close(af);
         owned = true;
     }
 
@@ -1400,7 +1421,7 @@ static void do_walk(const char *path)
         return;
     }
 
-    FILE *f = fopen(path, "rb");
+    FILE *f = storage_io_open(path, "rb");
     if (!f) return;
 
     /* Decline before reading anything. Walking a format with no
@@ -1409,7 +1430,7 @@ static void do_walk(const char *path)
      * decoder reading the same card for the same track. */
     if (!framewalk_supports(f)) {
         ESP_LOGI(TAG, "no frame walker for this format; no envelope");
-        fclose(f);
+        storage_io_close(f);
         return;
     }
 
@@ -1420,7 +1441,7 @@ static void do_walk(const char *path)
     const int cols = LCD_H_RES;
 
     const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
-    fclose(f);
+    storage_io_close(f);
 
     /* Loud, because every way this can fail is silent otherwise: an
      * aborted scan, a format with no per-frame loudness, and a walk
@@ -1564,13 +1585,23 @@ static void ring_publish(void)
  * not, and because the walk reads the entire file.
  */
 #define MEDIA_ART_DELAY_MS      (700)
+/* Short, because the cover stage above has already settled and the ring
+ * has been filling throughout it. The wait that matters here is the one
+ * on the ring, not this. */
+#define MEDIA_PREFETCH_DELAY_MS (250)
 #define MEDIA_WALK_DELAY_MS     (2500)
 #define MEDIA_MIN_RING_PCT      (60)
 #define MEDIA_WAIT_SLICE_MS     (100)
 #define MEDIA_WAIT_MAX_MS       (8000)
 
 /*
- * Sleep for `delay_ms`, then wait for the ring to reach MEDIA_MIN_RING_PCT.
+ * Sleep for `delay_ms`, then wait for the ring to reach `floor_pct`.
+ *
+ * The floor is a parameter because prefetch wants a higher one than the
+ * cover does, and having two numbers in two places was the whole of the
+ * 0101 prefetch regression: this waited for 60% while prefetch_next()
+ * sampled once and demanded 75%, so the answer depended on how long
+ * whatever ran before it happened to take.
  *
  * Returns false if the track changed while waiting, which means whatever
  * was about to be done is for a song nobody is listening to any more.
@@ -1581,7 +1612,8 @@ static void ring_publish(void)
  * late cover beats no cover, and the log line is how that gets noticed
  * rather than being silently lived with.
  */
-static bool media_settle(uint32_t gen, int delay_ms, const char *what)
+static bool media_settle(uint32_t gen, int delay_ms, int floor_pct,
+                         const char *what)
 {
     int waited = 0;
 
@@ -1593,14 +1625,14 @@ static bool media_settle(uint32_t gen, int delay_ms, const char *what)
 
     while (waited < MEDIA_WAIT_MAX_MS) {
         const int pct = ring_headroom_pct();
-        if (pct < 0 || pct >= MEDIA_MIN_RING_PCT) return true;
+        if (pct < 0 || pct >= floor_pct) return true;
         vTaskDelay(pdMS_TO_TICKS(MEDIA_WAIT_SLICE_MS));
         waited += MEDIA_WAIT_SLICE_MS;
         if (gen != s_track_gen) return false;
     }
 
     ESP_LOGW(TAG, "%s: ring never reached %d%% in %d ms; going ahead anyway",
-             what, MEDIA_MIN_RING_PCT, MEDIA_WAIT_MAX_MS);
+             what, floor_pct, MEDIA_WAIT_MAX_MS);
     return true;
 }
 
@@ -1649,17 +1681,22 @@ static void prefetch_next(void)
         return;
     }
 
-    if (!prefetch_ok(PREFETCH_START_PCT)) {
-        ESP_LOGI(TAG, "prefetch held off: ring at %d%%, need %d%%",
-                 ring_headroom_pct(), PREFETCH_START_PCT);
-        return;
-    }
-
+    /*
+     * No start gate here any more: media_task waits on
+     * PREFETCH_START_PCT through media_settle() before calling this, so
+     * re-testing it would only re-introduce the sample-once failure one
+     * level down -- and would throw away the work when the settle had
+     * deliberately proceeded on its bounded timeout.
+     *
+     * The abort checks below stay. They are a different question: not
+     * "is there surplus to start" but "has the surplus gone while I was
+     * working", and that one still has to be asked repeatedly.
+     */
     const uint32_t gen = s_track_gen;
 
     /* ---- tags ---- */
     if (!mediacache_tags(next, NULL)) {
-        FILE *f = fopen(next, "rb");
+        FILE *f = storage_io_open(next, "rb");
         if (f) {
             id3_tags_t t;
             memset(&t, 0, sizeof(t));
@@ -1667,7 +1704,7 @@ static void prefetch_next(void)
                 mediacache_put_tags(next, &t);
                 ESP_LOGI(TAG, "prefetched tags: \"%s\"", t.title);
             }
-            fclose(f);
+            storage_io_close(f);
         }
     }
 
@@ -1682,13 +1719,13 @@ static void prefetch_next(void)
             return;
         }
 
-        FILE *f = fopen(next, "rb");
+        FILE *f = storage_io_open(next, "rb");
         if (!f) return;
 
         uint8_t *img = NULL;
         size_t len = 0;
         const esp_err_t err = covertag_extract_art(f, &img, &len);
-        fclose(f);
+        storage_io_close(f);
 
         if (err != ESP_OK) {
             /* The useful half of what was learned. Without storing it,
@@ -1727,11 +1764,11 @@ static void prefetch_next(void)
             return;
         }
 
-        FILE *f = fopen(next, "rb");
+        FILE *f = storage_io_open(next, "rb");
         if (!f) return;
 
         if (!framewalk_supports(f)) {
-            fclose(f);
+            storage_io_close(f);
         } else {
             /* Cleared here and nowhere else: this is the moment "still
              * next" was last true. */
@@ -1740,7 +1777,7 @@ static void prefetch_next(void)
             const esp_err_t err = framewalk_scan(f, LCD_H_RES,
                                                  &s_prefetch_abort,
                                                  &s_prefetch_walk);
-            fclose(f);
+            storage_io_close(f);
 
             if (err == ESP_OK && !s_prefetch_abort &&
                 s_prefetch_walk.has_levels && s_prefetch_walk.frames &&
@@ -1811,7 +1848,7 @@ static void media_task(void *arg)
         const bool art_in_hand = mediacache_art(path, &cached_len) != NULL ||
                                  mediacache_no_art(path);
 
-        if (!art_in_hand && !media_settle(gen, MEDIA_ART_DELAY_MS, "cover")) {
+        if (!art_in_hand && !media_settle(gen, MEDIA_ART_DELAY_MS, MEDIA_MIN_RING_PCT, "cover")) {
             continue;
         }
 
@@ -1827,14 +1864,14 @@ static void media_task(void *arg)
          * this is a few KB at the front of a file.
          */
         if (gen == s_track_gen && !mediacache_tags(path, NULL)) {
-            FILE *tf = fopen(path, "rb");
+            FILE *tf = storage_io_open(path, "rb");
             if (tf) {
                 id3_tags_t t;
                 memset(&t, 0, sizeof(t));
                 if (covertag_read_tags(tf, &t) == ESP_OK) {
                     mediacache_put_tags(path, &t);
                 }
-                fclose(tf);
+                storage_io_close(tf);
             }
         }
 
@@ -1868,7 +1905,8 @@ static void media_task(void *arg)
              * cached envelope skips the wait, because do_walk() will not
              * touch the card at all. */
             if (!mediacache_walk(path) &&
-                !media_settle(gen, MEDIA_WALK_DELAY_MS, "envelope")) continue;
+                !media_settle(gen, MEDIA_WALK_DELAY_MS, MEDIA_MIN_RING_PCT,
+                              "envelope")) continue;
 
             do_walk(path);
             HEAP_CHECK("after do_walk");
@@ -1890,8 +1928,30 @@ static void media_task(void *arg)
          */
         if (gen == s_track_gen) {
             mediacache_pin(path);
-            prefetch_next();
-            HEAP_CHECK("after prefetch");
+
+            /*
+             * Wait for the surplus rather than sampling for it.
+             *
+             * 0101 switched the walk off and this stopped happening at
+             * all -- "prefetch held off: ring at 61%, need 75%", every
+             * track, forever. Nothing about prefetch had changed. What
+             * changed is that the walk's 2.5 s settle used to run first,
+             * and by the time it returned the ring was past 75%; without
+             * it prefetch_next() sampled a ring that was still filling
+             * and gave up, and nothing called it again.
+             *
+             * A gate that opens or not depending on how long an
+             * unrelated stage happened to take is not a gate. This waits
+             * on the number it actually cares about, with the same
+             * bounded timeout as everything else -- a late prefetch
+             * beats no prefetch, and PREFETCH_ABORT_PCT still stops the
+             * work if the ring falls away underneath it.
+             */
+            if (media_settle(gen, MEDIA_PREFETCH_DELAY_MS,
+                             PREFETCH_START_PCT, "prefetch")) {
+                prefetch_next();
+                HEAP_CHECK("after prefetch");
+            }
         }
     }
 }
@@ -2047,7 +2107,7 @@ static void ui_task(void *arg)
          * writer stops rather than up to a minute before it, which is the
          * gap the old behaviour played its buffer out into.
          */
-        audio_out_set_idle(!s_playing || !s_decoding);
+        audio_out_set_idle(!s_playing || (!s_decoding && !s_track_changing));
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
 
@@ -2269,6 +2329,7 @@ static track_end_t play_file(const char *path)
      * screen would otherwise still be showing the track that just
      * ended. */
     const int64_t t_start = esp_timer_get_time();
+    s_track_changing = true;
     track_change_begin(path);
 
     /*
@@ -2730,6 +2791,10 @@ static track_end_t play_file(const char *path)
     /* No loop from here on, so no seek can be serviced. Cleared before
      * the log line rather than after, so nothing can slip in between. */
     s_decoding = false;
+    /* Cleared here rather than at the first decoded block, so that a
+     * track which fails to open cannot leave the amplifier powered for
+     * ever waiting for a sound that is not coming. */
+    s_track_changing = false;
     if (s_seek_pct >= 0) {
         ESP_LOGI(TAG, "dropping unserviced seek (%s): track over", s_seek_why);
         s_seek_pct = -1;

@@ -2089,6 +2089,85 @@ and it is the thing that will finally give the arbiter a contended window
 to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
 the only concurrent reader was the walk and 0101 switched it off.
 
+## Where v0.2.0 got to, and what is next
+
+**Read this first if you are picking this up cold.** Patches 0100-0105
+were one session. The short version: the player was slow because
+`fread()` was reaching the filesystem in `BUFSIZ` pieces, and everything
+before 0104 was looking in the wrong place for it.
+
+| | before | after 0105 |
+| --- | --- | --- |
+| Card throughput | 576 KB/s | 7823 KB/s |
+| Open, 8.5 MB MP3 | 14938 ms | 1218 ms |
+| Press to sound | 15336 ms | 1572 ms |
+| Longest single read | 219 ms | 21 ms |
+| Card busy during playback | 10% | 0.85% |
+
+`st_blksize` came back **0**, not 512 as predicted, so newlib fell
+through to `BUFSIZ`. 7823/576 = 13.58, and 16384/13.58 is about 1206
+bytes -- `BUFSIZ` plus overhead. The mechanism was right and the constant
+was wrong.
+
+### The four things v0.2.0 set out to fix
+
+1. **Display flashing cyan.** Untouched. It is a DPI/PSRAM bandwidth
+   problem, independent of storage, and no log since has shown it.
+2. **The card starving other tasks.** Arbitrated in 0100 -- and still
+   **unvalidated**, because `worst wait` has been 0 ms in every log. The
+   walk was off from 0101 and prefetch was broken from 0101 until this
+   patch, so nothing has ever contended with the decoder. 0105 should
+   produce the first contended window.
+3. **Gapless needs RAM caching.** Not started, but no longer blocked: it
+   was impossible against a 19 s open and is merely unwritten against a
+   1.5 s one.
+4. **ReplayGain envelope in a sidecar.** Not started. `WAVEFORM_SCAN`
+   stays 0 and the walk comes back with it -- the sidecar is what makes
+   the whole-file pass a once-per-file cost instead of a per-play one,
+   and re-enabling the walk before that would put the second read back.
+
+### What to do next, roughly in order
+
+- **Check `worst wait` now that prefetch runs.** It is the first real
+  test of 0100 and the number that says whether the arbiter was worth it.
+- **ReplayGain sidecar**, `.file.ext.dat.tmp`, keyed on size and mtime.
+  The walk returns as its producer, and it can carry the seek index too,
+  which would let `MP3D_DO_NOT_SCAN` remove what is left of the open.
+- **Gapless**, which wants the next track decoding before the current one
+  ends. At 0.85% card duty there is room; the ring is 10 MB and reaches
+  0% at first sound, so the head start has to be built rather than
+  assumed.
+- `MP3D_DO_NOT_SCAN` is **no longer urgent**. 1.2-1.5 s is not what is
+  wrong with the player, and the index buys real seeking and duration.
+  It is worth doing when the walk can supply the index instead.
+
+### Things left deliberately broken or unfinished
+
+- `covertag.c` is `PREFETCH` class for every caller, including the decode
+  loop's own `load_tags()`, which should be `PLAYBACK`.
+- One lease covers the SD card and the USB port together.
+- Raw ADTS and AMR have no duration source while the walk is off, and
+  will read 00:00.
+- The size-only handle in `do_art()` is deliberately left on plain
+  `fopen()`: it opens, seeks, tells and closes without reading a byte, so
+  a pool slot spent on it is a slot the decoder cannot have.
+- Nothing in 0100-0105 was compile-tested against ESP-IDF. `storage_io.c`
+  is clean under `gcc -Wall -Wextra -Wformat=2`.
+
+### The method that actually worked
+
+Three hypotheses were tested and two were wrong: the bus clock (0102) and
+DMA capability of the destination (0103). Both were plausible, both were
+measured, both moved throughput by about 1%. What made the third one
+findable was that each failed patch **narrowed** where the problem could
+be -- invariance to the clock and to the destination put it above the
+driver, which is the only reason `fread()` was worth looking at.
+
+Write the falsification condition into the patch before flashing it. 0103
+said "if throughput does not move and `bounced` is high, this is wrong",
+and that is exactly what happened, which turned a wasted patch into a
+result.
+
 ## 0103 was wrong, and what the negative result bought
 
 The bounce buffer did nothing. `bounced` came back 77 of 77 and 94 of 94,
