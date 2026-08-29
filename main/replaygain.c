@@ -759,3 +759,19 @@ esp_err_t replaygain_note_abandoned(const char *path)
     rg.attempts.abandoned = was + 1;
     return RG_SAVE_APPEND();
 }
+
+esp_err_t replaygain_write(const char *path, const replaygain_t *rg)
+{
+    if (!path || !rg) return ESP_ERR_INVALID_ARG;
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        ESP_LOGW(TAG, "stat failed for %s; not writing", path);
+        return ESP_FAIL;
+    }
+    /* The key is taken fresh rather than from the record: a caller may
+     * have held it across a whole track, and a file replaced underneath
+     * it should not be written a record about the old one. */
+    return append_record(path, rg, (uint32_t)st.st_size,
+                         (int64_t)st.st_mtime);
+}

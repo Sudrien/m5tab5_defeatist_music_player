@@ -334,6 +334,22 @@ esp_err_t replaygain_save_index(const char *path, const uint32_t *offset,
 esp_err_t replaygain_note_abandoned(const char *path);
 
 /*
+ * Write a whole record, with no load-merge first.
+ *
+ * The per-section savers above each load, overlay and write, which is
+ * right when one fact is learned in isolation. It is wrong when several
+ * are learned during one track open: three savers meant three loads and
+ * three full-file rewrites on top of the read the caller had already
+ * done, all within five seconds, all of the same kilobyte.
+ *
+ * A caller that is holding the record can merge in memory and call this
+ * once. The record passed in IS the file's new contents -- nothing is
+ * preserved from what was there, because the caller loaded it and is
+ * the one that knows what should survive.
+ */
+esp_err_t replaygain_write(const char *path, const replaygain_t *rg);
+
+/*
  * The gain to apply for a measured track, in dB.
  *
  * REFERENCE minus the measured loudness, then held back so the peak
