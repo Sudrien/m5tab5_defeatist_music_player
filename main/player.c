@@ -1412,6 +1412,56 @@ static void do_art(const char *path, uint32_t gen)
  * EOF and back. Sharing it would be a seek war with the thing producing
  * the audio.
  */
+/*
+ * Pull an envelope out of the sidecar into the RAM cache, if there is
+ * one and it is not there already.
+ *
+ * Split out of do_walk() and called BEFORE the settle, which is the
+ * whole point of it. The settle exists to keep a whole-file read off
+ * the card until the ring has a cushion; a sidecar hit is a stat and a
+ * two-kilobyte read, and making it wait 2.5 s and a ring threshold for
+ * permission to not touch the card is the wait protecting nothing.
+ *
+ * The old shape had do_walk() consult the sidecar and the caller decide
+ * whether to wait by asking mediacache_walk() -- so the fast path
+ * existed but only RAM could reach it, and a track whose envelope was
+ * sitting in a dotfile queued behind a delay sized for the read it was
+ * about to not do. On a fresh boot with populated sidecars that is
+ * every track in the folder.
+ *
+ * Returns true when the cache now holds this track's envelope, which is
+ * exactly the question the caller has to answer to skip the settle.
+ */
+static bool walk_prime(const char *path)
+{
+    if (!WAVEFORM_SCAN) return false;
+    if (mediacache_walk(path)) return true;
+
+    replaygain_t rg;
+    if (!replaygain_load(path, &rg)) return false;
+    if (!rg.waveform.present || !rg.waveform.has_levels ||
+        rg.waveform.columns <= 0) {
+        /* A record with no levels (AAC/AMR) is not a hit: those formats
+         * have nothing to show, and the walk below still owes them the
+         * duration the sidecar does not carry. Returning false sends
+         * them down the settle-then-walk path they took before. */
+        return false;
+    }
+
+    framewalk_t w;
+    memset(&w, 0, sizeof(w));
+    w.has_levels = true;
+    w.columns = rg.waveform.columns;
+    w.frames  = rg.waveform.frames;
+    w.sec     = rg.waveform.sec;
+    memcpy(w.level, rg.waveform.level, (size_t)rg.waveform.columns);
+
+    mediacache_put_walk(path, &w);
+    ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
+             w.columns, w.sec);
+    return true;
+}
+
 static void do_walk(const char *path)
 {
     /* Silent: the reason is logged once at boot rather than once per
@@ -1432,34 +1482,11 @@ static void do_walk(const char *path)
         return;
     }
 
-    /*
-     * Second-cheapest lookup, before the whole-file walk: the on-disk
-     * sidecar. mediacache_walk() above only ever has an answer if this
-     * track was already visited since boot; the sidecar survives a
-     * power cycle. A hit here still goes through mediacache_put_walk()
-     * below, on the framewalk_t constructed from it, so a second look
-     * at the same track in this session is the RAM hit above.
-     */
-    replaygain_t rg;
-    if (replaygain_load(path, &rg) && rg.waveform.present &&
-        rg.waveform.has_levels && rg.waveform.columns > 0) {
-        memset(&s_walk, 0, sizeof(s_walk));
-        s_walk.has_levels = true;
-        s_walk.columns = rg.waveform.columns;
-        s_walk.frames = rg.waveform.frames;
-        s_walk.sec = rg.waveform.sec;
-        memcpy(s_walk.level, rg.waveform.level,
-               (size_t)rg.waveform.columns);
-        s_wave_ready = true;
-        mediacache_put_walk(path, &s_walk);
-        ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
-                 s_walk.columns, s_walk.sec);
-        return;
-    }
-    /* rg.has_levels == false (AAC/AMR) falls through to the walk below
-     * rather than being treated as a hit: those formats have nothing to
-     * show either way, and the walk still supplies the duration that
-     * the sidecar does not carry (see replaygain.h). */
+    /* The sidecar was pulled into the RAM cache by walk_prime(), which
+     * the caller runs before deciding whether to settle -- so a sidecar
+     * hit is the cache hit above by the time control reaches here, and
+     * there is no second disk read on this path. Anything still here
+     * has no envelope stored anywhere and has to be walked. */
 
     FILE *f = storage_io_open(path, "rb");
     if (!f) return;
@@ -1956,7 +1983,12 @@ static void media_task(void *arg)
              * and is the first thing dropped when the track moves on. A
              * cached envelope skips the wait, because do_walk() will not
              * touch the card at all. */
-            if (!mediacache_walk(path) &&
+            /* RAM first, then the sidecar, and only then the settle.
+             * walk_prime() answers "is this already known" for both
+             * caches, so the wait is skipped whenever the envelope can
+             * be had without reading the whole file -- which is what
+             * the settle was always for. */
+            if (!walk_prime(path) &&
                 !media_settle(gen, MEDIA_WALK_DELAY_MS, MEDIA_MIN_RING_PCT,
                               "envelope")) continue;
 
