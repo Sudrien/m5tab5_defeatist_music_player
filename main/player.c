@@ -2704,22 +2704,13 @@ static track_end_t play_file(const char *path)
          * the one path where it would be hardest to spot. */
         s_decoding = false;
 
-    /*
-     * One write, here, for everything this track taught us -- and only
-     * if it taught us something. A track played twice with nothing new
-     * to record does not touch the card at all the second time.
-     *
-     * After the loudness merge above and outside the TRACK_ENDED test,
-     * because a skipped track still learned its tags and whether it has
-     * a cover even though its loudness was thrown away.
-     */
-    rg_release();
-    s_rg_measuring = false;
-
-    /* The gain belonged to this track. Left set, the bar would keep
-     * claiming it during the gap before the next one starts. */
-    s_rg_active = false;
-    s_rg_gain_db = 0.0f;
+        /* Nothing was decoded, but the record may still hold tags and
+         * the cover answer from the open above, so it is released the
+         * same way the normal exit releases it. */
+        rg_release();
+        s_rg_measuring = false;
+        s_rg_active = false;
+        s_rg_gain_db = 0.0f;
         return TRACK_UNREADABLE;
     }
 
@@ -3279,6 +3270,23 @@ static track_end_t play_file(const char *path)
     free(st);
     decoder_close(dec);
     storage_hold(STORAGE_COUNT);
+
+    /*
+     * One write, here, for everything this track taught us -- and only
+     * if it taught us something. A track played twice with nothing new
+     * to record does not touch the card at all the second time.
+     *
+     * After the loudness merge above and outside the TRACK_ENDED test,
+     * because a skipped track still learned its tags and whether it has
+     * a cover even though its loudness was thrown away.
+     */
+    rg_release();
+    s_rg_measuring = false;
+
+    /* The gain belonged to this track. Left set, the bar would keep
+     * claiming it during the gap before the next one starts. */
+    s_rg_active = false;
+    s_rg_gain_db = 0.0f;
 
     s_pos_sec = 0;
     return why;
