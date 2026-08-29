@@ -94,6 +94,21 @@ uint8_t settings_volume(void);
  */
 void settings_set_volume(uint8_t percent);
 
+/*
+ * The track that was playing when the player was last put down, or NULL
+ * if the file does not name one.
+ *
+ * A path, taken from the file as written and not checked: the volume it
+ * names may not be mounted and the file may have been deleted. The
+ * caller decides what to do about that, because the caller is the only
+ * one who knows whether it is about to try playing it.
+ */
+const char *settings_track(void);
+
+/* Record the track being played. Same cost as settings_set_volume():
+ * it stores and marks dirty, and the append happens later. */
+void settings_set_track(const char *path);
+
 #ifdef __cplusplus
 }
 #endif

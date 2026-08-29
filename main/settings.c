@@ -95,6 +95,10 @@ static const char *TAG = "tab5_settings";
 #define SETTINGS_MAX_FILE_BYTES (64 * 1024)
 
 static uint8_t    s_volume = 50;
+
+/* The track that was last playing, absolute path, empty when nothing
+ * has played yet on this file's volume. */
+static char       s_track[512];
 static volatile bool s_dirty;
 static TickType_t s_dirty_since;
 
@@ -121,6 +125,17 @@ static bool s_loaded;
 static size_t s_bytes;
 
 uint8_t settings_volume(void) { return s_volume; }
+
+const char *settings_track(void) { return s_track[0] ? s_track : NULL; }
+
+void settings_set_track(const char *path)
+{
+    if (!path || !*path) return;
+    if (strcmp(path, s_track) == 0) return;
+    snprintf(s_track, sizeof(s_track), "%s", path);
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
 
 void settings_set_volume(uint8_t percent)
 {
@@ -159,13 +174,26 @@ static bool parse_line(char *line)
         cJSON *root = cJSON_Parse(line);
         if (!root) return false;
 
-        const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "volume");
         bool any = false;
+
+        const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "volume");
         if (cJSON_IsNumber(v)) {
             int n = v->valueint;
             if (n < 0)   n = 0;
             if (n > 100) n = 100;
             s_volume = (uint8_t)n;
+            any = true;
+        }
+
+        /*
+         * Taken as written and checked by the caller, not here. A path
+         * on a volume that is no longer mounted, or a file since
+         * deleted, is a perfectly ordinary thing to find in this file
+         * and is not a reason to reject the record it appears in.
+         */
+        const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
+        if (cJSON_IsString(t) && t->valuestring && t->valuestring[0]) {
+            snprintf(s_track, sizeof(s_track), "%s", t->valuestring);
             any = true;
         }
         cJSON_Delete(root);
@@ -250,7 +278,27 @@ static bool load_file(const char *name)
  */
 static int record_line(char *out, size_t out_len)
 {
-    return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+    /*
+     * The track is written through cJSON rather than into the format
+     * string: a filename can contain a quote or a backslash, and one of
+     * those would produce a line that the next boot cannot parse --
+     * which, in an append-only file, is a line that silently costs
+     * every record after it nothing and every record before it its
+     * place as the newest.
+     */
+    if (!s_track[0]) {
+        return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+    }
+
+    cJSON *str = cJSON_CreateString(s_track);
+    char *esc = str ? cJSON_PrintUnformatted(str) : NULL;
+    cJSON_Delete(str);
+    if (!esc) return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+
+    const int n = snprintf(out, out_len, "{\"volume\":%u,\"track\":%s}\n",
+                           s_volume, esc);
+    cJSON_free(esc);
+    return n;
 }
 
 /*
