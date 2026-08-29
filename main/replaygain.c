@@ -571,6 +571,11 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
         return ESP_FAIL;
     }
 
+    /* One of these lands next to every track played. The dot keeps them
+     * out of this program's own listings; this keeps them out of the
+     * file browser on whatever the card gets plugged into next. */
+    storage_mark_hidden(cache_path);
+
     ESP_LOGI(TAG, "sidecar written: %s (%u bytes)", cache_path,
              (unsigned)(len + 1));
     return ESP_OK;
