@@ -100,6 +100,16 @@ extern "C" {
  * the decode loop duplicates mono into both slots. */
 #define LOUDNESS_MAX_CHANNELS   (2)
 
+/* Columns in the drawable envelope. Matches the panel, which is what
+ * will draw it, but the sidecar stores whatever count survived so a
+ * short track is not padded -- see replaygain.h. */
+#define LOUDNESS_ENV_COLUMNS    (720)
+
+/* Samples per column before any merging: 20 ms at 44.1 kHz. Small
+ * enough that a short track still gets a detailed envelope, and the
+ * merging handles everything longer. */
+#define LOUDNESS_ENV_SPAN0      (882)
+
 typedef struct {
     bool     active;        /* false once invalidated; process() is a no-op */
     bool     started;       /* has any audio been seen at all */
@@ -156,6 +166,32 @@ typedef struct {
 
     /* Sample peak, as a normalised magnitude 0..1 over all channels. */
     float    peak;
+
+    /*
+     * The drawable envelope: peak magnitude per column, which is what
+     * a waveform IS. framewalk.c's envelope was global_gain out of the
+     * frame headers -- an encoder's bit budget, which correlates with
+     * loudness and is not it. This is the decoded signal, so the shape
+     * on the seek bar is the shape of the audio.
+     *
+     * The duration is not known here -- the accumulator sees blocks,
+     * not a file -- so columns cannot be sized up front. Instead a
+     * column covers a fixed span, and when the array fills, adjacent
+     * pairs are merged (max, not mean) and the span doubles. A track of
+     * any length lands between LOUDNESS_ENV_COLUMNS/2 and
+     * LOUDNESS_ENV_COLUMNS columns with at most one pass over the array
+     * per doubling, which for a ten-minute track is nine merges of 720
+     * bytes in total.
+     *
+     * Max rather than mean at every stage, for the reason framewalk.c
+     * gave: a mean turns a transient into a bump, and the transient is
+     * what makes a track's shape recognisable.
+     */
+    uint8_t  env[LOUDNESS_ENV_COLUMNS];
+    int      env_used;          /* columns filled so far */
+    uint32_t env_span;          /* samples per column, doubles on merge */
+    uint32_t env_pos;           /* samples into the column being filled */
+    float    env_peak;          /* running peak within that column */
 } loudness_t;
 
 /* Start (or restart) a measurement. Called once per play attempt. */
@@ -202,6 +238,18 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
  */
 bool loudness_finish(loudness_t *l, float *out_lufs, float *out_peak_dbfs,
                      uint32_t *out_blocks);
+
+/*
+ * The envelope built during the pass: `*out_cols` columns of 0-255 peak
+ * magnitude, written into `dst` (which must hold LOUDNESS_ENV_COLUMNS).
+ *
+ * Valid after loudness_process() has been fed anything at all, and
+ * unlike loudness_finish() it does not care whether the measurement was
+ * invalidated -- a seek ruins an integrated loudness figure but the
+ * columns either side of it are still the audio that was there. The
+ * caller decides whether a partial envelope is worth storing.
+ */
+void loudness_envelope(const loudness_t *l, uint8_t *dst, int *out_cols);
 
 #ifdef __cplusplus
 }

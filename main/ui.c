@@ -749,8 +749,31 @@ void ui_draw(const ui_state_t *st)
          * not say -- the whole 72 px block is the target, and it is the
          * same target before and after the scan finishes.
          */
-        waveform_draw_flat(x0, x1, y, UI_WAVE_H, shown_pct,
-                           C_WAVE_PAST, C_WAVE_FUTURE);
+        /*
+         * Unshaped and grey, both halves the same: there is no envelope
+         * to divide, and colouring the played part red would draw a
+         * progress bar that happens to be the exact size and place the
+         * waveform will occupy -- which reads as a waveform of a track
+         * that is uniformly loud, rather than as one not measured yet.
+         * Grey says "nothing known here" in a way red cannot.
+         */
+        gfx_fill_rect(x0, y - UI_WAVE_H, x1 - x0, UI_WAVE_H, C_WAVE_FUTURE);
+
+        /*
+         * And say why. An unshaped bar on first play and a shaped one
+         * ever after is otherwise unexplained -- worse, it looks like
+         * the waveform failed on this track. This is the one moment the
+         * measurement is worth mentioning, so it is mentioned here and
+         * nowhere else, in the same yellow the RG badge uses so the two
+         * read as the same feature.
+         *
+         * Behind the playhead, not above or below: the bar is 72 px of
+         * empty grey and the text has nowhere better to be, and it is
+         * drawn first so the playhead crosses over it rather than the
+         * text sitting on top of the position.
+         */
+        gfx_draw_text(x0 + 12, y - UI_WAVE_H / 2 - 8,
+                      "ReplayGain is listening...", 2, x1 - x0 - 24, C_RG);
 
         const int split = x0 + ((x1 - x0) * shown_pct) / 100;
         gfx_fill_rect(split - 1, y - UI_WAVE_H, 3, UI_WAVE_H + 4,
@@ -772,9 +795,12 @@ void ui_draw(const ui_state_t *st)
      * question people actually ask of a player, and it is the one number
      * on screen that the seek bar cannot answer by looking at it.
      *
-     * With no duration there is nothing to subtract from, so the right
-     * hand clock reads 00:00 in the dim colour -- the honest rendering of
-     * "unknown", matching the plain groove above it.
+     * With no duration there is nothing to subtract from, so BOTH
+     * clocks dash -- the elapsed one too. A running elapsed beside a
+     * dashed remaining invites the arithmetic that would finish the
+     * sentence, and there is no total to finish it with; dashes on both
+     * match the bare groove above, which is also refusing to claim a
+     * position it does not have.
      */
     const int ty = s_bar_top + TIME_Y;
 
@@ -815,17 +841,19 @@ void ui_draw(const ui_state_t *st)
             : st->pos_sec;
         const uint16_t clock_c = seeking ? C_FILL : C_ICON;
 
-        gfx_draw_time(TIME_PAD, ty, shown_sec, clock_c);
-
         if (st->len_sec > 0) {
+            gfx_draw_time(TIME_PAD, ty, shown_sec, clock_c);
             const uint32_t left = (st->len_sec > shown_sec)
                                 ? st->len_sec - shown_sec : 0;
             gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left,
                               clock_c);
         } else {
-            /* No duration, so no target either -- pct_from_x() has
-             * nothing to scale against and the drag is refused anyway. */
-            gfx_draw_time(s_w - GFX_TIME_W - TIME_PAD, ty, 0, C_TRACK);
+            /* No duration: dashes on both, matching the bare groove.
+             * The elapsed number is real and is still withheld, because
+             * on its own beside a blank it is an invitation to work out
+             * what is left, which is the one thing not known. */
+            gfx_draw_time_dashes(TIME_PAD, ty, C_TRACK);
+            gfx_draw_time_dashes(s_w - GFX_TIME_W - TIME_PAD, ty, C_TRACK);
         }
     }
 

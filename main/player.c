@@ -94,10 +94,6 @@ static const char *TAG = "tab5_mp3";
  * against the rest of the file. Dead code that stops building is dead
  * code that cannot be switched back on to compare against.
  */
-#ifndef WAVEFORM_SCAN
-#define WAVEFORM_SCAN   (0)
-#endif
-
 /* ---- I2C bus: same pins the display example uses ---- */
 #define BSP_I2C_NUM             (0)
 #define BSP_I2C_SDA             (GPIO_NUM_31)
@@ -1413,46 +1409,29 @@ static void do_art(const char *path, uint32_t gen)
  * the audio.
  */
 /*
- * Pull an envelope out of the sidecar into the RAM cache, if there is
- * one and it is not there already.
+ * Put a track's stored envelope into the RAM cache, if it has one.
  *
- * Split out of do_walk() and called BEFORE the settle, which is the
- * whole point of it. The settle exists to keep a whole-file read off
- * the card until the ring has a cushion; a sidecar hit is a stat and a
- * two-kilobyte read, and making it wait 2.5 s and a ring threshold for
- * permission to not touch the card is the wait protecting nothing.
+ * The envelope now comes from the loudness pass -- peak magnitude off
+ * the decoded PCM -- so there is nothing to compute here and no
+ * whole-file read to schedule. This is a stat and a two-kilobyte read,
+ * which is why it no longer sits behind a settle: the settle existed to
+ * keep framewalk.c's whole-file scan off the card until the ring had a
+ * cushion, and that scan is gone.
  *
- * The old shape had do_walk() consult the sidecar and the caller decide
- * whether to wait by asking mediacache_walk() -- so the fast path
- * existed but only RAM could reach it, and a track whose envelope was
- * sitting in a dotfile queued behind a delay sized for the read it was
- * about to not do. On a fresh boot with populated sidecars that is
- * every track in the folder.
- *
- * Returns true when the cache now holds this track's envelope, which is
- * exactly the question the caller has to answer to skip the settle.
+ * Returns true when the cache now holds this track's envelope.
  */
 static bool walk_prime(const char *path)
 {
-    if (!WAVEFORM_SCAN) return false;
     if (mediacache_walk(path)) return true;
 
     replaygain_t rg;
     if (!replaygain_load(path, &rg)) return false;
-    if (!rg.waveform.present || !rg.waveform.has_levels ||
-        rg.waveform.columns <= 0) {
-        /* A record with no levels (AAC/AMR) is not a hit: those formats
-         * have nothing to show, and the walk below still owes them the
-         * duration the sidecar does not carry. Returning false sends
-         * them down the settle-then-walk path they took before. */
-        return false;
-    }
+    if (!rg.waveform.present || rg.waveform.columns <= 0) return false;
 
     framewalk_t w;
     memset(&w, 0, sizeof(w));
     w.has_levels = true;
     w.columns = rg.waveform.columns;
-    w.frames  = rg.waveform.frames;
     w.sec     = rg.waveform.sec;
     memcpy(w.level, rg.waveform.level, (size_t)rg.waveform.columns);
 
@@ -1462,83 +1441,6 @@ static bool walk_prime(const char *path)
     return true;
 }
 
-static void do_walk(const char *path, bool primed)
-{
-    /* Silent: the reason is logged once at boot rather than once per
-     * track, since it does not change while the firmware is running. */
-    if (!WAVEFORM_SCAN) return;
-
-    /*
-     * A cached envelope, which is the entire point of caching it: the
-     * walk is a whole-file read, so returning to a track otherwise costs
-     * the same 30 MB it cost the first time. A kilobyte in PSRAM buys
-     * that back.
-     *
-     * walk_prime() has already run and has already put a sidecar hit
-     * here, so this catches both caches. It logs only when it did NOT
-     * just fill the entry itself -- otherwise every sidecar hit printed
-     * "from sidecar" and "from cache" back to back, describing one
-     * lookup twice.
-     */
-    const framewalk_t *hit = mediacache_walk(path);
-    if (hit) {
-        memcpy(&s_walk, hit, sizeof(s_walk));
-        s_wave_ready = true;
-        if (!primed) {
-            ESP_LOGI(TAG, "envelope from cache: %d columns", s_walk.columns);
-        }
-        return;
-    }
-
-    /* Nothing in either cache: this track has no envelope stored
-     * anywhere and has to be walked, which is the only case the
-     * caller's settle was ever for. */
-
-    FILE *f = storage_io_open(path, "rb");
-    if (!f) return;
-
-    /* Decline before reading anything. Walking a format with no
-     * parser here is a whole file off the card in exchange for a log
-     * line saying it found nothing -- and it is contention with the
-     * decoder reading the same card for the same track. */
-    if (!framewalk_supports(f)) {
-        ESP_LOGI(TAG, "no frame walker for this format; no envelope");
-        storage_io_close(f);
-        return;
-    }
-
-    /* One column per pixel of panel width, still, even though the bar
-     * is narrower than that now. The extra columns cost a kilobyte
-     * and are averaged down at draw time; the alternative is a rescan
-     * whenever the bar's width changes. */
-    const int cols = LCD_H_RES;
-
-    const esp_err_t err = framewalk_scan(f, cols, &s_scan_abort, &s_walk);
-    storage_io_close(f);
-
-    /* Loud, because every way this can fail is silent otherwise: an
-     * aborted scan, a format with no per-frame loudness, and a walk
-     * that found no frames at all all end with simply no envelope on
-     * screen and nothing said about it. */
-    if (err != ESP_OK) {
-        ESP_LOGI(TAG, "scan cancelled");
-    } else if (s_scan_abort) {
-        ESP_LOGI(TAG, "scan finished but the track moved on");
-    } else if (!s_walk.has_levels) {
-        ESP_LOGI(TAG, "no per-frame loudness in this format; no envelope");
-    } else if (!s_walk.frames) {
-        ESP_LOGW(TAG, "walk found no frames; no envelope");
-    } else {
-        ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
-        s_wave_ready = true;
-        mediacache_put_walk(path, &s_walk);
-        /* Best-effort. A failed write costs the next play a re-walk --
-         * the state every play was in before this file existed -- so
-         * the error is logged inside replaygain_save() and not acted
-         * on here. */
-        replaygain_save_waveform(path, &s_walk);
-    }
-}
 
 /*
  * How full the PCM ring is, 0-100, or -1 when nothing is playing.
@@ -1731,16 +1633,9 @@ static bool media_settle(uint32_t gen, int delay_ms, int floor_pct,
  * slider and fills in later, which is what it already did.
  *
  * Each stage re-checks the gate. They are not one operation: the tags
- * cost a few KB and the walk costs the whole file, and a device that can
- * spare the first cannot necessarily spare the last.
+ * cost a few KB, which a device can spare.
  *
- * The walk is abortable through s_prefetch_abort, threaded into
- * framewalk_scan()'s existing polling. It has to be -- a gate checked
- * once at the start is fine for a 120 KB bounded read and is not fine
- * for a 60 MB one that would otherwise run for seconds after the track
- * it was for stopped being next.
  */
-static framewalk_t s_prefetch_walk;     /* media_task only; ~1 KB, not a local */
 
 /* Whether the ring can still spare a reader. Logged by the caller when
  * it cannot, because a gate that never opens is indistinguishable from a
@@ -1836,56 +1731,12 @@ static void prefetch_next(void)
 
     /* ---- envelope ---- */
     /*
-     * walk_prime(), not mediacache_walk(): the sidecar counts as having
-     * the envelope, and asking only the RAM cache re-walked a track
-     * whose dotfile already held one. That is the same split 0204 fixed
-     * for the foreground walk, in the one place it did not reach --
-     * and it is the more expensive one, because the prefetch walk is a
-     * whole extra file read running against the playing track.
-     *
-     * A hit also leaves the entry in the RAM cache, which is what the
-     * track change is about to look for.
+     * Just a sidecar read now. There is no prefetch walk any more: the
+     * envelope is a by-product of playing a track, so a track nobody has
+     * played has none to fetch and one that has been played has it in a
+     * dotfile. This warms the RAM cache so the track change finds it.
      */
-    if (WAVEFORM_SCAN && !walk_prime(next)) {
-        if (!prefetch_ok(PREFETCH_START_PCT)) {
-            ESP_LOGI(TAG, "prefetch stopped before the envelope (ring %d%%)",
-                     ring_headroom_pct());
-            return;
-        }
-
-        FILE *f = storage_io_open(next, "rb");
-        if (!f) return;
-
-        if (!framewalk_supports(f)) {
-            storage_io_close(f);
-        } else {
-            /* Cleared here and nowhere else: this is the moment "still
-             * next" was last true. */
-            s_prefetch_abort = false;
-
-            const esp_err_t err = framewalk_scan(f, LCD_H_RES,
-                                                 &s_prefetch_abort,
-                                                 &s_prefetch_walk);
-            storage_io_close(f);
-
-            if (err == ESP_OK && !s_prefetch_abort &&
-                s_prefetch_walk.has_levels && s_prefetch_walk.frames &&
-                gen == s_track_gen) {
-                mediacache_put_walk(next, &s_prefetch_walk);
-                /* Same sidecar a foreground walk writes in do_walk() --
-                 * without this, a track that is only ever reached by
-                 * prefetch (skipped past before its own do_walk() runs)
-                 * never gets one, and the next time anything actually
-                 * plays it, it pays for a full scan again. Best-effort,
-                 * same as there. */
-                replaygain_save_waveform(next, &s_prefetch_walk);
-                ESP_LOGI(TAG, "prefetched envelope for %s (%d columns)",
-                         next, s_prefetch_walk.columns);
-            } else {
-                ESP_LOGI(TAG, "prefetch walk abandoned");
-            }
-        }
-    }
+    walk_prime(next);
 
     int n = 0;
     size_t bytes = 0;
@@ -1991,29 +1842,20 @@ static void media_task(void *arg)
          * that the better the cache did, the less prefetching happened,
          * which is precisely backwards.
          */
-        /* WAVEFORM_SCAN gates the settle as well as the walk. Waiting
-         * 2.5 s to then do nothing is the kind of thing that survives a
-         * feature being switched off and is only found later, as a
-         * prefetch that starts inexplicably late. */
-        if (WAVEFORM_SCAN && strcmp(path, s_walked_path) != 0) {
-            /* The expensive one: a whole-file read, so it waits longest
-             * and is the first thing dropped when the track moves on. A
-             * cached envelope skips the wait, because do_walk() will not
-             * touch the card at all. */
-            /* RAM first, then the sidecar, and only then the settle.
-             * walk_prime() answers "is this already known" for both
-             * caches, so the wait is skipped whenever the envelope can
-             * be had without reading the whole file -- which is what
-             * the settle was always for. */
-            const bool primed = walk_prime(path);
-            if (!primed &&
-                !media_settle(gen, MEDIA_WALK_DELAY_MS, MEDIA_MIN_RING_PCT,
-                              "envelope")) continue;
-
-            do_walk(path, primed);
-            HEAP_CHECK("after do_walk");
-            if (s_wave_ready) snprintf(s_walked_path, sizeof(s_walked_path),
-                                       "%s", path);
+        /*
+         * The envelope, from the sidecar if the track has been played
+         * before. No settle: this is a small read, not the whole-file
+         * scan the wait was built around.
+         */
+        if (strcmp(path, s_walked_path) != 0) {
+            if (walk_prime(path)) {
+                const framewalk_t *hit = mediacache_walk(path);
+                if (hit) {
+                    memcpy(&s_walk, hit, sizeof(s_walk));
+                    s_wave_ready = true;
+                }
+            }
+            snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
         }
 
         /*
@@ -3048,6 +2890,25 @@ static track_end_t play_file(const char *path)
         uint32_t gated = 0;
         if (loudness_finish(&s_loud, &lufs, &peak, &gated)) {
             replaygain_save_loudness(path, lufs, peak, gated);
+
+            /*
+             * The envelope, from the same pass. This is where waveforms
+             * come from now -- framewalk.c read global_gain out of the
+             * frame headers, which is the encoder's bit budget and not
+             * the audio; this is peak magnitude off the decoded PCM.
+             *
+             * Written only here, so a track has an envelope and a
+             * loudness together or has neither, and both cost one
+             * uninterrupted play rather than a whole-file read.
+             */
+            uint8_t env[LOUDNESS_ENV_COLUMNS];
+            int cols = 0;
+            loudness_envelope(&s_loud, env, &cols);
+            if (cols > 0) {
+                replaygain_save_waveform(path, env, cols,
+                                         s_len_sec ? s_len_sec : 0);
+                ESP_LOGI(TAG, "envelope from playback: %d columns", cols);
+            }
         }
     }
 
@@ -3265,13 +3126,6 @@ void app_main(void)
      * what this replaced, and that one played.
      */
     storage_io_init();
-
-    /* Once per boot, next to the arbiter line, because "why is there no
-     * waveform" is otherwise answered only by reading CMakeLists. */
-    if (!WAVEFORM_SCAN) {
-        ESP_LOGI(TAG, "waveform scan disabled at build time "
-                      "(idf.py -DWAVEFORM=1 build to re-enable)");
-    }
 
     ESP_ERROR_CHECK(storage_init());
 
