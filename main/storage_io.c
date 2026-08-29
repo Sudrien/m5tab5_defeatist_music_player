@@ -6,6 +6,7 @@
 
 #include <inttypes.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -63,12 +64,25 @@ static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
  * needs to move into the per-class arrays with it.
  */
 /*
- * One internal DMA-capable staging buffer. Shared, and safe only because
- * the lease serialises every reader -- it is touched between an acquire
- * and the matching release and nowhere else.
+ * Stdio buffers, preallocated.
+ *
+ * Preallocated rather than allocated per open because these are 16 KB
+ * internal DMA-capable blocks and the internal heap is 256 KB with a USB
+ * host stack living in it: taking and returning them at every track
+ * change is how that heap gets fragmented into a state where the next one
+ * fails. Two is enough for decoder.c, which is all that is converted so
+ * far; a third concurrent open falls back to default buffering, which is
+ * correct and slow rather than broken.
  */
-static uint8_t *s_bounce;
-static uint32_t s_bounced[STORAGE_IO_CLASSES];
+#define STDIO_BUFS      (2)
+#define STDIO_BUF_SIZE  STORAGE_IO_CHUNK
+
+static struct {
+    uint8_t *buf;
+    FILE    *owner;             /* NULL when free */
+} s_pool[STDIO_BUFS];
+
+static bool s_blksize_logged;
 
 static int64_t  s_hold_t0;
 static uint64_t s_held_us[STORAGE_IO_CLASSES];
@@ -105,7 +119,6 @@ void storage_io_init(void)
     memset(s_worst_ms, 0, sizeof(s_worst_ms));
     memset(s_held_us, 0, sizeof(s_held_us));
     memset(s_worst_hold_ms, 0, sizeof(s_worst_hold_ms));
-    memset(s_bounced, 0, sizeof(s_bounced));
     s_phase_t0 = esp_timer_get_time();
 
     /*
@@ -118,16 +131,22 @@ void storage_io_init(void)
      *16 KB of internal RAM going missing is worth knowing about on a
      * board with 256 KB of it and a USB host stack next door.
      */
-    s_bounce = heap_caps_aligned_alloc(64, STORAGE_IO_CHUNK,
-                                       MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL |
-                                       MALLOC_CAP_8BIT);
-    if (!s_bounce) {
-        ESP_LOGW(TAG, "no internal DMA buffer; reads will take the "
-                      "sector-at-a-time path");
+    int got = 0;
+    for (int i = 0; i < STDIO_BUFS; i++) {
+        s_pool[i].buf = heap_caps_aligned_alloc(64, STDIO_BUF_SIZE,
+                                                MALLOC_CAP_DMA |
+                                                MALLOC_CAP_INTERNAL |
+                                                MALLOC_CAP_8BIT);
+        s_pool[i].owner = NULL;
+        if (s_pool[i].buf) got++;
+    }
+    if (got < STDIO_BUFS) {
+        ESP_LOGW(TAG, "only %d of %d stdio buffers; the rest of the opens "
+                      "will use whatever newlib picks", got, STDIO_BUFS);
     }
 
-    ESP_LOGI(TAG, "storage arbiter up, %d KB chunks, bounce %s",
-             STORAGE_IO_CHUNK / 1024, s_bounce ? "on" : "OFF");
+    ESP_LOGI(TAG, "storage arbiter up, %d KB chunks, %d x %d KB stdio buffers",
+             STORAGE_IO_CHUNK / 1024, got, STDIO_BUF_SIZE / 1024);
 }
 
 /* Most urgent class with somebody waiting, or STORAGE_IO_CLASSES for
@@ -255,49 +274,79 @@ static void count_bytes(storage_io_class_t cls, size_t n)
 }
 
 /*
- * True when the sdmmc driver can burst straight into this pointer.
+ * Log what newlib would have used if we had not intervened.
  *
- * Four-byte alignment as well as DMA capability, because the driver
- * requires both and a misaligned internal buffer fails the same way a
- * PSRAM one does.
+ * st_blksize is where newlib sizes its stdio buffer from, and for this
+ * VFS it comes from CONFIG_FATFS_VFS_FSTAT_BLKSIZE, which
+ * sdkconfig.defaults does not set. If this prints 512 then the
+ * one-sector-per-request theory is confirmed outright and the arithmetic
+ * in storage_io.h stops being arithmetic. If it prints something large,
+ * the theory is wrong and the request size was never the problem --
+ * either way it is one line and it is the point of the patch.
  */
-static inline bool dma_ready(const void *p)
+static void log_blksize_once(FILE *f)
 {
-    return esp_ptr_dma_capable(p) && ((uintptr_t)p & 3u) == 0;
+    if (s_blksize_logged) return;
+    s_blksize_logged = true;
+
+    struct stat st;
+    if (fstat(fileno(f), &st) == 0) {
+        ESP_LOGI(TAG, "stdio would use %ld byte reads (st_blksize); "
+                      "using %d instead",
+                 (long)st.st_blksize, STDIO_BUF_SIZE);
+    } else {
+        ESP_LOGW(TAG, "fstat failed; st_blksize unknown");
+    }
 }
 
-/*
- * fread() into a destination the card may not be able to reach.
- *
- * The caller must already hold the lease: s_bounce is shared and that is
- * what makes sharing it safe.
- */
-static size_t read_staged(void *dst, size_t len, FILE *f,
-                          storage_io_class_t cls)
+FILE *storage_io_open(const char *path, const char *mode)
 {
-    if (!s_bounce || dma_ready(dst)) return fread(dst, 1, len, f);
+    FILE *f = fopen(path, mode);
+    if (!f) return NULL;
 
-    uint8_t *p = (uint8_t *)dst;
-    size_t done = 0;
+    log_blksize_once(f);
+    if (!s_lock) return f;
 
-    while (done < len) {
-        size_t want = len - done;
-        if (want > STORAGE_IO_CHUNK) want = STORAGE_IO_CHUNK;
+    /*
+     * setvbuf() before any I/O on the stream, which is why this is a
+     * wrapper around fopen() rather than something a caller can apply
+     * to a handle it already has and has already read from.
+     */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    for (int i = 0; i < STDIO_BUFS; i++) {
+        if (!s_pool[i].buf || s_pool[i].owner) continue;
 
-        const size_t got = fread(s_bounce, 1, want, f);
-        if (got) {
-            memcpy(p + done, s_bounce, got);
-            done += got;
+        if (setvbuf(f, (char *)s_pool[i].buf, _IOFBF, STDIO_BUF_SIZE) == 0) {
+            s_pool[i].owner = f;
+        } else {
+            ESP_LOGW(TAG, "setvbuf refused; default buffering");
         }
-        if (got < want) break;          /* EOF or error; same as fread */
+        break;
     }
+    xSemaphoreGive(s_lock);
+
+    return f;
+}
+
+int storage_io_close(FILE *f)
+{
+    if (!f) return 0;
+
+    /*
+     * fclose() first: it may flush through the buffer, so the slot is
+     * only free once the stream is gone. Nothing here is freed -- the
+     * pool is preallocated and the block goes back to it.
+     */
+    const int rc = fclose(f);
 
     if (s_lock) {
         xSemaphoreTake(s_lock, portMAX_DELAY);
-        s_bounced[cls]++;
+        for (int i = 0; i < STDIO_BUFS; i++) {
+            if (s_pool[i].owner == f) { s_pool[i].owner = NULL; break; }
+        }
         xSemaphoreGive(s_lock);
     }
-    return done;
+    return rc;
 }
 
 size_t storage_io_fread(void *dst, size_t len, FILE *f,
@@ -318,7 +367,7 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
          * chunked, but nothing outranks playback, so letting go between
          * chunks would only cost semaphore traffic. */
         storage_io_acquire(cls);
-        done = read_staged(p, len, f, cls);
+        done = fread(p, 1, len, f);
         storage_io_release();
         count_bytes(cls, done);
         return done;
@@ -329,7 +378,7 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
         if (want > STORAGE_IO_CHUNK) want = STORAGE_IO_CHUNK;
 
         storage_io_acquire(cls);
-        const size_t got = read_staged(p + done, want, f, cls);
+        const size_t got = fread(p + done, 1, want, f);
         storage_io_release();
 
         count_bytes(cls, got);
@@ -371,9 +420,7 @@ void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out)
     out->held_ms       = (uint32_t)(s_held_us[cls] / 1000);
     out->worst_hold_ms = s_worst_hold_ms[cls];
     out->worst_wait_ms = s_worst_ms[cls];
-    out->bounced       = s_bounced[cls];
 
-    s_bounced[cls] = 0;
     s_acquires[cls] = 0;
     s_bytes[cls] = 0;
     s_held_us[cls] = 0;
@@ -427,10 +474,9 @@ void storage_io_report(const char *phase)
 
         ESP_LOGI(TAG, "%s %s: %" PRIu32 " reads, %" PRIu32 " KB in %" PRIu32
                  " ms held of %" PRIu32 " ms (%" PRIu32 "%%), %" PRIu32
-                 " KB/s, worst hold %" PRIu32 " ms, worst wait %" PRIu32
-                 " ms, %" PRIu32 " bounced",
+                 " KB/s, worst hold %" PRIu32 " ms, worst wait %" PRIu32 " ms",
                  name, k_class_name[i], st.reads,
                  (uint32_t)(st.bytes / 1024), st.held_ms, phase_ms, pct,
-                 kbps, st.worst_hold_ms, st.worst_wait_ms, st.bounced);
+                 kbps, st.worst_hold_ms, st.worst_wait_ms);
     }
 }
