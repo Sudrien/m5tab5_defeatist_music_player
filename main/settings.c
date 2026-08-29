@@ -18,9 +18,23 @@
 
 static const char *TAG = "tab5_settings";
 
-#define SETTINGS_NAME   "defeatist.dat"
-#define BACKUP_NAME     "defeatist.bak"
-#define TEMP_NAME       "defeatist.tmp"
+/*
+ * Dotfiles, and hidden on FAT once written.
+ *
+ * The old names had no dot and sat in the root of whatever volume held
+ * them, which is the first thing anyone sees when they plug the card
+ * into a computer to add music. storage_mark_hidden() covers the half
+ * of "hidden" that a dot does not.
+ */
+#define SETTINGS_NAME   ".defeatist.dat"
+#define BACKUP_NAME     ".defeatist.bak"
+#define TEMP_NAME       ".defeatist.tmp"
+
+/* What the same files were called before they gained their dot. Read,
+ * never written: a card written by an older build is loaded once and
+ * the next save lands on the new names. */
+#define LEGACY_NAME     "defeatist.dat"
+#define LEGACY_BACKUP   "defeatist.bak"
 
 /*
  * How long after the last change the file is written.
@@ -56,9 +70,23 @@ static uint8_t    s_volume = 50;
 static volatile bool s_dirty;
 static TickType_t s_dirty_since;
 
-/* Where the file lives, decided once at init. NULL means nowhere was
- * mounted and nothing will be written this boot. */
+/*
+ * Where the file lives -- the volume the music is coming from, which is
+ * a question that has no answer at init and changes when someone taps
+ * the other tab.
+ *
+ * NULL means nowhere to write yet. That is not an error and not the end
+ * of the matter: the values live in memory regardless, and the first
+ * volume that plays a track gets them written to it.
+ */
 static const char *s_root;
+
+/* Whether a file has ever been read. Guards a second load: adopting a
+ * volume mid-session takes the settings that are already in effect to
+ * the new volume rather than replacing them with whatever that volume
+ * remembers, because a volume change is a change of where the music is,
+ * not a request to restore someone else's preferences. */
+static bool s_loaded;
 
 uint8_t settings_volume(void) { return s_volume; }
 
@@ -208,7 +236,65 @@ static void write_file(void)
         return;
     }
 
-    ESP_LOGI(TAG, "saved (volume=%u)", s_volume);
+    /*
+     * After the rename, not on the temp file: the attribute belongs to
+     * the name, and the name the user sees is this one.
+     */
+    storage_mark_hidden(dat);
+
+    ESP_LOGI(TAG, "saved %s (volume=%u)", dat, s_volume);
+}
+
+/*
+ * Adopt a volume, which is the one a track is playing from.
+ *
+ * Called on every track start, so the common case is that the root has
+ * not changed and this does nothing. When it has changed -- first
+ * playback of the boot, or a switch between the card and a drive -- the
+ * settings move with the music:
+ *
+ *   - The first adoption of the session loads, because that is the
+ *     boot-time load that used to happen in settings_init() and could
+ *     not, since nothing was mounted yet.
+ *   - Later ones do not load. The volume in force is the one the person
+ *     has been listening at; replacing it from a file because they
+ *     tapped the USB tab would be the player changing its own volume
+ *     behind them. They are marked dirty instead, so the new volume
+ *     gets a copy.
+ */
+void settings_note_path(const char *path)
+{
+    const storage_id_t id = storage_of_path(path);
+    if (id == STORAGE_COUNT || !storage_present(id)) return;
+
+    const char *root = storage_mount_path(id);
+    if (!root || (s_root && strcmp(root, s_root) == 0)) return;
+
+    s_root = root;
+
+    if (!s_loaded) {
+        s_loaded = true;
+        if (load_file(SETTINGS_NAME)) {
+            ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", s_root, SETTINGS_NAME, s_volume);
+        } else if (load_file(BACKUP_NAME)) {
+            /* The rotation in write_file() means this is the previous
+             * good copy, not a guess. Reaching it means the last write
+             * was interrupted. */
+            ESP_LOGW(TAG, "using %s after a bad or missing %s", BACKUP_NAME, SETTINGS_NAME);
+        } else if (load_file(LEGACY_NAME) || load_file(LEGACY_BACKUP)) {
+            ESP_LOGI(TAG, "loaded %s/%s (volume=%u); saving as %s from now on",
+                     s_root, LEGACY_NAME, s_volume, SETTINGS_NAME);
+            s_dirty = true;
+            s_dirty_since = xTaskGetTickCount();
+        } else {
+            ESP_LOGI(TAG, "no settings file on %s; using defaults", s_root);
+        }
+        return;
+    }
+
+    ESP_LOGI(TAG, "settings follow the music to %s", s_root);
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
 }
 
 static void settings_task(void *arg)
@@ -234,40 +320,44 @@ static void settings_task(void *arg)
         /* The volume the file is meant to hold could have moved since
          * the flag was set, and that is fine -- write_file() reads the
          * current value, which is the one worth keeping. */
-        if (storage_present(storage_of_path(s_root))) write_file();
+        /*
+         * Nowhere to write is not a reason to drop the value. The flag
+         * is set again so that the first volume to turn up gets it --
+         * this is the whole of "kept in memory when there is no
+         * storage".
+         */
+        if (!s_root) {
+            s_dirty = true;
+            continue;
+        }
+
+        if (storage_present(storage_of_path(s_root))) {
+            write_file();
+        } else {
+            /* The volume went away between the change and the write.
+             * Hold the value for the next one rather than losing it. */
+            s_root = NULL;
+            s_dirty = true;
+        }
     }
 }
 
 void settings_init(void)
 {
-    /* The card first, the USB volume second. A drive is the more likely
-     * of the two to be carried between machines, and settings following
-     * a stick around is surprising in a way settings living on the
-     * player's own card is not. */
-    for (int v = 0; v < STORAGE_COUNT; v++) {
-        if (storage_present((storage_id_t)v)) {
-            s_root = storage_mount_path((storage_id_t)v);
-            break;
-        }
-    }
-
-    if (!s_root) {
-        ESP_LOGI(TAG, "no volume mounted; settings not persisted this boot");
-        return;
-    }
-
-    if (load_file(SETTINGS_NAME)) {
-        ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", s_root, SETTINGS_NAME, s_volume);
-    } else if (load_file(BACKUP_NAME)) {
-        /* The rotation above means this is the previous good copy, not a
-         * guess. Reaching it means the last write was interrupted. */
-        ESP_LOGW(TAG, "using %s after a bad or missing %s", BACKUP_NAME, SETTINGS_NAME);
-    } else {
-        ESP_LOGI(TAG, "no settings file; using defaults");
-    }
-
-    /* Priority 2: below the UI and well below the audio writer. Nothing
-     * waits on this and it holds the card's VFS lock while it writes. */
+    /*
+     * No search, and no early return.
+     *
+     * This used to pick a volume here and give up for the whole boot if
+     * it found none. That was wrong twice over: a USB drive mounts
+     * asynchronously and is routinely a second or two behind this call,
+     * so a drive-only session lost its settings entirely; and the
+     * volume it did find was not necessarily the one the music came
+     * from.
+     *
+     * The root is now settled by settings_note_path() when a track
+     * starts. Until then the defaults are in memory and are as usable
+     * as anything loaded from a file.
+     */
     if (xTaskCreate(settings_task, "settings", 4096, NULL, 2, NULL) != pdPASS) {
         ESP_LOGW(TAG, "no writer task; settings will not be saved");
     }
