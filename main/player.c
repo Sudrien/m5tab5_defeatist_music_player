@@ -3352,6 +3352,11 @@ static void player_loop(void)
             continue;
         }
 
+        /* Settings live on the volume the music is on. Cheap and
+         * idempotent -- it returns immediately unless the volume has
+         * actually changed. */
+        settings_note_path(s_path);
+
         ESP_LOGI(TAG, "playing %s", s_path);
         history_push(s_path);
         const track_end_t why = play_file(s_path);

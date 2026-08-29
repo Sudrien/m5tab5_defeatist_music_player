@@ -1,9 +1,16 @@
 /*
  * settings.h -- the handful of things worth surviving a power cycle.
  *
- * One file, `defeatist.dat`, in the root of the microSD if there is one
- * and the USB volume otherwise, with `defeatist.bak` beside it holding
- * the previous good copy.
+ * One file, `.defeatist.dat`, in the root of the volume the music is
+ * playing from, with `.defeatist.bak` beside it holding the previous
+ * good copy. Both are dotfiles and both are flagged hidden on FAT, so
+ * they stay out of the way on a card someone plugs into a computer to
+ * add music.
+ *
+ * Nothing is written until a track plays, because until then there is
+ * no answer to which volume the settings belong on. With no volume at
+ * all -- no card, no drive -- the settings live in memory for the
+ * session and are written to the first volume that turns up.
  *
  * Text, not a packed struct. This is a card people pull out and put in a
  * computer, and a line saying `volume=35` is something they can read,
@@ -40,6 +47,23 @@ extern "C" {
  * a missing or unreadable file leaves the defaults in place.
  */
 void settings_init(void);
+
+/*
+ * Tell settings which volume the music is on.
+ *
+ * Call with the path of each track as it starts. The settings file
+ * lives beside the music rather than on whichever volume happened to be
+ * mounted first: a card carried to another player carries its volume
+ * with it, and a session played entirely off a USB drive is saved at
+ * all, which it was not when the root was chosen at init and the drive
+ * was still enumerating.
+ *
+ * Idempotent and cheap -- it returns without doing anything unless the
+ * volume has changed. The first call of the session is the one that
+ * loads the file; later ones carry the settings in force across to the
+ * new volume rather than loading over them.
+ */
+void settings_note_path(const char *path);
 
 /*
  * The volume the player was last left at, 0-100, or 50 if it has never
