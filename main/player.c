@@ -63,6 +63,7 @@
 #include "browser.h"
 #include "decoder.h"
 #include "framewalk.h"
+#include "replaygain.h"
 #include "hid.h"
 #include "playlist.h"
 #include "settings.h"
@@ -1421,6 +1422,33 @@ static void do_walk(const char *path)
         return;
     }
 
+    /*
+     * Second-cheapest lookup, before the whole-file walk: the on-disk
+     * sidecar. mediacache_walk() above only ever has an answer if this
+     * track was already visited since boot; the sidecar survives a
+     * power cycle. A hit here still goes through mediacache_put_walk()
+     * below, on the framewalk_t constructed from it, so a second look
+     * at the same track in this session is the RAM hit above.
+     */
+    replaygain_t rg;
+    if (replaygain_load(path, &rg) && rg.has_levels) {
+        memset(&s_walk, 0, sizeof(s_walk));
+        s_walk.has_levels = true;
+        s_walk.columns = REPLAYGAIN_COLUMNS;
+        s_walk.frames = rg.frames;
+        s_walk.sec = rg.sec;
+        memcpy(s_walk.level, rg.waveform, sizeof(rg.waveform));
+        s_wave_ready = true;
+        mediacache_put_walk(path, &s_walk);
+        ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
+                 s_walk.columns, s_walk.sec);
+        return;
+    }
+    /* rg.has_levels == false (AAC/AMR) falls through to the walk below
+     * rather than being treated as a hit: those formats have nothing to
+     * show either way, and the walk still supplies the duration that
+     * the sidecar does not carry (see replaygain.h). */
+
     FILE *f = storage_io_open(path, "rb");
     if (!f) return;
 
@@ -1459,6 +1487,11 @@ static void do_walk(const char *path)
         ESP_LOGI(TAG, "envelope ready: %d columns", s_walk.columns);
         s_wave_ready = true;
         mediacache_put_walk(path, &s_walk);
+        /* Best-effort. A failed write costs the next play a re-walk --
+         * the state every play was in before this file existed -- so
+         * the error is logged inside replaygain_save() and not acted
+         * on here. */
+        replaygain_save(path, &s_walk);
     }
 }
 
@@ -1783,6 +1816,13 @@ static void prefetch_next(void)
                 s_prefetch_walk.has_levels && s_prefetch_walk.frames &&
                 gen == s_track_gen) {
                 mediacache_put_walk(next, &s_prefetch_walk);
+                /* Same sidecar a foreground walk writes in do_walk() --
+                 * without this, a track that is only ever reached by
+                 * prefetch (skipped past before its own do_walk() runs)
+                 * never gets one, and the next time anything actually
+                 * plays it, it pays for a full scan again. Best-effort,
+                 * same as there. */
+                replaygain_save(next, &s_prefetch_walk);
                 ESP_LOGI(TAG, "prefetched envelope for %s (%d columns)",
                          next, s_prefetch_walk.columns);
             } else {
