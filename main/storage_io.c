@@ -70,11 +70,17 @@ static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
  * internal DMA-capable blocks and the internal heap is 256 KB with a USB
  * host stack living in it: taking and returning them at every track
  * change is how that heap gets fragmented into a state where the next one
- * fails. Two is enough for decoder.c, which is all that is converted so
- * far; a third concurrent open falls back to default buffering, which is
- * correct and slow rather than broken.
+ * fails.
+ *
+ * Three since 0105, which converted player.c's readers too. The
+ * concurrent worst case is the decoder holding one for the length of a
+ * track while media_task has one open for a cover or a prefetch, so two
+ * covers it and the third is margin. A fourth concurrent open falls back
+ * to default buffering -- correct and slow rather than broken, where slow
+ * now means the BUFSIZ-sized reads 0104 measured at a thirteenth of the
+ * speed. The margin is worth 16 KB.
  */
-#define STDIO_BUFS      (2)
+#define STDIO_BUFS      (3)
 #define STDIO_BUF_SIZE  STORAGE_IO_CHUNK
 
 static struct {
