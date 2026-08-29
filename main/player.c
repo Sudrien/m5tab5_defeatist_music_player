@@ -543,6 +543,13 @@ static StreamBufferHandle_t s_pcm;
  * So the handle stays private to the decode loop and the writer, and the
  * decode loop publishes an int. An int cannot dangle. -1 means "no ring"
  * and is written before the ring goes away, not after.
+ *
+ * The ring no longer goes away -- it is created once in app_main() and
+ * outlives every track -- so the window that crash came through is
+ * gone. The published int stays anyway: it is what media_task's
+ * headroom checks are written against, and handing out the handle now
+ * would be re-earning the right to a use-after-free the first time
+ * anything else acquires a lifetime.
  */
 static volatile int s_ring_pct = -1;
 
@@ -574,21 +581,13 @@ static volatile uint32_t s_frames_chans = 2;
  */
 static StaticStreamBuffer_t s_pcm_struct;
 static uint8_t             *s_pcm_store;
-static volatile bool s_decode_done;
-
-/* The writer used to outlive the one and only file. Now that play_file()
- * is called once per track, the ring has to be freed at the end of each
- * one -- and freeing it while the writer is still inside
- * xStreamBufferReceive() on it is a use-after-free rather than an error.
- * So the writer says when it has gone. */
-static volatile bool s_writer_done;
 
 /*
- * Set by play_file() before it waits for the writer, and the reason the
+ * Set by play_file() before it drains the ring, and the reason the
  * pause gate below is not simply "if (!s_playing)".
  *
- * Teardown ends with two spins -- drain the ring on TRACK_ENDED, then
- * wait for s_writer_done -- and both are waiting on the writer to move.
+ * The end of a finished track spins waiting for the ring to empty,
+ * which is waiting on the writer to move.
  * A writer parked on a pause never does, so pausing at the wrong moment
  * would hang the decode loop against a task that is deliberately not
  * running, with the seek and next-track paths gone with it. Being
@@ -614,7 +613,15 @@ static void ring_publish(void);
 static void i2s_writer_task(void *arg)
 {
     uint8_t *buf = heap_caps_malloc(PCM_CHUNK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
-    if (!buf) { s_writer_done = true; vTaskDelete(NULL); return; }
+    /* No ring to drain into I2S without this, and nothing else can
+     * recover it, so the task ends. play_file() sees a NULL s_pcm and
+     * refuses the track rather than queueing into a ring nobody reads. */
+    if (!buf) {
+        ESP_LOGE(TAG, "no writer buffer; audio output is dead this boot");
+        s_pcm = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
 
     while (1) {
         /*
@@ -657,13 +664,23 @@ static void i2s_writer_task(void *arg)
 
         if (got) {
             audio_out_write(buf, got);
-        } else if (s_decode_done && xStreamBufferIsEmpty(s_pcm)) {
-            break;
         }
+        /*
+         * No exit, and no s_decode_done test any more.
+         *
+         * The writer used to end with the track, because the ring ended
+         * with the track. Both now live for the program: an empty ring
+         * means either that the decoder has not caught up or that
+         * nothing is playing, and going round again is the answer to
+         * both. The 100 ms receive timeout is what makes that cheap.
+         *
+         * This is the change that lets a track boundary happen without
+         * the audio path being torn down and rebuilt around it, which
+         * is what decoding the next track into a second ring needs.
+         */
     }
-    free(buf);
-    s_writer_done = true;
-    vTaskDelete(NULL);
+    /* Not reached. buf is held for the life of the program deliberately;
+     * a writer that freed it would be a writer that could stop. */
 }
 
 /* ------------------------------------------------------------------ */
@@ -3033,25 +3050,20 @@ static track_end_t play_file(const char *path)
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
-                HEAP_CHECK("before ring create");
-                s_ring_pct = 0;
-                /* Static: no allocation here, and the matching delete
-                 * below frees nothing. If the boot allocation failed the
-                 * player runs without a ring rather than not at all --
-                 * checked below, because a NULL here is a silent hang. */
-                s_pcm = s_pcm_store
-                        ? xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
-                                                    s_pcm_store, &s_pcm_struct)
-                        : NULL;
+                /*
+                 * The ring and the writer are made once in app_main()
+                 * now, so a track start sets the rate and publishes an
+                 * occupancy and that is all. A boot with no ring is
+                 * refused here rather than hanging silently, same as
+                 * before.
+                 */
                 if (!s_pcm) {
                     ESP_LOGE(TAG, "no PCM ring; cannot play");
                     why = TRACK_UNREADABLE;
                     break;
                 }
-                s_decode_done = false;
-                s_writer_done = false;
+                s_ring_pct = 0;
                 s_writer_stop = false;
-                xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
             } else if ((uint32_t)info.sample_rate != cur_rate) {
                 /* i2s_channel_reconfig_std_clock() needs the channel
                  * disabled, and doing that with audio queued is an
@@ -3167,7 +3179,6 @@ static track_end_t play_file(const char *path)
         blocks++;
     }
 
-    s_decode_done = true;
     if (s_pcm) {
         /* Interrupted rather than finished: what is queued is the old
          * track, and playing 0.37 s of it after the new one was chosen
@@ -3187,26 +3198,18 @@ static track_end_t play_file(const char *path)
             xStreamBufferReset(s_pcm);
         }
 
-        /* Wait for the writer to leave the buffer before deleting it.
-         * With one file this task never came back here at all; with a
-         * playlist, freeing the ring out from under a blocked
-         * xStreamBufferReceive() is a use-after-free once per track. */
-        while (!s_writer_done) vTaskDelay(pdMS_TO_TICKS(10));
         /*
-         * Order matters. -1 is published FIRST, so anything asking about
-         * occupancy is already being told there is no ring before the
-         * memory stops existing. Then the handle is cleared, then the
-         * buffer is freed -- so at no point is there a reachable handle
-         * to a freed buffer.
+         * Nothing is deleted here any more, so none of the ordering the
+         * delete needed applies: no wait for the writer to leave the
+         * buffer, no -1 published ahead of a free, no handle cleared.
+         * The ring outlives the track and the writer outlives both.
          *
-         * Plain create, plain delete: the allocator pairing that the
-         * WithCaps version had to get right is simply not present now.
+         * The pause override is dropped again. It is set for the drain
+         * above and means "ignore pause"; left set, the next pause
+         * would not pause.
          */
-        HEAP_CHECK("before ring delete");
-        s_ring_pct = -1;
-        StreamBufferHandle_t doomed = s_pcm;
-        s_pcm = NULL;
-        vStreamBufferDelete(doomed);
+        s_writer_stop = false;
+        s_ring_pct = 0;
     }
     /* No loop from here on, so no seek can be serviced. Cleared before
      * the log line rather than after, so nothing can slip in between. */
@@ -3521,6 +3524,31 @@ void app_main(void)
     if (!s_pcm_store) {
         ESP_LOGE(TAG, "could not reserve %u KB for the PCM ring",
                  (unsigned)(PCM_RING_BYTES / 1024));
+    }
+
+    /*
+     * The ring and the writer, once, for the life of the program.
+     *
+     * Both were made and destroyed inside play_file() on every track,
+     * which made a track boundary a teardown: drain, stop the writer,
+     * wait for it to leave the buffer, delete. Nothing can be decoded
+     * ahead across a boundary shaped like that, because there is a
+     * window in it with no ring at all.
+     *
+     * Static create over storage that outlives everything, so this
+     * allocates nothing and there is no delete to pair it with. A NULL
+     * here is a player that cannot play, which play_file() reports per
+     * track rather than refusing to boot -- the chooser still works and
+     * still says what is on the card.
+     */
+    if (s_pcm_store) {
+        s_pcm = xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
+                                          s_pcm_store, &s_pcm_struct);
+    }
+    if (s_pcm) {
+        xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
+    } else {
+        ESP_LOGE(TAG, "no PCM ring; this boot cannot play audio");
     }
 
     /* Both volumes, and the poll task that keeps them up to date. Not
