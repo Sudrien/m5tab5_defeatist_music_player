@@ -1640,6 +1640,9 @@ static void rg_hold(const char *path)
 static replaygain_t *s_rg_pending;
 static char          s_rg_pending_path[512];
 static volatile bool s_rg_pending_ready;
+/* When the hand-off happened, for the deadline below. 0 means the wait
+ * has not started. */
+static TickType_t    s_rg_pending_since;
 
 /*
  * Hand the record to media_task rather than writing it here.
@@ -1690,9 +1693,46 @@ static void rg_release(void)
 /* media_task's half. Called at the top of its loop, so the write starts
  * within one poll of the track ending and runs alongside the next
  * track's open rather than in front of it. */
+/*
+ * How full the ring has to be before the deferred write is allowed to
+ * start, and how long that requirement is honoured.
+ *
+ * Deferring the write to media_task moved it off the track boundary and
+ * straight into the next track's fill:
+ *
+ *   I (343486) tab5_mp3: open took 5 ms
+ *   I (344801) tab5_rg: sidecar written: ... (984 bytes)
+ *   I (344881) tab5_mp3: first sound 1464 ms after the press
+ *
+ * Same silence, one step later. A write is only free when playback has
+ * something banked, so it waits for the ring.
+ *
+ * The deadline is the other half. On a slow volume the ring may never
+ * reach the mark, and a record that is never written means the track is
+ * measured again on every play for ever -- which is the thing the
+ * sidecar exists to stop. Ten seconds of trying, then write regardless.
+ */
+#define RG_WRITE_MIN_RING_PCT   (40)
+#define RG_WRITE_DEADLINE_MS    (10000)
+
 static void rg_write_pending(void)
 {
     if (!s_rg_pending_ready) return;
+
+    /*
+     * -1 is no ring at all, which means nothing is playing and there is
+     * nobody to get in the way.
+     */
+    const int pct = s_ring_pct;
+    if (pct >= 0 && pct < RG_WRITE_MIN_RING_PCT) {
+        if (s_rg_pending_since == 0) s_rg_pending_since = xTaskGetTickCount();
+        if ((int32_t)(xTaskGetTickCount() - s_rg_pending_since) <
+            (int32_t)pdMS_TO_TICKS(RG_WRITE_DEADLINE_MS)) {
+            return;
+        }
+        ESP_LOGW(TAG, "sidecar write went ahead at ring %d%%", pct);
+    }
+    s_rg_pending_since = 0;
 
     replaygain_t *rg = s_rg_pending;
     if (rg) replaygain_write(s_rg_pending_path, rg);

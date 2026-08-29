@@ -535,16 +535,30 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
      *   - A stale-version line cannot survive, because nothing survives.
      *     Version handling stops needing a migration path at all.
      */
-    char tmp_path[620];
-    if ((int)snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", cache_path)
-        >= (int)sizeof(tmp_path)) {
-        cJSON_free(line);
-        return ESP_ERR_INVALID_SIZE;
-    }
-
-    FILE *f = storage_io_open(tmp_path, "wb");
+    /*
+     * Written in place. No temp file, no remove, no rename.
+     *
+     * The rotation was here so that a crash mid-write could not destroy
+     * a good record, and on a USB drive it cost more than the record is
+     * worth: three FAT metadata operations, 1.3 s measured, against a
+     * 984-byte payload. It was the whole of the gap between two tracks
+     * and then, once the write was deferred to media_task, the whole of
+     * the delay before first sound on the track after it.
+     *
+     * What makes dropping it right is what this file is. A sidecar is
+     * derived data -- loudness and an envelope measured off a play, and
+     * tags read out of the file itself. A truncated one fails to parse
+     * and is treated as absent, which costs one more measured play and
+     * nothing else. The rotation was protecting a cache against an
+     * outcome identical to a cache miss.
+     *
+     * A failed write does remove the file, because a stale record that
+     * happens to still parse would be worse than no record: it would be
+     * believed.
+     */
+    FILE *f = storage_io_open(cache_path, "wb");
     if (!f) {
-        ESP_LOGW(TAG, "could not open %s for writing", tmp_path);
+        ESP_LOGW(TAG, "could not open %s for writing", cache_path);
         cJSON_free(line);
         return ESP_FAIL;
     }
@@ -556,18 +570,8 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
     cJSON_free(line);
 
     if (!wrote || cerr != 0) {
-        ESP_LOGW(TAG, "write failed for %s; keeping the old sidecar",
-                 tmp_path);
-        remove(tmp_path);
-        return ESP_FAIL;
-    }
-
-    /* Atomic on FatFs: a directory entry update, not a copy. Either the
-     * new record is there or the old one still is. */
-    remove(cache_path);          /* FatFs rename() will not overwrite */
-    if (rename(tmp_path, cache_path) != 0) {
-        ESP_LOGW(TAG, "rename %s -> %s failed", tmp_path, cache_path);
-        remove(tmp_path);
+        ESP_LOGW(TAG, "write failed for %s; removing it", cache_path);
+        remove(cache_path);
         return ESP_FAIL;
     }
 
