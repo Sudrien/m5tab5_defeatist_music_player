@@ -257,7 +257,37 @@ static const char *TAG = "tab5_mp3";
  * eleven-second read; this buys enough slack to not hear it, which is
  * worth having and is not the same as the card working.
  */
-#define PCM_RING_BYTES          (10 * 1024 * 1024)
+/*
+ * 20 SECONDS, NOT SIXTY -- step one of the two-ring conversion.
+ *
+ * 10 MB is 59 s of 44.1 kHz stereo. That was chosen to swallow an
+ * eleven-second card read and it does, but it made every threshold
+ * expressed as a fraction of the ring mean something absurd:
+ * MEDIA_MIN_RING_PCT at 60% of 59 s is 34 seconds of audio, demanded
+ * inside an 8000 ms window. That is 4.3x realtime. A card supplies it
+ * and a USB drive does not, which is the whole of
+ *
+ *   W cover: ring never reached 60% in 8000 ms; going ahead anyway
+ *   W prefetch: ring never reached 75% in 8000 ms; going ahead anyway
+ *
+ * -- not a throughput problem, a threshold measured against a ring that
+ * grew 160x without the thresholds being revisited. At 3.5 MB, 60% is
+ * 12 s of audio in 8 s, or 1.5x realtime, which both volumes clear.
+ *
+ * Two of these is 7 MB against the 10 MB one, so the conversion to a
+ * pair of rings costs no PSRAM. This patch does not make that pair --
+ * the ring and i2s_writer_task are still created and destroyed inside
+ * play_file(), and a track boundary is still "drain, stop the writer,
+ * delete" -- but it settles the size first, because that boundary is
+ * built around the drain and the drain is where the size hurts.
+ *
+ * What it gives up: slack. Worst wait was 0 ms with 59 s banked and the
+ * settings write held the volume for 1005 ms; 20 s still covers that
+ * with room to spare, but an eleven-second card stall is now 20 s of
+ * cover rather than 59 s. If those come back this is the first number
+ * to look at.
+ */
+#define PCM_RING_BYTES          (3520 * 1024)       /* ~20 s at 44.1/16/2 */
 #define PCM_CHUNK_BYTES         (4 * 1024)
 
 /*
