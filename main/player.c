@@ -3503,10 +3503,23 @@ static void player_loop(void)
             continue;
         }
 
-        /* Settings live on the volume the music is on. Cheap and
+        /*
+         * Settings live on the volume the music is on. Cheap and
          * idempotent -- it returns immediately unless the volume has
-         * actually changed. */
-        settings_note_path(s_path);
+         * actually changed.
+         *
+         * The true return is the first adoption of the session, which
+         * is where the file is read. app_main() samples settings_volume()
+         * long before that can have happened, so without this the saved
+         * volume was loaded into settings.c and never reached the codec:
+         * the player kept the 50 it booted with, and the next drag saved
+         * that over the file.
+         */
+        if (settings_note_path(s_path)) {
+            s_volume = settings_volume();
+            audio_out_set_volume((uint8_t)s_volume);
+            ESP_LOGI(TAG, "volume %d from settings", s_volume);
+        }
 
         ESP_LOGI(TAG, "playing %s", s_path);
         history_push(s_path);
@@ -3713,10 +3726,11 @@ void app_main(void)
     ESP_ERROR_CHECK(storage_init());
 
     /*
-     * After storage, because it needs a mounted volume to read from, and
-     * before anything asks for a setting. The volume it loads has to be
-     * pushed at audio_out.c explicitly: audio_out_init() has already run
-     * and left the codec at its own default of 50.
+     * Starts the writer task; loads nothing, because which volume the
+     * settings live on is not known until a track plays. What it leaves
+     * here is the built-in default, pushed at audio_out.c so the codec
+     * and the player agree on something. The real value arrives at the
+     * first settings_note_path() in player_loop().
      */
     settings_init();
     s_volume = settings_volume();

@@ -62,8 +62,14 @@ void settings_init(void);
  * volume has changed. The first call of the session is the one that
  * loads the file; later ones carry the settings in force across to the
  * new volume rather than loading over them.
+ *
+ * Returns true when that first adoption has just happened, meaning the
+ * values in this module are now the ones that apply and the caller has
+ * to push them wherever they are acted on -- the codec does not read
+ * them. False every other time, including every repeat call for the
+ * same volume.
  */
-void settings_note_path(const char *path);
+bool settings_note_path(const char *path);
 
 /*
  * The volume the player was last left at, 0-100, or 50 if it has never

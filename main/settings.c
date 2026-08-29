@@ -299,13 +299,13 @@ static void write_file(void)
  *     behind them. They are marked dirty instead, so the new volume
  *     gets a copy.
  */
-void settings_note_path(const char *path)
+bool settings_note_path(const char *path)
 {
     const storage_id_t id = storage_of_path(path);
-    if (id == STORAGE_COUNT || !storage_present(id)) return;
+    if (id == STORAGE_COUNT || !storage_present(id)) return false;
 
     const char *root = storage_mount_path(id);
-    if (!root || (s_root && strcmp(root, s_root) == 0)) return;
+    if (!root || (s_root && strcmp(root, s_root) == 0)) return false;
 
     s_root = root;
 
@@ -326,12 +326,18 @@ void settings_note_path(const char *path)
         } else {
             ESP_LOGI(TAG, "no settings file on %s; using defaults", s_root);
         }
-        return;
+        /* True whether or not a file was found: the caller's question is
+         * "are the values in this module now the ones that apply", and
+         * after the first adoption they are, defaults included. */
+        return true;
     }
 
     ESP_LOGI(TAG, "settings follow the music to %s", s_root);
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
+    /* Nothing was loaded -- the settings in force travelled to the new
+     * volume, so the caller has nothing to apply. */
+    return false;
 }
 
 static void settings_task(void *arg)
