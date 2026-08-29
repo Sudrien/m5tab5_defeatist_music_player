@@ -1,15 +1,16 @@
 /*
- * replaygain.c -- see replaygain.h for the design. This file is the
- * on-disk record and the path it lives at.
+ * replaygain.c -- see replaygain.h for the format and why it is JSONL.
  *
  * SPDX-License-Identifier: MIT
  */
 #include "replaygain.h"
 
-#include <stdio.h>
+#include <inttypes.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
+#include "cJSON.h"
 #include "esp_log.h"
 
 #include "storage.h"
@@ -17,54 +18,87 @@
 
 static const char *TAG = "tab5_rg";
 
-/*
- * The packed on-disk record. Not replaygain_t directly -- that struct is
- * free to grow padding or change field order under a compiler's rules,
- * and a sidecar written by one build has to be readable by the next one
- * built from the same source. magic + version are checked before
- * anything else is trusted; reserved is here so a future field (the
- * ReplayGain dB/peak pair, or a seek index -- see "WHAT THIS DOES NOT DO
- * YET" in the header) can be added without another version bump eating
- * every sidecar on the card the day it ships.
- */
-#define REPLAYGAIN_MAGIC  (0x52474331u)  /* "RGC1" as bytes, arch-neutral */
+/* A line with a full 720-column waveform is about a kilobyte of base64
+ * plus the rest of the object. Two of them plus slack. */
+#define RG_LINE_MAX     (2048)
 
-typedef struct __attribute__((packed)) {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t filesize;
-    int64_t  mtime;
-    uint16_t columns;      /* REPLAYGAIN_COLUMNS at write time */
-    uint8_t  has_levels;   /* 0/1, see replaygain_t */
-    uint8_t  reserved;
-    uint32_t frames;       /* mirrors framewalk_t.frames */
-    uint32_t sec;          /* mirrors framewalk_t.sec */
-    uint8_t  waveform[REPLAYGAIN_COLUMNS];
-} replaygain_record_t;
+/* ------------------------------------------------------------------ */
+/* base64, because raw envelope bytes are not JSON-safe.               */
+
+static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static size_t b64_encode(const uint8_t *in, size_t n, char *out, size_t out_len)
+{
+    const size_t need = ((n + 2) / 3) * 4 + 1;
+    if (out_len < need) return 0;
+
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        const uint32_t a = in[i];
+        const uint32_t b = (i + 1 < n) ? in[i + 1] : 0;
+        const uint32_t c = (i + 2 < n) ? in[i + 2] : 0;
+        const uint32_t v = (a << 16) | (b << 8) | c;
+
+        out[o++] = B64[(v >> 18) & 0x3F];
+        out[o++] = B64[(v >> 12) & 0x3F];
+        out[o++] = (i + 1 < n) ? B64[(v >> 6) & 0x3F] : '=';
+        out[o++] = (i + 2 < n) ? B64[v & 0x3F] : '=';
+    }
+    out[o] = '\0';
+    return o;
+}
+
+static int b64_val(char c)
+{
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static size_t b64_decode(const char *in, uint8_t *out, size_t out_len)
+{
+    size_t o = 0;
+    uint32_t acc = 0;
+    int bits = 0;
+
+    for (const char *p = in; *p; p++) {
+        if (*p == '=' || *p == '\r' || *p == '\n') break;
+        const int v = b64_val(*p);
+        if (v < 0) continue;               /* skip anything unexpected */
+        acc = (acc << 6) | (uint32_t)v;
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            if (o < out_len) out[o++] = (uint8_t)((acc >> bits) & 0xFF);
+            else return o;
+        }
+    }
+    return o;
+}
+
+/* ------------------------------------------------------------------ */
 
 /*
- * "." + filename + ".rgcache", next to the track. storage_is_hidden()
- * already excludes anything starting with '.' from directory listings
- * and playlist scans, so this needs no separate hiding logic -- it is
- * invisible to the browser for the same reason "._Resource" forks are.
+ * "." + filename + ".rgcache", next to the track. A dotfile, so
+ * storage_is_hidden() keeps it out of the chooser and the playlist scan
+ * for the same reason it keeps out macOS's "._Name.mp3" forks.
  *
- * Built from the track's own path rather than a hash of it: a hash
- * would still need somewhere to live, and a fixed sibling name is one
- * fewer thing that can collide or need its own directory.
+ * The arithmetic is written out rather than snprintf'd for the reason
+ * storage_join_path() gives: a truncated path is a path to a different
+ * file, and opening that silently is worse than refusing.
  */
-static bool sidecar_path(const char *track_path, char *out, size_t out_len,
-                         const char *suffix)
+static bool sidecar_path(const char *track_path, char *out, size_t out_len)
 {
     const char *slash = strrchr(track_path, '/');
     const char *name = slash ? slash + 1 : track_path;
-    const size_t dir_len = (size_t)(name - track_path);  /* includes '/' */
+    const size_t dir_len = (size_t)(name - track_path);
+    static const char suffix[] = ".rgcache";
 
-    /* dir + "." + name + suffix, proven to fit rather than snprintf'd
-     * and hoped -- storage.h takes the same position on path joins and
-     * the reasoning is identical: a truncated path is a path to a
-     * different file, or to none, and opening either silently is worse
-     * than refusing. */
-    const size_t need = dir_len + 1 /* '.' */ + strlen(name) + strlen(suffix) + 1;
+    const size_t need = dir_len + 1 + strlen(name) + strlen(suffix) + 1;
     if (need > out_len) return false;
 
     memcpy(out, track_path, dir_len);
@@ -74,79 +108,165 @@ static bool sidecar_path(const char *track_path, char *out, size_t out_len,
     return true;
 }
 
+/* Parse one JSON object into *out. False when the line is not usable,
+ * which includes a torn line and a line about a different revision of
+ * the track. */
+static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
+                       replaygain_t *out)
+{
+    cJSON *root = cJSON_Parse(line);
+    if (!root) return false;
+
+    bool ok = false;
+
+    const cJSON *fv = cJSON_GetObjectItemCaseSensitive(root, "format_version");
+    const cJSON *fs = cJSON_GetObjectItemCaseSensitive(root, "filesize");
+    const cJSON *mt = cJSON_GetObjectItemCaseSensitive(root, "mtime");
+
+    if (!cJSON_IsNumber(fv) || fv->valueint != REPLAYGAIN_FORMAT_VERSION) goto done;
+    if (!cJSON_IsNumber(fs) || !cJSON_IsNumber(mt)) goto done;
+
+    /* Staleness. Checked per line rather than once for the file,
+     * because every line carries the key and the last good line is the
+     * one being trusted. */
+    if ((uint32_t)fs->valuedouble != filesize) goto done;
+    if ((int64_t)mt->valuedouble != mtime) goto done;
+
+    memset(out, 0, sizeof(*out));
+    out->filesize = filesize;
+    out->mtime = mtime;
+
+    const cJSON *wf = cJSON_GetObjectItemCaseSensitive(root, "waveform");
+    if (cJSON_IsObject(wf)) {
+        const cJSON *lv = cJSON_GetObjectItemCaseSensitive(wf, "level");
+        const cJSON *cols = cJSON_GetObjectItemCaseSensitive(wf, "columns");
+        const cJSON *hl = cJSON_GetObjectItemCaseSensitive(wf, "has_levels");
+        const cJSON *fr = cJSON_GetObjectItemCaseSensitive(wf, "frames");
+        const cJSON *sc = cJSON_GetObjectItemCaseSensitive(wf, "sec");
+
+        if (cJSON_IsString(lv) && cJSON_IsNumber(cols)) {
+            int n = cols->valueint;
+            if (n > REPLAYGAIN_COLUMNS) n = REPLAYGAIN_COLUMNS;
+            if (n > 0) {
+                const size_t got = b64_decode(lv->valuestring,
+                                              out->waveform.level,
+                                              sizeof(out->waveform.level));
+                /* A short decode means a truncated or damaged line.
+                 * Take what decoded rather than the declared width, or
+                 * the tail of the envelope is whatever was in the
+                 * struct. */
+                if (got < (size_t)n) n = (int)got;
+            }
+            if (n > 0) {
+                out->waveform.present = true;
+                out->waveform.columns = n;
+                out->waveform.has_levels = cJSON_IsBool(hl)
+                                           ? cJSON_IsTrue(hl) : true;
+                out->waveform.frames = cJSON_IsNumber(fr)
+                                       ? (uint32_t)fr->valuedouble : 0;
+                out->waveform.sec = cJSON_IsNumber(sc)
+                                    ? (uint32_t)sc->valuedouble : 0;
+            }
+        }
+    }
+
+    const cJSON *ld = cJSON_GetObjectItemCaseSensitive(root, "loudness");
+    if (cJSON_IsObject(ld)) {
+        const cJSON *ver = cJSON_GetObjectItemCaseSensitive(ld, "version");
+        const cJSON *lu = cJSON_GetObjectItemCaseSensitive(ld, "integrated_lufs");
+        const cJSON *pk = cJSON_GetObjectItemCaseSensitive(ld, "sample_peak_dbfs");
+        const cJSON *bl = cJSON_GetObjectItemCaseSensitive(ld, "blocks");
+
+        /* A different LOUDNESS_VERSION is not corruption -- it is a
+         * number measured by different rules. Dropped so the next full
+         * play recomputes it, while the waveform above survives. */
+        if (cJSON_IsNumber(ver) && ver->valueint == LOUDNESS_VERSION &&
+            cJSON_IsNumber(lu)) {
+            out->loudness.present = true;
+            out->loudness.integrated_lufs = (float)lu->valuedouble;
+            out->loudness.sample_peak_dbfs = cJSON_IsNumber(pk)
+                                             ? (float)pk->valuedouble : 0.0f;
+            out->loudness.blocks = cJSON_IsNumber(bl)
+                                   ? (uint32_t)bl->valuedouble : 0;
+        }
+    }
+
+    ok = out->waveform.present || out->loudness.present;
+
+done:
+    cJSON_Delete(root);
+    return ok;
+}
+
 bool replaygain_load(const char *path, replaygain_t *out)
 {
     if (!path || !out) return false;
 
     struct stat st;
-    if (stat(path, &st) != 0) {
-        ESP_LOGW(TAG, "stat failed for %s; no cache lookup", path);
-        return false;
-    }
+    if (stat(path, &st) != 0) return false;
 
     char cache_path[600];
-    if (!sidecar_path(path, cache_path, sizeof(cache_path), ".rgcache")) {
+    if (!sidecar_path(path, cache_path, sizeof(cache_path))) {
         ESP_LOGW(TAG, "sidecar path too long for %s", path);
         return false;
     }
 
     FILE *f = storage_io_open(cache_path, "rb");
-    if (!f) return false;  /* ordinary case: no cache yet */
+    if (!f) return false;              /* ordinary: nothing cached yet */
 
-    replaygain_record_t rec;
-    const size_t got = fread(&rec, 1, sizeof(rec), f);
+    /* Small file by construction -- compaction keeps it so. Read it
+     * whole rather than seeking around for line boundaries. */
+    char *buf = malloc(REPLAYGAIN_COMPACT_BYTES + 1);
+    if (!buf) {
+        storage_io_close(f);
+        return false;
+    }
+    const size_t got = fread(buf, 1, REPLAYGAIN_COMPACT_BYTES, f);
     storage_io_close(f);
+    buf[got] = '\0';
 
-    if (got != sizeof(rec)) {
-        ESP_LOGI(TAG, "sidecar truncated for %s; will re-walk", path);
-        return false;
-    }
-    if (rec.magic != REPLAYGAIN_MAGIC) {
-        ESP_LOGI(TAG, "sidecar not ours for %s; will re-walk", path);
-        return false;
-    }
-    if (rec.version != REPLAYGAIN_VERSION) {
-        ESP_LOGI(TAG, "sidecar version %u != %u for %s; will re-walk",
-                 (unsigned)rec.version, (unsigned)REPLAYGAIN_VERSION, path);
-        return false;
-    }
-    if (rec.columns != REPLAYGAIN_COLUMNS) {
-        ESP_LOGI(TAG, "sidecar column count %u != %u for %s; will re-walk",
-                 (unsigned)rec.columns, (unsigned)REPLAYGAIN_COLUMNS, path);
-        return false;
-    }
-    if (rec.filesize != (uint32_t)st.st_size || rec.mtime != (int64_t)st.st_mtime) {
-        ESP_LOGI(TAG, "sidecar stale for %s (size/mtime changed); "
-                      "will re-walk", path);
-        return false;
+    /*
+     * Last usable line wins, so scan backwards. A torn final line --
+     * power lost mid-append -- simply fails to parse and the line
+     * before it is used, which is the whole reason every line repeats
+     * the staleness key.
+     */
+    bool found = false;
+    char *end = buf + got;
+    while (end > buf && !found) {
+        char *start = end;
+        while (start > buf && start[-1] != '\n') start--;
+
+        /* Trim the newline the terminator sits on. */
+        char saved = *end;
+        *end = '\0';
+        if (end > start) found = parse_line(start, (uint32_t)st.st_size,
+                                            (int64_t)st.st_mtime, out);
+        *end = saved;
+
+        end = (start > buf) ? start - 1 : buf;
+        if (start == buf) break;
     }
 
-    out->filesize = rec.filesize;
-    out->mtime = rec.mtime;
-    out->has_levels = (rec.has_levels != 0);
-    out->frames = rec.frames;
-    out->sec = rec.sec;
-    memcpy(out->waveform, rec.waveform, sizeof(out->waveform));
+    free(buf);
 
-    ESP_LOGI(TAG, "waveform from sidecar: %s", cache_path);
-    return true;
+    if (found) {
+        ESP_LOGI(TAG, "sidecar: %s%s", cache_path,
+                 out->loudness.present ? " (waveform+loudness)"
+                                       : " (waveform only)");
+    }
+    return found;
 }
 
-/* Same edge-based max-per-bucket resample framewalk.c's resample() uses
- * for the live envelope, applied here to go from however many columns
- * the walk actually filled down to the fixed on-disk width. Max, not
- * mean, for the reason framewalk.c gives: a mean over several source
- * columns turns a transient into a bump, and the transient is the part
- * that makes one track's shape recognisable from another's. */
-static void resample_to_sidecar(const uint8_t *src, int n, uint8_t *dst)
+/* Same edge-based max-per-bucket rule framewalk.c's resample() uses.
+ * Max rather than mean: a mean over several source columns turns a
+ * transient into a bump, and the transient is what makes one track's
+ * shape recognisable from another's. */
+static void resample_levels(const uint8_t *src, int n, uint8_t *dst, int cols)
 {
-    if (n <= 0) {
-        memset(dst, 0, REPLAYGAIN_COLUMNS);
-        return;
-    }
-    for (int c = 0; c < REPLAYGAIN_COLUMNS; c++) {
-        const uint32_t a = (uint32_t)(((uint64_t)c * (uint32_t)n) / REPLAYGAIN_COLUMNS);
-        uint32_t b = (uint32_t)(((uint64_t)(c + 1) * (uint32_t)n) / REPLAYGAIN_COLUMNS);
+    for (int c = 0; c < cols; c++) {
+        const uint32_t a = (uint32_t)(((uint64_t)c * (uint32_t)n) / (uint32_t)cols);
+        uint32_t b = (uint32_t)(((uint64_t)(c + 1) * (uint32_t)n) / (uint32_t)cols);
         if (b <= a) b = a + 1;
         if (b > (uint32_t)n) b = (uint32_t)n;
 
@@ -156,7 +276,115 @@ static void resample_to_sidecar(const uint8_t *src, int n, uint8_t *dst)
     }
 }
 
-esp_err_t replaygain_save(const char *path, const framewalk_t *w)
+/*
+ * Serialise `rg` as one line and append it.
+ *
+ * Read-modify-write is the caller's job: it loads, overlays its own
+ * section and hands the whole thing here. That keeps the merge in one
+ * obvious place per section rather than inside a writer that would have
+ * to know which fields it was allowed to touch.
+ */
+static esp_err_t append_record(const char *path, const replaygain_t *rg,
+                               uint32_t filesize, int64_t mtime)
+{
+    char cache_path[600];
+    if (!sidecar_path(path, cache_path, sizeof(cache_path))) {
+        ESP_LOGW(TAG, "sidecar path too long for %s; not caching", path);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) return ESP_ERR_NO_MEM;
+
+    cJSON_AddNumberToObject(root, "format_version", REPLAYGAIN_FORMAT_VERSION);
+    cJSON_AddNumberToObject(root, "filesize", (double)filesize);
+    cJSON_AddNumberToObject(root, "mtime", (double)mtime);
+
+    if (rg->waveform.present && rg->waveform.columns > 0) {
+        cJSON *wf = cJSON_AddObjectToObject(root, "waveform");
+        if (wf) {
+            cJSON_AddBoolToObject(wf, "has_levels", rg->waveform.has_levels);
+            cJSON_AddNumberToObject(wf, "frames", (double)rg->waveform.frames);
+            cJSON_AddNumberToObject(wf, "sec", (double)rg->waveform.sec);
+            cJSON_AddNumberToObject(wf, "columns", rg->waveform.columns);
+
+            char *b64 = malloc(((size_t)rg->waveform.columns + 2) / 3 * 4 + 1);
+            if (b64) {
+                if (b64_encode(rg->waveform.level,
+                               (size_t)rg->waveform.columns, b64,
+                               ((size_t)rg->waveform.columns + 2) / 3 * 4 + 1)) {
+                    cJSON_AddStringToObject(wf, "level", b64);
+                }
+                free(b64);
+            }
+        }
+    }
+
+    if (rg->loudness.present) {
+        cJSON *ld = cJSON_AddObjectToObject(root, "loudness");
+        if (ld) {
+            cJSON_AddNumberToObject(ld, "version", LOUDNESS_VERSION);
+            cJSON_AddNumberToObject(ld, "integrated_lufs",
+                                    (double)rg->loudness.integrated_lufs);
+            cJSON_AddNumberToObject(ld, "sample_peak_dbfs",
+                                    (double)rg->loudness.sample_peak_dbfs);
+            cJSON_AddNumberToObject(ld, "blocks", (double)rg->loudness.blocks);
+        }
+    }
+
+    char *line = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!line) return ESP_ERR_NO_MEM;
+
+    /*
+     * Compact rather than append once the file has grown. Re-measuring
+     * a track appends a line each time, and without this a sidecar
+     * that is rewritten on every play grows for ever.
+     *
+     * "w" here rather than "a": the record being written already
+     * carries everything the earlier lines said, because the caller
+     * merged it.
+     */
+    struct stat cst;
+    const bool compact = (stat(cache_path, &cst) == 0 &&
+                          cst.st_size > REPLAYGAIN_COMPACT_BYTES);
+
+    FILE *f = storage_io_open(cache_path, compact ? "wb" : "ab");
+    if (!f) {
+        ESP_LOGW(TAG, "could not open %s for writing", cache_path);
+        cJSON_free(line);
+        return ESP_FAIL;
+    }
+
+    const size_t len = strlen(line);
+    const bool wrote = (fwrite(line, 1, len, f) == len) &&
+                       (fputc('\n', f) != EOF);
+    const int cerr = storage_io_close(f);
+    cJSON_free(line);
+
+    if (!wrote || cerr != 0) {
+        ESP_LOGW(TAG, "write failed for %s", cache_path);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "sidecar %s: %s", compact ? "compacted" : "updated",
+             cache_path);
+    return ESP_OK;
+}
+
+/* Load current state, or start an empty one, so a save of one section
+ * carries the other section forward instead of dropping it. */
+static void load_or_empty(const char *path, uint32_t filesize, int64_t mtime,
+                          replaygain_t *rg)
+{
+    if (!replaygain_load(path, rg)) {
+        memset(rg, 0, sizeof(*rg));
+    }
+    rg->filesize = filesize;
+    rg->mtime = mtime;
+}
+
+esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w)
 {
     if (!path || !w) return ESP_ERR_INVALID_ARG;
 
@@ -166,69 +394,71 @@ esp_err_t replaygain_save(const char *path, const framewalk_t *w)
         return ESP_FAIL;
     }
 
-    replaygain_record_t rec = {
-        .magic = REPLAYGAIN_MAGIC,
-        .version = REPLAYGAIN_VERSION,
-        .filesize = (uint32_t)st.st_size,
-        .mtime = (int64_t)st.st_mtime,
-        .columns = REPLAYGAIN_COLUMNS,
-        .has_levels = (uint8_t)(w->has_levels && w->columns > 0),
-        .reserved = 0,
-        .frames = w->frames,
-        .sec = w->sec,
-    };
+    replaygain_t rg;
+    load_or_empty(path, (uint32_t)st.st_size, (int64_t)st.st_mtime, &rg);
 
-    if (rec.has_levels) {
-        resample_to_sidecar(w->level, w->columns, rec.waveform);
+    rg.waveform.present = true;
+    rg.waveform.has_levels = (w->has_levels && w->columns > 0);
+    rg.waveform.frames = w->frames;
+    rg.waveform.sec = w->sec;
+
+    if (w->columns <= 0) {
+        /* Nothing to draw. Still worth a record: the frame count and
+         * duration are real, and without them a format with no
+         * per-frame loudness pays for a whole-file walk on every play
+         * to learn the same nothing. */
+        rg.waveform.columns = 0;
+        rg.waveform.present = (w->frames > 0 || w->sec > 0);
+        memset(rg.waveform.level, 0, sizeof(rg.waveform.level));
+        /* A record with no columns cannot be serialised as a waveform
+         * section -- append_record() skips it -- so hold the counts in
+         * a zero-column section only if there is also a loudness
+         * section keeping the line alive. */
+    } else if (w->columns > REPLAYGAIN_COLUMNS) {
+        rg.waveform.columns = REPLAYGAIN_COLUMNS;
+        resample_levels(w->level, w->columns, rg.waveform.level,
+                        REPLAYGAIN_COLUMNS);
     } else {
-        /* No per-frame loudness for this format (AAC, AMR). Write a
-         * flat zero waveform rather than skipping the sidecar entirely
-         * -- filesize/mtime alone are still worth caching so a repeat
-         * play does not pay for a whole-file walk just to learn "no
-         * envelope" a second time. has_levels=false is what stops that
-         * flat zero being drawn as a real (silent) track. */
-        memset(rec.waveform, 0, sizeof(rec.waveform));
+        /*
+         * Fewer columns than the panel is wide. Stored at its own
+         * width rather than stretched to 720 here: the UI can stretch
+         * a short envelope across the bar and it is the only thing
+         * that knows how wide the bar is, whereas padding it now would
+         * bake in silence the track does not contain.
+         */
+        rg.waveform.columns = w->columns;
+        memcpy(rg.waveform.level, w->level, (size_t)w->columns);
     }
 
-    char final_path[600];
-    char tmp_path[608];
-    if (!sidecar_path(path, final_path, sizeof(final_path), ".rgcache")) {
-        ESP_LOGW(TAG, "sidecar path too long for %s; not caching", path);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (!sidecar_path(path, tmp_path, sizeof(tmp_path), ".rgcache.tmp")) {
-        ESP_LOGW(TAG, "sidecar tmp path too long for %s; not caching", path);
-        return ESP_ERR_INVALID_SIZE;
-    }
+    return append_record(path, &rg, (uint32_t)st.st_size,
+                         (int64_t)st.st_mtime);
+}
 
-    FILE *f = storage_io_open(tmp_path, "wb");
-    if (!f) {
-        ESP_LOGW(TAG, "could not open %s for writing", tmp_path);
+esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
+                                   float sample_peak_dbfs, uint32_t blocks)
+{
+    if (!path) return ESP_ERR_INVALID_ARG;
+
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        ESP_LOGW(TAG, "stat failed for %s; not caching loudness", path);
         return ESP_FAIL;
     }
 
-    const size_t wrote = fwrite(&rec, 1, sizeof(rec), f);
-    const int cerr = storage_io_close(f);
+    replaygain_t rg;
+    load_or_empty(path, (uint32_t)st.st_size, (int64_t)st.st_mtime, &rg);
 
-    if (wrote != sizeof(rec) || cerr != 0) {
-        ESP_LOGW(TAG, "write failed for %s; leaving old sidecar in place",
-                 tmp_path);
-        remove(tmp_path);
-        return ESP_FAIL;
+    rg.loudness.present = true;
+    rg.loudness.integrated_lufs = integrated_lufs;
+    rg.loudness.sample_peak_dbfs = sample_peak_dbfs;
+    rg.loudness.blocks = blocks;
+
+    const esp_err_t err = append_record(path, &rg, (uint32_t)st.st_size,
+                                        (int64_t)st.st_mtime);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "loudness: %.2f LUFS, peak %.2f dBFS, %" PRIu32
+                      " gated blocks",
+                 (double)integrated_lufs, (double)sample_peak_dbfs, blocks);
     }
-
-    /* Atomic on FatFs: rename() is a directory-entry update, not a
-     * copy. A crash between here and the write above leaves a stray
-     * .tmp that the next write overwrites and every reader ignores --
-     * never a half-written file under the name replaygain_load() will
-     * open. */
-    if (rename(tmp_path, final_path) != 0) {
-        ESP_LOGW(TAG, "rename %s -> %s failed", tmp_path, final_path);
-        remove(tmp_path);
-        return ESP_FAIL;
-    }
-
-    ESP_LOGI(TAG, "sidecar written: %s (%u bytes, %d source columns)",
-             final_path, (unsigned)sizeof(rec), w->columns);
-    return ESP_OK;
+    return err;
 }

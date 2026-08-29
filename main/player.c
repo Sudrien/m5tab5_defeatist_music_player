@@ -63,6 +63,7 @@
 #include "browser.h"
 #include "decoder.h"
 #include "framewalk.h"
+#include "loudness.h"
 #include "replaygain.h"
 #include "hid.h"
 #include "playlist.h"
@@ -1431,13 +1432,15 @@ static void do_walk(const char *path)
      * at the same track in this session is the RAM hit above.
      */
     replaygain_t rg;
-    if (replaygain_load(path, &rg) && rg.has_levels) {
+    if (replaygain_load(path, &rg) && rg.waveform.present &&
+        rg.waveform.has_levels && rg.waveform.columns > 0) {
         memset(&s_walk, 0, sizeof(s_walk));
         s_walk.has_levels = true;
-        s_walk.columns = REPLAYGAIN_COLUMNS;
-        s_walk.frames = rg.frames;
-        s_walk.sec = rg.sec;
-        memcpy(s_walk.level, rg.waveform, sizeof(rg.waveform));
+        s_walk.columns = rg.waveform.columns;
+        s_walk.frames = rg.waveform.frames;
+        s_walk.sec = rg.waveform.sec;
+        memcpy(s_walk.level, rg.waveform.level,
+               (size_t)rg.waveform.columns);
         s_wave_ready = true;
         mediacache_put_walk(path, &s_walk);
         ESP_LOGI(TAG, "envelope from sidecar: %d columns, %" PRIu32 "s",
@@ -1491,7 +1494,7 @@ static void do_walk(const char *path)
          * the state every play was in before this file existed -- so
          * the error is logged inside replaygain_save() and not acted
          * on here. */
-        replaygain_save(path, &s_walk);
+        replaygain_save_waveform(path, &s_walk);
     }
 }
 
@@ -1822,7 +1825,7 @@ static void prefetch_next(void)
                  * never gets one, and the next time anything actually
                  * plays it, it pays for a full scan again. Best-effort,
                  * same as there. */
-                replaygain_save(next, &s_prefetch_walk);
+                replaygain_save_waveform(next, &s_prefetch_walk);
                 ESP_LOGI(TAG, "prefetched envelope for %s (%d columns)",
                          next, s_prefetch_walk.columns);
             } else {
@@ -2416,6 +2419,26 @@ static track_end_t play_file(const char *path)
      */
     s_decoding = true;
 
+    /*
+     * Loudness is measured off the PCM that is about to be decoded for
+     * the speaker anyway -- see loudness.h. Skipped entirely when the
+     * sidecar already holds a current measurement, so a track that has
+     * been played once costs nothing on every later play.
+     *
+     * A local, not a static: it belongs to this attempt at this track
+     * and nothing else may touch it, which is the same single-owner
+     * rule the ring follows.
+     */
+    static loudness_t s_loud;      /* static only because it is ~4 KB */
+    bool measuring = false;
+    {
+        replaygain_t have;
+        measuring = !(replaygain_load(path, &have) && have.loudness.present);
+        if (measuring) loudness_reset(&s_loud);
+        else ESP_LOGI(TAG, "loudness known (%.2f LUFS); not measuring",
+                      (double)have.loudness.integrated_lufs);
+    }
+
     /* Tell storage.c not to unmount underneath this FILE*. It will still
      * mark the volume absent the moment the card stops answering -- the
      * loop below watches for that -- but the unmount itself waits until
@@ -2571,6 +2594,21 @@ static track_end_t play_file(const char *path)
 
 
         if (s_seek_pct >= 0) {
+            /*
+             * Before the seek is applied, and regardless of whether it
+             * turns out to be possible. BS.1770 integrates over the
+             * whole programme, so a measurement that skipped a section
+             * is not a slightly worse number -- it is a number about
+             * different audio, and nothing downstream could tell. A
+             * refused seek still says the listener stopped listening
+             * straight through.
+             */
+            if (measuring) {
+                loudness_invalidate(&s_loud);
+                measuring = false;
+                ESP_LOGI(TAG, "loudness measurement dropped: seek");
+            }
+
             const int pct = s_seek_pct;
             const uint32_t waited =
                 (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_seek_asked);
@@ -2630,6 +2668,13 @@ static track_end_t play_file(const char *path)
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_read);
         if (read_ms > LOOP_STALL_MS) {
             ESP_LOGW(TAG, "decoder_read blocked %" PRIu32 " ms", read_ms);
+        }
+
+        /* The whole cost of measuring: two biquads and a running sum
+         * per sample, over a buffer that has already been decoded. */
+        if (measuring) {
+            loudness_process(&s_loud, pcm, n, info.channels,
+                             (uint32_t)info.sample_rate);
         }
 
         if ((uint32_t)info.sample_rate != cur_rate || info.channels != cur_chans) {
@@ -2847,6 +2892,26 @@ static track_end_t play_file(const char *path)
      * "finished, 0 blocks" and "finished, 261 blocks" mean opposite
      * things and only one of them is a reason to move on cheerfully. */
     if (why == TRACK_ENDED && blocks == 0) why = TRACK_UNREADABLE;
+
+    /*
+     * The measurement is only written for a track that played from
+     * start to finish with no seek in it -- which is what TRACK_ENDED
+     * means by the time it survives the check above. Everything else
+     * (skipped, interrupted, media pulled, opened but silent) is
+     * discarded rather than written as a partial answer nothing could
+     * later tell apart from a real one.
+     *
+     * A restart is not a special case: it re-enters play_file() for the
+     * same path, which resets the accumulator, so the restarted play
+     * gets its own clean attempt and writes if IT reaches the end.
+     */
+    if (measuring && why == TRACK_ENDED) {
+        float lufs = 0.0f, peak = 0.0f;
+        uint32_t gated = 0;
+        if (loudness_finish(&s_loud, &lufs, &peak, &gated)) {
+            replaygain_save_loudness(path, lufs, peak, gated);
+        }
+    }
 
     /* Why, not just that. "finished" on a track the user skipped out of
      * reads as the skip having been ignored until the next line arrives. */
