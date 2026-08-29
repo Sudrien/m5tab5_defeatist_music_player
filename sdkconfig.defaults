@@ -16,6 +16,30 @@ CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 # Console over the USB-C port.
 CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 
+# 4 KB of console TX buffer, up from the 256 byte default.
+#
+# The USB-serial-JTAG driver discards output when its TX buffer is full
+# rather than blocking the task that logged it -- the right trade for a
+# console, and invisible until the log is what you are reasoning from.
+#
+# It cost most of an evening. A burst of six lines inside 50 ms at a
+# track start lost two of them, always a contiguous run, always with
+# intact lines either side. The missing pair happened to be the ones
+# that would have shown the first block being queued, so the log read as
+# a decode loop that stopped between the format publish and the send.
+# Two probe patches went in chasing a stall that was never there; the
+# tell was the third run printing every line and behaving identically.
+#
+# 4 KB is about eighty lines of the length this program writes, which
+# covers the worst burst it has -- a track start with the probes in --
+# several times over. The cost is 4 KB of internal RAM, and RETENT_RAM
+# has 110 KB free at boot.
+#
+# The buffer only defers the loss rather than removing it: a host that
+# stops draining still fills any buffer eventually. If lines go missing
+# again, look for a burst first and do not assume the code stopped.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE=4096
+
 # MP3 decode buffers live in PSRAM.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_SPEED_200M=y
