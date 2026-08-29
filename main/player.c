@@ -32,6 +32,7 @@
  */
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -701,6 +702,14 @@ static volatile bool     s_open_chooser;
 /* Set by the UI, consumed by the decode loop. -1 = nothing pending. Seek
  * is not implemented yet -- see README -- so the decode loop currently
  * logs and clears it. */
+/*
+ * The gain in effect for the track playing now, and whether there is
+ * one. Published rather than fetched: the UI task cannot ask play_file()
+ * anything -- the same rule s_ring_pct follows.
+ */
+static volatile bool     s_rg_active = false;
+static volatile float    s_rg_gain_db = 0.0f;
+
 static volatile int      s_seek_pct = -1;
 
 /*
@@ -2117,6 +2126,8 @@ static void ui_task(void *arg)
         st.album = s_tags.album;
         st.playing = s_playing;
         st.volume = s_volume;
+        st.rg_active = s_rg_active;
+        st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
@@ -2309,6 +2320,8 @@ static void ui_task(void *arg)
          * forty times a second for nothing. */
         st.playing = s_playing;
         st.volume = s_volume;
+        st.rg_active = s_rg_active;
+        st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
@@ -2431,12 +2444,32 @@ static track_end_t play_file(const char *path)
      */
     static loudness_t s_loud;      /* static only because it is ~4 KB */
     bool measuring = false;
+    float rg_scale = 1.0f;         /* linear; 1.0 is unity */
     {
         replaygain_t have;
-        measuring = !(replaygain_load(path, &have) && have.loudness.present);
-        if (measuring) loudness_reset(&s_loud);
-        else ESP_LOGI(TAG, "loudness known (%.2f LUFS); not measuring",
-                      (double)have.loudness.integrated_lufs);
+        const bool known = replaygain_load(path, &have) && have.loudness.present;
+        measuring = !known;
+
+        if (measuring) {
+            loudness_reset(&s_loud);
+            /*
+             * Measuring and applying are mutually exclusive, and have to
+             * be: the measurement has to see the file's own level, so a
+             * pass that applied a gain would measure the gain back and
+             * converge on the reference no matter what the track is.
+             * The first play measures at unity, every later one applies.
+             */
+            s_rg_active = false;
+            s_rg_gain_db = 0.0f;
+        } else {
+            const float g = replaygain_gain_db(&have.loudness);
+            rg_scale = powf(10.0f, g / 20.0f);
+            s_rg_active = true;
+            s_rg_gain_db = g;
+            ESP_LOGI(TAG, "replaygain: %.2f LUFS, peak %.2f dBFS -> %+.2f dB",
+                     (double)have.loudness.integrated_lufs,
+                     (double)have.loudness.sample_peak_dbfs, (double)g);
+        }
     }
 
     /* Tell storage.c not to unmount underneath this FILE*. It will still
@@ -2467,6 +2500,10 @@ static track_end_t play_file(const char *path)
          * that does not exist -- reintroducing the queued-forever bug on
          * the one path where it would be hardest to spot. */
         s_decoding = false;
+    /* The gain belonged to this track. Left set, the bar would keep
+     * claiming it during the gap before the next one starts. */
+    s_rg_active = false;
+    s_rg_gain_db = 0.0f;
         return TRACK_UNREADABLE;
     }
 
@@ -2675,6 +2712,26 @@ static track_end_t play_file(const char *path)
         if (measuring) {
             loudness_process(&s_loud, pcm, n, info.channels,
                              (uint32_t)info.sample_rate);
+        }
+
+        /*
+         * Applied here rather than in audio_out.c because only the USB
+         * route has a software gain stage -- the analog path sets the
+         * ES8388's own registers, and a per-route gain would mean the
+         * same track played at two different levels depending on what
+         * is plugged in. This is one pass over a block that is already
+         * in cache from the decode.
+         *
+         * Never runs while measuring: see the note where rg_scale is
+         * computed.
+         */
+        if (rg_scale != 1.0f) {
+            for (int i = 0; i < n; i++) {
+                int v = (int)lrintf((float)pcm[i] * rg_scale);
+                if (v >  32767) v =  32767;
+                if (v < -32768) v = -32768;
+                pcm[i] = (int16_t)v;
+            }
         }
 
         if ((uint32_t)info.sample_rate != cur_rate || info.channels != cur_chans) {

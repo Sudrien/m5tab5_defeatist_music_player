@@ -5,6 +5,7 @@
  */
 
 #include <stdio.h>
+#include <math.h>
 #include <string.h>
 
 #include "esp_check.h"
@@ -37,6 +38,13 @@ static const char *TAG = "tab5_ui";
  * C_ICON that C_ALBUM sits below C_THUMB, so the bar has one idea of
  * what "de-emphasised" means rather than two. */
 #define C_ICON_OFF  RGB(0x55, 0x55, 0x55)
+
+/*
+ * ReplayGain. Yellow because nothing else on the bar is: C_FILL owns
+ * "the level you set" and C_ICON owns "a control", so a gain that is
+ * neither needs a third idea rather than a shade of one of theirs.
+ */
+#define C_RG        RGB(0xE8, 0xC0, 0x30)
 /* The envelope's two halves.
  *
  * Played reuses C_FILL exactly -- it is the same statement the slider fill
@@ -471,6 +479,66 @@ static void draw_speaker(bool muted)
 }
 
 /*
+ * "RG" under the speaker, and a mark on the slider for the offset.
+ *
+ * Two parts because they answer two questions. The badge says a
+ * measured gain is being applied at all, which is otherwise invisible
+ * -- a track playing 4 dB down with the slider untouched looks like a
+ * quiet file or a fault. The mark says how much and which way, placed
+ * where the thumb WOULD be if the gain were part of the slider, so the
+ * gap between the mark and the thumb is the adjustment drawn to the
+ * same scale as the control it modifies.
+ *
+ * The mark is not a second thumb and is deliberately not round: it is
+ * not draggable, and a thing that looks like the thumb invites a drag
+ * that would do nothing.
+ *
+ * The dB scale here is the slider's own, which is linear in percent and
+ * therefore linear in amplitude (see the note on apply_gain() in
+ * audio_out.c). A gain in dB has to be converted to the same units
+ * before it can be drawn beside it, or the mark would be right only at
+ * one volume.
+ */
+static void draw_rg(const ui_state_t *st)
+{
+    if (!st->rg_active) return;
+
+    int cx, cy;
+    spk_centre(&cx, &cy);
+
+    /* Under the speaker, in the margin it already owns. Scale 2 is the
+     * smallest the font stays legible at arm's length. */
+    gfx_draw_text(cx - 17, cy + 20, "RG", 2, 40, C_RG);
+
+    if (st->rg_gain_db == 0.0f) return;
+
+    int x0, x1, y;
+    vol_bounds(&x0, &x1, &y);
+
+    /* Where the slider sits now, and where it would sit with the gain
+     * folded in. Amplitude ratio, because that is the slider's curve. */
+    const int base = st->volume;
+    float scaled = (float)base * powf(10.0f, st->rg_gain_db / 20.0f);
+    if (scaled < 0.0f) scaled = 0.0f;
+    if (scaled > 100.0f) scaled = 100.0f;
+
+    const int w = x1 - x0;
+    const int mark = x0 + (int)(((float)w * scaled) / 100.0f);
+    const int here = x0 + (w * (base < 0 ? 0 : base > 100 ? 100 : base)) / 100;
+
+    /* The span between the two, so a small offset is still visible when
+     * the mark itself would sit under the thumb. */
+    if (mark != here) {
+        const int a = mark < here ? mark : here;
+        const int b = mark < here ? here : mark;
+        gfx_fill_rect(a, y - TRACK_THIN / 2, b - a, TRACK_THIN, C_RG);
+    }
+
+    /* A 3 px bar, full slider height. Not a circle: see above. */
+    gfx_fill_rect(mark - 1, y - THUMB_R, 3, 2 * THUMB_R + 1, C_RG);
+}
+
+/*
  * The battery, at the right end of the volume row.
  *
  * Opposite the speaker on purpose: that row already has an icon in the
@@ -828,6 +896,7 @@ void ui_draw(const ui_state_t *st)
                   st->muted ? C_ICON_OFF : C_FILL);
 
     draw_speaker(st->muted);
+    draw_rg(st);
     draw_battery(st->battery_pct, st->battery_charging);
     draw_folder();
     draw_moon();

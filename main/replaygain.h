@@ -179,6 +179,40 @@ esp_err_t replaygain_save_waveform(const char *path, const framewalk_t *w);
 esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
                                    float sample_peak_dbfs, uint32_t blocks);
 
+/*
+ * The gain to apply for a measured track, in dB.
+ *
+ * REFERENCE minus the measured loudness, then held back so the peak
+ * cannot pass full scale: a track measured quiet gets a positive gain,
+ * and a positive gain on a track that already peaks near 0 dBFS clips.
+ * The peak is what says how much headroom there is, which is the reason
+ * it is stored next to the loudness rather than as a curiosity.
+ *
+ * The clamp is on the POSITIVE side only. Turning a loud track down can
+ * never clip, so a large negative gain is applied in full; a large
+ * positive one is cut to whatever the headroom allows and the track
+ * simply ends up quieter than the reference. That is the honest
+ * failure: a limiter would let it reach the target by squashing the
+ * peaks, and this player has no business rewriting the waveform to hit
+ * a number.
+ *
+ * Also bounded by REPLAYGAIN_MAX_BOOST_DB so a measurement that is
+ * wrong, or a track that really is near-silent, cannot produce a gain
+ * that arrives as a shock.
+ *
+ * Returns 0.0 when `l` holds no measurement, so an unmeasured track
+ * plays at unity rather than being guessed at.
+ */
+float replaygain_gain_db(const replaygain_loudness_t *l);
+
+/* Never boost by more than this, whatever the measurement says. */
+#define REPLAYGAIN_MAX_BOOST_DB     (12.0f)
+
+/* Leave this much below full scale when the peak limits the boost, so
+ * rounding in the peak and inter-sample peaks the sample peak cannot
+ * see (see "SAMPLE PEAK" in loudness.h) have somewhere to go. */
+#define REPLAYGAIN_HEADROOM_DB      (1.0f)
+
 #ifdef __cplusplus
 }
 #endif

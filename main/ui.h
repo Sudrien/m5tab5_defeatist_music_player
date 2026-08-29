@@ -66,6 +66,20 @@ typedef struct {
      */
     int  battery_pct;
     bool battery_charging;
+
+    /*
+     * ReplayGain, when a measured gain is in effect for this track.
+     *
+     * Drawn in its own colour rather than folded into the volume
+     * number, because the two are different statements: the slider is
+     * what the listener asked for and this is what the file needed on
+     * top of it. Showing only their sum would leave a track that plays
+     * quieter than the slider says looking like a bug.
+     *
+     * rg_gain_db is signed and typically a few dB either way.
+     */
+    bool  rg_active;
+    float rg_gain_db;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
