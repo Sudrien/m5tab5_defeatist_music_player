@@ -69,6 +69,18 @@ esp_err_t audio_out_init(i2c_master_bus_handle_t bus,
  */
 esp_err_t audio_out_set_format(uint32_t rate, uint8_t channels);
 
+/*
+ * Whether this output stage can be clocked at that sample rate.
+ *
+ * Asked before a track is committed to, so an unplayable file is
+ * skipped with a line rather than aborting the player. See
+ * I2S_MAX_RATE_HZ in audio_out.c for why the ceiling is where it is.
+ */
+bool audio_out_rate_supported(uint32_t rate);
+
+/* What the output stage is clocked at now. 0 before the first track. */
+uint32_t audio_out_rate(void);
+
 /* Interleaved 16-bit PCM in the format last stated. Blocks until the
  * hardware has taken all of it. */
 esp_err_t audio_out_write(const void *data, size_t len);
