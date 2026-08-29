@@ -3,7 +3,6 @@
 Notes for anyone (or anything) working on this repository. The README is
 the design document; this file is the set of things that are easy to get
 
-
 ## Why two decoders
 
 `main/decoder.c` routes by file extension:
@@ -588,145 +587,77 @@ This does not make those formats seekable. Ogg seeking is the same
 granulepos scan applied as a bisection over page boundaries, which is
 worth doing and is not done here.
 
-### The frame walk, for formats with no length at all
+### The frame walk, and why it is gone (historical, 0206)
 
-> **Historical, as of 0206.** `framewalk.c` is deleted and everything in
-> this section and the Ogg one below it describes code that no longer
-> exists. It is kept because the reasoning is still the clearest
-> statement of what `global_gain` is and why it was the wrong thing to
-> draw: an encoder's bit budget, not the audio. The envelope now comes
-> from `loudness.c`, off the decoded PCM of a normal play -- real peak
-> magnitude, no extra file read, and it arrives as a by-product of
-> listening rather than as a scan scheduled around the ring.
-> `framewalk.h` keeps only `framewalk_t`, which the cache, the sidecar
-> and `waveform.c` still pass around.
+`framewalk.c` used to answer two questions in one sequential pass over a
+file: how many frames a format with no stated length has, and what the
+seek bar should look like. It is deleted. The reasoning is kept because
+what it got wrong is the useful part.
 
+The duration half was sound. Raw ADTS, AMR and a CBR MP3 with no Xing
+header state nothing about their length, so counting frames is the only
+honest answer, and since every one of those formats puts its own length
+in its header the walk was header-skip-header with the audio never
+touched -- I/O bound rather than CPU bound.
 
-`duration.c` covers the containers that state their own length. Raw ADTS,
-AMR and a CBR MP3 with no Xing header state nothing -- there is no field
-to read, so the only honest answer is to count frames.
+The waveform half was not. It drew `global_gain`, which sits in MP3 side
+info at a fixed bit offset and is therefore free to read, and which is
+**the encoder's quantisation-step choice** -- how many bits a granule was
+worth. That correlates with loudness, because a busy passage gets more
+bits, and it is not loudness: two granules with the same `global_gain`
+can sound nothing alike. It was a whole-file read producing a proxy, and
+calling it ReplayGain (which the first patches did) was wrong.
 
-`framewalk.c` does one sequential pass reading **only frame headers**.
-Every one of these formats puts its own length in its header, so the walk
-is header, skip, header, and the audio data is never touched. That makes
-it I/O bound rather than CPU bound, which is what makes it cheap enough to
-run while a track plays.
+The lesson worth keeping is narrower than "it was a proxy". It is that a
+number which is cheap, correlated, and shaped like the thing you want is
+the hardest kind of wrong to notice -- the envelopes it drew looked
+plausible for months. The tell was in the data once there was something
+to compare against: `global_gain` envelopes spanned levels 132..210,
+because the value never approaches zero even in silence, where the real
+amplitude envelopes that replaced them span 1..182. A narrow band that
+never reaches the floor is what a bit budget looks like.
 
-The same pass produces the waveform envelope, which is the reason it is
-one function and not two. On MP3 the loudness is free: `global_gain` sits
-in the side info at a **fixed bit offset**, so it is a constant, not a
-parse -- a real per-granule loudness value read without touching a Huffman
-table. AAC and AMR headers say how long a frame is but nothing about what
-is in it, so those report `has_levels = false` and produce a duration
-only; a waveform there needs a real decode, and whether that is worth it
-is the caller's call.
+What replaced it is in **"ReplayGain, and where the waveform comes from"**
+below. `framewalk.h` keeps only `framewalk_t`, which the cache, the
+sidecar and `waveform.c` still pass around; renaming it would touch far
+more than it would explain.
 
-Details that matter:
+Two details from the walk are worth carrying forward because they are
+about file formats rather than about the walk, and anything that parses
+these containers will meet them again:
 
-- **It is the backstop, not a replacement for `duration.c`.** The probe
-  answers before the first audio block; the walk answers a second or two
-  in. Routing FLAC through here would take a bar that is right immediately
-  and make it right eventually, for nothing. FLAC also cannot be walked
-  cheaply -- the fast path there is SEEKTABLE seeking, which never sees
-  most frames and so cannot count them.
-- **Resampling takes the max per bucket, not the mean.** A mean over
-  twenty frames turns a drum hit into a bump. The transient is the part
-  that makes one track look unlike another.
-- **The ID3v2 tag is skipped by its length field, not walked past.** This
-  was the first version's bug and it is worth stating plainly: the tag
-  holds the album art, and 130 KB of PNG is full of bytes that look like
-  an MP3 sync word. Resyncing a byte at a time through it locks onto
-  noise, parses a nonsense frame length and walks off into the middle of
-  the image -- which on the first real file gave 212 frames and a 4 second
-  duration for a 52 second track. The size field is syncsafe, seven bits
-  per byte with the high bit always clear, so the length can never itself
-  contain a false sync.
-- **The Xing/Info/VBRI frame is skipped, and not counted.** It is a real
-  MP3 frame carrying the seek table rather than audio, and its side info
-  is whatever the encoder left there -- an arbitrary value that became the
-  spike at the start of every MP3 envelope. Skipped without incrementing
-  the frame count, because it is not a frame's worth of playing time
-  either.
-- **Trailing tags end the walk.** ID3v1 is 128 bytes at EOF, APE tags are
-  larger, and the byte-at-a-time resync parsed both into nonsense frames
-  whose side info became the spike at the *end* of the envelope. Same
-  class of bug as the ID3v2 tag at the front, at the other end of the
-  file -- which is the argument for treating "arbitrary bytes adjacent to
-  audio" as a category rather than fixing them one at a time.
-- **A granule with no main data is silence, and is reported as such.**
-  `part2_3_length == 0` means no scalefactors and no Huffman data --
-  nothing for a gain to apply to -- and `global_gain` is then whatever the
-  encoder left in the field. LAME writes 210 there, and something in the
-  run writes 255. Read literally, every LAME-encoded MP3 opens and closes
-  at four fifths of full scale.
+- **Arbitrary bytes adjacent to audio are a category, not a list of
+  bugs.** A 130 KB ID3v2 tag full of PNG is full of bytes that look like
+  a sync word; so is an ID3v1 or APE tag at EOF. Resyncing a byte at a
+  time through either locks onto noise and parses nonsense. Both are
+  skipped by their length fields. The ID3v2 size field is syncsafe --
+  seven bits per byte, high bit always clear -- so the length can never
+  itself contain a false sync.
+- **A granule with no main data is silence, and encoders leave junk in
+  the gain field.** `part2_3_length == 0` means no scalefactors and no
+  Huffman data, and `global_gain` is then whatever was left there: LAME
+  writes 210. Read literally, every LAME MP3 opened and closed at four
+  fifths of full scale. Those are real frames correctly parsed -- the
+  encoder delay at the head and the flush padding at the tail, 51 of them
+  on a 2.6 minute track.
 
-  That is the spike at each end of the envelope that survived the ID3v2
-  and trailing-tag fixes above, and it is not metadata: these are real
-  frames, correctly parsed, in the audio stream -- the encoder delay at
-  the head and the flush padding at the tail. A 2.6 minute test track has
-  51 of them, seven at the front and the rest trailing. They are reported
-  as 0 and left out of the normalisation range.
-- **The first sync is confirmed by a second one** at exactly the offset
-  the first header states, with a matching sample rate. One valid-looking
-  header proves nothing; two at the stated spacing do. Once locked, the
-  stream is trusted until a header fails to parse.
-- **MP3 frames with a CRC shift the side info by two bytes.** The first
-  version skipped those frames' loudness instead, which meant a file where
-  every frame is protected produced no envelope at all and said only that
-  the format had no per-frame loudness.
-- **Both buffers are PSRAM and freed.** 32 KB of read buffer and 64 KB of
-  per-frame gains, for something that runs once per track.
-- **`abort_flag` is polled every 256 frames**, so a track change cancels a
-  scan that is no longer wanted rather than finishing it into a buffer
-  nobody will read.
+## Ogg loudness without decoding anything (historical, 0206)
 
-Verified against generated files with known frame counts: a 400-frame CBR
-MP3 reports 10 s, a 300-frame ADTS stream 6 s, a 500-frame AMR 10 s. Also
-against a reconstruction of the file that broke it -- 2000 CRC-protected
-64 kbps frames behind a 130 KB ID3v2 tag stuffed with false sync words --
-which now reports 2000 frames, 52 s and a full envelope.
+Vorbis and Opus have no equivalent of MP3's `global_gain`, so the frame
+walk approximated their envelope from **page sizes**: both codecs are
+always VBR, a VBR encoder spends bits where there is something to encode,
+and a silent passage is a handful of bytes where a loud one is hundreds.
 
-Not yet wired to anything -- `decoder_duration_sec()` still returns 0 for
-these formats, and nothing draws the envelope. That is the next patch.
+That was a proxy for a proxy, and it is gone with the walk for the same
+reason. It is recorded here because the reasoning was explicitly labelled
+as an approximation in the code and in this file, and it still ended up
+drawn on screen as though it were a waveform for as long as the walk
+existed. Labelling a number honestly in a comment does not stop a UI from
+presenting it as the thing it approximates.
 
-## Ogg loudness without decoding anything
-
-Vorbis and Opus have no equivalent of MP3's `global_gain`. There is no
-loudness anywhere in the page or packet headers, so an amplitude envelope
-means decoding one packet in N -- minutes of CPU on a long track, and a
-second codec instance live alongside the one making the sound.
-
-The way in is that **both codecs are always VBR**. A VBR encoder spends
-bits where there is something to encode: a silent passage is a handful of
-bytes per packet, a dense one several hundred. Packet size is therefore a
-usable proxy, and it is free -- the segment table already states it.
-
-What this produces is a **bitrate envelope, not an amplitude envelope**.
-Not the same measurement, and worth being honest about: it will not show a
-loud sine wave as loud, because a sine wave is cheap to encode. It rises
-and falls where the music does, which is all a shape drawn 720 px wide can
-convey. The alternative was the format being minutes slower than every
-other one.
-
-Packet sizes are clamped rather than scaled adaptively, because a header
-packet carrying a comment block and embedded cover art would otherwise set
-the ceiling for the whole track.
-
-**Header packets are not columns.** Opus has two and Vorbis three, and the
-big ones -- Vorbis's setup packet of codebooks, and OpusTags carrying the
-comment block and any embedded picture -- are several KB each. They
-clamped to 255, which is why every Ogg drew a full-height spike in its
-first column. The codec is identified before its first page's segments
-are walked, precisely so the header count is known by the time the first
-packet ends.
-
-**The last packet is the end of the stream, not the end of the music.**
-Opus pads its final packet and both codecs can finish short; either way
-the size says nothing about the audio and it landed in the last column as
-a spike. Held at the previous value rather than dropped, so the envelope
-still spans the full width.
-
-Verified against a generated 5000-packet Opus stream: 100 s, exact.
+Ogg now gets its envelope the same way every other format does: off the
+decoded PCM of a normal play. The codec was always going to run; the
+envelope is a by-product of it running.
 
 ### The envelope is the seek bar
 
@@ -816,16 +747,17 @@ rather than two:
 The middle row is the one worth the extra case. The position is real and
 worth showing; the missing thumb is what says not to try dragging it.
 
-### The walk declines formats it cannot parse
+### The walk declines formats it cannot parse (historical, 0206)
 
-`framewalk_supports()` reads four bytes before the scan task commits to
-anything. Without it, an Ogg was read end to end -- a whole file off the
-card, in contention with the decoder reading the same card for the same
-track -- to produce zero frames and a log line saying so.
+`framewalk_supports()` read four bytes before the scan task committed to
+anything, because without it an Ogg was read end to end -- a whole file
+off the card, in contention with the decoder reading the same card for
+the same track -- to produce zero frames and a log line saying so.
 
-Ogg is walked now -- see below. AAC, TS and AMR remain: those state a
-frame length and nothing about the content, so they produce a duration and
-no envelope.
+Gone with the walk. The general form is worth keeping: **a cheap check
+that a long operation is worth starting belongs before the operation, not
+inside it.** Nothing now needs it here, because nothing schedules a pass
+over a file at all.
 
 ### The seek target reads as a time
 
@@ -992,6 +924,225 @@ The path row carries the reason instead of a path:
 completed bring-up, so the third state -- `USB port coming up` -- exists
 only for the few milliseconds between `usbhost_start()` and VBUS going
 high at boot. Nobody can tap their way into it any more.
+
+## ReplayGain, and where the waveform comes from
+
+Both come off the PCM the decode loop is already producing for the
+speaker. That is the whole design: the expensive step is the decode, it
+is already happening, and everything here is arithmetic on a buffer that
+is already in cache.
+
+### The measurement
+
+`loudness.c` implements ITU-R BS.1770-4 integrated loudness as
+ReplayGain 2.0 uses it: K-weighting, 400 ms blocks at 75% overlap, an
+absolute gate at -70 LUFS, then a relative gate 10 LU below the mean of
+what survived.
+
+**The gating is the part that makes this not a running RMS with a better
+name.** A track with a quiet intro and a loud body should report the
+loudness of the body; an ungated mean reports something in between that
+matches neither. Proven rather than asserted: 10 s of -40 dBFS followed
+by 10 s of -20 reads -20.016 LUFS, not the -23 an average gives.
+
+**The K-weighting filter is derived from the standard's own prototype
+with `tan()` pre-warping, not from an RBJ-cookbook shelf fitted to the
+same corner and Q.** This cost a round trip and is the single most
+important thing in the file to not "simplify". The cookbook shelf
+compiles, runs, produces plausible output, and lands 0.4382 dB at 1 kHz
+where the standard's filter lands 0.6977 dB -- so every measurement came
+out 0.25 LU low, which is outside EBU R128's +/-0.1 LU tolerance and is
+invisible from the output alone.
+
+The test that settles it, and the one to re-run if this function is ever
+touched: **at fs = 48000 the derivation must reproduce the coefficient
+table printed in BS.1770-4 to fourteen decimal places.** Not "the numbers
+look reasonable". A 1 kHz sine at -20 dBFS stereo then reads -19.950
+LUFS, inside tolerance, the residual being histogram quantisation.
+
+Peak is **sample peak, not true peak** -- no 4x oversampling. Documented
+as a simplification rather than left to be inferred from a better name.
+Changing it is a `LOUDNESS_VERSION` bump.
+
+### The envelope
+
+Peak magnitude per column, accumulated in the same pass. The accumulator
+sees blocks, not a file, so it never knows the duration and cannot size
+its columns up front. Instead a column covers a fixed span; when the
+array fills, adjacent pairs are merged and the span doubles. Any length
+lands between 360 and 720 columns at one pass over 720 bytes per
+doubling -- nine merges for a ten-minute track.
+
+Merged with max, not mean, for the reason the frame walk gave and got
+right: a mean turns a transient into a bump, and the transient is what
+makes one track's shape recognisable.
+
+The column still being filled is left out of the result. It covers less
+time than the others, so its peak is drawn from a smaller sample and
+reads low -- a dip at the right edge of every track, for one column.
+
+### Applying it
+
+`replaygain_gain_db()` is REFERENCE minus the measurement, **held back on
+the positive side only** so the stored peak cannot be pushed past full
+scale. Turning a loud track down never clips, so a negative gain applies
+in full; a positive one is cut to whatever headroom the peak leaves and
+the track ends up quieter than the reference.
+
+That is the honest failure. A limiter would reach the target by squashing
+peaks, and a music player has no business rewriting a waveform to hit a
+number. It is also what the peak is stored *for*, rather than as a
+curiosity beside the loudness.
+
+Applied in `player.c`'s decode loop, not `audio_out.c`, because only the
+USB route has a software gain stage -- the analog path writes ES8388
+registers, so a gain applied there would play the same track at two
+levels depending on what is plugged in.
+
+**Measuring and applying are mutually exclusive**, and have to be: a pass
+that applied a gain would measure the gain back and converge on the
+reference whatever the track is. The sidecar's presence is the switch.
+
+On one real album: nine tracks spanning -17.36 to -25.13 LUFS, a 7.77 dB
+spread, collapse to 0.18 dB. The residual is two tracks the peak held
+back.
+
+### What a play costs, and what it does not
+
+The first uninterrupted play of a track produces its loudness and its
+envelope. **Seek, skip, or next during that play throws the measurement
+away** -- BS.1770 integrates over the whole programme, so a measurement
+that skipped a section is not a slightly worse number, it is a number
+about different audio, and nothing downstream could tell. A restart is
+not a special case: it re-enters `play_file()`, which resets the
+accumulator, and that attempt writes if it reaches the end.
+
+A track always skipped through therefore gets neither, for ever. That is
+counted (`attempts.abandoned`) so a future policy can stop trying or
+accept a partial answer; nothing acts on it yet.
+
+## The sidecar
+
+`.<name>.rgcache` next to the track -- a dotfile, which
+`storage_is_hidden()` already excludes from every listing and playlist
+scan, so nothing had to learn to hide it. JSON Lines, though in practice
+**always exactly one line**.
+
+Keyed on **size and mtime, not a content hash**. A hash would need to
+read the file to validate a cache that exists to avoid reading the file.
+
+### One line, rewritten whole
+
+Every write serialises the entire merged record to a temp file and
+renames it over the old one. Appending was tried and was wrong, and the
+way it failed is instructive: a card showed a sidecar with six lines
+across three format versions, four of them dead, because the "is this
+even our format" check only asked whether the first byte was `{` -- and a
+stale-version line is perfectly good JSONL. Every format bump would have
+doubled the corpses.
+
+The deeper point is that appending never bought anything. Every line is
+already a complete merged record, because the caller loads and overlays
+before writing: line N+1 says everything line N said. An append writes
+exactly the bytes a rewrite would **and** keeps the old copy. The only
+argument for it was torn-write safety, and temp-and-rename answers that
+better, because the rename either happened or it did not.
+
+This is also the fragmentation answer. At about a kilobyte -- 5.4 KB with
+a full 256-entry seek index -- the file sits inside a single 64 KB FAT
+cluster and cannot fragment, because it never grows. There is no size
+threshold: nothing to compact and no boundary to straddle. A growth cap
+of 65536 was in fact the worst possible value, permitting growth to
+exactly the cluster edge before acting.
+
+### Two version numbers, deliberately
+
+`REPLAYGAIN_FORMAT_VERSION` is the record's shape; `LOUDNESS_VERSION` is
+what the numbers mean. They change for different reasons and must not
+invalidate each other: adding a field should not throw away a good
+measurement, and changing the gate or the weighting should not throw away
+an envelope. A stale loudness version reports absent and is recomputed on
+the next full play; the rest of the record survives.
+
+Format version 2 exists because version 1 stored the frame walk's proxy
+envelope under the same key -- same shape, different meaning, and an
+unbumped reader would have drawn old numbers as amplitude and been wrong
+invisibly.
+
+### Absent is not the same as none
+
+The art section carries `present` **and** `has_art`. Section absent means
+nobody has looked; section present with `has_art` false means somebody
+looked and there is none. The negative is the valuable half: it turns the
+eight-to-thirteen second tag scan the logs used to show into nothing at
+all.
+
+The positive is deliberately **not** used to seed the cover on the open
+path. The sidecar stores where the image is, not the image, so using it
+means a seek and a read -- that belongs where the decode already happens,
+not where it would block the open.
+
+### Held for the track, written once
+
+`play_file()` reads the record once, before `decoder_open()`, and merges
+into it in memory as facts are learned -- tags, whether there is a cover,
+the format the decoder reports, then the loudness and envelope at the
+end. One write when the track ends, and only if something changed.
+
+That last clause is what makes a fully-known track free: it reads its
+sidecar once and never writes. The format merge compares before marking
+dirty, or a track whose format was already recorded would rewrite an
+identical file every play and the dirty flag would be decoration.
+
+Written outside the `TRACK_ENDED` test, because a skipped track still
+learned its tags and whether it has a cover even though its loudness was
+thrown away.
+
+The read has to happen in `track_change_begin()` rather than
+`play_file()`, and this was got wrong once: seeded one step downstream of
+its consumers, `load_tags()` re-read the ID3 and `do_art()` re-scanned
+for a cover the sidecar already said was absent, and both then wrote back
+what was already there.
+
+### What is in it, and what is not
+
+Waveform, loudness, tags, format (rate, channels, bitrate, codec,
+duration, gapless delay/padding), art location, abandonment count -- all
+produced and consumed.
+
+**The seek index is defined, tested and unwired.** It is now the largest
+remaining win by a wide margin: with everything else answered from the
+sidecar before `decoder_open()` returns, `index built` is essentially the
+whole of the 1.2-1.8 s open. Wiring it means `decoder.c` handing minimp3
+a prebuilt index rather than `MP3D_DO_NOT_SCAN`'s absence of one, which
+is a change inside the decoder's seek path rather than around it.
+
+Entries are (offset, sample) pairs at a **stored** spacing -- 10 s by
+default, not minimp3's per-frame, because one pixel of a 720 px bar is
+380 ms on a 273 s track and per-frame precision is far finer than a
+finger can ask for. A long file doubles the spacing to stay under 256
+entries, so a reader must use the stored value and not the constant.
+
+Two read-side rejections, both silent-wrong-seek hazards rather than
+crashes: ragged offset/sample arrays (pairing an offset with the wrong
+sample seeks to the wrong place), and any offset past the end of the file
+(a record about a different file that happened to match size and mtime).
+
+### The listening text
+
+A track with no envelope yet draws an unshaped grey bar with
+"ReplayGain is listening..." across it. Grey and unshaped rather than a
+red progress fill, because a red fill exactly where the waveform will go
+reads as a waveform of a uniformly loud track rather than as one not
+measured yet.
+
+Gated on whether a measurement is actually running, **not** on the
+envelope being absent -- those are different states. A track whose
+envelope is already in its sidecar is not being listened to, and the gap
+between the track starting and the bar being handed that envelope was
+otherwise putting the words on screen for a few seconds of every replay,
+claiming work that was not happening on exactly the tracks that had
+already done it.
 
 ## USB audio output, and why it wins
 
@@ -1686,8 +1837,6 @@ anything DRM'd. The first two are only a framing layer away rather than a
 codec away. Everything else is a decoder problem, and decoder problems
 get fixed in `decoder.c`.
 
-
-
 ## Licensing: the font is not MIT
 
 **`components/ark10/` is SIL OFL-1.1. Everything else in this repository
@@ -1960,16 +2109,16 @@ Three things worth not undoing:
   If it is not, somebody is holding a lease across a parse.
 
 Small reads are deliberately left unarbitrated -- the ten-byte ID3 frame
-headers in `albumart.c`, `framewalk_supports()`'s four-byte sniff. A lease
+headers in `albumart.c`, and the sidecar's own kilobyte. A lease
 costs two semaphore operations and those reads are shorter than that. Only
 `albumart.c`'s APIC frame, which is the cover itself, takes one.
 
-## The envelope scan is off, and what the first flash showed
+## The envelope scan is off, and what the first flash showed (historical)
 
-`WAVEFORM_SCAN` is 0. `idf.py -DWAVEFORM=1 build` puts it back. The code
-is gated with a plain `if` rather than `#if` so it still compiles and is
-still type-checked -- a switched-off feature that stops building cannot be
-switched on to compare against.
+`WAVEFORM_SCAN` no longer exists; the feature it gated is unconditional
+because it costs nothing beyond a play you were having anyway. The
+measurement below is kept because it is the number that eventually killed
+the walk.
 
 The first flash of the arbiter measured this, on an 8.7 MB Xing-less MP3:
 
@@ -1979,23 +2128,22 @@ The first flash of the arbiter measured this, on an 8.7 MB Xing-less MP3:
 
 Both passes read the same file. `MP3D_SEEK_TO_SAMPLE` reads it to build
 minimp3's sample index, which yields the frame count and the duration; the
-walk then reads it again for the frame count, the duration and the
-envelope. Two of the three answers were already known. On track two the
-gap was long enough for `amplifier off (idle)` to fire in the middle of
-it, so the audible result was a click, seventeen seconds of nothing, and a
-click back on.
+walk then read it again for the frame count, the duration and the
+envelope. Two of the three answers were already known.
 
-None of that is contention -- both opens happened with nothing else
-touching the card -- so the arbiter neither caused it nor could have
-helped. It is one read that is inherently slow and one that is redundant,
-and the redundant one is the one that can be switched off today.
+The conclusion drawn at the time was to switch the walk off and bring it
+back behind a sidecar, so the second read became once-per-file instead of
+once-per-play. That was the wrong shape and it took until 0206 to see it:
+the second read did not need to be cached, it needed to not exist. The
+decode loop already has the PCM, so the envelope is free there and the
+walk had nothing left to do.
 
-What switching it off costs: the seek bar falls back to the plain slider,
-which is a path that already existed and is already drawn while a scan is
-in flight. Duration survives on MP3 because the open's index supplies it.
-Raw ADTS and AMR lose their only source of a length and will show 00:00 --
-the walk was the sole answer there, which is the argument for the walk
-coming back rather than being deleted.
+Worth stating because the intermediate answer was reasonable and shipped:
+0200 built the sidecar, keyed it on size and mtime, wired it to the walk,
+and worked. It just cached the result of a pass that should not have been
+happening. "Make the expensive thing cheaper" and "notice the expensive
+thing is redundant" look identical until someone asks what else already
+has the data.
 
 ## What the log now says
 
@@ -2125,11 +2273,18 @@ was wrong.
 
 1. **Display flashing cyan.** Untouched. It is a DPI/PSRAM bandwidth
    problem, independent of storage, and no log since has shown it.
-2. **The card starving other tasks.** Arbitrated in 0100 -- and still
-   **unvalidated**, because `worst wait` has been 0 ms in every log. The
-   walk was off from 0101 and prefetch was broken from 0101 until this
-   patch, so nothing has ever contended with the decoder. 0105 should
-   produce the first contended window.
+2. **The card starving other tasks.** Arbitrated in 0100. Briefly
+   validated and then made moot. With the walk running in the background
+   against a playing track, logs showed `worst wait` reaching 39 ms and a
+   background class doing 19 MB of reads across one track -- the first
+   real contention the arbiter ever saw, and it held.
+
+   The walk is gone as of 0206, and with it the only long read that ran
+   against playback. `worst wait` is back to 0-1 ms because nothing
+   contends any more: what is left is the open, the ring's own refills,
+   and a kilobyte of sidecar. The arbiter is now insurance rather than a
+   working part, which is a better place for it to be but does mean it is
+   again untested by anything current.
 3. **Gapless needs RAM caching.** Not started, but no longer blocked: it
    was impossible against a 19 s open and is merely unwritten against a
    1.5 s one.
@@ -2173,13 +2328,28 @@ was wrong.
 - `covertag.c` is `PREFETCH` class for every caller, including the decode
   loop's own `load_tags()`, which should be `PLAYBACK`.
 - One lease covers the SD card and the USB port together.
-- Raw ADTS and AMR have no duration source while the walk is off, and
-  will read 00:00.
+- Raw ADTS and AMR have no duration on a track that has never been played
+  through: the walk was their only source and it is gone. They read
+  `--:--` until a full play records a duration in the sidecar, after
+  which it is instant. This is the one place 0206 traded something away
+  rather than improving it -- the walk could produce a duration during a
+  prefetch of a track nobody had played.
 - The size-only handle in `do_art()` is deliberately left on plain
   `fopen()`: it opens, seeks, tells and closes without reading a byte, so
   a pool slot spent on it is a slot the decoder cannot have.
 - Nothing in 0100-0105 was compile-tested against ESP-IDF. `storage_io.c`
   is clean under `gcc -Wall -Wextra -Wformat=2`.
+- The 0200 series is host-tested, not IDF-built, and shipped two build
+  failures because of it: a struct field removed in one patch and still
+  referenced in another, and four functions called above their
+  definitions. Both are classes an isolated harness structurally cannot
+  see -- it compiles function bodies, not the file they sit in. Type
+  checks against the real headers catch the first; a use-before-definition
+  scan catches the second; neither substitutes for a build.
+- `waveform_draw_flat()` and `draw_slider()` were removed as dead in 0206;
+  `framewalk_t` still carries `frames` and `has_levels`, which nothing
+  fills any more. Trimming the struct touches `mediacache`, `waveform.c`
+  and both remaining call sites for no behaviour change.
 
 ### The method that actually worked
 
@@ -2288,7 +2458,7 @@ sector at a time whenever `esp_ptr_dma_capable()` says no to the
 destination. It does not warn when it does this.
 
 Every large buffer here is PSRAM -- `decoder.c`'s input window,
-`framewalk.c`'s read buffer, minimp3's 128 KB IO buffer through `malloc()`
+minimp3's 128 KB IO buffer through `malloc()`
 with `SPIRAM_MALLOC_ALWAYSINTERNAL` at its 16 KB default -- so every read
 in the program took that path.
 
@@ -2400,11 +2570,13 @@ not a statement about the file.
 that order, each stage re-checking the ring gate. They are not one
 operation -- tags cost a few KB and the walk costs the whole file.
 
-The walk is abortable through `s_prefetch_abort`, threaded into
-`framewalk_scan()`'s polling. A gate checked once at the start is fine
+The prefetch walk was abortable through `s_prefetch_abort`, threaded
+into the scan's polling, because a gate checked once at the start is fine
 for a bounded 120 KB read and is not fine for a 60 MB one that would
 otherwise keep running for seconds after the track it was for stopped
-being next. `s_prefetch_abort` is separate from `s_scan_abort` because
+being next. The walk is gone and nothing that long runs on the prefetch
+path any more; the remaining prefetch work is tags and the cover, both
+bounded. `s_prefetch_abort` is separate from `s_scan_abort` because
 they mean different things and are cleared at different moments.
 
 Two consequences that are easy to undo by accident:
@@ -2480,7 +2652,6 @@ direction ever showed the fault.
 If a screen transition is ever added elsewhere in that loop, it needs
 both: `touch_swallow()` for the presses that follow, and `continue` for
 the sample already in hand.
-
 
 `touch_swallow()` exists because a tap that changes which screen is up
 would otherwise be read twice: once by the screen that was up, and again
