@@ -3404,7 +3404,14 @@ static void player_loop(void)
         const track_end_t why = play_file(s_path);
         have = false;
 
-        if (why == TRACK_INTERRUPTED) continue;    /* s_pending has the next */
+        if (why == TRACK_INTERRUPTED) {
+            /* Something else is already chosen, so the amplifier has a
+             * reason to stay powered through the gap. See the block
+             * below for why this is set out here rather than left set
+             * by play_file(). */
+            s_track_changing = true;
+            continue;                             /* s_pending has the next */
+        }
 
         if (why == TRACK_MEDIA_GONE) {
             /* The list points at paths on a volume that is no longer
@@ -3449,6 +3456,31 @@ static void player_loop(void)
 
         const char *next = playlist_next(browser_order());
         if (next) {
+            /*
+             * There is another track, so this gap is a gap and not a
+             * stop. Without this the amplifier idles across every
+             * boundary on an album:
+             *
+             *   I (327491) finished, 17464 blocks
+             *   I (329121) tab5_audio: amplifier off (idle)
+             *   I (329343) tab5_audio: amplifier on
+             *
+             * -- powered down and back up 222 ms apart, which is an
+             * audible click between two consecutive songs. audio_out.c
+             * holds the shutdown for 1500 ms precisely to absorb a
+             * track gap, and the gap is now about 1.8 s: drain, then
+             * the sidecar write, then the next open. Just over.
+             *
+             * Set here rather than left set by play_file(), which
+             * clears s_track_changing on its way out on purpose -- a
+             * track that fails to open must not leave the amplifier
+             * powered forever waiting for a sound that is not coming.
+             * The loop is the only thing that knows there is a next
+             * track, so the loop is what says so. If that next track
+             * then fails to open, play_file() clears it again and the
+             * amp idles as it should.
+             */
+            s_track_changing = true;
             snprintf(s_path, sizeof(s_path), "%s", next);
             have = true;
             continue;
