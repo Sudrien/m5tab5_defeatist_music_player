@@ -914,6 +914,18 @@ static volatile bool     s_scan_abort;
  * clears this one immediately before it starts scanning, which is the
  * only point at which "no longer next" has been re-decided.
  */
+/*
+ * The replaygain-hold helpers and the sidecar primer, declared here
+ * because load_tags() and track_change_begin() call all three several
+ * hundred lines above where they are defined. C89 would have taken the
+ * implicit int() declarations; anything since is right to refuse them,
+ * and a prototype is cheaper than moving the definitions up past the
+ * statics they read.
+ */
+static void rg_hold(const char *path);
+static bool rg_holding(const char *path);
+static bool sidecar_prime(const char *path);
+
 static volatile bool     s_prefetch_abort;
 static volatile bool     s_wave_ready;
 static framewalk_t       s_walk;            /* media_task's scan buffer */
