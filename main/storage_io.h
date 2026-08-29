@@ -128,53 +128,70 @@ typedef enum {
 #define STORAGE_IO_CHUNK    (16 * 1024)
 
 /*
- * THE BOUNCE BUFFER, AND WHY EVERY READ IN THIS PROGRAM WAS SLOW
+ * THE REQUEST SIZE, AND TWO THINGS IT IS NOT
  *
- * 0102 measured 577 KB/s inside fread(), stable to +/-1% across two
- * files, two bus clocks and four windows. A rate that does not move when
- * the bus clock doubles is not a bus rate. 577 KB/s is 1127 sectors per
- * second, or 0.89 ms per 512-byte sector, against roughly 26 us of actual
- * data time for that sector at 40 MHz on four lines -- so about 0.86 ms
- * per sector was going somewhere with nothing to do with the card.
+ * Throughput has now been measured at 577, 576, 571 and 569 KB/s across
+ * six windows, two files, two bus clocks and both with and without DMA
+ * staging. It has not moved. Two explanations are therefore dead:
  *
- * ESP-IDF's sdmmc_read_sectors() tests the destination with
- * esp_ptr_dma_capable(). When that fails it does not refuse and it does
- * not warn: it reads the transfer one sector at a time through a
- * temporary internal buffer. Throughput then becomes a function of
- * transaction count and is indifferent to the clock, which is exactly the
- * signature above.
+ *   0102  SDMMC_FREQ_DEFAULT -> SDMMC_FREQ_HIGHSPEED, 20 to 40 MHz.
+ *         The card accepted it (the banner reads 40000 kHz) and
+ *         throughput moved about 4%.
+ *   0103  Staging every read through an internal DMA-capable buffer,
+ *         on the theory that sdmmc_read_sectors() was falling back to
+ *         its sector-at-a-time path. The `bounced` counter confirmed
+ *         the staging happened -- 77 of 77 reads, 94 of 94 -- and
+ *         throughput moved 1 KB/s.
  *
- * Every large buffer in this program is PSRAM, deliberately and for
- * reasons stated where each is allocated -- decoder.c's input window,
- * framewalk.c's read buffer, and minimp3's own 128 KB IO buffer through
- * malloc() with SPIRAM_MALLOC_ALWAYSINTERNAL left at its 16 KB default.
- * PSRAM is not DMA-capable for this peripheral, so every one of them took
- * the slow path.
+ * Both of those live at or below the driver. So the constraint is above
+ * it: not how fast a request moves bytes, but how large the requests are
+ * and therefore how many there are.
  *
- * The fix is one internal, cache-aligned, DMA-capable buffer of
- * STORAGE_IO_CHUNK, read into and then memcpy'd out to wherever the
- * caller actually wants the bytes. The card sees a destination it can
- * burst into; the caller keeps its PSRAM buffer and its reasons for it. A
- * 16 KB write to PSRAM at 200 MHz is tens of microseconds against
- * milliseconds of card time, so the copy is not a cost worth weighing.
+ * 576 KB/s is 1127 requests per second at 512 bytes, or 0.89 ms per
+ * single-sector round trip through the VFS lock, FatFs and the driver.
+ * That is what one sector per request looks like, and it looks the same
+ * at any clock and with any destination -- which is precisely the
+ * invariance the last two patches measured.
  *
- * One buffer, shared, and safe because the lease already serialises every
- * reader. That is the second thing 0100 has paid for: this is a change in
- * one function rather than in six.
+ * WHY THE REQUESTS ARE THAT SIZE
  *
- * A destination that is already DMA-capable and 4-byte aligned skips the
- * bounce and reads straight through, so nothing pays a copy to fix a
- * problem it did not have. `bounced` in the stats counts the ones that
- * did, which is also the diagnostic: if it equals `reads`, every
- * destination in that window was PSRAM.
+ * newlib's fread() does not hand a large request to the layer below.
+ * Unlike glibc, which bypasses its buffer for reads larger than it,
+ * newlib loops on __srefill_r and refills fp->_bf._size bytes at a time,
+ * so everything reaches f_read() one stdio buffer at a time no matter
+ * what the caller asked for. minimp3 asks for 128 KB; the arbiter
+ * faithfully measured 111 KB per lease; FatFs underneath saw neither.
  *
- * IF THIS IS WRONG it will be obvious rather than subtle -- the bounced
- * count will be high and the throughput will not move. That is a real
- * possibility: the pointer tested here is the one handed to fread(), and
- * FatFs is entitled to stage a read through its own window buffer rather
- * than passing it down to the driver. Being wrong costs a memcpy.
+ * newlib sizes _bf from st_blksize, which for this VFS comes from
+ * CONFIG_FATFS_VFS_FSTAT_BLKSIZE -- a value sdkconfig.defaults does not
+ * set. storage_io_open() logs the st_blksize it found on the first open,
+ * so this stops being an inference.
+ *
+ * WHAT THIS DOES
+ *
+ * fopen(), then setvbuf() with a buffer from a small preallocated pool of
+ * internal, cache-aligned, DMA-capable blocks. That sets the request size
+ * AND makes the destination the driver finally sees DMA-capable, which is
+ * what 0103 was trying to do from the wrong end -- with stdio buffering
+ * the bytes land in the stdio buffer first, so the caller's PSRAM pointer
+ * was never what the driver was given. 0103's staging is removed here
+ * rather than kept: on top of a buffered stream it is a third copy of
+ * every byte to solve a problem it has already been measured not to
+ * solve.
+ *
+ * SAME SHAPE OF GUESS AS THE ONE THAT JUST FAILED
+ *
+ * "A layer below is chunking smaller than we think" is exactly the class
+ * of hypothesis 0103 was, so it gets the same explicit test: if the
+ * stdio buffer goes to 16 KB and throughput does not move, then the
+ * constraint is the card's own per-request latency and no amount of
+ * restructuring above it will help. The st_blksize line settles it
+ * either way, and it is worth having even if the fix does nothing.
+ *
+ * Only decoder.c is converted here, which is where 99% of the bytes are.
+ * The rest follow once this is measured rather than before -- the lesson
+ * of 0103 being that the cheap test comes first.
  */
-
 /*
  * Safe to call before this is initialised: every function degrades to
  * calling straight through to stdio, which is exactly the old behaviour.
@@ -182,6 +199,18 @@ typedef enum {
  * and a boot-order mistake should cost arbitration rather than the read.
  */
 void storage_io_init(void);
+
+/*
+ * fopen() with a large internal DMA-capable stdio buffer attached.
+ *
+ * Falls back to a plain fopen() when the pool is empty or setvbuf()
+ * refuses, so the result is always usable and never NULL for a reason
+ * this file invented. Close with storage_io_close() -- a plain fclose()
+ * still works and still closes the file, it just strands a pool slot
+ * until reboot, which is logged.
+ */
+FILE *storage_io_open(const char *path, const char *mode);
+int   storage_io_close(FILE *f);
 
 /*
  * Take and drop the lease.
@@ -270,7 +299,6 @@ typedef struct {
     uint32_t held_ms;           /* summed time inside fread() */
     uint32_t worst_hold_ms;     /* longest single lease */
     uint32_t worst_wait_ms;     /* longest wait to be granted one */
-    uint32_t bounced;           /* reads whose destination was not DMA-capable */
 } storage_io_stat_t;
 
 void storage_io_stats(storage_io_class_t cls, storage_io_stat_t *out);

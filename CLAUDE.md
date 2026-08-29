@@ -2089,7 +2089,73 @@ and it is the thing that will finally give the arbiter a contended window
 to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
 the only concurrent reader was the walk and 0101 switched it off.
 
-## 577 KB/s was the bounce path, not the card
+## 0103 was wrong, and what the negative result bought
+
+The bounce buffer did nothing. `bounced` came back 77 of 77 and 94 of 94,
+so the staging happened exactly as designed, and throughput went from
+577 to 576 KB/s. The sector-at-a-time fallback in `sdmmc_read_sectors()`
+was never the constraint.
+
+That is worth keeping because of what it rules out. Throughput is now
+known to be invariant to **two independent things**: the bus clock
+(20 -> 40 MHz, 0102) and the DMA-capability of the destination (0103).
+Both live at or below the driver, so the constraint is above it -- not
+how fast a request moves bytes but how many requests there are.
+
+576 KB/s is 1127 requests per second at 512 bytes: 0.89 ms per
+single-sector round trip through the VFS lock, FatFs and the driver. One
+sector per request looks like this at any clock and with any destination,
+which is precisely the invariance the two dead patches measured.
+
+**newlib's `fread()` does not pass a large request down.** glibc bypasses
+its buffer for reads larger than it; newlib loops on `__srefill_r` and
+refills `fp->_bf._size` at a time, so everything reaches `f_read()` one
+stdio buffer at a time regardless of what was asked for. minimp3 asks for
+128 KB, the arbiter measured 111 KB per lease, and FatFs saw neither.
+
+newlib sizes `_bf` from `st_blksize`, which for this VFS comes from
+`CONFIG_FATFS_VFS_FSTAT_BLKSIZE` -- which `sdkconfig.defaults` does not
+set. `storage_io_open()` logs the `st_blksize` it finds on the first open,
+so this stops being an inference.
+
+`storage_io_open()` is `fopen()` plus `setvbuf()` with a block from a
+small preallocated pool of internal, cache-aligned, DMA-capable buffers.
+That sets the request size and makes the destination the driver actually
+sees DMA-capable -- which is what 0103 was reaching for from the wrong
+end. With stdio buffering the bytes land in the stdio buffer first, so
+the caller's PSRAM pointer was never what the driver was handed.
+
+0103's staging is removed rather than left in place: on a buffered stream
+it is a third copy of every byte, to solve a problem it has been measured
+not to solve.
+
+Buffers are preallocated because they are 16 KB internal DMA-capable
+blocks and the internal heap is 256 KB with a USB host stack in it.
+Taking and returning them at every track change is how that heap ends up
+fragmented into a state where the next one fails. Two slots covers
+`decoder.c`; a third concurrent open falls back to default buffering,
+which is correct and slow rather than broken. A plain `fclose()` on a
+`storage_io_open()` handle still closes the file -- it strands a slot
+until reboot, and that is the failure worth knowing about if the pool
+ever reports empty.
+
+**Only `decoder.c` is converted.** It is where 99% of the bytes are, and
+the lesson of 0103 is that the cheap test comes before the rollout.
+
+### The test this has to pass
+
+"A layer below is chunking smaller than we think" is the same class of
+hypothesis 0103 was, so it gets the same explicit condition: **if the
+stdio buffer is 16 KB and throughput does not move, the constraint is the
+card's own per-request latency** and nothing above it will help. At that
+point the answer is not to read faster but to read less -- which is
+`MP3D_DO_NOT_SCAN`, and it stops being an optimisation and becomes the
+only remaining move.
+
+The `st_blksize` line settles the question either way, and is worth
+having even if the fix does nothing.
+
+## 577 KB/s was not the bounce path either (0103, superseded above)
 
 0102 predicted two outcomes and got the one that rules out the cheap fix:
 the open is **99% I/O**, not CPU. `10462 KB in 18110 ms held of 18271 ms`.

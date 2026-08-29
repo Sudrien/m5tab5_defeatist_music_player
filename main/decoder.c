@@ -137,7 +137,7 @@ static int mp3_io_seek(uint64_t position, void *user)
 
 static esp_err_t minimp3_open(decoder_t *d, const char *path)
 {
-    d->f = fopen(path, "rb");
+    d->f = storage_io_open(path, "rb");
     if (!d->f) return ESP_ERR_NOT_FOUND;
 
     d->io.read = mp3_io_read;
@@ -151,7 +151,7 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
      * starts immediately. Swap when scrubbing is wanted. */
     if (mp3dec_ex_open_cb(&d->ex, &d->io, MP3D_SEEK_TO_SAMPLE) != 0) {
         ESP_LOGE(TAG, "minimp3 could not open %s", path);
-        fclose(d->f);
+        storage_io_close(d->f);
         d->f = NULL;
         return ESP_FAIL;
     }
@@ -231,11 +231,11 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
         s_esp_codec_registered = true;
     }
 
-    d->f = fopen(path, "rb");
+    d->f = storage_io_open(path, "rb");
     if (!d->f) return ESP_ERR_NOT_FOUND;
 
     d->inbuf = heap_caps_malloc(ESP_IN_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!d->inbuf) { fclose(d->f); d->f = NULL; return ESP_ERR_NO_MEM; }
+    if (!d->inbuf) { storage_io_close(d->f); d->f = NULL; return ESP_ERR_NO_MEM; }
 
     esp_audio_simple_dec_cfg_t cfg = {
         .dec_type = k_formats[fmt].type,
@@ -252,7 +252,7 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
                  k_formats[fmt].name);
         free(d->inbuf);
         d->inbuf = NULL;
-        fclose(d->f);
+        storage_io_close(d->f);
         d->f = NULL;
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -443,6 +443,6 @@ void decoder_close(decoder_t *d)
         if (d->esp_dec) esp_audio_simple_dec_close(d->esp_dec);
         free(d->inbuf);
     }
-    if (d->f) fclose(d->f);
+    if (d->f) storage_io_close(d->f);
     free(d);
 }
