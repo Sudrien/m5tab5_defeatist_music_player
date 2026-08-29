@@ -2951,15 +2951,31 @@ static track_end_t play_file(const char *path)
     uint64_t frames_out = 0;
     /* Cleared with the local it mirrors, so a new track cannot briefly
      * show the previous one's position. */
-    s_frames_out = 0;
     s_frames_rate = 0;
     track_end_t why = TRACK_ENDED;
 
-    load_track_visuals(path);
+    /*
+     * The screen changes when the sound does, not when the decode does.
+     *
+     * With the drain gone, up to a ring of the previous track is still
+     * to be played when this call starts filling the other one. Drawing
+     * this track's title, envelope and position now would put them on
+     * screen up to twenty seconds before anything of this track is
+     * audible -- and would reset the position of a track that is still
+     * playing.
+     *
+     * So both are deferred to the moment the writer arrives on this
+     * ring, which is the moment this track becomes the one being heard.
+     * The common case has no wait in it at all: the previous ring is
+     * usually already empty, the writer has already moved, and the gate
+     * below passes on its first look.
+     */
+    bool visuals_pending = true;
 
     /* Consume any repaint the chooser left pending. It closed a moment
-     * ago and set the flag; the call above has just drawn this track's
-     * cover, so the flag is already satisfied.
+     * ago and set the flag, and the visuals gate above will draw this
+     * track's cover when it becomes the audible one, so the flag is
+     * already spoken for.
      *
      * Without this the loop's first pass ran load_track_visuals() a
      * second time, ~50 ms later -- visible in the log as a duplicated
@@ -3145,6 +3161,18 @@ static track_end_t play_file(const char *path)
          * the outside they are the same symptom. Only logged past the
          * threshold, so a healthy loop stays silent.
          */
+        /*
+         * The handoff, from this side. s_ring_play catches up when the
+         * previous track's ring runs dry; that is this track's first
+         * audible sample, so it is where its name and its bar belong.
+         */
+        if (visuals_pending && cur_rate != 0 && s_ring_play == s_ring_fill) {
+            visuals_pending = false;
+            s_frames_out = 0;
+            frames_out = 0;
+            load_track_visuals(path);
+        }
+
         const TickType_t t_read = xTaskGetTickCount();
 
         decoder_info_t info;
@@ -3396,20 +3424,31 @@ static track_end_t play_file(const char *path)
 
         if (why == TRACK_ENDED) {
             /*
-             * Both conditions, not just the empty one.
+             * No drain. This is the gapless step.
              *
-             * The writer may still be on the previous track's ring when
-             * this track's decode finishes -- a very short track, or one
-             * skipped into. This ring being empty would then be true
-             * because nothing has been played from it yet rather than
-             * because everything has, and returning on that would cut
-             * the track off before a sample of it was heard.
+             * What is queued is the rest of this track and it will be
+             * played out by the writer, which outlives this call. The
+             * next play_file() fills the OTHER ring, so the two do not
+             * collide, and the writer moves across when this one runs
+             * dry -- at the sample, not at a convenient moment.
+             *
+             * Up to a ring of audio therefore outlives the loop that
+             * produced it. Everything that describes the playing track
+             * has to be published at the handoff rather than here; see
+             * the visuals gate at the top of the loop.
              */
-            while (s_ring_play != s_ring_fill ||
-                   !xStreamBufferIsEmpty(s_pcm)) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
         } else {
+            /*
+             * Interrupted: what is queued is a track the user has
+             * finished with, and playing 20 s of it after the tap
+             * sounds like the tap was ignored.
+             *
+             * The writer may be parked on this ring or on the other
+             * one. Resetting the one being filled is right either way:
+             * if the writer is here it stops immediately, and if it is
+             * still on the previous ring this one held nothing anybody
+             * was going to hear.
+             */
             xStreamBufferReset(s_pcm);
         }
 
