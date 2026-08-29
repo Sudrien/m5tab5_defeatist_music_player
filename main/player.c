@@ -3230,9 +3230,21 @@ static track_end_t play_file(const char *path)
             }
 
             if (cur_rate == 0) {
+                /* PROBE 0324 -- temporary, revert with 0323's.
+                 * The first-block branch is the only code between the
+                 * format publish (which the "ogg: ..." line proves is
+                 * reached) and 0323's pre-send probe (which is not), so
+                 * one of the three calls below is where the loop goes. */
+                ESP_LOGW(TAG, "probe: rate branch enter, rate=%d play=%d fill=%d "
+                              "playing=%d stop=%d",
+                         info.sample_rate, s_ring_play, s_ring_fill,
+                         (int)s_playing, (int)s_writer_stop);
+
                 /* First block: set the rate before anything is queued,
                  * so the reconfigure never happens mid-stream. */
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
+
+                ESP_LOGW(TAG, "probe: set_format returned");
                 /*
                  * The ring and the writer are made once in app_main()
                  * now, so a track start sets the rate and publishes an
@@ -3262,7 +3274,22 @@ static track_end_t play_file(const char *path)
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
-                xStreamBufferReset(s_pcm);
+
+                /*
+                 * PROBE 0324 -- temporary.
+                 *
+                 * xStreamBufferReset() fails, and returns pdFAIL, if a
+                 * task is blocked on the buffer. The writer sits in
+                 * xStreamBufferReceive() with a 100 ms timeout, so on
+                 * the ring it is parked on that is a live possibility.
+                 * Before 0322 this call did not exist -- the ring was
+                 * freshly created here -- which matches when the
+                 * symptom appeared.
+                 */
+                ESP_LOGW(TAG, "probe: about to reset ring %d", s_ring_fill);
+                const BaseType_t reset_ok = xStreamBufferReset(s_pcm);
+                ESP_LOGW(TAG, "probe: reset ring %d -> %s", s_ring_fill,
+                         reset_ok == pdPASS ? "pass" : "FAIL");
 
                 s_ring_pct = 0;
                 s_writer_stop = false;
