@@ -125,12 +125,53 @@ uint16_t *gfx_fb(void) { return s_fb; }
 int gfx_w(void) { return s_w; }
 int gfx_h(void) { return s_h; }
 
+/*
+ * A transfer taller than this is split, with a tick between the pieces.
+ *
+ * The DPI peripheral reads the panel's framebuffer out of PSRAM
+ * continuously and cannot wait; a transfer into that same PSRAM is
+ * bandwidth taken away from it, and past some size the fetch falls
+ * behind, the bridge underruns and the panel goes cyan for a frame. The
+ * pixel-clock note in player.c has the arithmetic.
+ *
+ * The steady load is not the problem: ui_task repaints the transport
+ * bar, UI_BAR_H = 560 rows, and the panel holds through it at 50 Hz.
+ * What flashed was the one transfer larger than that -- the 720-row art
+ * strip, sent whole whenever a cover is drawn or cleared, which is once
+ * per track change and which is exactly where the flash was seen.
+ *
+ * So the threshold sits above the bar and below the strip: the frame the
+ * UI sends constantly is untouched, and the occasional big one is spread
+ * instead. 240 rows a piece makes the strip three transfers with two
+ * one-tick gaps in it -- 2 ms added to a repaint that happens between
+ * tracks, against a flash that is visible every time.
+ *
+ * Splitting is safe because a full-width band is what the driver wants
+ * anyway; each piece is contiguous in the shadow buffer exactly as the
+ * whole was.
+ */
+#define BLIT_BAND_ROWS          (240)
+#define BLIT_BAND_ABOVE         (600)
+
 esp_err_t gfx_blit_err(int y0, int y1)
 {
     if (!s_fb) return ESP_ERR_INVALID_STATE;
     if (y0 < 0) y0 = 0;
     if (y1 > s_h) y1 = s_h;
     if (y1 <= y0) return ESP_OK;
+
+    /* Big region: hand it over in pieces, with the bus free between
+     * them. Recursion depth is one -- the pieces are BLIT_BAND_ROWS
+     * tall and the test is for more than BLIT_BAND_ABOVE. */
+    if (y1 - y0 > BLIT_BAND_ABOVE) {
+        for (int y = y0; y < y1; y += BLIT_BAND_ROWS) {
+            const int end = (y + BLIT_BAND_ROWS < y1) ? y + BLIT_BAND_ROWS : y1;
+            const esp_err_t berr = gfx_blit_err(y, end);
+            if (berr != ESP_OK) return berr;
+            if (end < y1) vTaskDelay(1);
+        }
+        return ESP_OK;
+    }
 
     /* Full-width band, so the source rows are contiguous and the driver
      * copies the region in one go. Passing the whole-screen base pointer
