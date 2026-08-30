@@ -615,7 +615,19 @@ static volatile int s_ring_pct = -1;
  * handoff without anything being reset at it. */
 static volatile uint64_t s_frames_out[PCM_RINGS];
 static volatile uint32_t s_frames_rate[PCM_RINGS];
-static volatile uint32_t s_frames_chans[PCM_RINGS] = { 2, 2 };
+
+/*
+ * Bytes per frame in the ring, which is not bytes per frame in the file.
+ *
+ * The I2S slots are stereo 16-bit and mono is duplicated into both on
+ * the way in, so whatever the file is, what is queued is four bytes a
+ * frame. The channel count that used to divide this was the FILE's, so
+ * a mono track had its queued audio counted as twice as many frames as
+ * it held and its position ran backwards from the moment the ring had
+ * anything in it. Nothing in the ring is ever mono; there is no channel
+ * count to consult.
+ */
+#define PCM_BYTES_PER_FRAME     (4)
 
 /*
  * The ring's memory, allocated once and never freed.
@@ -2116,8 +2128,7 @@ static void pos_publish(int play, size_t queued)
     const uint32_t rate = s_frames_rate[play];
     if (!rate) return;
 
-    const uint32_t chans = s_frames_chans[play] ? s_frames_chans[play] : 1;
-    const uint64_t queued_frames = queued / (2 * chans);
+    const uint64_t queued_frames = queued / PCM_BYTES_PER_FRAME;
     const uint64_t decoded = s_frames_out[play];
     const uint64_t heard = decoded > queued_frames ? decoded - queued_frames : 0;
     s_pos_sec = (uint32_t)(heard / rate);
@@ -3531,7 +3542,6 @@ static track_end_t play_file(const char *path)
                  * before any frame count of this track is. */
                 s_frames_rate[s_ring_fill] = 0;
                 s_frames_out[s_ring_fill] = 0;
-                s_frames_chans[s_ring_fill] = 2;
 
                 s_ring_pct = 0;
                 s_writer_stop = false;
@@ -3604,6 +3614,29 @@ static track_end_t play_file(const char *path)
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             src += sent;
             remain -= sent;
+            /*
+             * Counted here, as the ring accepts it, and not after the
+             * block is through.
+             *
+             * The position is decoded-minus-queued and the two halves
+             * are written by different tasks. Bumping the decoded count
+             * after the send left a window -- the whole of the send, up
+             * to SEND_SLICE_MS of it -- in which the block was already
+             * in the ring and not yet in the count, and any pos_publish()
+             * landing in that window subtracted a block that had not
+             * been added. The writer publishes every 23 ms, so it landed
+             * there often: the second counter and the slider stepped
+             * back and forth over one second for as long as a track
+             * played.
+             *
+             * Incrementing per slice keeps the pair consistent at every
+             * instant either can be read. It also makes an abandoned
+             * send -- a seek or a track change mid-block -- count what
+             * was actually queued rather than the whole block.
+             */
+            frames_out += sent / PCM_BYTES_PER_FRAME;
+            s_frames_rate[s_ring_fill] = cur_rate;
+            s_frames_out[s_ring_fill] = frames_out;
             /* The handoff can happen while this call is parked on a
              * full ring, which with decode-ahead is most of a track. */
             VISUALS_GATE();
@@ -3631,13 +3664,6 @@ static track_end_t play_file(const char *path)
          * needs the ring's occupancy at the moment it is asked, and this
          * loop stops running a minute before the audio does -- see
          * pos_publish(). */
-        frames_out += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
-        /* Into this track's slot -- the ring it is filling. The other
-         * slot still describes the track the writer is playing out and
-         * must not be touched until that ring is empty. */
-        s_frames_rate[s_ring_fill] = cur_rate;
-        s_frames_chans[s_ring_fill] = info.channels > 0 ? (uint32_t)info.channels : 1;
-        s_frames_out[s_ring_fill] = frames_out;
 
         /*
          * The number the listener actually experiences: press to sound,
