@@ -127,6 +127,42 @@ CONFIG_FATFS_API_ENCODING_UTF_8=y
 # stays greyed with a drive plugged into it.
 CONFIG_FATFS_VOLUME_COUNT=2
 
+# --- USB host -------------------------------------------------------
+#
+# External hubs, off by default in IDF.
+#
+# Without this a hub enumerates and everything behind it does not, with
+# the only symptom being
+#
+#   W (nnn) HUB: External Hubs support disabled, Hub device was not initialized
+#
+# and a port that looks dead. People plug hubs into a USB-A socket; the
+# stack should cope.
+#
+# MULTI_LEVEL as well, because a hub behind a hub is what a monitor or a
+# dock is, and the failure without it is the same silent one a level
+# further down.
+#
+# WHAT THIS DOES NOT FIX
+#
+# The P4's USB-A is high speed, and IDF's external hub driver has no
+# Transaction Translator. A full- or low-speed device behind a hub on a
+# high-speed host still will not enumerate -- which is most keyboards,
+# most remotes, and the C-Media UAC headphone set this player has been
+# tested against. Those have to go into the port directly.
+#
+# So this buys high-speed devices behind a hub, chiefly flash drives,
+# and it buys an honest log line instead of a mysterious one. It does
+# not make the USB-A socket general purpose, and it is not a way around
+# the brownout a bus-powered keyboard causes: that is a supply problem
+# and a powered hub is the fix for it, independently of this.
+#
+# Each downstream device needs a vacant host channel, so a hub with
+# several devices on it can exhaust them. If enumeration starts failing
+# with a full hub, that is the thing to look at first.
+CONFIG_USB_HOST_HUBS_SUPPORTED=y
+CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
+
 # esp_log_level_set() is a no-op without this on IDF v6.
 CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
 
