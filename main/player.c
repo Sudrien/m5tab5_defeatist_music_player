@@ -1867,8 +1867,33 @@ static void show_format_card(const char *path, long bytes, uint32_t gen)
          waited += FMT_WAIT_SLICE_MS) {
         vTaskDelay(pdMS_TO_TICKS(FMT_WAIT_SLICE_MS));
         if (gen != s_track_gen) return;
+        /* The chooser can be opened during the wait, which on a
+         * Xing-less MP3 is seconds long. Checked every slice for the
+         * same reason gen is: this loop is the one place in the art path
+         * that spends real time, so it is where the world changes. */
+        if (browser_is_open()) {
+            s_repaint_art = true;
+            return;
+        }
     }
     if (gen != s_track_gen) return;
+
+    /*
+     * And again on the way out, because the two tests above cover
+     * different things: gen says this is still the right track, this
+     * says there is somewhere to draw it. ui_show_art_info() blits
+     * straight to the panel -- it does not go through ui_draw(), which
+     * is what media_task's browser branch skips -- so without this the
+     * format card lands on top of the file list.
+     *
+     * The cover had this guard, in load_track_visuals(). The text that
+     * stands in for a missing cover did not, and it comes through
+     * media_task by a different route.
+     */
+    if (browser_is_open()) {
+        s_repaint_art = true;
+        return;
+    }
 
     char head[16];
     char rate[48] = "";
@@ -1909,6 +1934,24 @@ static void show_format_card(const char *path, long bytes, uint32_t gen)
 
 static void do_art(const char *path, uint32_t gen)
 {
+    /*
+     * Not while the chooser is up -- the same guard, and the same
+     * reasoning, as the one in load_track_visuals().
+     *
+     * This is the other way into the art strip. That one is the repaint
+     * path and runs on the decode loop; this one runs on media_task at
+     * a track change, and it was never guarded. albumart_show(),
+     * ui_clear_art() and show_format_card() all blit straight to the
+     * panel from here.
+     *
+     * s_repaint_art brings it back when the chooser closes, which every
+     * browser exit already sets.
+     */
+    if (browser_is_open()) {
+        s_repaint_art = true;
+        return;
+    }
+
     /*
      * Already known to have no picture in it -- prefetch read the tag, or
      * this track was played earlier. Straight to the card, with no read
