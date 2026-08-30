@@ -3477,9 +3477,26 @@ static track_end_t play_file(const char *path)
          * the cover answer from the open above, so it is released the
          * same way the normal exit releases it. */
         rg_release();
-        s_rg_measuring = false;
-        s_rg_active = false;
-        s_rg_gain_db = 0.0f;
+
+        /*
+         * Guarded exactly as the normal exit is, and for the same
+         * reason. This path runs on the INCOMING track -- it is reached
+         * from play_file() for the track that could not allocate -- and
+         * at a boundary that is a ring before the OUTGOING track's last
+         * sample is heard. Clearing here would take the previous song's
+         * ReplayGain mark off the screen twenty seconds early, which is
+         * the bug 0511 fixed on the path next to this one.
+         *
+         * Missed there because it is the out-of-memory path and nobody
+         * looks at it, which is what the comment a few lines up says
+         * about s_decoding for the same path. Two things now depend on
+         * this branch being written as carefully as the ordinary one.
+         */
+        if (!tail_playing()) {
+            s_rg_measuring = false;
+            s_rg_active = false;
+            s_rg_gain_db = 0.0f;
+        }
         return TRACK_UNREADABLE;
     }
 
