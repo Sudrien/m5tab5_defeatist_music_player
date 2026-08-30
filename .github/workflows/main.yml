@@ -8,10 +8,21 @@ on:
   workflow_dispatch:
     inputs:
       git_ref:
-        description: 'Git tag, branch, or commit to build (e.g. v0.1.0)'
+        description: 'Git tag, branch, or commit to build (e.g. v0.2.0)'
         required: true
         default: 'main'
         type: string
+      release:
+        description: 'Also publish a GitHub release with these binaries'
+        required: false
+        default: false
+        type: boolean
+
+# Needed to create a release. The default token is read-only on newer
+# repository settings, and the failure is a 403 at the very last step of
+# a fifteen-minute build.
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,6 +34,14 @@ jobs:
         with:
           ref: ${{ github.event.inputs.git_ref || github.ref }}
 
+      # github.ref_name is the BRANCH on a workflow_dispatch, not the
+      # thing that was checked out -- so a manual build of v0.2.0 from
+      # the main branch produced files called ..._main.bin. The name
+      # comes from the input when there is one.
+      - name: Work out the version string
+        id: ver
+        run: echo "name=${{ github.event.inputs.git_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
       - name: Install ESP-IDF
         uses: espressif/install-esp-idf-action@v1
         with:
@@ -33,7 +52,7 @@ jobs:
         run: |
           chmod +x tools/enable_exfat.sh
           ./tools/enable_exfat.sh
-          
+
           chmod +x tools/fetch_vendored.sh
           ./tools/fetch_vendored.sh
 
@@ -42,13 +61,33 @@ jobs:
           idf.py set-target esp32p4
           idf.py build
           idf.py merge-bin
-          mv build/merged-binary.bin build/m5tab5_defeatist_music_player_${{ github.ref_name }}_standalone.bin
-          mv build/m5tab5_defeatist_music_player.bin build/m5tab5_defeatist_music_player_${{ github.ref_name }}.bin
-          
+          mv build/merged-binary.bin build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}_standalone.bin
+          mv build/m5tab5_defeatist_music_player.bin build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}.bin
+
       - name: Archive build output artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: m5tab5_defeatist_music_player-${{ github.ref_name }}
+          name: m5tab5_defeatist_music_player-${{ steps.ver.outputs.name }}
           path: |
-            build/m5tab5_defeatist_music_player_${{ github.ref_name }}_standalone.bin
-            build/m5tab5_defeatist_music_player_${{ github.ref_name }}.bin
+            build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}_standalone.bin
+            build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}.bin
+
+      # Two ways in, one step. Pushing a tag releases; a manual run
+      # releases only when the box is ticked, so the dispatch stays
+      # usable for a build you just want to look at.
+      #
+      # The tag has to exist for a release to hang off, which is why the
+      # manual path releases against the ref that was built rather than
+      # inventing one. Dispatching this against a branch with the box
+      # ticked will fail, and should.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.name }}
+          name: ${{ steps.ver.outputs.name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}_standalone.bin
+            build/m5tab5_defeatist_music_player_${{ steps.ver.outputs.name }}.bin
