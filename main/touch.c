@@ -17,6 +17,8 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <inttypes.h>
+
 #include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_lcd_touch.h"
@@ -160,6 +162,38 @@ static bool swallow_active(bool finger_down)
     return true;
 }
 
+/*
+ * DIAGNOSTIC, added by 0503. Not a feature.
+ *
+ * The volume moved seven times unbidden in one capture -- 75, 24, 8, 29,
+ * 63, 63, 15 -- and a `prev` arrived 1.3 s after another `prev`. Neither
+ * was pressed. Presses that nobody made are the first explanation for
+ * the cyan flash that does not require the bandwidth story that 0501
+ * disproved, and they also make every seek measurement in this
+ * investigation suspect: "fewer flashes with SEEK_NOOP set" may have
+ * been counting touches rather than seeks.
+ *
+ * So log the edges. Every down with its coordinates, every up with how
+ * long the press lasted, and every failed read, because a controller
+ * that is dropping or corrupting reports is the mechanism this is
+ * looking for. Edges only -- a poll at 50 Hz logged per poll would be
+ * its own problem, and the buffer loss that costs is documented in
+ * sdkconfig.defaults.
+ *
+ * Read it against the actions in player.c. A `button: seek` with no
+ * `touch: down` before it is a phantom, and a `touch: read failed` next
+ * to a flash is the ST7123 misbehaving on a bus it shares with the
+ * codec at 0x10 and both expanders at 0x43 and 0x44 -- one of which
+ * holds LCD_RST.
+ */
+#define TOUCH_TRACE             (1)
+
+#if TOUCH_TRACE
+static bool       s_trace_down;
+static TickType_t s_trace_since;
+static uint32_t   s_trace_fails;
+#endif
+
 bool touch_get(int *x, int *y)
 {
     if (!s_touch) return false;
@@ -172,6 +206,14 @@ bool touch_get(int *x, int *y)
     uint8_t count = 0;
 
     if (esp_lcd_touch_read_data(s_touch) != ESP_OK) {
+#if TOUCH_TRACE
+        /* Counted rather than logged per occurrence: a controller that
+         * has stopped answering would otherwise fill the console with
+         * the same line at 50 Hz and lose everything around it. */
+        if ((++s_trace_fails % 50) == 1) {
+            ESP_LOGW(TAG, "touch: read failed (%" PRIu32 " total)", s_trace_fails);
+        }
+#endif
         swallow_active(false);
         return false;
     }
@@ -181,8 +223,29 @@ bool touch_get(int *x, int *y)
          * one poll counts as the release and the reacquisition counts as
          * a new tap. */
         swallow_active(false);
+#if TOUCH_TRACE
+        if (s_trace_down) {
+            s_trace_down = false;
+            ESP_LOGI(TAG, "touch: up after %" PRIu32 " ms",
+                     (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - s_trace_since));
+        }
+#endif
         return false;
     }
+
+#if TOUCH_TRACE
+    /* Before the swallow test, deliberately: a swallowed press is still
+     * a press the glass reported, and a phantom that arrives during a
+     * settle window would otherwise be invisible here. */
+    if (!s_trace_down) {
+        s_trace_down = true;
+        s_trace_since = xTaskGetTickCount();
+        ESP_LOGI(TAG, "touch: down at %d,%d (%u point%s)%s",
+                 (int)pt[0].x, (int)pt[0].y, (unsigned)count,
+                 count == 1 ? "" : "s",
+                 s_swallow ? ", swallowed" : "");
+    }
+#endif
 
     if (swallow_active(true)) return false;
 

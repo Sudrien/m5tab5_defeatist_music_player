@@ -239,8 +239,14 @@ extern uint32_t g_tab5_dpi_underruns;
  *
  * The clock will read wrong and the audio will not move while this is
  * set. That is the point; it is one build, not a mode.
+ *
+ * 0503 turns it back off. The answer it gave was 'fewer flashes',
+ * which is not an answer -- and the same capture showed the volume
+ * moving on its own seven times, which means some of those seek
+ * releases were not presses at all. The experiment cannot be read
+ * until the touch trace says which events were real.
  */
-#define SEEK_NOOP               (1)
+#define SEEK_NOOP               (0)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
@@ -2894,6 +2900,11 @@ static void ui_task(void *arg)
             s_playing = !s_playing;
             break;
         case UI_ACTION_VOLUME:
+            /* 0503: logged because it was the tell. Seven unbidden volume
+             * changes in one capture were the first evidence of presses
+             * nobody made, and until then the only trace of them was the
+             * settings file being rewritten. */
+            ESP_LOGI(TAG, "button: volume -> %d%%", act.value);
             s_volume = act.value;
             settings_set_volume((uint8_t)act.value);
             /* Moving the slider unmutes. Adjusting a control that is
