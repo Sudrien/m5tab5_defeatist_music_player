@@ -4345,12 +4345,35 @@ static track_end_t play_file(const char *path)
      * a cover even though its loudness was thrown away.
      */
     rg_release();
-    s_rg_measuring = false;
 
-    /* The gain belonged to this track. Left set, the bar would keep
-     * claiming it during the gap before the next one starts. */
-    s_rg_active = false;
-    s_rg_gain_db = 0.0f;
+    /*
+     * The gain belonged to this track. Left set, the bar would keep
+     * claiming it during the gap before the next one starts.
+     *
+     * ...but only when there is no tail still being heard, which is the
+     * same condition and the same reason as s_pos_sec below and as the
+     * stats in track_change_begin(). This function returns when this
+     * track's DECODE ends, and at a boundary that is a ring -- twenty
+     * seconds -- before its last sample reaches the speaker. Clearing
+     * here took the RG mark off the screen while the track it describes
+     * was still playing.
+     *
+     * 0510 deferred the incoming track's gain to the handoff and this
+     * is the other half: the outgoing one has to survive until the same
+     * moment, or the indicator goes out at the decode boundary and
+     * comes back at the audio one with a gap in between. Which is what
+     * it did -- "the current one disappears, the new one isn't drawn
+     * early" is exactly one of the two halves being fixed.
+     *
+     * The gate republishes both when the handoff happens, so nothing is
+     * left stale: a track that ends with nothing following it clears
+     * these through the not-playing path instead.
+     */
+    if (!tail_playing()) {
+        s_rg_measuring = false;
+        s_rg_active = false;
+        s_rg_gain_db = 0.0f;
+    }
 
     /* Not zeroed when the tail of this track is still queued: the
      * writer goes on playing it and pos_publish() goes on describing it
@@ -4675,6 +4698,21 @@ static void player_loop(void)
             vTaskDelay(pdMS_TO_TICKS(50));
         }
         if (s_pending_ready) continue;
+
+        /*
+         * The last track has now been heard, so the indicator that
+         * described it can go.
+         *
+         * play_file() no longer clears these when a tail is still
+         * playing -- see the note there -- which is right for a boundary
+         * and leaves exactly one case uncovered: the end of a folder,
+         * where nothing follows to republish them at a handoff. This is
+         * that case, and it is after the wait above, so "heard" is
+         * already true when it runs.
+         */
+        s_rg_measuring = false;
+        s_rg_active = false;
+        s_rg_gain_db = 0.0f;
 
         ESP_LOGI(TAG, "end of %s", playlist_dir());
         s_open_chooser = true;
