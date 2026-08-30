@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <inttypes.h>
+#include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -32,6 +35,33 @@ static const char *TAG = "tab5_batt";
  * place to reject that is the sampler.
  */
 #define CONFIG_VALUE    (0x4527)
+
+/*
+ * The trace's configuration: no averaging, 140 us bus conversions, bus
+ * only. See battery_trace_arm() in the header for why the normal one is
+ * useless here.
+ *
+ *   [11:9] AVG     000  1 sample
+ *   [8:6]  VBUSCT  000  140 us
+ *   [5:3]  VSHCT   000  140 us (unused; mode is bus only)
+ *   [2:0]  MODE    110  bus voltage, continuous
+ *
+ * Shunt is dropped so the part is not spending half its time on a
+ * channel this does not read, which halves the interval between bus
+ * samples.
+ */
+#define TRACE_CONFIG_VALUE  (0x4006)
+
+/* Samples per trace, and how long to keep taking them. 600 ms covers a
+ * seek commit with room either side; the buffer is sized so a faster
+ * bus cannot overrun it. 1200 x 2 bytes is 2.4 KB of .bss. */
+#define TRACE_SAMPLES       (1200)
+#define TRACE_WINDOW_MS     (600)
+
+static volatile bool  s_trace_wanted;
+static const char    *volatile s_trace_why = "";
+static uint16_t       s_trace_raw[TRACE_SAMPLES];
+static TaskHandle_t   s_trace_task;
 
 /*
  * Which sign of shunt voltage means current INTO the pack.
@@ -183,9 +213,115 @@ static void battery_task(void *arg)
     }
 }
 
+/*
+ * One trace: reconfigure, sample flat out, restore, then report.
+ *
+ * The report happens after the restore, deliberately. Logging inside the
+ * window would put a USB-serial-JTAG write in the middle of the thing
+ * being measured, and that write is itself a load.
+ */
+static void battery_trace_run(void)
+{
+    const char *why = s_trace_why;
+
+    if (reg16_write(REG_CONFIG, TRACE_CONFIG_VALUE) != ESP_OK) {
+        ESP_LOGW(TAG, "trace: could not reconfigure the gauge");
+        return;
+    }
+
+    const TickType_t t0 = xTaskGetTickCount();
+    int n = 0;
+    while (n < TRACE_SAMPLES &&
+           pdTICKS_TO_MS(xTaskGetTickCount() - t0) < TRACE_WINDOW_MS) {
+        uint16_t bus = 0;
+        if (reg16_read(REG_BUS, &bus) != ESP_OK) break;
+        s_trace_raw[n++] = bus;
+    }
+    const uint32_t took = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t0);
+
+    /* Back to the gauge's configuration before anything slow happens. */
+    reg16_write(REG_CONFIG, CONFIG_VALUE);
+
+    if (n <= 0) {
+        ESP_LOGW(TAG, "trace (%s): no samples", why);
+        return;
+    }
+
+    int lo = INT32_MAX, hi = 0;
+    long sum = 0;
+    int lo_at = 0;
+    for (int i = 0; i < n; i++) {
+        const int mv = ((int)s_trace_raw[i] * BUS_LSB_UV) / 1000;
+        if (mv < lo) { lo = mv; lo_at = i; }
+        if (mv > hi) hi = mv;
+        sum += mv;
+    }
+
+    /*
+     * The summary first, because it is the answer: a sag of tens of
+     * millivolts is ordinary, and a sag of hundreds next to a flash is
+     * the thing this was written to find. lo_at says where in the window
+     * it happened, which is what lines it up against the seek.
+     */
+    ESP_LOGW(TAG, "trace (%s): %d samples in %" PRIu32 " ms, "
+                  "min %d mV at %d ms, max %d mV, mean %d mV, sag %d mV",
+             why, n, took, lo, (int)((long)lo_at * took / n), hi,
+             (int)(sum / n), hi - lo);
+
+    /*
+     * Then the series, sixteen to a line, so the shape can be read
+     * rather than inferred from three numbers. At warning level like the
+     * summary: a trace that is armed and then filtered out by a log
+     * level is the worst of both.
+     */
+    char line[16 * 6 + 1];
+    for (int i = 0; i < n; i += 16) {
+        int m = 0;
+        line[0] = '\0';
+        for (int j = i; j < n && j < i + 16; j++) {
+            const int mv = ((int)s_trace_raw[j] * BUS_LSB_UV) / 1000;
+            m += snprintf(line + m, sizeof(line) - m, "%d ", mv);
+        }
+        ESP_LOGW(TAG, "trace: %s", line);
+    }
+}
+
+static void battery_trace_task(void *arg)
+{
+    (void)arg;
+    while (1) {
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        battery_trace_run();
+        s_trace_wanted = false;
+    }
+}
+
+void battery_trace_arm(const char *why)
+{
+    if (!s_dev || !s_trace_task) return;
+
+    /* Ignored rather than queued. Two traces back to back would have the
+     * second one measuring the first one's logging. */
+    if (s_trace_wanted) return;
+
+    s_trace_why = why ? why : "";
+    s_trace_wanted = true;
+    xTaskNotifyGive(s_trace_task);
+}
+
 esp_err_t battery_start(void)
 {
     if (!s_dev) return ESP_ERR_INVALID_STATE;
+
+    /* Above the gauge task and above the UI, so a trace is not
+     * descheduled in the middle of the window it is measuring. Below the
+     * writer, which must never wait for a diagnostic. */
+    if (xTaskCreate(battery_trace_task, "batt_tr", 4096, NULL, 5,
+                    &s_trace_task) != pdPASS) {
+        ESP_LOGW(TAG, "no trace task; battery_trace_arm() will do nothing");
+        s_trace_task = NULL;
+    }
+
     return xTaskCreate(battery_task, "batt", 3072, NULL, 2, NULL) == pdPASS
            ? ESP_OK : ESP_ERR_NO_MEM;
 }

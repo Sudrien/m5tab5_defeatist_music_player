@@ -3553,6 +3553,13 @@ static track_end_t play_file(const char *path)
                     s_refill_pacing = true;
 #endif
 
+                    /* 0505: capture the pack across the commit. Armed
+                     * here rather than at the press because this is the
+                     * instant the flash follows -- the release only
+                     * records a target, and the decode loop is where it
+                     * is acted on. */
+                    battery_trace_arm("seek");
+
                     /* Re-anchor the position counter, or the clock counts
                      * on from where it was rather than from the new
                      * point. */
