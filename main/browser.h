@@ -45,6 +45,24 @@ typedef struct {
  * on the first volume that is. Safe to call when nothing is mounted: the
  * chooser opens with both tabs greyed and an empty list, which is a
  * truthful screen and a place to plug something in. */
+/*
+ * The track that is being HEARD, told to the chooser by the player.
+ *
+ * The list marks the playing row in the accent colour, and it used to
+ * work that out itself from playlist_current(). That is the track the
+ * decoder has moved to, which at a boundary is a ring -- twenty seconds
+ * -- ahead of the one coming out of the speaker, so the marker jumped a
+ * row while the previous song was still playing.
+ *
+ * The player publishes this at the same handoff that changes the title
+ * and the transport bar, so all three move together.
+ *
+ * NULL or an empty string means nothing is playing, and no row is
+ * marked. Calling this is what makes the list redraw; the chooser does
+ * not poll for it.
+ */
+void browser_set_playing(const char *path);
+
 void browser_open(const char *start);
 
 void browser_close(void);

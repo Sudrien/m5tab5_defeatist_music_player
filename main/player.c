@@ -3548,6 +3548,11 @@ static track_end_t play_file(const char *path)
             s_rg_measuring = rg_pending_measuring;                      \
             s_rg_gain_db = rg_pending_db;                               \
             settings_set_track(path);                                   \
+            /* The chooser's playing marker, with the title and the bar. \
+             * It used to work this out from playlist_current(), which  \
+             * is where the decoder is -- a ring ahead of the speaker.   \
+             * See browser_set_playing(). */                            \
+            browser_set_playing(path);                                  \
             track_change_show();                                        \
             load_track_visuals(path);                                   \
         }                                                               \
@@ -4756,6 +4761,11 @@ static void player_loop(void)
         s_rg_measuring = false;
         s_rg_active = false;
         s_rg_gain_db = 0.0f;
+
+        /* And the chooser's marker, for the same reason and at the same
+         * moment: nothing is being heard now, so no row is the playing
+         * one. Nothing follows to republish it. */
+        browser_set_playing(NULL);
 
         ESP_LOGI(TAG, "end of %s", playlist_dir());
         s_open_chooser = true;
