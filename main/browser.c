@@ -16,6 +16,7 @@
 #include "browser.h"
 #include "decoder.h"
 #include "gfx.h"
+#include "playlist.h"
 #include "storage.h"
 
 static const char *TAG = "tab5_browser";
@@ -368,6 +369,34 @@ void browser_draw(void)
             }
         } else if (s_count == 0 || !s_dir[0]) {
             load_dir(s_dir[0] ? s_dir : tab_root());
+        }
+    }
+
+    /*
+     * The playing row is drawn from live state -- is_current() asks
+     * playlist_current() every time -- but nothing was asking for a
+     * redraw when that changed. So with the chooser open across a track
+     * boundary the accent stayed on the row that had finished, until
+     * something else happened to dirty the list.
+     *
+     * Noticed here rather than pushed from player.c because this is the
+     * only file that knows the marker exists. A track change is a
+     * player event; "the highlighted row is wrong now" is a browser
+     * one, and the two are not the same thing -- a change to a track
+     * outside this directory moves the marker off the list entirely,
+     * and that still has to be drawn.
+     *
+     * The index alone is not enough. playlist_current() is a position
+     * in a playlist that a reload can renumber under a chooser that is
+     * sitting open, so the path is what is compared.
+     */
+    {
+        static char last_cur[512];
+        const int cur = playlist_current();
+        const char *now = (cur >= 0) ? playlist_path(cur) : NULL;
+        if (strcmp(last_cur, now ? now : "") != 0) {
+            snprintf(last_cur, sizeof(last_cur), "%s", now ? now : "");
+            s_dirty = true;
         }
     }
 
