@@ -114,7 +114,17 @@ static const char *TAG = "tab5_mp3";
 #define LCD_V_RES               (1280)
 #define LCD_BITS_PER_PIXEL      (24)
 #define DSI_DATA_LANES          (2)
-#define DSI_LANE_RATE_MBPS      (965)
+/*
+ * Sized to the pixel clock with a margin, not set as high as the PHY
+ * will go. See the note below on why that is not the same thing.
+ *
+ *   720 x 1280 RGB565 at DPI_CLOCK_MHZ = 70 MHz
+ *   -> 70 MHz x 16 bits / 2 lanes = 560 Mbps per lane required
+ *   -> 700 is 25% over, against Espressif's recommended ~20%
+ *
+ * Documented floor is 480 and the ceiling on this part is 1500.
+ */
+#define DSI_LANE_RATE_MBPS      (700)
 /*
  * Back to 70 MHz, which is ~57.3 Hz. 29 MHz blanked the panel.
  *
@@ -161,13 +171,23 @@ static const char *TAG = "tab5_mp3";
  *     mipi_dsi_hal_host_dpi_calculate_divider(), so the rate is the
  *     nearest the divider allows and not what is written above. Log the
  *     divider before trusting any of the figures in this comment.
- *   - DSI_LANE_RATE_MBPS is deliberately not moved with it. The lane
- *     rate is the wire, not the memory, and costs no PSRAM bandwidth; it
- *     only has to stay above what the pixel clock demands, which it does
- *     by an increasing margin as this comes down. If a low rate ever
- *     gives a sheared or misaligned picture rather than a black one,
- *     that is the mismatch to go and look at, against a documented floor
- *     of 480.
+ *   - DSI_LANE_RATE_MBPS is sized to this, and the reasoning that used
+ *     to be here -- that the lane rate is the wire, not the memory, so a
+ *     bigger margin costs nothing -- is wrong in the way that matters.
+ *     Average bandwidth, yes. Burstiness, no: the bridge drains its line
+ *     buffer at wire speed and then waits, so the faster the wire the
+ *     more the fetch looks like a spike rather than a stream, and a
+ *     spike is what a fetch that cannot wait underruns on. Espressif's
+ *     LCD FAQ lists a lane rate mismatched to the pixel clock as a cause
+ *     of this exact blue-screen symptom and recommends sizing it about
+ *     20% above what the clock demands. 965 against a demand of 560 was
+ *     72% above.
+ *
+ *     So the two move together. If the pixel clock comes down, work the
+ *     lane rate out again: pixel clock x 16 bits / 2 lanes, plus a
+ *     fifth, against a documented floor of 480. If a low rate ever gives
+ *     a sheared or misaligned picture rather than a black one, that is
+ *     the mismatch to go and look at.
  *
  * And the honest conclusion from the attempt: this is the smaller and
  * riskier of the two levers. The clock buys tens of MB/s and can blank
