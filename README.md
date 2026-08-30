@@ -65,7 +65,7 @@ What do you mean no audio over Bluetooth
 ## What could not happen with current published code
 - classic BT dongle support
 - per file resume
-- usb hubs - it won't complain now, but don't expect multiple devices to work. Powered hubs might be needed to keep the thing form rebooting.
+- usb hubs - Can it tell you have plugged one in? yes. Can it use things plugged into them? Probably not. Will one save you if your device requires enough power to brownout the Tab5? Uh. Define save.
   
 ## Potential issues
 
