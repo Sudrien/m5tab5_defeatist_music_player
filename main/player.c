@@ -247,6 +247,41 @@ extern uint32_t g_tab5_dpi_underruns;
  * until the touch trace says which events were real.
  */
 #define SEEK_NOOP               (0)
+
+/*
+ * The other half of the same bisection.
+ *
+ * 0505 retired the supply: fifteen traces across a seek commit, 15-21 mV
+ * of spread every time, the minimum landing anywhere in the window. A
+ * load step would have clustered at the commit. Nothing does.
+ *
+ * So the flash is inside the commit, and the commit is two calls.
+ * decoder_seek_sec(), which is mp3dec_ex_seek() -- an index lookup, a
+ * backward fseek, and the frames minimp3 decodes to prime the bit
+ * reservoir. And xStreamBufferReset(), which drops the queued PCM.
+ *
+ * 0500 showed the refill AFTER the reset is not the cause. It did not
+ * show the reset itself is not: emptying a 3.5 MB stream buffer walks
+ * its control block and leaves the writer, which may be parked inside
+ * xStreamBufferReceive() on that same buffer, to be released and rerun.
+ *
+ * Set to 1, the decoder is seeked and the ring is left alone. The new
+ * position decodes into a ring that still holds up to twenty seconds of
+ * the old one, so the jump is heard late -- which is the exact behaviour
+ * the reset was added to remove, and is why this is a diagnostic and not
+ * an option.
+ *
+ * Still flashes: it is mp3dec_ex_seek(), and SEEK_NOOP's "fewer" was
+ * measuring that.
+ *
+ * Stops flashing: it is the ring reset, and the two experiments together
+ * bracket it -- 0500 excluded what happens after, this excludes
+ * everything else.
+ *
+ * Run it against a counted ten seeks, not an impression. Every reading
+ * in this investigation that rested on one has since been wrong.
+ */
+#define SEEK_KEEP_RING          (1)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
@@ -3561,13 +3596,18 @@ static track_end_t play_file(const char *path)
                      * plays out ~0.37 s of the old position after the
                      * jump, which sounds like the seek was ignored and
                      * then took effect late. */
-#if !SEEK_NOOP
+#if !SEEK_NOOP && !SEEK_KEEP_RING
                     if (s_pcm) xStreamBufferReset(s_pcm);
 
                     /* The ring is now empty and nothing is draining it,
                      * so the refill below would otherwise run flat out.
                      * See REFILL_DECODE_SPEEDUP. */
                     s_refill_pacing = true;
+#elif SEEK_KEEP_RING
+                    /* See SEEK_KEEP_RING. The decoder has moved; the
+                     * queued audio has not, so the jump arrives when the
+                     * ring drains to it. */
+                    ESP_LOGW(TAG, "SEEK_KEEP_RING: ring not reset");
 #endif
 
                     /* 0505: capture the pack across the commit. Armed

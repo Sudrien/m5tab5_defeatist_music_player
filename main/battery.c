@@ -58,6 +58,30 @@ static const char *TAG = "tab5_batt";
 #define TRACE_SAMPLES       (1200)
 #define TRACE_WINDOW_MS     (600)
 
+/*
+ * Whether to dump every sample, and off because it destroyed the log it
+ * was printed into.
+ *
+ * Each trace is about seventy-five warning lines emitted inside a few
+ * milliseconds. CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE is 4096,
+ * roughly eighty lines, and the driver discards rather than blocks when
+ * it fills -- the failure sdkconfig.defaults documents at length, along
+ * with the evening it cost and the two probe patches written chasing a
+ * stall that was never there.
+ *
+ * It happened again immediately. Four seeks in the first capture logged
+ * `button: seek -> N%` with no `seek to Ns` after it, and that line is
+ * emitted in the same branch that arms the trace, so it cannot have been
+ * skipped. The dump ate it.
+ *
+ * The series has now been read fifteen times and says the same thing
+ * every time: 15-21 mV of spread, minimum landing anywhere in the window
+ * -- 1 ms, 7 ms, 148 ms, 234 ms -- which is an ADC with a 1.25 mV LSB
+ * looking at a steady rail, not a load step. The summary carries that
+ * finding in one line. The other seventy-four cost more than they say.
+ */
+#define TRACE_DUMP_SAMPLES  (0)
+
 static volatile bool  s_trace_wanted;
 static const char    *volatile s_trace_why = "";
 static uint16_t       s_trace_raw[TRACE_SAMPLES];
@@ -273,7 +297,12 @@ static void battery_trace_run(void)
      * rather than inferred from three numbers. At warning level like the
      * summary: a trace that is armed and then filtered out by a log
      * level is the worst of both.
+     *
+     * Off by default -- see TRACE_DUMP_SAMPLES. Turn it on only for a
+     * capture where the shape is the question and the surrounding lines
+     * are not.
      */
+#if TRACE_DUMP_SAMPLES
     char line[16 * 6 + 1];
     for (int i = 0; i < n; i += 16) {
         int m = 0;
@@ -284,6 +313,7 @@ static void battery_trace_run(void)
         }
         ESP_LOGW(TAG, "trace: %s", line);
     }
+#endif
 }
 
 static void battery_trace_task(void *arg)
