@@ -818,7 +818,8 @@ static void i2s_writer_task(void *arg)
          */
         if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
             s_tail_pending = false;
-            ESP_LOGI(TAG, "tail played out; the screen is the next track's now");
+            ESP_LOGI(TAG, "the finished track has played out; "
+                          "the screen is the next track's now");
         }
 
         /*
@@ -4233,9 +4234,27 @@ static void player_loop(void)
             continue;
         }
 
-        /* End of the folder, or single-track mode. Nothing is playing and
-         * nothing is queued, so offer the chooser rather than sit on a
-         * finished track. */
+        /*
+         * End of the folder, or single-track mode.
+         *
+         * "Nothing is playing and nothing is queued" is what this used
+         * to say, and with one ring it was true: the boundary was a
+         * drain, so a decode loop that had returned meant a track that
+         * had been heard. It is false now. The last track of a folder
+         * ends its decode with up to twenty seconds still in the ring,
+         * and opening the chooser here put the file list over the top of
+         * a song that was still playing -- the album ending on the menu
+         * screen twenty seconds early, every time.
+         *
+         * So wait for it. A press during the wait wins: s_pending_ready
+         * means something else has been chosen, and the loop above is
+         * where that belongs.
+         */
+        while (s_tail_pending && !s_pending_ready) {
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        if (s_pending_ready) continue;
+
         ESP_LOGI(TAG, "end of %s", playlist_dir());
         s_open_chooser = true;
     }
