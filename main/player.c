@@ -3289,6 +3289,12 @@ static track_end_t play_file(const char *path)
     bool measuring = false;
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
     bool  fmt_saved = false;       /* the format line is written once */
+
+    /* Held, not published. Released by VISUALS_GATE() with everything
+     * else the listener is not supposed to see early. */
+    bool  rg_pending_active = false;
+    bool  rg_pending_measuring = false;
+    float rg_pending_db = 0.0f;
     {
         /*
          * One load, everything it holds put to use.
@@ -3350,7 +3356,29 @@ static track_end_t play_file(const char *path)
             }
         }
 
-        s_rg_measuring = measuring;
+        /*
+         * Learned now, shown at the handoff -- like the title, the
+         * envelope and the length above it.
+         *
+         * These three used to be published here, which is where this
+         * track's DECODE begins, up to a ring before any of it is
+         * heard. On a boundary that is twenty seconds: the indicator
+         * switched to the incoming track's gain while the outgoing one
+         * was still playing, and the number on screen belonged to audio
+         * nobody could hear yet.
+         *
+         * It was invisible until 0508 and 0509 removed the cyan flash
+         * that happened at the same instant. The flash was covering it.
+         *
+         * rg_scale is NOT deferred and must not be: it is applied to the
+         * samples this loop is decoding, which are the incoming track's,
+         * and holding it back would play the first twenty seconds of
+         * every track at the wrong level. The gain applies to the audio
+         * when the audio is made; the indicator describes the audio when
+         * it is heard. Same number, two different moments, and that is
+         * the whole of this bug.
+         */
+        rg_pending_measuring = measuring;
         if (measuring) {
             loudness_reset(&s_loud);
             /*
@@ -3360,13 +3388,13 @@ static track_end_t play_file(const char *path)
              * converge on the reference no matter what the track is.
              * The first play measures at unity, every later one applies.
              */
-            s_rg_active = false;
-            s_rg_gain_db = 0.0f;
+            rg_pending_active = false;
+            rg_pending_db = 0.0f;
         } else {
             const float g = replaygain_gain_db(&have->loudness);
             rg_scale = powf(10.0f, g / 20.0f);
-            s_rg_active = true;
-            s_rg_gain_db = g;
+            rg_pending_active = true;
+            rg_pending_db = g;
             ESP_LOGI(TAG, "replaygain: %.2f LUFS, peak %.2f dBFS -> %+.2f dB",
                      (double)have->loudness.integrated_lufs,
                      (double)have->loudness.sample_peak_dbfs, (double)g);
@@ -3470,6 +3498,12 @@ static track_end_t play_file(const char *path)
             s_len_sec = len_sec;                                        \
             s_can_seek = can_seek;                                      \
             s_stats_valid = true;                                       \
+            /* The ReplayGain indicator, with the rest of the screen.   \
+             * See where these are computed for why the gain itself is  \
+             * not deferred with them. */                               \
+            s_rg_active = rg_pending_active;                            \
+            s_rg_measuring = rg_pending_measuring;                      \
+            s_rg_gain_db = rg_pending_db;                               \
             settings_set_track(path);                                   \
             track_change_show();                                        \
             load_track_visuals(path);                                   \
