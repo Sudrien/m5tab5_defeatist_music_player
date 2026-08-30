@@ -594,10 +594,28 @@ static volatile int s_ring_pct = -1;
  * Three plain integers rather than a handle, for the reason above: an
  * int cannot dangle. The writer holds the ring anyway, so it is the one
  * task that can ask how much is still queued at any moment.
- */
-static volatile uint64_t s_frames_out;
-static volatile uint32_t s_frames_rate;
-static volatile uint32_t s_frames_chans = 2;
+ *
+ * PER RING, not per player, and that is the whole of the twenty-second
+ * bug this replaced.
+ *
+ * With two rings there are two tracks in flight: the writer is playing
+ * out the tail of the old one while the decode loop is a whole ring
+ * ahead into the new one. One set of counters cannot describe both, so
+ * the new track's frame count landed on top of the old track's while
+ * the old track was still the audible one -- and the gate then zeroed
+ * it again at the handoff, against a ring that already held twenty
+ * seconds of decoded audio. decoded-minus-queued went negative, clamped
+ * to zero, and stayed there until the decoder had produced a ring's
+ * worth again: the position sat still for exactly as long as the ring
+ * is deep.
+ *
+ * Indexed by ring, they describe the track that ring holds. The writer
+ * reads the slot for the ring it is draining, which is by definition
+ * the track being heard, and the answer is right on both sides of a
+ * handoff without anything being reset at it. */
+static volatile uint64_t s_frames_out[PCM_RINGS];
+static volatile uint32_t s_frames_rate[PCM_RINGS];
+static volatile uint32_t s_frames_chans[PCM_RINGS] = { 2, 2 };
 
 /*
  * The ring's memory, allocated once and never freed.
@@ -627,6 +645,31 @@ static StreamBufferHandle_t s_ring[PCM_RINGS];
  */
 static volatile int s_ring_fill;
 static volatile int s_ring_play;
+
+/*
+ * Is there still a previous track being played out?
+ *
+ * NOT `s_ring_play != s_ring_fill`, which is what the first attempt at
+ * this asked and why it changed nothing. The decode loop does not move
+ * s_ring_fill when a track starts -- it moves it when the FIRST BLOCK
+ * of that track is decoded, one decoder_open() later, which on a
+ * Xing-less MP3 is two seconds of whole-file index build. Every decision
+ * taken before that point -- the tags, the envelope, the retired stats,
+ * the seeded duration, all of them in track_change_begin(), which runs
+ * before the open -- therefore saw the two indices still equal and
+ * concluded that nothing was playing, at the exact moment twenty seconds
+ * of the previous track were sitting in the ring.
+ *
+ * The honest question is not which ring the writer is on but whether it
+ * still has anything to play, so that is what this asks. True from the
+ * end of one track until the last sample of it has actually been
+ * handed to I2S, regardless of where either index happens to be.
+ */
+static bool tail_playing(void)
+{
+    const int play = s_ring_play;
+    return s_ring[play] && !xStreamBufferIsEmpty(s_ring[play]);
+}
 
 /*
  * Set by play_file() before it drains the ring, and the reason the
@@ -1260,6 +1303,11 @@ static void load_tags(const char *path)
  */
 static volatile bool s_track_changing;
 
+/* Whether track_change_begin() left an envelope undrawn because the
+ * previous track was still playing, and if so which kind. */
+enum { ENV_PENDING_NONE = 0, ENV_PENDING_SET, ENV_PENDING_CLEAR };
+static int s_env_pending = ENV_PENDING_NONE;
+
 static void track_change_begin(const char *path)
 {
     s_track_gen++;
@@ -1289,10 +1337,25 @@ static void track_change_begin(const char *path)
      * filling across it is the previous song's progress drawn under this
      * song's name.
      */
-    s_stats_valid = false;
-    s_pos_sec = 0;
-    s_len_sec = 0;
-    s_can_seek = false;
+    /*
+     * ...but only when there is no previous track still being heard.
+     *
+     * With a decode-ahead this function runs a ring BEFORE the new
+     * track's first sample -- twenty seconds during which the old track
+     * is still playing and its numbers are still the true ones. Retiring
+     * them here blanked the bar under a song that was still going, and
+     * the gate then republished them for a track that had not started:
+     * the bar jumped to the next song early and then sat still. When the
+     * writer is still on the other ring these are left alone and the
+     * gate replaces them at the handoff, which is when the screen and
+     * the sound change together.
+     */
+    if (!tail_playing()) {
+        s_stats_valid = false;
+        s_pos_sec = 0;
+        s_len_sec = 0;
+        s_can_seek = false;
+    }
     s_fmt_known = false;
     /*
      * The record first, before anything that could go and read the file
@@ -1334,7 +1397,13 @@ static void track_change_begin(const char *path)
          * the hands of the task that evicts.
          */
         if (mediacache_walk_copy(path, &s_walk_pending)) {
-            waveform_set(&s_walk_pending);
+            /* Held rather than drawn when the previous track is still
+             * playing: this envelope belongs to a song nobody is
+             * hearing yet. track_change_show() draws it at the handoff.
+             * The buffer is safe to hold -- see the note above on why it
+             * is not s_walk. */
+            if (!tail_playing()) waveform_set(&s_walk_pending);
+            else s_env_pending = ENV_PENDING_SET;
             snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
             /* Quiet when sidecar_prime() a few lines up is what put it
              * there: two lines describing one lookup reads as two. */
@@ -1342,16 +1411,39 @@ static void track_change_begin(const char *path)
                 ESP_LOGI(TAG, "envelope from cache at track change");
             }
         } else {
-            waveform_set(NULL);
+            if (!tail_playing()) waveform_set(NULL);
+            else s_env_pending = ENV_PENDING_CLEAR;
         }
     }
 
     /* Read before the screen is asked to show anything, so the title row
      * is either right or empty and never a filename standing in for a
-     * title the file actually has. */
-    load_tags(path);
+     * title the file actually has.
+     *
+     * Skipped entirely during a decode-ahead: s_tags is what the title
+     * row draws, so writing it here would put the next song's name over
+     * the one still playing. load_track_visuals() calls load_tags() at
+     * the handoff and the cache makes that call free, so nothing is lost
+     * but the twenty seconds of lying. */
+    if (!tail_playing()) {
+        load_tags(path);
+        ui_clear_art();
+    }
+}
 
-    ui_clear_art();
+/*
+ * The half of a track change that is deferred to the handoff.
+ *
+ * Only the envelope: the tags, the cover and the art strip are already
+ * load_track_visuals()' job and the gate calls that too. Kept next to
+ * the flag it consumes rather than inside the gate macro so there is one
+ * place to look for what a deferred change still owes the screen.
+ */
+static void track_change_show(void)
+{
+    if (s_env_pending == ENV_PENDING_SET)        waveform_set(&s_walk_pending);
+    else if (s_env_pending == ENV_PENDING_CLEAR) waveform_set(NULL);
+    s_env_pending = ENV_PENDING_NONE;
 }
 
 static void load_track_visuals(const char *path)
@@ -1988,23 +2080,39 @@ static int ring_headroom_pct(void)
  * large number is not rounded twice, and clamped because the ring can
  * report more than has been decoded right after a seek reset.
  */
-static void pos_publish(size_t queued)
+static void pos_publish(int play, size_t queued)
 {
-    const uint32_t rate = s_frames_rate;
+    const uint32_t rate = s_frames_rate[play];
     if (!rate) return;
 
-    const uint32_t chans = s_frames_chans ? s_frames_chans : 1;
+    const uint32_t chans = s_frames_chans[play] ? s_frames_chans[play] : 1;
     const uint64_t queued_frames = queued / (2 * chans);
-    const uint64_t decoded = s_frames_out;
+    const uint64_t decoded = s_frames_out[play];
     const uint64_t heard = decoded > queued_frames ? decoded - queued_frames : 0;
     s_pos_sec = (uint32_t)(heard / rate);
 }
 
 static void ring_publish(void)
 {
-    const size_t queued = xStreamBufferBytesAvailable(s_pcm);
-    s_ring_pct = (int)((queued * 100) / PCM_RING_BYTES);
-    pos_publish(queued);
+    /*
+     * Two rings, two questions, and they are not the same question.
+     *
+     * Occupancy is asked by the prefetch and by media_task, and what
+     * they want to know is whether the DECODER has headroom -- so it is
+     * measured on the ring being filled, s_pcm.
+     *
+     * Position is asked by the display, and what it wants to know is
+     * where the audible track has got to -- so it is measured on the
+     * ring being played, which during a decode-ahead is the other one
+     * entirely. Measuring the position against the fill ring was the
+     * second half of the twenty-second bug: the numbers came from two
+     * different tracks and the difference between them meant nothing.
+     */
+    const size_t fill_queued = xStreamBufferBytesAvailable(s_pcm);
+    s_ring_pct = (int)((fill_queued * 100) / PCM_RING_BYTES);
+
+    const int play = s_ring_play;
+    pos_publish(play, xStreamBufferBytesAvailable(s_ring[play]));
 
     /* And act on it. Nothing else was: s_prefetch_abort was set on a
      * track change and nowhere else, so the low-water threshold the
@@ -2760,6 +2868,11 @@ static track_end_t play_file(const char *path)
 {
     const storage_id_t vol = storage_of_path(path);
 
+    /* The duration the sidecar already knows, if it does. Held as a
+     * local because it is learned before the decoder is open and shown
+     * only once this track is the audible one. */
+    uint32_t seed_len = 0;
+
     /* Before the open, not after. decoder_open() on a Xing-less MP3 scans
      * the whole file to build a seek index, and until it returns the
      * screen would otherwise still be showing the track that just
@@ -2879,7 +2992,11 @@ static track_end_t play_file(const char *path)
              * answer when it has one.
              */
             if (have->format.present && have->format.sec) {
-                s_len_sec = have->format.sec;
+                seed_len = have->format.sec;
+                /* Only onto the screen if the screen is this track's
+                 * already. During a decode-ahead the bar belongs to the
+                 * song still playing; the gate publishes this one. */
+                if (!tail_playing()) s_len_sec = seed_len;
             }
         }
 
@@ -2949,9 +3066,6 @@ static track_end_t play_file(const char *path)
     int cur_chans = 0;
     int blocks = 0;
     uint64_t frames_out = 0;
-    /* Cleared with the local it mirrors, so a new track cannot briefly
-     * show the previous one's position. */
-    s_frames_rate = 0;
     track_end_t why = TRACK_ENDED;
 
     /*
@@ -2996,9 +3110,17 @@ static track_end_t play_file(const char *path)
     do {                                                                \
         if (visuals_pending && cur_rate != 0 &&                         \
             s_ring_play == s_ring_fill) {                               \
+            /* Index equality is the right test HERE and only here:     \
+             * cur_rate is non-zero, so this track has decoded a block, \
+             * so s_ring_fill has already moved to this track's ring.   \
+             * Equality therefore means the writer has arrived on it.   \
+             * Everything that runs before the first block must use     \
+             * tail_playing() instead. */                               \
             visuals_pending = false;                                    \
-            s_frames_out = 0;                                           \
-            frames_out = 0;                                             \
+            s_len_sec = len_sec;                                        \
+            s_can_seek = can_seek;                                      \
+            s_stats_valid = true;                                       \
+            track_change_show();                                        \
             load_track_visuals(path);                                   \
         }                                                               \
     } while (0)
@@ -3019,16 +3141,26 @@ static track_end_t play_file(const char *path)
      * function: two scans of a whole song per track change. */
     s_repaint_art = false;
 
-    /* Before the first block, so the bar has a scale to draw against from
-     * the very first repaint rather than snapping into place a frame in. */
-    s_pos_sec = 0;
-    s_can_seek = decoder_can_seek(dec);
-    s_len_sec = decoder_duration_sec(dec);
-    /* Published last, and only here. Everything the bar draws from is now
-     * this track's; before this line it was the previous track's and the
-     * UI was drawing dashes rather than pretending otherwise. */
-    s_stats_valid = true;
-    if (s_len_sec == 0) {
+    /*
+     * Learned now, shown at the handoff.
+     *
+     * These used to be published here, which is where the decode of this
+     * track starts -- up to a ring before any of it is audible. The bar
+     * snapped to this track's length and back to zero while the previous
+     * track was still playing, and then had nothing to say for twenty
+     * seconds. The title and the envelope were already deferred to the
+     * gate for exactly this reason; the numbers behind the bar belong
+     * there with them.
+     *
+     * Kept as locals as well because the decode loop needs them itself
+     * -- the seek target, the format record, the envelope's duration --
+     * and during a decode-ahead the published values are still the
+     * previous track's and would be the wrong answer to all three.
+     */
+    bool can_seek = decoder_can_seek(dec);
+    uint32_t len_sec = decoder_duration_sec(dec);
+    if (!len_sec) len_sec = seed_len;
+    if (len_sec == 0) {
         ESP_LOGI(TAG, "no duration available; seek bar will stay empty");
     }
 
@@ -3050,7 +3182,7 @@ static track_end_t play_file(const char *path)
          *
          * The cancel case still repaints: nothing is pending there, which
          * is exactly what distinguishes it. */
-        if (s_repaint_art && !s_pending_ready) {
+        if (s_repaint_art && !s_pending_ready && !visuals_pending) {
             s_repaint_art = false;
             load_track_visuals(path);
         }
@@ -3061,7 +3193,7 @@ static track_end_t play_file(const char *path)
          * Checked against the path first: media_task may have prepared
          * this for a track that has since been skipped past, and the
          * flag alone cannot tell. */
-        if (s_wave_ready && strcmp(s_wave_path, path) == 0) {
+        if (s_wave_ready && strcmp(s_wave_path, path) == 0 && !visuals_pending) {
             s_wave_ready = false;
             /* Hand it over rather than draw it. The envelope is part of
              * the transport bar now, so it is drawn by ui_draw() on every
@@ -3079,10 +3211,13 @@ static track_end_t play_file(const char *path)
              * for raw ADTS, AMR and a Xing-less MP3 it is the only answer
              * there is, and the bar goes from empty to filled mid-track
              * rather than staying empty for the whole song. */
-            if (!s_len_sec && s_walk.sec) {
-                s_len_sec = s_walk.sec;
+            if (!len_sec && s_walk.sec) {
+                len_sec = s_walk.sec;
+                /* Mirrored only once the bar is this track's, for the
+                 * same reason it is not published above. */
+                if (!visuals_pending) s_len_sec = len_sec;
                 ESP_LOGI(TAG, "duration from frame walk: %" PRIu32 "s",
-                         s_len_sec);
+                         len_sec);
             }
         }
 
@@ -3156,10 +3291,10 @@ static track_end_t play_file(const char *path)
                          s_seek_why, waited);
             }
 
-            if (s_len_sec == 0) {
+            if (len_sec == 0) {
                 ESP_LOGI(TAG, "seek ignored: no duration for this format");
             } else {
-                const uint32_t target = (uint32_t)((uint64_t)s_len_sec * pct / 100);
+                const uint32_t target = (uint32_t)((uint64_t)len_sec * pct / 100);
                 const esp_err_t sr = decoder_seek_sec(dec, target);
                 if (sr == ESP_ERR_NOT_SUPPORTED) {
                     ESP_LOGI(TAG, "seek ignored: %s cannot seek", "this backend");
@@ -3176,6 +3311,7 @@ static track_end_t play_file(const char *path)
                      * on from where it was rather than from the new
                      * point. */
                     frames_out = (uint64_t)target * (cur_rate ? cur_rate : 1);
+                    s_frames_out[s_ring_fill] = frames_out;
                     s_pos_sec = target;
                     ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
                 }
@@ -3265,7 +3401,7 @@ static track_end_t play_file(const char *path)
                 replaygain_format_t rf;
                 memset(&rf, 0, sizeof(rf));
                 rf.present = true;
-                rf.sec = s_len_sec;
+                rf.sec = len_sec;
                 rf.sample_rate = (uint32_t)info.sample_rate;
                 rf.channels = (uint8_t)info.channels;
                 rf.kbps = (uint16_t)info.bitrate_kbps;
@@ -3356,6 +3492,15 @@ static track_end_t play_file(const char *path)
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
                 xStreamBufferReset(s_pcm);
+
+                /* The counters describe the ring, so they are cleared
+                 * with it and at the same moment. Rate last and zero
+                 * first: a zero rate is what tells pos_publish() this
+                 * ring has nothing to report yet, so it must be visible
+                 * before any frame count of this track is. */
+                s_frames_rate[s_ring_fill] = 0;
+                s_frames_out[s_ring_fill] = 0;
+                s_frames_chans[s_ring_fill] = 2;
 
                 s_ring_pct = 0;
                 s_writer_stop = false;
@@ -3456,9 +3601,12 @@ static track_end_t play_file(const char *path)
          * loop stops running a minute before the audio does -- see
          * pos_publish(). */
         frames_out += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
-        s_frames_rate = cur_rate;
-        s_frames_chans = info.channels > 0 ? (uint32_t)info.channels : 1;
-        s_frames_out = frames_out;
+        /* Into this track's slot -- the ring it is filling. The other
+         * slot still describes the track the writer is playing out and
+         * must not be touched until that ring is empty. */
+        s_frames_rate[s_ring_fill] = cur_rate;
+        s_frames_chans[s_ring_fill] = info.channels > 0 ? (uint32_t)info.channels : 1;
+        s_frames_out[s_ring_fill] = frames_out;
 
         /*
          * The number the listener actually experiences: press to sound,
@@ -3603,7 +3751,7 @@ static track_end_t play_file(const char *path)
             loudness_envelope(&s_loud, env, &cols);
             if (cols > 0 && rg_holding(path)) {
                 s_rg.waveform.present = true;
-                s_rg.waveform.sec = s_len_sec;
+                s_rg.waveform.sec = len_sec;
                 s_rg.waveform.columns =
                     (cols > REPLAYGAIN_COLUMNS) ? REPLAYGAIN_COLUMNS : cols;
                 memcpy(s_rg.waveform.level, env,
@@ -3652,7 +3800,12 @@ static track_end_t play_file(const char *path)
     s_rg_active = false;
     s_rg_gain_db = 0.0f;
 
-    s_pos_sec = 0;
+    /* Not zeroed when the tail of this track is still queued: the
+     * writer goes on playing it and pos_publish() goes on describing it
+     * from the ring, which is the only thing that still knows where it
+     * has got to. Zeroing here dropped the bar to the start for the last
+     * twenty seconds of every song. */
+    if (!tail_playing()) s_pos_sec = 0;
     return why;
 }
 #undef VISUALS_GATE
