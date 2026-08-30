@@ -647,28 +647,39 @@ static volatile int s_ring_fill;
 static volatile int s_ring_play;
 
 /*
- * Is there still a previous track being played out?
+ * Is a finished track still being played out of its ring?
  *
- * NOT `s_ring_play != s_ring_fill`, which is what the first attempt at
- * this asked and why it changed nothing. The decode loop does not move
- * s_ring_fill when a track starts -- it moves it when the FIRST BLOCK
- * of that track is decoded, one decoder_open() later, which on a
- * Xing-less MP3 is two seconds of whole-file index build. Every decision
- * taken before that point -- the tags, the envelope, the retired stats,
- * the seeded duration, all of them in track_change_begin(), which runs
- * before the open -- therefore saw the two indices still equal and
- * concluded that nothing was playing, at the exact moment twenty seconds
- * of the previous track were sitting in the ring.
+ * Latched, not sampled, and that is the whole of the difference between
+ * this and the two versions of it that did not work.
  *
- * The honest question is not which ring the writer is on but whether it
- * still has anything to play, so that is what this asks. True from the
- * end of one track until the last sample of it has actually been
- * handed to I2S, regardless of where either index happens to be.
+ * The first asked `s_ring_play != s_ring_fill`. The decode loop does not
+ * move s_ring_fill when a track starts -- it moves it when the FIRST
+ * BLOCK is decoded, one decoder_open() later, which on a Xing-less MP3
+ * is two seconds of index build. Everything in track_change_begin(),
+ * which runs before the open, therefore saw the indices still equal.
+ *
+ * The second asked whether s_ring[s_ring_play] was empty, at the moment
+ * it was asked, from the decode-loop task. That is a question about two
+ * volatile words and a stream buffer that another task is draining, read
+ * during the window between one track's decode ending and the next one's
+ * first block -- the one window in which s_ring_play, s_ring_fill and
+ * s_pcm do not agree about anything. It answered "empty" against a ring
+ * with twenty seconds in it.
+ *
+ * So it is neither computed nor sampled now: it is SET at the one moment
+ * the answer is unambiguous -- the end of a track's decode loop, which
+ * knows exactly which ring it filled and exactly how much it left there
+ * -- and CLEARED by the writer, which is the task that empties that ring
+ * and therefore the only one that can say when the last sample has gone.
+ * Those two events are the two the screen is allowed to change on: a
+ * press, which clears it, and the ring running out, which clears it.
  */
+static volatile bool s_tail_pending;
+static volatile int  s_tail_ring;
+
 static bool tail_playing(void)
 {
-    const int play = s_ring_play;
-    return s_ring[play] && !xStreamBufferIsEmpty(s_ring[play]);
+    return s_tail_pending;
 }
 
 /*
@@ -745,6 +756,26 @@ static void i2s_writer_task(void *arg)
         if (!s_playing && !s_writer_stop) {
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
+        }
+
+        /*
+         * The last sample of the finished track has gone to I2S.
+         *
+         * This is the event the screen has been waiting for, and it is
+         * detected here because this is the task that consumed it. Note
+         * that it is NOT the handoff below: the handoff needs the decode
+         * loop to have produced a first block for the next track, which
+         * on a long index build is seconds later, and the truthful
+         * moment to stop showing a track is when it stops being heard --
+         * not when its successor is ready to be.
+         *
+         * Checked before the pause gate would matter and on every pass,
+         * including the ones where the receive below times out, because
+         * a ring that has run dry generates no other event.
+         */
+        if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
+            s_tail_pending = false;
+            ESP_LOGI(TAG, "tail played out; the screen is the next track's now");
         }
 
         /*
@@ -3108,14 +3139,14 @@ static track_end_t play_file(const char *path)
      */
 #define VISUALS_GATE()                                                  \
     do {                                                                \
-        if (visuals_pending && cur_rate != 0 &&                         \
-            s_ring_play == s_ring_fill) {                               \
-            /* Index equality is the right test HERE and only here:     \
-             * cur_rate is non-zero, so this track has decoded a block, \
-             * so s_ring_fill has already moved to this track's ring.   \
-             * Equality therefore means the writer has arrived on it.   \
-             * Everything that runs before the first block must use     \
-             * tail_playing() instead. */                               \
+        if (visuals_pending && cur_rate != 0 && !s_tail_pending) {      \
+            /* One condition, the same one track_change_begin() used,   \
+             * so the deferral and its release cannot disagree. The     \
+             * index comparison this replaced was a second way of       \
+             * asking, and two ways of asking one question is how the   \
+             * screen ended up ahead of the sound in the first place.   \
+             * cur_rate is still required: the bar needs this track's   \
+             * length and that is not known until the open returns. */  \
             visuals_pending = false;                                    \
             s_len_sec = len_sec;                                        \
             s_can_seek = can_seek;                                      \
@@ -3660,7 +3691,20 @@ static track_end_t play_file(const char *path)
              * produced it. Everything that describes the playing track
              * has to be published at the handoff rather than here; see
              * the visuals gate at the top of the loop.
+             *
+             * And this is where that is latched. blocks > 0 because a
+             * track that decoded nothing never took a ring of its own,
+             * so s_ring_fill still names the PREVIOUS track's ring and
+             * latching against it would hold the screen for a tail that
+             * is not this track's.
              */
+            if (blocks > 0 && !xStreamBufferIsEmpty(s_ring[s_ring_fill])) {
+                s_tail_ring = s_ring_fill;
+                s_tail_pending = true;
+                ESP_LOGI(TAG, "tail: %u KB of this track still to play; "
+                              "holding the screen",
+                         (unsigned)(xStreamBufferBytesAvailable(s_ring[s_ring_fill]) / 1024));
+            }
         } else {
             /*
              * Interrupted: what is queued is a track the user has
@@ -3674,6 +3718,14 @@ static track_end_t play_file(const char *path)
              * was going to hear.
              */
             xStreamBufferReset(s_pcm);
+            /*
+             * And the screen changes now, on the press, which is the
+             * other of the two moments it is allowed to change on. The
+             * queued audio this just dropped is what the deferral exists
+             * to protect, and it has been dropped; there is nothing left
+             * to be out of step with.
+             */
+            s_tail_pending = false;
         }
 
         /*
