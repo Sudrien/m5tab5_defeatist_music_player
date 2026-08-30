@@ -281,7 +281,7 @@ extern uint32_t g_tab5_dpi_underruns;
  * Run it against a counted ten seeks, not an impression. Every reading
  * in this investigation that rested on one has since been wrong.
  */
-#define SEEK_KEEP_RING          (1)
+#define SEEK_KEEP_RING          (0)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
@@ -892,6 +892,45 @@ static volatile bool s_writer_stop;
  * player state, is further down; the writer needs the name here and the
  * writer comes first in the file. Kept static rather than extern so it
  * stays internal to this translation unit like everything around it. */
+/*
+ * A seek asks the writer to throw away what is queued.
+ *
+ * Set by the decode loop at a seek commit, cleared by the writer when
+ * the ring is empty. The handshake is one word each way because the two
+ * tasks already communicate that way -- see s_ring_pct and
+ * s_tail_pending -- and because anything richer would need a lock on the
+ * path this exists to keep lock-free.
+ *
+ * WHY NOT xStreamBufferReset(), WHICH THIS REPLACES
+ *
+ * Because it is the cyan flash. Nineteen seeks with the reset skipped
+ * (SEEK_KEEP_RING, 0507) produced no flash at all; the same build
+ * flashed at the next track boundary, where a ring is reset by another
+ * path. 0500 had already excluded the refill that follows the reset, so
+ * the two bracket it.
+ *
+ * The mechanism fits even if the last link to a DSI frame is not proven:
+ * xStreamBufferReset() rewrites a stream buffer's head and tail while
+ * i2s_writer_task may be parked inside xStreamBufferReceive() on that
+ * same buffer. FreeRTOS says a reset fails if a task is blocked on
+ * either side, and a writer released against indices that moved beneath
+ * it is not a defined state to be in at priority 6.
+ *
+ * WHY NOT DRAIN FROM THE DECODE LOOP
+ *
+ * That would be two readers on a structure that supports one. The
+ * discard has to happen in the task that already owns the read, which
+ * is this one.
+ *
+ * WHAT THIS IS NOT
+ *
+ * Not the track-boundary drain that used to wait for the ring to play
+ * out; that blocked the next track for the length of a ring and was
+ * removed for gapless (see the note above PCM_RING_BYTES). This throws
+ * the samples away at memcpy speed and waits for nobody.
+ */
+static volatile bool s_pcm_flush;
+
 static volatile bool s_playing;
 
 static void ring_publish(void);
@@ -912,6 +951,33 @@ static void i2s_writer_task(void *arg)
     }
 
     while (1) {
+        /*
+         * The seek discard. See s_pcm_flush.
+         *
+         * Ahead of the pause gate, deliberately: a seek while paused is
+         * still a seek, and leaving the old position queued until resume
+         * is the artefact this whole path exists to avoid.
+         *
+         * Receives with a zero timeout until the ring reports empty, so
+         * it never blocks and cannot be the reason the writer misses a
+         * DMA deadline. Both rings, because a seek during a decode-ahead
+         * has a tail in one and the new position filling the other.
+         */
+        if (s_pcm_flush) {
+            size_t dropped = 0, got;
+            for (int r = 0; r < PCM_RINGS; r++) {
+                if (!s_ring[r]) continue;
+                while ((got = xStreamBufferReceive(s_ring[r], buf,
+                                                   PCM_CHUNK_BYTES, 0)) > 0) {
+                    dropped += got;
+                }
+            }
+            s_pcm_flush = false;
+            ring_publish();
+            ESP_LOGI(TAG, "seek: dropped %u KB of queued audio",
+                     (unsigned)(dropped / 1024));
+        }
+
         /*
          * Pause stops the writer, which is the only place it can stop.
          *
@@ -3597,11 +3663,14 @@ static track_end_t play_file(const char *path)
                      * jump, which sounds like the seek was ignored and
                      * then took effect late. */
 #if !SEEK_NOOP && !SEEK_KEEP_RING
-                    if (s_pcm) xStreamBufferReset(s_pcm);
+                    /* Ask the writer to drop what is queued. It owns the
+                     * read side; this task must not touch it. See
+                     * s_pcm_flush. */
+                    s_pcm_flush = true;
 
-                    /* The ring is now empty and nothing is draining it,
-                     * so the refill below would otherwise run flat out.
-                     * See REFILL_DECODE_SPEEDUP. */
+                    /* The ring is about to be empty and nothing is
+                     * draining it, so the refill below would otherwise
+                     * run flat out. See REFILL_DECODE_SPEEDUP. */
                     s_refill_pacing = true;
 #elif SEEK_KEEP_RING
                     /* See SEEK_KEEP_RING. The decoder has moved; the
@@ -3798,6 +3867,14 @@ static track_end_t play_file(const char *path)
                  * Reset rather than trusted: an interrupted track left
                  * its tail in this ring two tracks ago, and the writer
                  * has long since moved off it.
+                 *
+                 * This one stays a reset, and the sentence above is why:
+                 * the writer receives from s_ring[s_ring_play] and this
+                 * is the ring about to become s_ring_fill, so no task is
+                 * blocked on it. The two resets that were dangerous were
+                 * on the ring the writer was reading -- both now go
+                 * through s_pcm_flush. If the drain below is ever
+                 * removed, this assumption goes with it.
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
@@ -4062,7 +4139,22 @@ static track_end_t play_file(const char *path)
              * still on the previous ring this one held nothing anybody
              * was going to hear.
              */
-            xStreamBufferReset(s_pcm);
+            /*
+             * Through the writer, not with a reset. This site named the
+             * hazard itself -- "the writer may be parked on this ring"
+             * -- and that is precisely the case 0507 identified: a reset
+             * rewrites head and tail under a task blocked inside
+             * xStreamBufferReceive() on the same buffer. This is the
+             * boundary that still flashed in the SEEK_KEEP_RING build,
+             * because SEEK_KEEP_RING only skipped the seek path's reset
+             * and a `prev` press comes through here.
+             *
+             * Asynchronous, where the reset was immediate. The writer
+             * picks it up at the top of its next pass, which is at worst
+             * one chunk of DMA away, and the deferral below is what the
+             * screen was already waiting on.
+             */
+            s_pcm_flush = true;
             /*
              * And the screen changes now, on the press, which is the
              * other of the two moments it is allowed to change on. The
