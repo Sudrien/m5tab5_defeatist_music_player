@@ -397,6 +397,50 @@ extern uint32_t g_tab5_dpi_underruns;
 #define PCM_CHUNK_BYTES         (4 * 1024)
 
 /*
+ * How long queued audio takes to stop being audible when the thing that
+ * produced it has gone away.
+ *
+ * Pulling the card mid-track used to cut the sound at the press of the
+ * ejector: the decode loop noticed the volume had gone, broke out with
+ * TRACK_MEDIA_GONE, and the shared "not a clean end" path threw the ring
+ * away -- up to twenty seconds of already-decoded audio, discarded at
+ * memcpy speed. Nothing was wrong with those samples. They were decoded
+ * before the card left and they are in PSRAM; the card is not needed to
+ * play them and the click at the end of them is the only part of that
+ * event the listener should not have heard.
+ *
+ * So the ring plays on, and this is how long it takes to get to silence.
+ * The ramp is the whole point: 20 s of music ending abruptly because the
+ * buffer ran out is the same click, twenty seconds later. The fade
+ * finishes well before the ring empties, and whatever is left after it
+ * is dropped -- silence multiplied by anything is still silence, and
+ * there is no reason to clock it out.
+ *
+ * 600 ms because that is comfortably longer than a cycle of anything
+ * audible (a 20 Hz fundamental is 50 ms) so the ramp cannot itself be
+ * heard as a pitch, and comfortably shorter than the shortest tail worth
+ * having. It is not a musical fade and does not need to be.
+ *
+ * PREP FOR CROSSFADE, AND THAT IS THE REASON IT LOOKS LIKE THIS.
+ *
+ * A crossfade is two ramps and a mix, and the hard part is not the mix
+ * -- it is having somewhere to put a gain that is applied per frame, in
+ * the task that owns the samples, at the moment they are handed to the
+ * hardware. That is what this adds. fade_apply() below walks a chunk
+ * applying an interpolated gain; a crossfade is the same walk with a
+ * second ring read alongside it and the complementary gain, and the
+ * ramp state (s_fade_pos, s_fade_frames) is already per-ramp rather
+ * than per-track so a second one can exist next to it.
+ *
+ * What deliberately is NOT here yet: the mix, the second read, and the
+ * overlap accounting that decides when the outgoing track's ramp starts
+ * relative to the incoming one's. Those need the decode loop to start
+ * the next track early on purpose, which is a scheduling change and not
+ * this one.
+ */
+#define FADE_OUT_MS             (600)
+
+/*
  * Two rings, alternating, one track each.
  *
  * A track boundary is currently a drain: the decode loop waits for the
@@ -932,6 +976,128 @@ static volatile bool s_writer_stop;
  */
 static volatile bool s_pcm_flush;
 
+/*
+ * Why the flush was asked for, for the log line only.
+ *
+ * The drop used to be the seek path's and said so. It has a second
+ * caller now -- the end of a fade -- and "seek: dropped 3200 KB" during
+ * a card removal is a line that sends you looking at the wrong path.
+ *
+ * A const char * written by one task and read by another with no
+ * ordering against the flag itself. That is fine for what it is: the
+ * pointers are all string literals with static lifetime, so the worst a
+ * race can do is attribute one drop to the wrong reason. It is a label,
+ * not a decision.
+ */
+static const char * volatile s_flush_why = "seek";
+
+/*
+ * The fade-out ramp.
+ *
+ * Requested by the decode loop, run by the writer, and owned by the
+ * writer for as long as it is running -- s_fade_pos is only ever
+ * touched inside fade_apply(), which only the writer calls. The request
+ * side sets the length first and the flag last, so the writer cannot
+ * see s_fade_out true against a zero length.
+ *
+ * Not a mutex and not a queue for the same reason as everything else on
+ * this path: the writer must not block on anything but DMA.
+ */
+static volatile bool     s_fade_out;
+static volatile uint32_t s_fade_frames;   /* length of the ramp, in frames */
+static volatile uint32_t s_fade_pos;      /* how far through it we are */
+
+/* Is anything still going to come out of the speaker because of a fade?
+ * Read by the UI task's idle gate, which would otherwise cut the
+ * amplifier out from under the ramp -- nothing is decoding during one,
+ * which is exactly the condition that gate uses to decide it is over. */
+static bool fade_out_active(void)
+{
+    return s_fade_out;
+}
+
+/*
+ * Start a ramp to silence over whatever is queued.
+ *
+ * rate is the rate the samples will be CLOCKED OUT at, not the rate of
+ * the file: the ring holds what the hardware is about to play, and a
+ * ramp measured in frames only lands on 600 ms if it is measured
+ * against the clock that consumes them.
+ */
+static void fade_out_begin(uint32_t rate)
+{
+    if (s_fade_out) return;                 /* one ramp is enough */
+    /* Before the first track, or if the sink never got a format. A ramp
+     * of the wrong length is still a ramp; not fading is a click. */
+    if (rate == 0) rate = 44100;
+
+    uint32_t frames = (uint32_t)((uint64_t)rate * FADE_OUT_MS / 1000u);
+    if (frames == 0) frames = 1;            /* no division by zero below */
+
+    s_fade_pos    = 0;
+    s_fade_frames = frames;
+    s_fade_out    = true;                   /* last: see above */
+}
+
+/*
+ * A new track has arrived while a ramp was running.
+ *
+ * The ramp belongs to audio the listener has already been told is over,
+ * and leaving it running would apply the tail of it to the first
+ * moments of whatever is starting -- a track that begins half faded and
+ * then, worse, hits the end of the ramp and drops to zero.
+ *
+ * The queued audio goes with it, and that is not the gapless path
+ * losing its tail: this only fires when a fade was actually running,
+ * and a fade only runs when the queued audio has already been declared
+ * unwanted. A clean track boundary never gets here.
+ */
+static void fade_out_cancel(void)
+{
+    if (!s_fade_out) return;
+    s_fade_out  = false;
+    s_flush_why = "fade cancelled";
+    s_pcm_flush = true;
+}
+
+/*
+ * Apply the ramp to one chunk, in place.
+ *
+ * Interleaved stereo 16-bit, which is what the ring holds and the only
+ * thing it ever holds (see PCM_BYTES_PER_FRAME). Linear in amplitude,
+ * Q15, so the gain is an integer multiply and a shift per sample rather
+ * than a float per sample on a path with a DMA deadline.
+ *
+ * Linear rather than the equal-power curve a crossfade wants, because
+ * this is a fade against silence and not against another signal: there
+ * is nothing for the power to be equal to. The curve is one expression
+ * on the line below when that changes.
+ *
+ * Past the end of the ramp the gain is zero rather than the loop
+ * stopping. The caller drops the rest of the ring immediately after, so
+ * this only covers the frames between the ramp ending and the chunk
+ * boundary -- but they are frames, and they would otherwise be the
+ * click this exists to remove.
+ */
+static void fade_apply(int16_t *pcm, size_t frames)
+{
+    const uint32_t total = s_fade_frames;
+    uint32_t pos = s_fade_pos;
+
+    for (size_t f = 0; f < frames; f++) {
+        const int32_t g = (pos >= total)
+            ? 0
+            : (int32_t)(32768u - (uint32_t)(((uint64_t)32768u * pos) / total));
+
+        pcm[2 * f + 0] = (int16_t)(((int32_t)pcm[2 * f + 0] * g) >> 15);
+        pcm[2 * f + 1] = (int16_t)(((int32_t)pcm[2 * f + 1] * g) >> 15);
+
+        if (pos < total) pos++;
+    }
+
+    s_fade_pos = pos;
+}
+
 static volatile bool s_playing;
 
 static void ring_publish(void);
@@ -975,8 +1141,8 @@ static void i2s_writer_task(void *arg)
             }
             s_pcm_flush = false;
             ring_publish();
-            ESP_LOGI(TAG, "seek: dropped %u KB of queued audio",
-                     (unsigned)(dropped / 1024));
+            ESP_LOGI(TAG, "%s: dropped %u KB of queued audio",
+                     s_flush_why, (unsigned)(dropped / 1024));
         }
 
         /*
@@ -1056,7 +1222,51 @@ static void i2s_writer_task(void *arg)
         ring_publish();
 
         if (got) {
+            /*
+             * The gain, applied here and nowhere else.
+             *
+             * This is the last place the samples exist as samples before
+             * the hardware has them, and it is on the task that owns the
+             * read -- so a chunk cannot be modified between being taken
+             * from the ring and being written, and there is no second
+             * reader to disagree with. Everything a crossfade needs to
+             * touch, it touches from inside this if.
+             */
+            bool ramp_over = false;
+            if (s_fade_out) {
+                fade_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
+                ramp_over = (s_fade_pos >= s_fade_frames);
+            }
+
             audio_out_write(buf, got);
+
+            /*
+             * Written first, then dropped. The chunk that finished the
+             * ramp ends at zero and is the last thing anybody hears;
+             * what is behind it in the ring is up to twenty seconds of a
+             * track that has already ended as far as the listener is
+             * concerned, and clocking it out at a gain of zero would
+             * mean twenty seconds of silence before the player would
+             * answer with anything else.
+             */
+            if (ramp_over) {
+                s_fade_out  = false;
+                s_flush_why = "fade";
+                s_pcm_flush = true;
+                ESP_LOGI(TAG, "faded out over %" PRIu32 " ms", (uint32_t)FADE_OUT_MS);
+            }
+        } else if (s_fade_out) {
+            /*
+             * The ring ran dry mid-ramp.
+             *
+             * It should not: the fade is 600 ms and it is started
+             * against a ring that has some seconds in it. But "should
+             * not" is how a flag gets left set, and a fade left set is
+             * the next track starting silent. The ramp is over because
+             * there is nothing left to apply it to.
+             */
+            s_fade_out = false;
+            ESP_LOGW(TAG, "fade: the ring emptied before the ramp finished");
         }
         /*
          * No exit, and no s_decode_done test any more.
@@ -3002,8 +3212,20 @@ static void ui_task(void *arg)
          * A tail is the third way for sound to exist. It belongs in the
          * same condition as the other two.
          */
+        /*
+         * And not during a fade, which is the fourth way for sound to
+         * exist and the only one that happens with the decode loop
+         * already returned and the tail deliberately unlatched.
+         *
+         * Without this the media-gone path is a race between the ramp
+         * and IDLE_HOLD_MS: nothing is decoding, nothing is changing,
+         * no tail is pending, so this line cuts the amplifier partway
+         * down the ramp and the fade this patch exists to add ends as
+         * the click it was meant to replace.
+         */
         audio_out_set_idle(!s_playing ||
-                           (!s_decoding && !s_track_changing && !s_tail_pending));
+                           (!s_decoding && !s_track_changing &&
+                            !s_tail_pending && !fade_out_active()));
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
 
@@ -3317,6 +3539,18 @@ static track_end_t play_file(const char *path)
      * the bug this flag exists to prevent, in miniature.
      */
     s_decoding = true;
+
+    /*
+     * Anything still fading belongs to a track that ended before this
+     * one was chosen. See fade_out_cancel() -- it is a no-op unless a
+     * ramp is actually running, so a gapless boundary does not reach
+     * the flush inside it.
+     *
+     * Here rather than at the choice, because this is the point after
+     * which a first block can be produced, and a ramp that outlives
+     * that would be applied to the wrong track.
+     */
+    fade_out_cancel();
 
     /*
      * Loudness is measured off the PCM that is about to be decoded for
@@ -3766,6 +4000,7 @@ static track_end_t play_file(const char *path)
                     /* Ask the writer to drop what is queued. It owns the
                      * read side; this task must not touch it. See
                      * s_pcm_flush. */
+                    s_flush_why = "seek";
                     s_pcm_flush = true;
 
                     /* The ring is about to be empty and nothing is
@@ -4255,6 +4490,43 @@ static track_end_t play_file(const char *path)
                               "holding the screen",
                          (unsigned)(xStreamBufferBytesAvailable(s_ring[s_ring_fill]) / 1024));
             }
+        } else if (why == TRACK_MEDIA_GONE) {
+            /*
+             * The card left. The music did not.
+             *
+             * What is queued was decoded while the volume was still
+             * there and needs nothing from it to be played -- so it is
+             * played, and faded rather than cut. This is the one "not a
+             * clean end" case where the queued audio is neither stale
+             * nor unwanted: nobody chose to stop listening to it, and
+             * the only thing that changed is that there will not be any
+             * more after it.
+             *
+             * It does not play the whole ring out. Twenty seconds of
+             * music continuing after the card is in your hand reads as
+             * the player having ignored the removal, and the far end of
+             * it is a hard stop anyway. The ramp starts now and silence
+             * arrives FADE_OUT_MS later; the writer drops the rest when
+             * it gets there.
+             *
+             * Against audio_out_rate(), not the file's rate: the ramp is
+             * counted in frames and the frames are consumed by the
+             * hardware clock. See fade_out_begin().
+             */
+            fade_out_begin(audio_out_rate());
+            ESP_LOGI(TAG, "media gone; fading out %u KB of queued audio "
+                          "over %" PRIu32 " ms",
+                     (unsigned)(xStreamBufferBytesAvailable(s_ring[s_ring_play]) / 1024),
+                     (uint32_t)FADE_OUT_MS);
+            /*
+             * The screen moves on at the press -- or here, at the
+             * removal, which is the same kind of moment: an external
+             * event that ends the track. The deferral exists to keep
+             * the screen with audio that is still the track's, and
+             * what is left of this one is a fade to silence and the
+             * chooser coming up behind it.
+             */
+            s_tail_pending = false;
         } else {
             /*
              * Interrupted: what is queued is a track the user has
@@ -4282,6 +4554,7 @@ static track_end_t play_file(const char *path)
              * one chunk of DMA away, and the deferral below is what the
              * screen was already waiting on.
              */
+            s_flush_why = "interrupted";
             s_pcm_flush = true;
             /*
              * And the screen changes now, on the press, which is the
