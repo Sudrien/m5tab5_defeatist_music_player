@@ -48,32 +48,31 @@ What do you mean no audio over Bluetooth
 - ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
-  - It all lands in a hidden `.songname.mp3.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again.
+  - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn it off.
+- Reopen last played song on start. Not autoplay.
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
 - build file lists faster
-- setting storage (defeatist.dat + defeatist.bak) actually being used for more than volume level
-- turn off autoplay on boot
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
-- resume at last file
 - 'Crossfade on manual skip (separate from gapless) is a common "why doesn't this exist" complaint on small players.'
 - Sleep timer
-- gapless playback is supposedly set up, but music cache does not actually follow it yet
+- gapless playback is supposedly set up, but I need to get behavior nailed down
 
 ## What could not happen with current published code
 - classic BT dongle support
 - per file resume
+- usb hubs - it won't complain now, but don't expect multiple devices to work. Powered hubs might be needed to keep the thing form rebooting.
   
 ## Potential issues
 
 - Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n.
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
-- I can never tell if the peaking I'm hearing is a buffer underun of record needle noise encoded in the music, personally. 
+- I can never tell if the peaking I'm hearing is a buffer underun of record needle noise encoded in the music, personally. ReplayGain fixes some of that. 
 
 ## Licensing
 
