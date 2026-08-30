@@ -213,6 +213,34 @@ static const char *TAG = "tab5_mp3";
  * same second.
  */
 extern uint32_t g_tab5_dpi_underruns;
+
+/*
+ * DIAGNOSTIC. Not a feature, and not meant to survive.
+ *
+ * 0501 established that the cyan flash is not a DSI bridge underrun: the
+ * counter above stays at zero across a flashing seek. That excludes the
+ * mechanism every patch from 0403 to 0500 was aimed at, and leaves two
+ * halves of the seek unexamined -- the audio work (decoder_seek_sec()
+ * and the ring reset that follows it) and everything else the release of
+ * a drag sets in motion.
+ *
+ * Set to 1, the seek is serviced in every respect except the two calls
+ * that touch audio: the request is taken, the loudness measurement is
+ * dropped, the wait is timed, the position counter is re-anchored and
+ * the bar moves. The decoder is not seeked and the ring is not emptied,
+ * so playback continues from where it was.
+ *
+ * If the flash still happens, nothing in the audio path is involved and
+ * the cause is in the touch-release or UI path, which nothing in this
+ * investigation has looked at yet. If it stops, it is inside
+ * decoder_seek_sec() -- and since 0500 excluded the refill that follows,
+ * that means mp3dec_ex_seek() itself: the index lookup, the backward
+ * fseek, and the frames it decodes to prime the bit reservoir.
+ *
+ * The clock will read wrong and the audio will not move while this is
+ * set. That is the point; it is one build, not a mode.
+ */
+#define SEEK_NOOP               (1)
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
@@ -3488,7 +3516,14 @@ static track_end_t play_file(const char *path)
                 ESP_LOGI(TAG, "seek ignored: no duration for this format");
             } else {
                 const uint32_t target = (uint32_t)((uint64_t)len_sec * pct / 100);
+#if SEEK_NOOP
+                /* See SEEK_NOOP. Everything below runs as if the seek
+                 * had succeeded; the decoder is simply never asked. */
+                const esp_err_t sr = ESP_OK;
+                ESP_LOGW(TAG, "SEEK_NOOP: not seeking to %" PRIu32 "s", target);
+#else
                 const esp_err_t sr = decoder_seek_sec(dec, target);
+#endif
                 if (sr == ESP_ERR_NOT_SUPPORTED) {
                     ESP_LOGI(TAG, "seek ignored: %s cannot seek", "this backend");
                 } else if (sr != ESP_OK) {
@@ -3498,12 +3533,14 @@ static track_end_t play_file(const char *path)
                      * plays out ~0.37 s of the old position after the
                      * jump, which sounds like the seek was ignored and
                      * then took effect late. */
+#if !SEEK_NOOP
                     if (s_pcm) xStreamBufferReset(s_pcm);
 
                     /* The ring is now empty and nothing is draining it,
                      * so the refill below would otherwise run flat out.
                      * See REFILL_DECODE_SPEEDUP. */
                     s_refill_pacing = true;
+#endif
 
                     /* Re-anchor the position counter, or the clock counts
                      * on from where it was rather than from the new
