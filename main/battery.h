@@ -80,6 +80,38 @@ esp_err_t battery_start(void);
  * forever when there is no gauge. The UI draws an empty outline with no
  * digits for -1 rather than inventing a number.
  */
+/*
+ * DIAGNOSTIC, added by 0505. Not a feature.
+ *
+ * Capture pack voltage as fast as the INA226 will produce it, for a
+ * short window, and dump the result. Armed at a seek commit, which is
+ * where the cyan flash lands.
+ *
+ * Everything else in this file is built to hide what this is looking
+ * for. The part averages 16 samples, the conversions are 1.1 ms, the
+ * poll is every 5 s and the result goes through a 1/8 exponential
+ * average -- four separate defences against the amplifier's draw
+ * showing up in the gauge, all of them correct for a gauge and all of
+ * them fatal to a transient. So the trace reconfigures the part for
+ * 140 us bus-only conversions with no averaging, samples flat out into
+ * a buffer, restores the normal configuration and only then logs.
+ *
+ * Why it matters: a bus-powered keyboard browned the board out on
+ * every plug-in, which is direct evidence that a load step on this
+ * supply can reach the SoC. A step too small to trip the brownout
+ * detector is the only remaining explanation for a single corrupted
+ * DSI frame that leaves no underrun, no error and no log -- which is
+ * what six patches of software theories have failed to account for.
+ *
+ * Costs the I2C bus for the length of the window, which the touch
+ * controller and the codec are also on. That is acceptable for a
+ * diagnostic and is why this is armed rather than free-running.
+ *
+ * Safe to call from anywhere, including when no gauge was found. Calls
+ * while a trace is already running are ignored rather than queued.
+ */
+void battery_trace_arm(const char *why);
+
 int battery_pct(void);
 
 /* Whether current is flowing into the pack. */
