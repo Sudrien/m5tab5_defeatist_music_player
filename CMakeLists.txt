@@ -12,6 +12,12 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/vendored.cmake)
 # symbols and ffconf.h fails to compile against them.
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/exfat.cmake)
 
+# Vendor an esp_lcd whose DSI bridge underrun ISR increments a counter
+# instead of calling esp_rom_printf. Before project.cmake for the same
+# two reasons as the line above: the component scan, and the Kconfig
+# collected during it.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/dpi_instrument.cmake)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5tab5_defeatist_music_player)
 

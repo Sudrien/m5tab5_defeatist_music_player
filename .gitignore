@@ -14,6 +14,7 @@
 /components/pngle/miniz.c
 /components/pngle/miniz.h
 /components/fatfs/
+/components/esp_lcd/
 
 # Download temporaries from a failed or interrupted vendored fetch.
 *.tmp
