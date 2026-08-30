@@ -83,6 +83,30 @@ static uint32_t s_worst_ms[STORAGE_IO_CLASSES];
 #define STDIO_BUFS      (3)
 #define STDIO_BUF_SIZE  STORAGE_IO_CHUNK
 
+/*
+ * The largest fread() a playback read is broken into.
+ *
+ * Deliberately SMALLER than STDIO_BUF_SIZE, and that is the whole point.
+ * newlib bypasses its own buffer for any request at least as large as
+ * the buffer: it passes the caller's pointer down to the filesystem, so
+ * a 110 KB decoder read becomes an SDMMC DMA writing straight into
+ * PSRAM. That makes the card a second bus master on the memory the DPI
+ * peripheral is fetching the framebuffer out of, and the evidence says
+ * that is what the panel underruns on -- the cyan follows reads, not
+ * draws. Opening the file chooser repaints the entire screen and never
+ * flashes; a seek reads a few hundred KB and flashes nearly every time.
+ *
+ * At 8 KB against a 16 KB buffer every read goes through the internal
+ * staging buffer instead. The DMA lands in internal RAM and what touches
+ * PSRAM is a CPU memcpy of at most 8 KB -- far shorter than a sustained
+ * DMA burst, and interruptible in a way DMA is not.
+ *
+ * The cost is one more fread() per 8 KB. Reads run at 8.6 MB/s against a
+ * decoder that needs 32 KB/s, so there is room; the KB/s in the
+ * storage_io_report() lines is where to look if that stops being true.
+ */
+#define PLAYBACK_SLICE  (8 * 1024)
+
 static struct {
     uint8_t *buf;
     FILE    *owner;             /* NULL when free */
@@ -369,11 +393,22 @@ size_t storage_io_fread(void *dst, size_t len, FILE *f,
      * of semaphore operations per 16 KB.
      */
     if (cls == STORAGE_IO_PLAYBACK) {
-        /* Still one lease for the whole read. The staging inside it is
-         * chunked, but nothing outranks playback, so letting go between
-         * chunks would only cost semaphore traffic. */
+        /*
+         * One lease for the whole read -- nothing outranks playback, so
+         * letting go between slices would only cost semaphore traffic --
+         * but sliced inside it, to keep the transfer inside newlib's
+         * internal buffer rather than letting the card DMA into PSRAM.
+         * See PLAYBACK_SLICE.
+         */
         storage_io_acquire(cls);
-        done = fread(p, 1, len, f);
+        while (done < len) {
+            size_t want = len - done;
+            if (want > PLAYBACK_SLICE) want = PLAYBACK_SLICE;
+
+            const size_t got = fread(p + done, 1, want, f);
+            done += got;
+            if (got < want) break;      /* EOF or error; same as fread */
+        }
         storage_io_release();
         count_bytes(cls, done);
         return done;
