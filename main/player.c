@@ -3194,6 +3194,7 @@ static track_end_t play_file(const char *path)
             s_len_sec = len_sec;                                        \
             s_can_seek = can_seek;                                      \
             s_stats_valid = true;                                       \
+            settings_set_track(path);                                   \
             track_change_show();                                        \
             load_track_visuals(path);                                   \
         }                                                               \
@@ -4140,7 +4141,19 @@ static void player_loop(void)
          * the player kept the 50 it booted with, and the next drag saved
          * that over the file.
          */
-        settings_set_track(s_path);
+        /*
+         * settings_set_track() used to be here, next to its sibling, and
+         * it wrote the resume point for a track twenty seconds before
+         * any of it was audible: pull the power during the tail and the
+         * player came back a track further on than the listener ever
+         * got. It has moved to the visuals gate, which is where the rest
+         * of "this is the track now playing" already lives.
+         *
+         * settings_note_path() stays. It is about which VOLUME the
+         * settings file lives on, not which track is playing, and the
+         * volume it adopts has to reach the codec before the first
+         * sample rather than after it.
+         */
         if (settings_note_path(s_path)) {
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
