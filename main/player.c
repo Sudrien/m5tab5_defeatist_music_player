@@ -112,7 +112,7 @@ static const char *TAG = "tab5_mp3";
 /* ---- Display: ST7121 MIPI-DSI, portrait native ---- */
 #define LCD_H_RES               (720)
 #define LCD_V_RES               (1280)
-#define LCD_BITS_PER_PIXEL      (24)
+#define LCD_BITS_PER_PIXEL      (16)
 #define DSI_DATA_LANES          (2)
 /*
  * Sized to the pixel clock with a margin, not set as high as the PHY
