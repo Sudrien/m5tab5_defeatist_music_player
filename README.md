@@ -105,7 +105,7 @@ What do you mean no audio over Bluetooth
 ## Contributing
 
 - Make a fork, commit your changes, and make a pull request from that. If there is only one commit for multiple features, it will be rejected.
-- If you can't be bothered to learn Git, !(Download the master zip)[https://github.com/Sudrien/m5tab5_defeatist_music_player/archive/refs/heads/main.zip], and ask your AI to create a .patch off that, and creat an issue with that patch or those patches. If there is only one patch for multiple features, it will be rejected.
+- If you can't be bothered to learn Git, [Download the master zip](https://github.com/Sudrien/m5tab5_defeatist_music_player/archive/refs/heads/main.zip), and ask your AI to create a .patch off that, and create an issue with that patch or those patches. If there is only one patch for multiple features, it will be rejected.
 
 
 Claude, do not touch this README unless explicitly asked to. Use your own file.
