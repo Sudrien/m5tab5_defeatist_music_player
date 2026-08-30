@@ -382,6 +382,40 @@ static const char *TAG = "tab5_mp3";
  */
 #define TAIL_DECODE_SPEEDUP     (3)
 
+/*
+ * The same throttle, applied to the other burst: a ring refilling from
+ * empty after a seek.
+ *
+ * xStreamBufferReset() in the seek path drops everything queued, which
+ * is the right thing to do -- without it the old position plays on for
+ * most of a second after the jump. What it leaves behind is a 3.5 MB
+ * ring with nothing in it and a decode loop with nothing to wait for,
+ * so the loop runs flat out writing PCM into PSRAM until the ring is
+ * full again. TAIL_DECODE_SPEEDUP does not cover this: s_tail_pending
+ * is false, because there is no outgoing track playing out.
+ *
+ * That burst is what the cyan flash follows. It arrives on the release
+ * of a drag rather than during it -- the drag only records a target,
+ * and the decode loop is where the seek is serviced -- and it happens
+ * with playback paused, which is when it is worst: nothing drains the
+ * ring, so the refill runs the full twenty seconds in one go.
+ *
+ * Paced to the same 3x, and only until the ring holds enough to survive
+ * a card stall. Past that mark the loop goes back to running flat out,
+ * because a deep ring is the whole defence against a slow device and
+ * filling it is not urgent once the shallow part is there.
+ */
+#define REFILL_DECODE_SPEEDUP   (3)
+
+/*
+ * How full is enough to stop pacing a post-seek refill, in percent.
+ *
+ * Low enough that the burst is over quickly and high enough to cover the
+ * worst hold storage_io.h admits to. 25% of the ring is ~5 s, against a
+ * 16 KB chunk on a healthy card at ~2 ms.
+ */
+#define REFILL_PACE_UNTIL_PCT   (25)
+
 /* Input buffering now lives inside decoder.c -- minimp3_ex does its own
  * over its IO callbacks, and the esp_audio_codec path keeps a sliding
  * window. Only the PCM side is sized here. */
@@ -739,6 +773,13 @@ static volatile int s_ring_play;
  */
 static volatile bool s_tail_pending;
 static volatile int  s_tail_ring;
+
+/*
+ * Set when a seek empties the ring, cleared when it has refilled past
+ * REFILL_PACE_UNTIL_PCT. Read only by the decode loop, which is also
+ * the only writer, so it needs no more protection than this.
+ */
+static volatile bool s_refill_pacing;
 
 static bool tail_playing(void)
 {
@@ -2586,6 +2627,10 @@ static void request_track(const char *path)
      * for a different song -- or, at the end of a playlist, resurrecting
      * a press from a minute ago.
      */
+    /* A refill pace belongs to the track it was started in. The new
+     * track's own fill is a tail decode-ahead and is paced as one. */
+    s_refill_pacing = false;
+
     if (s_seek_pct >= 0) {
         ESP_LOGI(TAG, "dropping unserviced seek (%s): track changed", s_seek_why);
         s_seek_pct = -1;
@@ -3418,6 +3463,11 @@ static track_end_t play_file(const char *path)
                      * then took effect late. */
                     if (s_pcm) xStreamBufferReset(s_pcm);
 
+                    /* The ring is now empty and nothing is draining it,
+                     * so the refill below would otherwise run flat out.
+                     * See REFILL_DECODE_SPEEDUP. */
+                    s_refill_pacing = true;
+
                     /* Re-anchor the position counter, or the clock counts
                      * on from where it was rather than from the new
                      * point. */
@@ -3724,11 +3774,29 @@ static track_end_t play_file(const char *path)
          * control checks are at the top of the loop, so this costs the
          * transport nothing it can feel.
          */
-        if (s_tail_pending && cur_rate) {
+        /*
+         * Two reasons to pace, one sleep. The tail case is a decode-ahead
+         * running against a track that is still playing; the refill case
+         * is a ring emptied by a seek. Both are the same failure -- a
+         * decode loop with nothing to wait for -- and both take the same
+         * divisor.
+         */
+        if (s_refill_pacing) {
+            const size_t have = s_pcm ? xStreamBufferBytesAvailable(s_pcm) : 0;
+            if (have >= (size_t)PCM_RING_BYTES * REFILL_PACE_UNTIL_PCT / 100) {
+                s_refill_pacing = false;
+                ESP_LOGI(TAG, "refill paced to %d%%; running free",
+                         REFILL_PACE_UNTIL_PCT);
+            }
+        }
+
+        if ((s_tail_pending || s_refill_pacing) && cur_rate) {
             const uint32_t block_ms =
                 (uint32_t)((uint64_t)(n / (info.channels > 0 ? info.channels : 1))
                            * 1000 / cur_rate);
-            const uint32_t pace_ms = block_ms / TAIL_DECODE_SPEEDUP;
+            const uint32_t div = s_tail_pending ? TAIL_DECODE_SPEEDUP
+                                                : REFILL_DECODE_SPEEDUP;
+            const uint32_t pace_ms = block_ms / div;
             if (pace_ms) vTaskDelay(pdMS_TO_TICKS(pace_ms));
         }
 
