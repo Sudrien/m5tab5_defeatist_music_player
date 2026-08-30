@@ -59,6 +59,7 @@
 #include "albumart.h"
 #include "audio_out.h"
 #include "battery.h"
+#include "player_diag.h"
 #include "covertag.h"
 #include "heapcheck.h"
 #include "mediacache.h"
@@ -3875,10 +3876,38 @@ static track_end_t play_file(const char *path)
                  * on the ring the writer was reading -- both now go
                  * through s_pcm_flush. If the drain below is ever
                  * removed, this assumption goes with it.
+                 *
+                 * 0509 makes it conditional, because the boundary still
+                 * flashes and this is the only reset left on that path.
+                 *
+                 * It cannot use s_pcm_flush: that drains BOTH rings, and
+                 * at a boundary one of them is the outgoing track's tail
+                 * with up to twenty seconds still to be heard. Cutting
+                 * that off to test a theory would replace a one-frame
+                 * flash with a truncated track.
+                 *
+                 * So: reset only when there is something to reset, and
+                 * say so. The claim above is that this ring is always
+                 * already empty here. If that holds, the log stays
+                 * silent, no reset happens on any boundary, and a flash
+                 * that persists anyway clears xStreamBufferReset() of
+                 * the boundary case entirely -- leaving the next track's
+                 * open, which is where the T-20 timing pointed from the
+                 * very first note.
+                 *
+                 * If the log is NOT silent, the assumption was wrong,
+                 * the writer's relationship to this ring needs
+                 * establishing rather than asserting, and that is the
+                 * bug.
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
-                xStreamBufferReset(s_pcm);
+                if (!xStreamBufferIsEmpty(s_pcm)) {
+                    const size_t left = xStreamBufferBytesAvailable(s_pcm);
+                    ESP_LOGW(TAG, "incoming ring %d held %u KB; resetting",
+                             s_ring_fill, (unsigned)(left / 1024));
+                    xStreamBufferReset(s_pcm);
+                }
 
                 /* The counters describe the ring, so they are cleared
                  * with it and at the same moment. Rate last and zero

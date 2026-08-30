@@ -12,6 +12,9 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 
+/* BOUNDARY_NO_INDEX lives with the other seek diagnostics. */
+#include "player_diag.h"
+
 #include "decoder.h"
 #include "storage_io.h"
 
@@ -149,7 +152,23 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
      * file on this SD bus is a noticeable pause before the first sample.
      * MP3D_DO_NOT_SCAN skips it: no seeking, no duration, but playback
      * starts immediately. Swap when scrubbing is wanted. */
+#if BOUNDARY_NO_INDEX
+    /*
+     * DIAGNOSTIC, 0509. See the flag in player.c.
+     *
+     * The index build is a whole-file read that happens at a track
+     * boundary while the outgoing track still has twenty seconds queued
+     * -- the T-20 the cyan flash has been timed against since the first
+     * note, and the one candidate no patch has removed rather than
+     * throttled. This removes it.
+     *
+     * The seek bar dies with it, which is the cost of the answer.
+     */
+    ESP_LOGW(TAG, "BOUNDARY_NO_INDEX: skipping the index build");
+    if (mp3dec_ex_open_cb(&d->ex, &d->io, MP3D_DO_NOT_SCAN) != 0) {
+#else
     if (mp3dec_ex_open_cb(&d->ex, &d->io, MP3D_SEEK_TO_SAMPLE) != 0) {
+#endif
         ESP_LOGE(TAG, "minimp3 could not open %s", path);
         storage_io_close(d->f);
         d->f = NULL;
