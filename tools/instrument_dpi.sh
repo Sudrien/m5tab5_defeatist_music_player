@@ -127,10 +127,27 @@ text = text[:at] + decl + text[at:]
 # The log call becomes an increment. Matched from ESP_DRAM_LOGE up to the
 # semicolon so a wrapped call is replaced whole rather than leaving its
 # tail behind as a syntax error.
+#
+# Every call site, not exactly one. IDF is free to log this from more
+# than one place and the count is not the interesting fact -- what
+# matters is that none is left.
 call = re.compile(r'ESP_DRAM_LOGE\s*\([^;]*underrun happens[^;]*\);', re.DOTALL)
 text, n = call.subn('g_tab5_dpi_underruns++;', text)
-if n != 1:
-    sys.exit('error: replaced %d underrun log calls, expected 1' % n)
+if n < 1:
+    sys.exit('error: found no underrun log call to replace')
+
+# And the verification, here rather than in a grep outside.
+#
+# The first version of this script grepped the file for "underrun
+# happens" afterwards and failed if it appeared at all. It appears in a
+# comment as well as in the call, so a substitution that had worked
+# perfectly was reported as a failure -- in CI, at the end of a build,
+# with "counted 1 underrun call site" printed immediately above the
+# error saying it had not worked.
+#
+# The check has to ask the same question the substitution did.
+if call.search(text):
+    sys.exit('error: an underrun log call survived the substitution')
 
 open(path, 'w').write(text)
 print('counted %d underrun call site' % n)
@@ -140,10 +157,11 @@ PYEOF
 # failed patch would otherwise look exactly like a successful one -- with
 # the symptom being a counter that reads zero forever, which is also the
 # most interesting possible result. Nothing would be more misleading.
-if grep -q "underrun happens" "$DPI"; then
-    echo "error: the underrun log call is still in $DPI" >&2
-    exit 1
-fi
+#
+# This is the increment only. Whether a log call survived is checked in
+# the python above, against the same pattern that did the replacing --
+# a plain grep for the message text matches the comment beside the call
+# as well, which failed a build over a substitution that had worked.
 if ! grep -q "g_tab5_dpi_underruns++" "$DPI"; then
     echo "error: the counter increment is not in $DPI" >&2
     exit 1
