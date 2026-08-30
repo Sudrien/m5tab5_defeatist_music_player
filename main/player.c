@@ -3639,6 +3639,8 @@ static track_end_t play_file(const char *path)
         }
 
         const TickType_t t_send = xTaskGetTickCount();
+        const bool ahead_before = (s_ring_play != s_ring_fill) ||
+                                  s_tail_pending || !s_playing;
         while (remain) {
             if (s_seek_pct >= 0 || s_pending_ready) break;
             const size_t sent = xStreamBufferSend(s_pcm, src, remain,
@@ -3705,8 +3707,15 @@ static track_end_t play_file(const char *path)
          * decode ending and the next one's first block the indices are
          * equal and there is still a tail playing, which is the window
          * this warning fired in every time -- 16 s of correct
-         * decode-ahead reported as a stall, once per boundary. */
-        const bool running_ahead = (s_ring_play != s_ring_fill) ||
+         * decode-ahead reported as a stall, once per boundary.
+         *
+         * OR'd with the state BEFORE the send, not just after it. The
+         * send that blocks for eleven seconds is released BY the handoff
+         * that clears these, so by the time the result is judged the
+         * evidence has gone: 0403 tested them 44 ms too late and the
+         * warning fired anyway. */
+        const bool running_ahead = ahead_before ||
+                                   (s_ring_play != s_ring_fill) ||
                                    s_tail_pending || !s_playing;
         if (send_ms > LOOP_STALL_MS && !running_ahead) {
             ESP_LOGW(TAG, "ring send blocked %" PRIu32 " ms (ring %d%%)",
