@@ -1029,6 +1029,23 @@ static void hid_button(hid_button_t button)
         s_hid_value = vol;
         s_hid_action = UI_ACTION_VOLUME;
         break;
+    case HID_BTN_PLAY_PAUSE:
+        s_hid_action = UI_ACTION_PLAY_PAUSE;
+        break;
+    case HID_BTN_NEXT:
+        s_hid_action = UI_ACTION_NEXT;
+        break;
+    case HID_BTN_PREV:
+        /* The same as the on-screen button: start of track, and the
+         * track before it only on a second press. That routes through
+         * request_seek(0), which is a seek commit with nothing touching
+         * the glass -- the hands-off test the flash investigation has
+         * been unable to run. */
+        s_hid_action = UI_ACTION_PREV;
+        break;
+    case HID_BTN_STOP:
+        s_hid_action = UI_ACTION_PLAY_PAUSE;
+        break;
     case HID_BTN_MIC_MUTE:
         /* There is no microphone in this program -- uac.c does not open
          * the RX interface. Logged by hid.c and dropped here rather than

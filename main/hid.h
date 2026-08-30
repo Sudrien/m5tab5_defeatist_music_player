@@ -33,6 +33,16 @@ typedef enum {
     HID_BTN_VOL_DOWN,
     HID_BTN_MUTE,
     HID_BTN_MIC_MUTE,
+
+    /*
+     * Transport. Added with the report-descriptor parsing in 0506: a
+     * keyboard's media keys are Consumer usages and there was nothing
+     * here to map them onto.
+     */
+    HID_BTN_PLAY_PAUSE,
+    HID_BTN_NEXT,
+    HID_BTN_PREV,
+    HID_BTN_STOP,
 } hid_button_t;
 
 /*
