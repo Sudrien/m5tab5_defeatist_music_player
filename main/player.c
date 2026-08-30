@@ -198,6 +198,21 @@ static const char *TAG = "tab5_mp3";
  * first.
  */
 #define DPI_CLOCK_MHZ           (70)
+
+/*
+ * DSI bridge underruns, counted in the ISR.
+ *
+ * Defined in the vendored components/esp_lcd -- see cmake/dpi_instrument.cmake
+ * and tools/instrument_dpi.sh, which replace that ISR's ESP_DRAM_LOGE with
+ * an increment of this. The log call was never seen once in any capture,
+ * and there was no way to tell whether that meant no underruns or a
+ * printf that never reached the USB console. This tells them apart.
+ *
+ * Read without a lock. It is a single aligned word written by one ISR and
+ * read by one task, and a report that is one behind is a report about the
+ * same second.
+ */
+extern uint32_t g_tab5_dpi_underruns;
 #define DSI_PHY_LDO_CHAN        (3)
 #define DSI_PHY_LDO_VOLTAGE_MV  (2500)
 
@@ -2980,6 +2995,28 @@ static void ui_task(void *arg)
          * 10 Hz does not read as movement, it reads as a title jumping
          * three pixels at a time; ui_animating() is false the moment the
          * title fits, so a short one costs nothing. */
+        /*
+         * The underrun counter, once a second and only when it has
+         * moved. Silence means the DPI is keeping up; a line here next
+         * to a flash is the confirmation five patches of bandwidth work
+         * have been assuming, and a flash with no line here means those
+         * patches were aimed at the wrong thing entirely.
+         */
+        {
+            static uint32_t   last_underruns;
+            static TickType_t last_report;
+            const TickType_t now = xTaskGetTickCount();
+            if (pdTICKS_TO_MS(now - last_report) >= 1000) {
+                const uint32_t n = g_tab5_dpi_underruns;
+                if (n != last_underruns) {
+                    ESP_LOGW(TAG, "DSI underruns: %" PRIu32 " (+%" PRIu32 ")",
+                             n, n - last_underruns);
+                    last_underruns = n;
+                }
+                last_report = now;
+            }
+        }
+
         int period = 100;
         if (down) period = 20;
         else if (!s_screen_off && ui_animating()) period = 40;
