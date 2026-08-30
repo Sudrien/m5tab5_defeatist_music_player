@@ -15,7 +15,7 @@ What do you mean no audio over Bluetooth
   - ~~Something like [The bb-link](https://github.com/halka/bb-link) would be required.~~ yeah I misread some things
 - It has a headset port
   - Which is great for a headset. Or an AUX cable.
-  - But there is nothing listing for inline controls. These can be wired, supposedly. Which, again, means special (but not too special) equipment. 
+  - But there is nothing listening for inline controls. These can be wired, supposedly. Which, again, means special (but not too special) equipment. 
 - The display and touch are controlled by the same chip. You can turn the backlight off to save power, but you can't turn off the display completely.
 - The whole display driver mess.
   - Initial release (2025.5.9): separate ILI9881C display driver + GT911 touch controller
@@ -29,7 +29,7 @@ What do you mean no audio over Bluetooth
   - The microsd card is preferred. It will use less power.
   - It will only auto-mount usb if no microsd is readable
 - exFAT support
-  - XDHC & XDXC cards have been tested. SDUC has not. Will Blu-ray size audio files play? Hell if I know.
+  - SDHC & SDXC cards have been tested (even if the latter died after week, not the software's fault). SDUC has not. Will Blu-ray size audio files play? Hell if I know.
 - Auto switching from headset to built in speaker on unplug and vice versa
 - Support for all (as far as I can tell) mp3 formats. This thing has fallback library after fallback library. Flac, ogg, wav, the standard are in here.
 - Album art display
@@ -44,7 +44,7 @@ What do you mean no audio over Bluetooth
 - volume levels on the seek bar. I thought it was cool.
 - USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too! USB A port only. 
 - pause cuts power to the amp
-- some sdram caching. If I can get a full minute without the screen blinking cyan on seeks, I will.
+- some sdram caching. If you notice things acting up 20 seconds before a song change, please file an issue.
 - ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
