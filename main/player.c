@@ -331,6 +331,37 @@ static const char *TAG = "tab5_mp3";
  */
 #define LOOP_STALL_MS           (400)
 
+/*
+ * How fast the decode loop is allowed to run while a finished track is
+ * still playing out of the other ring, as a multiple of real time.
+ *
+ * The decode-ahead is otherwise unthrottled, and for the whole of a
+ * twenty-second tail it is the only thing in the system with nothing to
+ * wait for: it decodes as fast as the card and the CPU allow, writing
+ * megabytes into a PSRAM ring while the next file's index build streams
+ * megabytes more through PSRAM behind it. The DPI peripheral is reading
+ * the framebuffer out of the same PSRAM continuously at ~105 MB/s and
+ * cannot wait for anything, so it loses lines and the panel goes cyan
+ * for a frame -- see the note on the pixel clock at the top of this
+ * file, which has the arithmetic. Every boundary flashed.
+ *
+ * Nothing is gained by the burst. There is a whole tail's worth of time
+ * to prepare the next track and only a second or two of audio needs to
+ * exist by the time the handoff comes; the rest of the ring can fill
+ * afterwards, at the rate the writer drains it. So the loop is paced
+ * back to a multiple of playback speed, which turns a one-second flood
+ * into a trickle spread over the tail and leaves the DPI fetch its
+ * bandwidth.
+ *
+ * 3x rather than 1x because the point is still to be ahead: at three
+ * times real time the ring is full again well before the tail ends,
+ * with the traffic spread over seconds instead of concentrated into a
+ * burst. Pacing applies ONLY while a tail is playing. Once this track is
+ * the audible one it is the only decoder running and it runs flat out,
+ * which is what a card stall needs.
+ */
+#define TAIL_DECODE_SPEEDUP     (3)
+
 /* Input buffering now lives inside decoder.c -- minimp3_ex does its own
  * over its IO callbacks, and the esp_audio_codec path keeps a sliding
  * window. Only the PCM side is sized here. */
@@ -3643,6 +3674,24 @@ static track_end_t play_file(const char *path)
         }
         ring_publish();
 
+        /*
+         * Pace the decode-ahead; see TAIL_DECODE_SPEEDUP.
+         *
+         * After the send rather than before it, so a block already
+         * written to the ring is never held back, and computed from the
+         * block just queued so it follows the sample rate rather than
+         * assuming one. The sleep is at most a few milliseconds and the
+         * control checks are at the top of the loop, so this costs the
+         * transport nothing it can feel.
+         */
+        if (s_tail_pending && cur_rate) {
+            const uint32_t block_ms =
+                (uint32_t)((uint64_t)(n / (info.channels > 0 ? info.channels : 1))
+                           * 1000 / cur_rate);
+            const uint32_t pace_ms = block_ms / TAIL_DECODE_SPEEDUP;
+            if (pace_ms) vTaskDelay(pdMS_TO_TICKS(pace_ms));
+        }
+
         const uint32_t send_ms =
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_send);
         /*
@@ -3652,7 +3701,13 @@ static track_end_t play_file(const char *path)
          * -- 15 s of it is a correctly working decode-ahead. Pause is
          * the same argument: the writer is stopped on purpose.
          */
-        const bool running_ahead = (s_ring_play != s_ring_fill) || !s_playing;
+        /* s_tail_pending as well as the index test: between a track's
+         * decode ending and the next one's first block the indices are
+         * equal and there is still a tail playing, which is the window
+         * this warning fired in every time -- 16 s of correct
+         * decode-ahead reported as a stall, once per boundary. */
+        const bool running_ahead = (s_ring_play != s_ring_fill) ||
+                                   s_tail_pending || !s_playing;
         if (send_ms > LOOP_STALL_MS && !running_ahead) {
             ESP_LOGW(TAG, "ring send blocked %" PRIu32 " ms (ring %d%%)",
                      send_ms, ring_headroom_pct());
