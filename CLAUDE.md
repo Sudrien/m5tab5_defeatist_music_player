@@ -816,9 +816,11 @@ log line rather than treated as a failure.
 
 Two things happen on a successful seek that are easy to leave out:
 
-- **The ring is reset.** Otherwise ~0.37 s of the old position plays out
-  after the jump, which sounds like the seek was ignored and then took
-  effect late.
+- **The queued audio is dropped**, or ~0.37 s of the old position plays
+  out after the jump and sounds like the seek was ignored and then took
+  effect late. Dropped by asking the writer -- `s_pcm_flush` -- and
+  **not** by calling `xStreamBufferReset()`, which was the cyan flash.
+  See "The cyan flash was xStreamBufferReset()".
 - **`frames_out` is re-anchored.** It is the source of the elapsed clock,
   so without this the time counts on from where it was instead of from the
   new point.
@@ -1385,9 +1387,11 @@ Three things that were free with a single file and are not any more:
   and `play_file()` waits for it.
 - **An interrupted track drops what is queued** rather than draining it.
   0.37 s of the old song after the tap sounds like the tap was ignored --
-  the same reasoning as resetting the ring on a seek. A track that ended
-  on its own still drains, because those fractions of a second are the end
-  of the song.
+  the same reasoning as the seek path. A track that ended on its own still
+  drains, because those fractions of a second are the end of the song.
+  The drop goes through `s_pcm_flush` and the writer; this site used to
+  reset the ring directly and its own comment named the hazard ("the
+  writer may be parked on this ring") while treating it as safe.
 - **The cover is cleared between tracks.** `albumart_show()` draws but
   never clears, so a track with no art inherited the previous track's
   cover, which reads as the player having ignored the choice rather than
@@ -2271,8 +2275,9 @@ was wrong.
 
 ### The four things v0.2.0 set out to fix
 
-1. **Display flashing cyan.** Untouched. It is a DPI/PSRAM bandwidth
-   problem, independent of storage, and no log since has shown it.
+1. **Display flashing cyan.** Fixed, 0500-0509, and it was never a
+   bandwidth problem. Every assumption in this line was wrong: see
+   "The cyan flash was xStreamBufferReset()".
 2. **The card starving other tasks.** Arbitrated in 0100. Briefly
    validated and then made moot. With the walk running in the background
    against a playing track, logs showed `worst wait` reaching 39 ms and a
@@ -2554,6 +2559,195 @@ One lease covers the card and the USB port together. That is wrong in
 principle -- a cover read from USB does not contend with a decode from SD
 -- and right in practice while nothing plays from one and reads the other.
 When that stops being true it grows a lease per `storage_id_t`.
+
+## The cyan flash was xStreamBufferReset()
+
+For most of this project's life the panel showed a single cyan frame on
+nearly every seek and at every track boundary. It was assumed to be a
+DPI/PSRAM bandwidth problem -- the DSI bridge failing to fetch a line out
+of PSRAM in time -- and six patches were written against that assumption
+before anybody measured it.
+
+It was `xStreamBufferReset()`. Called on a stream buffer that
+`i2s_writer_task` may be parked inside `xStreamBufferReceive()` on.
+FreeRTOS says a reset fails outright if a task is blocked on either side;
+a writer released against indices that moved beneath it is not a defined
+state for the highest-priority task in the program to be in. The last
+link to a corrupted DSI frame is not proven and probably needs a scope,
+but the localisation is not in doubt.
+
+**The reset was enough even when the buffer was empty.** The boundary
+site was made conditional on the ring actually holding something, the log
+says it never did, and the flash went away.
+
+### What was wrong with how it was chased
+
+Every patch from 0403 to 0500 throttled something on the theory that the
+DPI was being starved:
+
+| Patch | Did | Result |
+| --- | --- | --- |
+| 0403 | paced the tail decode-ahead to 3x real time | no change |
+| 0404 | split large blits into 240-row bands | no change |
+| 0408 | 16 KB reads with a 2 ms pause; 8.6 -> 3 MB/s | no change, reverted |
+| 0410 | lane rate 965 -> 700 Mbps | no change |
+| 0411 | sliced `fread()` under the stdio buffer | no change |
+| 0500 | paced the post-seek ring refill | no change |
+
+Six "no change" results in a row, each recorded and none acted on as
+evidence. The theory survived all of them because nothing had ever
+tested whether the mechanism was operating at all.
+
+**0501 tested it.** `cmake/dpi_instrument.cmake` vendors a copy of IDF's
+`esp_lcd` with the DSI bridge underrun ISR's `ESP_DRAM_LOGE` replaced by
+an increment of `g_tab5_dpi_underruns`, which `ui_task` reports once a
+second when it moves. The counter has never moved. There were no
+underruns, so there was no bandwidth problem, so all six patches were
+aimed at a mechanism that was not running.
+
+### The bisection that found it
+
+Once bandwidth was out, the flash was localised by removing one thing at
+a time from the seek commit and counting:
+
+- `SEEK_NOOP` -- service the seek but never call `decoder_seek_sec()` or
+  reset the ring. Fewer flashes, which was an impression and not a count,
+  and was the weakest link in the chain for two patches.
+- 0505 -- the INA226 at 1200 samples per 230 ms across a commit. Sag
+  15-21 mV with the minimum landing anywhere in the window. Not a supply
+  transient.
+- `SEEK_KEEP_RING` -- seek the decoder, leave the ring alone. Nineteen
+  seeks, no flash. The same build flashed at the next boundary, where a
+  different path resets a ring.
+
+That is the answer, bracketed from both sides: 0500 had already excluded
+what happens *after* the reset, and `SEEK_KEEP_RING` excluded everything
+else in the commit.
+
+### The rule
+
+**Do not call `xStreamBufferReset()` on a ring another task reads.** The
+discard happens in the task that owns the read side: the decode loop sets
+`s_pcm_flush`, and `i2s_writer_task` drains both rings with a zero
+timeout at the top of its next pass. Draining from the decode loop
+instead would be two readers on a structure that supports one, which is
+worse than the reset it replaces.
+
+One reset survives, at the boundary ring switch. It clears the ring about
+to become `s_ring_fill`, which the writer is by construction not reading,
+it is conditional on that ring being non-empty, and it logs if it ever
+fires. If the drain it depends on is ever removed, that assumption goes
+with it.
+
+### What this cost, and the lesson
+
+Five wrong hypotheses were published to the log before the right one:
+ring memsets, `ui_draw()` contention, the post-seek refill burst, an
+amplifier current spike, and a pack-voltage sag. Three of those were
+derived by reading the source and looked convincing in the comment that
+accompanied them.
+
+The pattern in all five: **the code kept looking guilty and kept turning
+out innocent, and each acquittal was treated as narrowing rather than as
+evidence the frame was wrong.** Six "no change" results should have
+retired the bandwidth theory long before a counter did.
+
+Two process notes worth keeping:
+
+- **Instrument the assumption before patching around it.** The notes
+  flagged the missing underrun measurement as "the single highest-value
+  next step" and then went five more patches without taking it.
+- **A count, not an impression.** "Fewer flashes" from `SEEK_NOOP` was
+  load-bearing for two patches and was never a number. `SEEK_KEEP_RING`
+  was run as nineteen deliberate seeks and settled it immediately.
+
+### The diagnostics it left behind
+
+All default off and all one-build, in `player_diag.h` and at the top of
+`player.c`:
+
+| Flag | Disables | Answers |
+| --- | --- | --- |
+| `SEEK_NOOP` | `decoder_seek_sec()` and the ring drop | is the flash in the seek at all |
+| `SEEK_KEEP_RING` | the ring drop only | seek vs. ring |
+| `BOUNDARY_NO_INDEX` | minimp3's up-front index build | is the boundary's whole-file read to blame |
+| `TRACE_DUMP_SAMPLES` | (enables) the per-sample pack dump | the shape of the rail |
+
+`BOUNDARY_NO_INDEX` was never needed -- the index build was exonerated
+without being switched off -- and it is kept because it is the cheapest
+way to ask that question if a boundary problem ever comes back.
+
+The DSI underrun counter is worth keeping longest. It is the only thing
+that can distinguish a real bandwidth problem from another six patches of
+assuming one.
+
+**`TRACE_DUMP_SAMPLES` ate the log the first time it ran.** Seventy-five
+warning lines in a few milliseconds against a 4 KB console buffer that
+discards rather than blocks -- the failure documented at length in
+`sdkconfig.defaults` and in "The console drops lines", happening again to
+the person who wrote both. Four seeks logged `button: seek` with no
+`seek to Ns` after it.
+
+## Anything describing the audio belongs to the moment it is heard
+
+The decode loop runs a ring ahead of the speaker. At a track boundary
+that is twenty seconds. So there are two different "now" in this program
+and every piece of state has to pick one:
+
+- **Shaping the audio** -- `rg_scale`, the sample rate, the decoder's
+  position. These belong to the moment the audio is *made*, because they
+  are applied to samples the loop is producing right now.
+- **Describing the audio** -- the title, the album, the envelope, the
+  length, the seekability, the ReplayGain indicator, the chooser's
+  playing-row marker. These belong to the moment the audio is *heard*,
+  and are held in locals until `VISUALS_GATE()` releases them at the
+  handoff.
+
+`rg_scale` and `s_rg_gain_db` are the same number and land in different
+categories. Deferring the gain would play the first twenty seconds of
+every track at the wrong level; publishing the indicator early puts a
+number on screen for audio nobody can hear yet.
+
+Five things now go through the gate. Each was added after being noticed
+separately on screen, which is the argument for a sixth being noticed the
+same way rather than prevented:
+
+| State | Was wrong how |
+| --- | --- |
+| title, album, artist | previous track's name over the new track |
+| envelope | next track's waveform before the decoder opened the file |
+| length, seekability, `s_stats_valid` | bar filling on the old track under the new name |
+| ReplayGain indicator | gain changed 20 s early; then the outgoing one vanished 20 s early |
+| chooser playing marker | accent moved to the next row while the old song played |
+
+The mirror-image rule matters as much: **`play_file()` returning is not
+the track ending.** It returns when the *decode* ends. Anything cleared
+on the way out needs `if (!tail_playing())` or it goes off the screen a
+ring early -- which is how the ReplayGain mark came to disappear twenty
+seconds before the track it described. `s_pos_sec` already had that
+guard; the gain and the marker did not.
+
+The end of a folder is the one case with no handoff to republish
+anything, so the clears live after the loop that waits for the tail to
+play out.
+
+### The chooser is told, not asked
+
+`browser_set_playing()` is called from the gate. `browser.c` used to work
+the marker out from `playlist_current()`, which is where the *decoder*
+is, and the answer is not derivable on that side -- so the player
+publishes it and the browser holds it. Setting it dirties the list,
+because every other cause of a marker move is a press and this one
+arrives from another task with nothing to ride on.
+
+### And nothing draws over the chooser
+
+`load_track_visuals()`, `do_art()` and `show_format_card()` all blit
+straight to the panel, bypassing the `ui_draw()` that `media_task`'s
+browser branch skips. All three check `browser_is_open()` and set
+`s_repaint_art` instead. `show_format_card()` checks inside its wait loop
+as well, because that wait is seconds long on a Xing-less MP3 and the
+chooser can open partway through it.
 
 ## Nothing on screen may outlive the track it describes
 
