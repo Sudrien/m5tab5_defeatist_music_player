@@ -2711,7 +2711,23 @@ static void ui_task(void *arg)
          * writer stops rather than up to a minute before it, which is the
          * gap the old behaviour played its buffer out into.
          */
-        audio_out_set_idle(!s_playing || (!s_decoding && !s_track_changing));
+        /*
+         * And not while a tail is still playing.
+         *
+         * s_decoding and s_track_changing between them used to cover
+         * every moment audio could be coming out, because a decode loop
+         * that had ended meant a ring that had been drained. The last
+         * track of a folder broke that: nothing is decoding, nothing is
+         * changing, and twenty seconds of music is still queued -- so
+         * the amplifier powered down 1.5 s after the decode ended and
+         * the album stopped being audible while the screen, correctly,
+         * went on showing it playing.
+         *
+         * A tail is the third way for sound to exist. It belongs in the
+         * same condition as the other two.
+         */
+        audio_out_set_idle(!s_playing ||
+                           (!s_decoding && !s_track_changing && !s_tail_pending));
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
 
