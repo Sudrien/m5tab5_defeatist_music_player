@@ -1286,16 +1286,65 @@ static bool xfade_can_start(int play, int fill, size_t avail_a, size_t avail_b,
      */
     if (rate == 0 || s_frames_rate[fill] != rate) return false;
 
-    /* Enough of the outgoing track left to fade out of, and enough of
-     * the incoming decoded to fade into. Without the second test a
-     * crossfade started against a track whose open is still in progress
-     * would ramp the outgoing one down into a ring that has nothing in
-     * it. */
+    /*
+     * THE TRIGGER IS THE OUTGOING RING RUNNING DOWN, NOT FILLING UP.
+     *
+     * 0613 had this backwards. It asked for at least need_bytes queued
+     * -- reading "enough left to fade out of" as a minimum -- and with
+     * decode-ahead the outgoing ring holds twenty seconds at the moment
+     * the incoming track produces its first block. The minimum was
+     * satisfied instantly, so the overlap began at the START of the tail
+     * instead of at its end: three seconds of crossfade, then seventeen
+     * seconds of the outgoing track dropped unheard.
+     *
+     * The right question is when the outgoing ring has come DOWN to the
+     * overlap length. play != fill above means the decode loop has moved
+     * on, so this ring can only shrink from here -- the test is a
+     * countdown with a guaranteed direction, not a race.
+     *
+     * One chunk of slack because avail_a falls in chunk-sized steps and
+     * an exact comparison would step straight past the mark. Being 23 ms
+     * early is inaudible; missing entirely is a hard cut.
+     */
     const size_t need_bytes = (size_t)need_frames * PCM_BYTES_PER_FRAME;
-    if (avail_a < need_bytes) return false;
+    if (avail_a > need_bytes + PCM_CHUNK_BYTES) return false;
+
+    /*
+     * And enough of the incoming decoded to fade into, or the outgoing
+     * one ramps down into an empty ring. Four chunks rather than the
+     * whole overlap: requiring the incoming ring to hold the full length
+     * would mean waiting on a decode while the outgoing ring drains past
+     * the point where a crossfade is still possible, which turns a slow
+     * open into a hard cut instead of a shorter fade.
+     */
     if (avail_b < PCM_CHUNK_BYTES * 4) return false;
 
     return true;
+}
+
+/*
+ * The overlap that will actually fit.
+ *
+ * The configured length, or whatever is left of the outgoing track if
+ * that is less. A tail shorter than the setting is the normal case at
+ * the end of a playlist, after a seek near the end, or when the incoming
+ * track's open ran long -- and a short crossfade is a better answer than
+ * none, because the alternative is the ramp running past the end of the
+ * audio it is ramping.
+ *
+ * Below XFADE_MIN_MS there is nothing worth doing: a quarter-second
+ * overlap is not a crossfade, it is a hard cut with a smear on it, and
+ * the plain handoff is cleaner.
+ */
+#define XFADE_MIN_MS    (400)
+
+static uint32_t xfade_fit(uint32_t want_frames, size_t avail_a, uint32_t rate)
+{
+    const uint32_t have = (uint32_t)(avail_a / PCM_BYTES_PER_FRAME);
+    if (have < want_frames) want_frames = have;
+
+    const uint32_t floor_frames = (uint32_t)(((uint64_t)rate * XFADE_MIN_MS) / 1000u);
+    return want_frames < floor_frames ? 0 : want_frames;
 }
 
 /*
@@ -1537,16 +1586,29 @@ static void i2s_writer_task(void *arg)
                 const uint32_t want = rate
                     ? (uint32_t)(((uint64_t)rate * s_xfade_ms) / 1000u) : 0;
                 if (want && xfade_can_start(play, fill, avail_a, avail_b, want)) {
-                    s_xfade_active = true;
-                    s_xfade_armed  = false;
-                    s_xfade_pos    = 0;
-                    s_xfade_frames = want;
-                    xfade_match(play, fill);
-                    ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms, "
-                                  "trim out %d%% in %d%%",
-                             s_xfade_ms,
-                             (int)((s_xfade_gain_a * 100) / 32768),
-                             (int)((s_xfade_gain_b * 100) / 32768));
+                    const uint32_t fit = xfade_fit(want, avail_a, rate);
+                    if (fit == 0) {
+                        /* Too little left to be worth it. Disarm rather
+                         * than keep testing: the ring only shrinks from
+                         * here, so this cannot become true again. */
+                        s_xfade_armed = false;
+                        ESP_LOGI(TAG, "no crossfade: only %u ms of the "
+                                      "outgoing track left",
+                                 (unsigned)((avail_a / PCM_BYTES_PER_FRAME)
+                                            * 1000u / (rate ? rate : 44100)));
+                    } else {
+                        s_xfade_active = true;
+                        s_xfade_armed  = false;
+                        s_xfade_pos    = 0;
+                        s_xfade_frames = fit;
+                        xfade_match(play, fill);
+                        ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms"
+                                      "%s, trim out %d%% in %d%%",
+                                 fit * 1000u / rate,
+                                 fit < want ? " (tail was shorter)" : "",
+                                 (int)((s_xfade_gain_a * 100) / 32768),
+                                 (int)((s_xfade_gain_b * 100) / 32768));
+                    }
                 }
             }
 
@@ -1585,13 +1647,44 @@ static void i2s_writer_task(void *arg)
                 }
 
                 /*
-                 * One side had nothing this pass. The incoming ring
-                 * starving is the likely one -- a slow card behind a
-                 * decode that has only just started -- and the honest
-                 * response is to keep playing the outgoing track for a
-                 * chunk rather than to stall the DMA or to abandon an
-                 * overlap that is probably about to resume.
+                 * One side had nothing this pass -- in practice the
+                 * incoming ring, starved behind a decode that has only
+                 * just started.
+                 *
+                 * The outgoing track keeps playing, but AT ITS CURRENT
+                 * RAMP GAIN and with the ramp held where it is. Falling
+                 * through to the ordinary single-ring path instead would
+                 * write it at unity, which partway down a fade is a step
+                 * back up in level -- the artefact the crossfade exists
+                 * to remove, produced by the crossfade.
+                 *
+                 * Holding the position rather than advancing it means a
+                 * starved overlap stretches rather than losing its
+                 * incoming half. It resumes where it left off when the
+                 * decode catches up, and if the outgoing ring empties
+                 * first the handoff at the top of the loop ends it.
                  */
+                const size_t solo = (avail_a < PCM_CHUNK_BYTES)
+                                  ? (avail_a & ~(size_t)(PCM_BYTES_PER_FRAME - 1))
+                                  : PCM_CHUNK_BYTES;
+                if (solo) {
+                    xStreamBufferReceive(s_ring[play], buf, solo, 0);
+
+                    const uint32_t t = (uint32_t)
+                        (((uint64_t)s_xfade_pos << 16) / s_xfade_frames);
+                    const int32_t g =
+                        (eqpower_q15(t, true) * s_xfade_gain_a) >> 15;
+
+                    int16_t *pcm = (int16_t *)buf;
+                    const size_t n_s = (solo / PCM_BYTES_PER_FRAME) * 2;
+                    for (size_t i = 0; i < n_s; i++) {
+                        pcm[i] = (int16_t)(((int32_t)pcm[i] * g) >> 15);
+                    }
+
+                    audio_out_write(buf, solo);
+                    ring_publish();
+                    continue;
+                }
             }
         }
 
