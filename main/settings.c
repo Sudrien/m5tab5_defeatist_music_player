@@ -17,6 +17,8 @@
 #include "storage.h"
 #include "storage_io.h"
 
+#include <strings.h>
+
 #include "cJSON.h"
 
 static const char *TAG = "tab5_settings";
@@ -95,6 +97,10 @@ static const char *TAG = "tab5_settings";
 #define SETTINGS_MAX_FILE_BYTES (64 * 1024)
 
 static uint8_t    s_volume = 50;
+/* On unless the file says otherwise. A player that quietly stopped
+ * levelling because a key was missing would be indistinguishable from
+ * one whose measurements had gone. */
+static bool       s_rg_enabled = true;
 
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
@@ -125,6 +131,16 @@ static bool s_loaded;
 static size_t s_bytes;
 
 uint8_t settings_volume(void) { return s_volume; }
+
+bool settings_rg_enabled(void) { return s_rg_enabled; }
+
+void settings_set_rg_enabled(bool on)
+{
+    if (on == s_rg_enabled) return;
+    s_rg_enabled = on;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
 
 const char *settings_track(void) { return s_track[0] ? s_track : NULL; }
 
@@ -191,6 +207,16 @@ static bool parse_line(char *line)
          * deleted, is a perfectly ordinary thing to find in this file
          * and is not a reason to reject the record it appears in.
          */
+        /* cJSON_IsBool covers true and false; anything else -- a number,
+         * a string "off" -- is left alone rather than coerced, so a
+         * hand-edited line that is not quite right loses that key
+         * instead of turning the feature off by accident. */
+        const cJSON *rg = cJSON_GetObjectItemCaseSensitive(root, "replaygain");
+        if (cJSON_IsBool(rg)) {
+            s_rg_enabled = cJSON_IsTrue(rg);
+            any = true;
+        }
+
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
         if (cJSON_IsString(t) && t->valuestring && t->valuestring[0]) {
             snprintf(s_track, sizeof(s_track), "%s", t->valuestring);
@@ -211,6 +237,13 @@ static bool parse_line(char *line)
         if (v < 0) v = 0;
         if (v > 100) v = 100;
         s_volume = (uint8_t)v;
+        return true;
+    }
+    if (strcmp(key, "replaygain") == 0) {
+        /* "0" and "false" both off, anything else on -- this form is
+         * only ever hand-written or written by a build older than the
+         * key, so it is read generously. */
+        s_rg_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
     }
     ESP_LOGD(TAG, "unknown key '%s'", key);
@@ -286,17 +319,22 @@ static int record_line(char *out, size_t out_len)
      * every record after it nothing and every record before it its
      * place as the newest.
      */
+    const char *const rg = s_rg_enabled ? "true" : "false";
+
     if (!s_track[0]) {
-        return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+        return snprintf(out, out_len, "{\"volume\":%u,\"replaygain\":%s}\n",
+                        s_volume, rg);
     }
 
     cJSON *str = cJSON_CreateString(s_track);
     char *esc = str ? cJSON_PrintUnformatted(str) : NULL;
     cJSON_Delete(str);
-    if (!esc) return snprintf(out, out_len, "{\"volume\":%u}\n", s_volume);
+    if (!esc) return snprintf(out, out_len, "{\"volume\":%u,\"replaygain\":%s}\n",
+                              s_volume, rg);
 
-    const int n = snprintf(out, out_len, "{\"volume\":%u,\"track\":%s}\n",
-                           s_volume, esc);
+    const int n = snprintf(out, out_len,
+                           "{\"volume\":%u,\"replaygain\":%s,\"track\":%s}\n",
+                           s_volume, rg, esc);
     cJSON_free(esc);
     return n;
 }

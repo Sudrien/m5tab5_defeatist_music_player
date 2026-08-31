@@ -109,6 +109,32 @@ const char *settings_track(void);
  * it stores and marks dirty, and the append happens later. */
 void settings_set_track(const char *path);
 
+/*
+ * Whether ReplayGain is in use at all. Defaults to on.
+ *
+ * ONE SWITCH FOR BOTH HALVES, deliberately.
+ *
+ * ReplayGain here is two activities that look separable and are not:
+ * measuring a track's loudness while it plays, and applying the stored
+ * answer on later plays. Two switches would let a player accumulate
+ * measurements it never uses, or -- worse -- apply gains from sidecars
+ * while refusing to measure, so a library half-measured under one
+ * setting plays at two different levels depending on which tracks
+ * happen to have been played before the switch was thrown.
+ *
+ * Off means off: nothing is measured, nothing is applied, the indicator
+ * does not appear, and the sidecars already on the card are left alone
+ * rather than deleted. Turning it back on resumes with everything that
+ * was learned before it was turned off.
+ *
+ * It takes effect at the next track. The gain is applied to samples as
+ * they are decoded and up to a ring of them is already queued, so
+ * changing it mid-track would either do nothing audible for twenty
+ * seconds or produce a step in level partway through a song.
+ */
+bool settings_rg_enabled(void);
+void settings_set_rg_enabled(bool on);
+
 #ifdef __cplusplus
 }
 #endif

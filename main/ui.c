@@ -192,6 +192,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_NONE:        return "none";
     case UI_ACTION_PLAY_PAUSE:  return "play/pause";
     case UI_ACTION_CHOOSE_FILE: return "folder";
+    case UI_ACTION_SETTINGS:    return "gear (settings)";
     case UI_ACTION_SCREEN_OFF:  return "moon (screen off)";
     case UI_ACTION_SCREEN_ON:   return "wake";
     case UI_ACTION_PREV:        return "prev";
@@ -327,6 +328,24 @@ static void folder_centre(int *cx, int *cy)
     *cy = s_bar_top + ROW_Y;
 }
 
+/*
+ * The gear, in the gap between the folder and prev.
+ *
+ * 156 rather than anywhere else because row 7's boxes must not touch and
+ * this is the only slack left in it. The folder's padded box ends at
+ * 64 + ICON_HALF + HIT_PAD_X = 104; prev's starts at 360 - 112 - SKIP_HALF
+ * - HIT_PAD_X = 199. A gear at 156 spans 116..196, which clears both.
+ *
+ * The right-hand side has no such gap: next ends at 521 and the moon
+ * starts at 616, so a sixth control over there would have had to move
+ * the transport, and the transport is where every finger already goes.
+ */
+static void gear_centre(int *cx, int *cy)
+{
+    *cx = 156;
+    *cy = s_bar_top + ROW_Y;
+}
+
 static void moon_centre(int *cx, int *cy)
 {
     *cx = s_w - 64;
@@ -408,6 +427,43 @@ static void draw_folder(void)
     gfx_fill_rect(cx - ICON_HALF, cy - 18, 21, 7, C_ICON);          /* tab */
     gfx_fill_rect(cx - ICON_HALF, cy - 12, 2 * ICON_HALF, 32, C_ICON);
     gfx_fill_rect(cx - ICON_HALF + 4, cy - 7, 2 * ICON_HALF - 8, 23, C_BG);
+}
+
+/*
+ * A gear: a disc with a hole, and eight teeth around it.
+ *
+ * Drawn from rectangles like everything else on this bar -- there is no
+ * path renderer and does not need to be. The teeth are four rectangles
+ * (two of them crossing at the diagonals would need rotation, which
+ * gfx.c has no notion of), so the diagonals are drawn as short stepped
+ * blocks instead. At 294 PPI the result reads as a gear at arm's length,
+ * which is the whole requirement for an icon.
+ */
+static void draw_gear(void)
+{
+    int cx, cy;
+    gear_centre(&cx, &cy);
+
+    const int r = ICON_HALF - 4;        /* body */
+    const int t = 8;                    /* tooth half-width */
+    const int o = ICON_HALF;            /* tooth outer reach */
+
+    /* Four square teeth on the axes. */
+    gfx_fill_rect(cx - t, cy - o, 2 * t, o - r + 6, C_ICON);
+    gfx_fill_rect(cx - t, cy + r - 6, 2 * t, o - r + 6, C_ICON);
+    gfx_fill_rect(cx - o, cy - t, o - r + 6, 2 * t, C_ICON);
+    gfx_fill_rect(cx + r - 6, cy - t, o - r + 6, 2 * t, C_ICON);
+
+    /* Four on the diagonals, as single blocks set out at 45 degrees.
+     * A rotated rectangle would be nicer and would need a rasteriser. */
+    const int d = (r * 7) / 10;         /* r / sqrt(2), near enough */
+    gfx_fill_rect(cx + d - 6, cy - d - 6, 13, 13, C_ICON);
+    gfx_fill_rect(cx - d - 7, cy - d - 6, 13, 13, C_ICON);
+    gfx_fill_rect(cx + d - 6, cy + d - 7, 13, 13, C_ICON);
+    gfx_fill_rect(cx - d - 7, cy + d - 7, 13, 13, C_ICON);
+
+    gfx_fill_circle(cx, cy, r, C_ICON);
+    gfx_fill_circle(cx, cy, 8, C_BG);   /* the hole */
 }
 
 static void draw_moon(void)
@@ -561,11 +617,58 @@ static void draw_rg(const ui_state_t *st)
 #define C_BATT_LOW   C_FILL
 #define C_BATT_CHG   RGB(0x4C, 0xC0, 0x5E)
 
-static void draw_battery(int pct, bool charging)
+/*
+ * A USB-C connector: a stadium outline with a slot in it.
+ *
+ * Drawn in the battery's place and at the battery's size, so the corner
+ * of the bar that answers "how long has this got" keeps answering it --
+ * the answer is just "as long as the cable is in" rather than a
+ * percentage.
+ *
+ * Rounded ends from two circles and a rectangle, which is how gfx.c
+ * draws anything with a curve; the inner slot is the same shape inset,
+ * and the fill between them is what makes it read as an outline.
+ */
+static void draw_usb_c(int cx, int cy)
+{
+    const int h = BATT_H;
+    const int w = BATT_W + BATT_NUB_W;      /* same footprint as the battery */
+    const int r = h / 2;
+    const int left = cx - w / 2;
+
+    /* Outer body. */
+    gfx_fill_circle(left + r, cy, r, C_ICON);
+    gfx_fill_circle(left + w - r, cy, r, C_ICON);
+    gfx_fill_rect(left + r, cy - r, w - 2 * r, h, C_ICON);
+
+    /* Hollowed out, leaving BATT_WALL of shell. */
+    const int ir = r - BATT_WALL;
+    gfx_fill_circle(left + r, cy, ir, C_BG);
+    gfx_fill_circle(left + w - r, cy, ir, C_BG);
+    gfx_fill_rect(left + r, cy - ir, w - 2 * r, 2 * ir, C_BG);
+
+    /* The tongue, which is what distinguishes a C connector from a
+     * lozenge at this size. */
+    const int tw = w - 2 * (BATT_WALL + 5);
+    const int th = h - 2 * (BATT_WALL + 5);
+    gfx_fill_rect(cx - tw / 2, cy - th / 2, tw, th, C_ICON);
+}
+
+static void draw_battery(int pct, bool charging, bool ext)
 {
     int x0, x1, y;
     vol_bounds(&x0, &x1, &y);
     const int cx = x1 + 42, cy = y;
+
+    /*
+     * Nothing of the battery is drawn when there is no battery. Not an
+     * outline with a connector next to it, and not a connector inside a
+     * battery -- one icon, saying one thing.
+     */
+    if (ext) {
+        draw_usb_c(cx, cy);
+        return;
+    }
 
     const int left = cx - BATT_W / 2;
     const int top  = cy - 30;
@@ -932,8 +1035,9 @@ void ui_draw(const ui_state_t *st)
 
     draw_speaker(st->muted);
     draw_rg(st);
-    draw_battery(st->battery_pct, st->battery_charging);
+    draw_battery(st->battery_pct, st->battery_charging, st->ext_power);
     draw_folder();
+    draw_gear();
     draw_moon();
 
     int cx, cy;
@@ -1052,6 +1156,12 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
     folder_centre(&cx, &cy);
     if (in_box(x, y, cx, cy, ICON_HALF)) {
         act.kind = UI_ACTION_CHOOSE_FILE;
+        return act;
+    }
+
+    gear_centre(&cx, &cy);
+    if (in_box(x, y, cx, cy, ICON_HALF)) {
+        act.kind = UI_ACTION_SETTINGS;
         return act;
     }
 

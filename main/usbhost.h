@@ -63,12 +63,36 @@ esp_err_t usbhost_init(i2c_master_dev_handle_t exp2);
  * Idempotent and asynchronous. The work is three I2C writes and a 100 ms
  * settle for the port's inrush, so it happens on the bus task and never
  * on the caller's.
- *
- * Deliberately one-way. Cutting VBUS again would yank a mounted drive or
- * a playing headset out from under whatever is using it, and the saving
- * is a port with nothing plugged into it.
  */
 void usbhost_start(void);
+
+/*
+ * Turn bus power on or off.
+ *
+ * THIS USED TO BE REFUSED, and the reason it was refused is still true:
+ * cutting VBUS yanks a mounted drive or a playing headset out from under
+ * whatever is using it. What has changed is that there is now somewhere
+ * to ask for it from -- the settings panel -- and therefore someone to
+ * hold responsible for the ordering. The caller must have got the
+ * filesystem out of the way first; storage_usb_power() is the one that
+ * knows how, and is what the panel actually calls.
+ *
+ * The host stack is NOT torn down. Only the P3 line moves. Uninstalling
+ * and reinstalling the USB stack and its class drivers is a great deal
+ * of state to rebuild for no gain, and class drivers cannot re-register
+ * once the port has been up. Powering back on is therefore just VBUS
+ * again, and a device plugged in meanwhile enumerates against the stack
+ * that has been sitting there all along.
+ *
+ * Asynchronous, like usbhost_start(), and for the same reason: the
+ * caller is the UI task and the work is I2C plus a settle.
+ */
+void usbhost_set_power(bool on);
+
+/* Whether VBUS is being driven right now. Distinct from
+ * usbhost_powered(), which is about the port ever having been asked
+ * for. */
+bool usbhost_vbus_on(void);
 
 /* True from the moment the port has been *asked* for, not from the
  * moment the bus task acts on it. Callers that draw a label off this
