@@ -3875,7 +3875,25 @@ static track_end_t play_file(const char *path)
          */
         const bool rg_on = settings_rg_enabled();
 
-        measuring = rg_on && !known;
+        /*
+         * MEASURING IS NOT GATED BY THE SWITCH, and 0603 had this wrong.
+         *
+         * The reasoning there was that measuring and applying are one
+         * activity, so one switch should cover both. The premise was
+         * false. Measuring is not separate work this player can decline
+         * to do: the pass it rides on happens anyway, because the
+         * waveform is always drawn and the envelope walk is that pass.
+         * Loudness costs two biquads and a running sum over samples that
+         * have already been decoded for the picture -- the marginal cost
+         * of measuring is the arithmetic, not the read.
+         *
+         * So switching ReplayGain off to save the measurement saves
+         * nothing, and costs the listener the ability to turn it back on
+         * and have it work immediately. Off now means one thing: DO NOT
+         * APPLY. The sidecar fills in either way, and the day the switch
+         * goes back on, the library is already measured.
+         */
+        measuring = !known;
 
         if (got) {
             /* Seed the RAM caches so load_tags() and do_art() find
@@ -3954,7 +3972,7 @@ static track_end_t play_file(const char *path)
         rg_pending_measuring = measuring;
         if (!rg_on) {
             /*
-             * Off: nothing measured, nothing applied, nothing shown.
+             * Off: measured, filed, not applied, not shown.
              *
              * rg_scale stays at unity and rg_pending_active stays false,
              * so the indicator does not appear -- which matters more than
@@ -3962,11 +3980,13 @@ static track_end_t play_file(const char *path)
              * being heard is not the file's own, and drawing it while the
              * feature is off would be that claim made falsely.
              *
-             * The sidecar is untouched either way. A measurement already
-             * on the card stays on the card, and turning the switch back
-             * on picks it up on the next play rather than measuring it
-             * all over again.
+             * The measurement still runs (see `measuring` above) and
+             * still reaches the sidecar, so the library gets measured as
+             * it is played whether or not anybody is listening to the
+             * result. That is the point: the switch changes what comes
+             * out of the speaker, not what the player learns.
              */
+            if (measuring) loudness_reset(&s_loud);
             rg_pending_active = false;
             rg_pending_db = 0.0f;
         } else if (measuring) {

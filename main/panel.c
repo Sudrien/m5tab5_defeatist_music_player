@@ -43,6 +43,10 @@ static const char *TAG = "tab5_panel";
 #define C_TAB_OFF   RGB(0x10, 0x10, 0x10)
 #define C_BTN       RGB(0x26, 0x26, 0x26)
 #define C_RULE      RGB(0x33, 0x33, 0x33)
+/* Between C_RULE and C_DIM, for the slider's end labels: readable when
+ * looked for, easy to look past when not. The same grey browser.c added
+ * for its prefix note, and for the same reason. */
+#define C_FAINT     RGB(0x55, 0x55, 0x55)
 
 #define TAB_H       (96)
 #define LIST_TOP    (TAB_H + 24)
@@ -334,36 +338,61 @@ static void draw_usb_switch(void)
  * geometry. Drawing and hit-testing both call these; nothing computes a
  * y from a literal.
  */
-#define AUDIO_ROW_H     (ROW_H + 24)
-#define AUDIO_GAP       (28)
+/*
+ * Heights, per control, rather than one row height for all three.
+ *
+ * The first version gave every control the same box and the slider was
+ * the one that suffered: a knob, a track and a heading crammed into the
+ * height of a switch that only has to hold one word. The row a control
+ * gets should be the room that control needs.
+ *
+ * There is no shortage to ration. The tab is three controls and two
+ * notes on a 1280 px screen; the arithmetic below still leaves the last
+ * line of explanation clear of the footer with room to spare, and the
+ * check is at the bottom of draw_audio().
+ */
+#define AUDIO_SWITCH_H  (ROW_H + 24)    /* a pill and a label */
+#define AUDIO_SLIDER_H  (ROW_H + 96)    /* heading, then track and knob */
+#define AUDIO_GAP       (36)            /* between a control and the next */
+#define AUDIO_NOTE_GAP  (14)            /* between a control and its note */
+#define AUDIO_NOTE_STEP (GFX_GLYPH_H(LABEL_SCALE) + 12)
 
-static int audio_row_y(int n)
-{
-    return LIST_TOP + n * (AUDIO_ROW_H + AUDIO_GAP);
-}
+/* The notes are part of the layout, not decoration painted over
+ * whatever space happens to be left, so the y of each control counts the
+ * lines under the one above it. Changing a note's length moves what is
+ * below it instead of colliding with it. */
+#define RG_NOTE_LINES       (2)
+#define ALBUM_NOTE_LINES    (4)
+
+static int rg_y(void)     { return LIST_TOP; }
+static int slider_y(void) { return rg_y() + AUDIO_SWITCH_H
+                                   + AUDIO_NOTE_GAP
+                                   + RG_NOTE_LINES * AUDIO_NOTE_STEP
+                                   + AUDIO_GAP; }
+static int album_y(void)  { return slider_y() + AUDIO_SLIDER_H + AUDIO_GAP; }
 
 static void rg_switch_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
-    *y = audio_row_y(0);
+    *y = rg_y();
     *w = gfx_w();
-    *h = AUDIO_ROW_H;
+    *h = AUDIO_SWITCH_H;
 }
 
 static void xfade_slider_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
-    *y = audio_row_y(1);
+    *y = slider_y();
     *w = gfx_w();
-    *h = AUDIO_ROW_H;
+    *h = AUDIO_SLIDER_H;
 }
 
 static void xfade_album_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
-    *y = audio_row_y(2);
+    *y = album_y();
     *w = gfx_w();
-    *h = AUDIO_ROW_H;
+    *h = AUDIO_SWITCH_H;
 }
 
 /* The slider's travel, inset from the row so the knob at either end is
@@ -390,6 +419,18 @@ static void draw_pill(int px, int py, int pw, int ph, const char *text,
                   text, scale, pw - 8, on ? C_BG : C_DIM);
 }
 
+/* One note under a control: dim, left-aligned, evenly spaced. The line
+ * count is declared above as part of the layout, and this asserts the
+ * two agree rather than trusting them to. */
+static int draw_note(int y, const char *const *lines, int count)
+{
+    for (int i = 0; i < count; i++) {
+        gfx_draw_text(24, y, lines[i], LABEL_SCALE, gfx_w() - 48, C_DIM);
+        y += AUDIO_NOTE_STEP;
+    }
+    return y;
+}
+
 static void draw_audio(void)
 {
     const int w = gfx_w();
@@ -406,9 +447,23 @@ static void draw_audio(void)
         draw_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
                   on ? "ON" : "OFF", on, NAME_SCALE);
     }
-    gfx_draw_text(24, y + bh + 8,
-                  "Off stops measuring and applying; sidecars kept.",
-                  LABEL_SCALE, w - 48, C_DIM);
+
+    /*
+     * What the switch does, and -- since 0612 -- what it no longer does.
+     *
+     * It used to stop measuring as well, and the note said so. It does
+     * not any more: the envelope pass runs regardless because the
+     * waveform is always drawn, and loudness rides on that pass for the
+     * cost of the arithmetic. Saying "levels are still measured" is the
+     * difference between a listener who turns this off for a week and
+     * comes back to a measured library, and one who comes back to a
+     * week of tracks that have to be played twice.
+     */
+    static const char *const rg_note[RG_NOTE_LINES] = {
+        "Evens out loudness between tracks.",
+        "Levels are still measured while off.",
+    };
+    draw_note(y + bh + AUDIO_NOTE_GAP, rg_note, RG_NOTE_LINES);
 
     /* --- Crossfade length ------------------------------------------- */
     xfade_slider_box(&x, &y, &bw, &bh);
@@ -418,7 +473,7 @@ static void draw_audio(void)
     char head[48];
     if (sec == 0) snprintf(head, sizeof(head), "Crossfade   off");
     else          snprintf(head, sizeof(head), "Crossfade   %d s", sec);
-    gfx_draw_text(24, y + 10, head, NAME_SCALE, w - 48,
+    gfx_draw_text(24, y + 20, head, NAME_SCALE, w - 48,
                   sec ? C_TEXT : C_DIM);
 
     /*
@@ -427,10 +482,14 @@ static void draw_audio(void)
      * heading says "off" rather than "0 s": a zero-second crossfade and
      * no crossfade are the same thing, and only one of them is a
      * sentence.
+     *
+     * The track sits in the lower half of a box tall enough that the
+     * knob is not touching the heading above it or the edge below it --
+     * a 28 px knob in an 88 px row was overlapping both.
      */
     int tx0, tx1;
     slider_track(&tx0, &tx1);
-    const int ty = y + bh - 34;
+    const int ty = y + bh - 44;
     gfx_fill_rect(tx0, ty - 3, tx1 - tx0, 6, C_BTN);
     if (sec > 0) {
         const int fill = ((tx1 - tx0) * sec) / SETTINGS_CROSSFADE_MAX;
@@ -438,6 +497,17 @@ static void draw_audio(void)
     }
     const int kx = tx0 + ((tx1 - tx0) * sec) / SETTINGS_CROSSFADE_MAX;
     gfx_fill_circle(kx, ty, SLIDER_KNOB / 2, sec ? C_TEXT : C_DIM);
+
+    /* The ends, so the range is readable without dragging to find it. */
+    gfx_draw_text(SLIDER_INSET, ty + SLIDER_KNOB, "off",
+                  LABEL_SCALE, 80, C_FAINT);
+    {
+        char maxlbl[8];
+        snprintf(maxlbl, sizeof(maxlbl), "%d s", SETTINGS_CROSSFADE_MAX);
+        const int mw = gfx_text_w(maxlbl, LABEL_SCALE);
+        gfx_draw_text(w - SLIDER_INSET - mw, ty + SLIDER_KNOB, maxlbl,
+                      LABEL_SCALE, 80, C_FAINT);
+    }
 
     /* --- Crossfade within an album ---------------------------------- */
     xfade_album_box(&x, &y, &bw, &bh);
@@ -466,15 +536,25 @@ static void draw_audio(void)
      * for that reason and the screen says why, because "Same album:
      * OFF" on its own reads like a limitation rather than a choice.
      */
-    static const char *const note[] = {
-        "Tracks in one folder are treated as one album.",
-        "Off keeps deliberate segues intact -- live sets,",
-        "mixes, movements that run into each other.",
+    static const char *const album_note[ALBUM_NOTE_LINES] = {
+        "One folder counts as one album.",
+        "Off keeps deliberate segues intact:",
+        "live sets, mixes, and movements that",
+        "are meant to run into each other.",
     };
-    int ny = y + bh + 24;
-    for (unsigned i = 0; i < sizeof(note) / sizeof(note[0]); i++) {
-        gfx_draw_text(24, ny, note[i], LABEL_SCALE, w - 48, C_DIM);
-        ny += GFX_GLYPH_H(LABEL_SCALE) + 10;
+    const int used = draw_note(y + bh + AUDIO_NOTE_GAP, album_note,
+                               ALBUM_NOTE_LINES);
+
+    /*
+     * The layout above is arithmetic on constants, so it can be checked
+     * rather than eyeballed. 748 against a footer at 1160 on this panel
+     * -- but the constants are the point, not the numbers: the next
+     * person to lengthen a note or grow a control finds out here instead
+     * of finding text under the CLOSE button.
+     */
+    if (used > gfx_h() - FOOT_H) {
+        ESP_LOGW(TAG, "AUDIO tab overflows: %d px against %d",
+                 used, gfx_h() - FOOT_H);
     }
 }
 
