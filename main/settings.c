@@ -101,6 +101,10 @@ static uint8_t    s_volume = 50;
  * levelling because a key was missing would be indistinguishable from
  * one whose measurements had gone. */
 static bool       s_rg_enabled = true;
+/* Off, so a player that has never been told otherwise plays albums the
+ * way they were cut. See settings_crossfade_sec(). */
+static uint8_t    s_crossfade_sec;
+static bool       s_crossfade_album;
 
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
@@ -133,6 +137,26 @@ static size_t s_bytes;
 uint8_t settings_volume(void) { return s_volume; }
 
 bool settings_rg_enabled(void) { return s_rg_enabled; }
+
+uint8_t settings_crossfade_sec(void)  { return s_crossfade_sec; }
+bool    settings_crossfade_album(void) { return s_crossfade_album; }
+
+void settings_set_crossfade_sec(uint8_t sec)
+{
+    if (sec > SETTINGS_CROSSFADE_MAX) sec = SETTINGS_CROSSFADE_MAX;
+    if (sec == s_crossfade_sec) return;
+    s_crossfade_sec = sec;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+void settings_set_crossfade_album(bool on)
+{
+    if (on == s_crossfade_album) return;
+    s_crossfade_album = on;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
 
 void settings_set_rg_enabled(bool on)
 {
@@ -217,6 +241,24 @@ static bool parse_line(char *line)
             any = true;
         }
 
+        /* Clamped on the way in as well as on the way out. The file is
+         * hand-editable and a number from it is not more trustworthy for
+         * having been written by this program last time. */
+        const cJSON *xf = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
+        if (cJSON_IsNumber(xf)) {
+            int v = xf->valueint;
+            if (v < 0) v = 0;
+            if (v > SETTINGS_CROSSFADE_MAX) v = SETTINGS_CROSSFADE_MAX;
+            s_crossfade_sec = (uint8_t)v;
+            any = true;
+        }
+
+        const cJSON *xa = cJSON_GetObjectItemCaseSensitive(root, "crossfade_album");
+        if (cJSON_IsBool(xa)) {
+            s_crossfade_album = cJSON_IsTrue(xa);
+            any = true;
+        }
+
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
         if (cJSON_IsString(t) && t->valuestring && t->valuestring[0]) {
             snprintf(s_track, sizeof(s_track), "%s", t->valuestring);
@@ -237,6 +279,17 @@ static bool parse_line(char *line)
         if (v < 0) v = 0;
         if (v > 100) v = 100;
         s_volume = (uint8_t)v;
+        return true;
+    }
+    if (strcmp(key, "crossfade") == 0) {
+        int v = atoi(val);
+        if (v < 0) v = 0;
+        if (v > SETTINGS_CROSSFADE_MAX) v = SETTINGS_CROSSFADE_MAX;
+        s_crossfade_sec = (uint8_t)v;
+        return true;
+    }
+    if (strcmp(key, "crossfade_album") == 0) {
+        s_crossfade_album = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
     }
     if (strcmp(key, "replaygain") == 0) {
@@ -320,21 +373,35 @@ static int record_line(char *out, size_t out_len)
      * place as the newest.
      */
     const char *const rg = s_rg_enabled ? "true" : "false";
+    const char *const xa = s_crossfade_album ? "true" : "false";
+
+    /*
+     * One format string for the settings half, used by all three exits
+     * below, so a key added here cannot reach the file on some paths and
+     * not others -- which is what an append-only format punishes: the
+     * newest record wins whole, so a record missing a key silently
+     * reverts it.
+     */
+#define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
+                            "\"crossfade\":%u,\"crossfade_album\":%s"
+#define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa
 
     if (!s_track[0]) {
-        return snprintf(out, out_len, "{\"volume\":%u,\"replaygain\":%s}\n",
-                        s_volume, rg);
+        return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",
+                        SETTINGS_FIELDS_ARGS);
     }
 
     cJSON *str = cJSON_CreateString(s_track);
     char *esc = str ? cJSON_PrintUnformatted(str) : NULL;
     cJSON_Delete(str);
-    if (!esc) return snprintf(out, out_len, "{\"volume\":%u,\"replaygain\":%s}\n",
-                              s_volume, rg);
+    if (!esc) return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",
+                              SETTINGS_FIELDS_ARGS);
 
     const int n = snprintf(out, out_len,
-                           "{\"volume\":%u,\"replaygain\":%s,\"track\":%s}\n",
-                           s_volume, rg, esc);
+                           "{" SETTINGS_FIELDS_FMT ",\"track\":%s}\n",
+                           SETTINGS_FIELDS_ARGS, esc);
+#undef SETTINGS_FIELDS_FMT
+#undef SETTINGS_FIELDS_ARGS
     cJSON_free(esc);
     return n;
 }
