@@ -135,6 +135,47 @@ void settings_set_track(const char *path);
 bool settings_rg_enabled(void);
 void settings_set_rg_enabled(bool on);
 
+/*
+ * Crossfade length, in whole seconds. 0 is off.
+ *
+ * Seconds rather than milliseconds because nobody wants 2,750 ms of
+ * crossfade, and a control offering it invites fiddling with a number
+ * that has no audible resolution at that scale. SETTINGS_CROSSFADE_MAX
+ * is the ceiling.
+ *
+ * Whether an overlap actually happens at a given boundary is a separate
+ * question -- rates must match, the next track has to be decoded far
+ * enough ahead, and the boundary has to be a track ending rather than a
+ * skip. This is the length it gets when all of that holds, not a
+ * promise that it will.
+ */
+#define SETTINGS_CROSSFADE_MAX  (12)
+uint8_t settings_crossfade_sec(void);
+void settings_set_crossfade_sec(uint8_t sec);
+
+/*
+ * Whether to crossfade between two tracks from the same album.
+ *
+ * Off by default, and that default is the whole reason this is a
+ * separate switch rather than a consequence of the one above.
+ *
+ * An album is frequently sequenced to run together -- a live record, a
+ * DJ mix, a symphony split across movements, anything where track 4 ends
+ * mid-phrase because track 5 begins there. Crossfading those is not a
+ * softer transition, it is playing three seconds of two different bars
+ * at once over a join the producer already made. The listener asked for
+ * a crossfade between SONGS; the album boundary is where that intent
+ * stops applying.
+ *
+ * "Same album" is decided by folder, not by tag. A folder is what the
+ * playlist is built from, it is what the user picked, and it is right
+ * for the untagged rips this player is full of -- the Ogg files in the
+ * last log have no ALBUM tag at all, and a tag-based test would call
+ * every one of them a different album and crossfade the lot.
+ */
+bool settings_crossfade_album(void);
+void settings_set_crossfade_album(bool on);
+
 #ifdef __cplusplus
 }
 #endif

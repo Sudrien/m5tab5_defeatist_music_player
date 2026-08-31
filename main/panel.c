@@ -76,6 +76,17 @@ typedef enum {
 
 static const char *const k_tab_name[TAB_COUNT] = { "SD", "USB", "BUILD", "AUDIO" };
 
+/*
+ * A drag on the crossfade slider.
+ *
+ * Every other control on this panel is a press, and panel_touch() was
+ * built on the down edge to match. A slider is the first thing here that
+ * has to follow a finger, so it needs the same treatment browser.c's
+ * scrollbar got: state held across polls, and a handler that runs
+ * outside the tapped test.
+ */
+static bool        s_slider_drag;
+
 static bool        s_open;
 static bool        s_dirty;
 static bool        s_was_down;
@@ -90,6 +101,7 @@ void panel_open(void)
     s_open = true;
     s_dirty = true;
     s_was_down = false;
+    s_slider_drag = false;
     /* Not reset to TAB_SD. Coming back to the tab you were last on is
      * the difference between a panel you check twice and one you
      * navigate twice. */
@@ -316,50 +328,153 @@ static void draw_usb_switch(void)
                   locked ? C_DISABLED : on ? C_BG : C_DIM);
 }
 
+/*
+ * The AUDIO tab is three controls in a column now, so their boxes are
+ * derived from one row height rather than each carrying its own
+ * geometry. Drawing and hit-testing both call these; nothing computes a
+ * y from a literal.
+ */
+#define AUDIO_ROW_H     (ROW_H + 24)
+#define AUDIO_GAP       (28)
+
+static int audio_row_y(int n)
+{
+    return LIST_TOP + n * (AUDIO_ROW_H + AUDIO_GAP);
+}
+
 static void rg_switch_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
-    *y = LIST_TOP;
+    *y = audio_row_y(0);
     *w = gfx_w();
-    *h = ROW_H + 24;
+    *h = AUDIO_ROW_H;
+}
+
+static void xfade_slider_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0;
+    *y = audio_row_y(1);
+    *w = gfx_w();
+    *h = AUDIO_ROW_H;
+}
+
+static void xfade_album_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0;
+    *y = audio_row_y(2);
+    *w = gfx_w();
+    *h = AUDIO_ROW_H;
+}
+
+/* The slider's travel, inset from the row so the knob at either end is
+ * still fully on screen. */
+#define SLIDER_INSET    (24)
+#define SLIDER_KNOB     (28)
+
+static void slider_track(int *x0, int *x1)
+{
+    *x0 = SLIDER_INSET + SLIDER_KNOB;
+    *x1 = gfx_w() - SLIDER_INSET - SLIDER_KNOB;
+}
+
+/* A pill with a word in it. Both switches on this tab are this, and the
+ * USB tab's is nearly it -- close enough to want sharing, different
+ * enough in size that sharing it would mean three parameters nobody can
+ * read at the call site. */
+static void draw_pill(int px, int py, int pw, int ph, const char *text,
+                      bool on, int scale)
+{
+    gfx_fill_rect(px, py, pw, ph, on ? C_ON : C_BTN);
+    const int tw = gfx_text_w(text, scale);
+    gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(scale)) / 2,
+                  text, scale, pw - 8, on ? C_BG : C_DIM);
 }
 
 static void draw_audio(void)
 {
     const int w = gfx_w();
-    const bool on = settings_rg_enabled();
-
     int x, y, bw, bh;
-    rg_switch_box(&x, &y, &bw, &bh);
 
+    /* --- ReplayGain ------------------------------------------------- */
+    rg_switch_box(&x, &y, &bw, &bh);
     gfx_fill_rect(x, y, bw, bh, C_ROW);
     gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "ReplayGain",
                   NAME_SCALE, 400, C_TEXT);
+    {
+        const bool on = settings_rg_enabled();
+        const int pw = 132, ph = 56;
+        draw_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                  on ? "ON" : "OFF", on, NAME_SCALE);
+    }
+    gfx_draw_text(24, y + bh + 8,
+                  "Off stops measuring and applying; sidecars kept.",
+                  LABEL_SCALE, w - 48, C_DIM);
 
-    const char *state = on ? "ON" : "OFF";
-    const int pw = 132, ph = 56;
-    const int px = w - 24 - pw, py = y + (bh - ph) / 2;
-    gfx_fill_rect(px, py, pw, ph, on ? C_ON : C_BTN);
-    const int tw = gfx_text_w(state, NAME_SCALE);
-    gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(NAME_SCALE)) / 2,
-                  state, NAME_SCALE, pw - 8, on ? C_BG : C_DIM);
+    /* --- Crossfade length ------------------------------------------- */
+    xfade_slider_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+
+    const int sec = settings_crossfade_sec();
+    char head[48];
+    if (sec == 0) snprintf(head, sizeof(head), "Crossfade   off");
+    else          snprintf(head, sizeof(head), "Crossfade   %d s", sec);
+    gfx_draw_text(24, y + 10, head, NAME_SCALE, w - 48,
+                  sec ? C_TEXT : C_DIM);
 
     /*
-     * What the switch actually does, said on the screen rather than left
-     * to be discovered. "ReplayGain: OFF" with no explanation invites
-     * the reasonable and wrong guess that existing measurements have
-     * been thrown away.
+     * The travel starts at 0 and 0 means off, so the left end of this
+     * slider is a real setting rather than a minimum. That is why the
+     * heading says "off" rather than "0 s": a zero-second crossfade and
+     * no crossfade are the same thing, and only one of them is a
+     * sentence.
+     */
+    int tx0, tx1;
+    slider_track(&tx0, &tx1);
+    const int ty = y + bh - 34;
+    gfx_fill_rect(tx0, ty - 3, tx1 - tx0, 6, C_BTN);
+    if (sec > 0) {
+        const int fill = ((tx1 - tx0) * sec) / SETTINGS_CROSSFADE_MAX;
+        gfx_fill_rect(tx0, ty - 3, fill, 6, C_ACCENT);
+    }
+    const int kx = tx0 + ((tx1 - tx0) * sec) / SETTINGS_CROSSFADE_MAX;
+    gfx_fill_circle(kx, ty, SLIDER_KNOB / 2, sec ? C_TEXT : C_DIM);
+
+    /* --- Crossfade within an album ---------------------------------- */
+    xfade_album_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Same album",
+                  NAME_SCALE, 400, sec ? C_TEXT : C_DISABLED);
+    {
+        const bool on = settings_crossfade_album();
+        const int pw = 132, ph = 56;
+        /*
+         * Greyed with the length at zero, because it cannot do anything
+         * then -- and left tappable anyway, so setting it up before
+         * turning crossfade on is possible rather than a trap. What is
+         * greyed is the claim that it is currently having an effect.
+         */
+        draw_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                  on ? "ON" : "OFF", on && sec, NAME_SCALE);
+    }
+
+    /*
+     * The one thing about this that is not obvious from the label.
+     *
+     * Albums are frequently sequenced to run together, and crossfading
+     * across a join the producer already made is not a softer
+     * transition -- it is two bars playing at once. Off is the default
+     * for that reason and the screen says why, because "Same album:
+     * OFF" on its own reads like a limitation rather than a choice.
      */
     static const char *const note[] = {
-        "Levels every track to the same loudness.",
-        "Off stops both measuring and applying;",
-        "measurements already on the card are kept.",
-        "Takes effect at the next track.",
+        "Tracks in one folder are treated as one album.",
+        "Off keeps deliberate segues intact -- live sets,",
+        "mixes, movements that run into each other.",
     };
-    int ny = y + bh + 32;
+    int ny = y + bh + 24;
     for (unsigned i = 0; i < sizeof(note) / sizeof(note[0]); i++) {
         gfx_draw_text(24, ny, note[i], LABEL_SCALE, w - 48, C_DIM);
-        ny += GFX_GLYPH_H(LABEL_SCALE) + 12;
+        ny += GFX_GLYPH_H(LABEL_SCALE) + 10;
     }
 }
 
@@ -426,9 +541,59 @@ bool panel_touch(bool down, int x, int y)
     const bool tapped = down && !s_was_down;
     s_was_down = down;
 
-    if (!s_open || !tapped) return false;
+    if (!s_open) return false;
 
     const int w = gfx_w(), h = gfx_h();
+
+    /*
+     * The slider, before the tapped test and before the row tests, for
+     * browser.c's reasons: a drag is a run of downs with one edge at the
+     * front, and the row underneath must not also act on a press that
+     * started a drag.
+     */
+    if (s_tab == TAB_AUDIO) {
+        int sx, sy, sw, sh;
+        xfade_slider_box(&sx, &sy, &sw, &sh);
+
+        if (s_slider_drag || (tapped && y >= sy && y < sy + sh)) {
+            if (down) {
+                int tx0, tx1;
+                slider_track(&tx0, &tx1);
+
+                /*
+                 * Snapped to whole seconds on the way in, so the knob
+                 * can only ever sit where a setting exists. A slider
+                 * that renders between two values it cannot hold looks
+                 * like it is lagging the finger.
+                 */
+                int pos = x - tx0;
+                if (pos < 0) pos = 0;
+                if (pos > tx1 - tx0) pos = tx1 - tx0;
+
+                const int span = tx1 - tx0;
+                const int want = span > 0
+                    ? (pos * SETTINGS_CROSSFADE_MAX + span / 2) / span
+                    : 0;
+
+                if (want != settings_crossfade_sec()) {
+                    settings_set_crossfade_sec((uint8_t)want);
+                    s_dirty = true;
+                }
+                s_slider_drag = true;
+                return false;
+            }
+
+            if (s_slider_drag) {
+                s_slider_drag = false;
+                s_dirty = true;
+                ESP_LOGI(TAG, "crossfade %d s (next boundary)",
+                         settings_crossfade_sec());
+                return false;
+            }
+        }
+    }
+
+    if (!tapped) return false;
 
     if (y < TAB_H) {
         int which = x / (w / TAB_COUNT);
@@ -465,15 +630,32 @@ bool panel_touch(bool down, int x, int y)
 
     if (s_tab == TAB_AUDIO) {
         int bx, by, bw, bh;
-        rg_switch_box(&bx, &by, &bw, &bh);
+
         /* The whole row, not just the pill. A 132 px target beside 400 px
          * of dead label is the kind of thing that reads as the button
          * being broken when the press lands 20 px to the left. */
+        rg_switch_box(&bx, &by, &bw, &bh);
         if (y >= by && y < by + bh) {
             const bool on = !settings_rg_enabled();
             settings_set_rg_enabled(on);
             ESP_LOGI(TAG, "replaygain %s (next track)", on ? "on" : "off");
             s_dirty = true;
+            return false;
+        }
+
+        xfade_album_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            /* Tappable with the length at zero. It is drawn greyed
+             * because it is having no effect, not because it is
+             * unavailable -- setting it before turning crossfade on
+             * should work rather than silently do nothing. */
+            const bool on = !settings_crossfade_album();
+            settings_set_crossfade_album(on);
+            ESP_LOGI(TAG, "crossfade within an album: %s%s",
+                     on ? "on" : "off",
+                     settings_crossfade_sec() ? "" : " (crossfade is off)");
+            s_dirty = true;
+            return false;
         }
     }
     return false;
