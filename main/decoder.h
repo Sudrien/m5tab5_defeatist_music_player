@@ -31,11 +31,82 @@ extern "C" {
 
 typedef struct decoder decoder_t;
 
+/*
+ * Whether the samples this backend hands out are exactly the recording.
+ *
+ * A lossy encoder cannot represent an arbitrary number of samples. MP3
+ * works in 1152-sample granules and its filterbank has latency, so
+ * encoding N samples produces silence at the front (LAME: 576 + 529
+ * samples of encoder delay) and silence at the back (padding out the
+ * last granule) that were never in the source. AAC has the same problem
+ * with a different constant. Opus states a mandatory pre-skip in its ID
+ * header. Each format carries the two counts somewhere -- Xing/Info/LAME
+ * for MP3, iTunSMPB or the edit list for MP4, the ID header for Opus --
+ * and a decoder that reads them reconstructs the original sample count
+ * exactly.
+ *
+ * THIS IS NOT THE SAME QUESTION AS "IS IT GAPLESS".
+ *
+ * Gapless playback is what you get when the trim is right AND the next
+ * track starts at the correct sample. This enum is only the first half:
+ * has the encoder's silence been taken off the ends. Nothing here says
+ * anything about what the player then does with the boundary.
+ *
+ * WHY IT IS EXPOSED RATHER THAN LOGGED AND FORGOTTEN
+ *
+ * It was logged and forgotten: minimp3_open() printed "gapless trim
+ * active" or not, and dropped the fact on the floor. That was enough
+ * while the boundary was a hard cut, because a hard cut at the wrong
+ * sample is a click either way and the trim only made it quieter.
+ *
+ * It stops being enough for a crossfade. An overlap has to be positioned
+ * against the trimmed end of the outgoing track and the trimmed start of
+ * the incoming one; if either trim silently did not happen, both are
+ * wrong by an unknown few tens of milliseconds that vary per file and
+ * per encoder. A fade-out tolerates that. Two tracks played against each
+ * other do not -- the error is audible as the incoming track entering
+ * early or late, and on anything with a beat that is the artefact you
+ * hear rather than the crossfade.
+ *
+ * So the caller needs to be able to ASK, and to refuse.
+ */
+typedef enum {
+    /*
+     * The backend does not say, and this format has ends that could
+     * need trimming. Treat as "not exact": the honest answer for a
+     * compressed format where nothing has verified the delay is being
+     * removed. This is the default so that a format added to the table
+     * without thought reports the cautious answer rather than the
+     * flattering one.
+     */
+    DECODER_TRIM_UNKNOWN = 0,
+
+    /*
+     * The samples are the recording. Either the format has no encoder
+     * delay to remove (WAV, FLAC) or the backend has read the metadata
+     * and removed it (MP3 with a Xing/Info header).
+     */
+    DECODER_TRIM_EXACT,
+
+    /*
+     * The format has encoder delay and the metadata that describes it is
+     * absent, so the ends carry silence of unknown length. Distinct from
+     * UNKNOWN: this is a fact about the file, not a gap in what the
+     * player has checked. A Xing-less MP3 is the case.
+     */
+    DECODER_TRIM_NONE,
+} decoder_trim_t;
+
+/* "exact", "untrimmed", "unknown". Never NULL. */
+const char *decoder_trim_name(decoder_trim_t t);
+
 typedef struct {
     int sample_rate;        /* Hz */
     int channels;           /* 1 or 2 */
     int bitrate_kbps;       /* 0 when the backend does not report one */
     const char *codec;      /* "mp3", "flac", ... for logging */
+    /* Set at open and constant for the file. See decoder_trim_t. */
+    decoder_trim_t trim;
 } decoder_info_t;
 
 /* Extensions decoder_open() will accept, for the directory scan. */

@@ -399,6 +399,135 @@ static void usb_detach(void)
     ESP_LOGI(TAG, "USB drive removed");
 }
 
+bool storage_usb_busy(void)
+{
+    return s_held == STORAGE_USB && s_mounted[STORAGE_USB];
+}
+
+bool storage_usb_power(bool on)
+{
+    if (on) {
+        usbhost_set_power(true);
+        return true;
+    }
+
+    /*
+     * Refused rather than forced. A held volume means the decode loop is
+     * inside a read on it, and the only ways to make this safe are to
+     * stop the track or to wait for it -- one of which is a decision
+     * that belongs to the listener and the other of which would block
+     * the UI task on a card read.
+     */
+    if (storage_usb_busy()) {
+        ESP_LOGW(TAG, "USB power off refused: a track is playing from %s",
+                 STORAGE_USB_MOUNT);
+        return false;
+    }
+
+    /*
+     * Unmount before the power goes, not after.
+     *
+     * After is what a physical unplug does, and it works only because
+     * the MSC driver reports the disconnect and storage_task tears the
+     * mount down in response. Doing it deliberately, we can do it in the
+     * right order instead: VFS unregistered, device uninstalled, and
+     * only then the line dropped -- so there is no window in which a
+     * mounted filesystem is sitting on a dead bus.
+     *
+     * From the caller's task rather than deferred to storage_task,
+     * because the caller is a button press and the alternative is a flag
+     * that the poll task services up to a second later, with the panel
+     * showing the old state for all of it. usb_detach() touches only
+     * this file's own handles and the flags, and the poll task's other
+     * work is the card.
+     */
+    if (s_mounted[STORAGE_USB] || s_msc_dev) usb_detach();
+
+    usbhost_set_power(false);
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Snapshots, for the settings panel                                   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Read from the caller's task, off structures the poll task owns.
+ *
+ * There is no lock, and the reason it is safe is the same reason
+ * storage_present() has none: the pointers are set before s_mounted goes
+ * true and cleared after it goes false, both on one task, and a torn
+ * read here costs one frame of a stale capacity figure on a panel that
+ * redraws every second. A mutex would put the drawing task behind a
+ * mount, which can take hundreds of milliseconds on a slow card.
+ *
+ * The pointer is sampled once into a local. Testing s_card and then
+ * dereferencing s_card is two reads of something another task can
+ * NULL in between; testing a local cannot be.
+ */
+void storage_sd_info(storage_sd_info_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    sdmmc_card_t *const c = s_card;
+    if (!c || !s_mounted[STORAGE_SD]) return;
+
+    out->present = true;
+    snprintf(out->name, sizeof(out->name), "%s", c->cid.name);
+    snprintf(out->type, sizeof(out->type), "%s",
+             c->is_mmc ? "MMC/eMMC"
+                       : (c->ocr & SD_OCR_CCS_BIT) ? "SDHC/SDXC" : "SDSC");
+    out->capacity_mb = ((uint64_t)c->csd.capacity * c->csd.sector_size)
+                       / (1024 * 1024);
+    /* The negotiated clock, not the card's printed rating -- which is
+     * the number worth showing, because a card that came up at 20 MHz on
+     * a bus that can do 40 is the answer to a stuttering track. */
+    out->speed_khz = c->max_freq_khz;
+    out->bus_width = c->log_bus_width ? 4 : 1;
+}
+
+/* The descriptor strings are UTF-16 in the descriptor and wchar_t here.
+ * Taken as the low byte of each unit, which is exact for the ASCII every
+ * drive actually uses and produces a readable approximation of anything
+ * else -- against a panel field that is 36 bytes and a font that has no
+ * glyphs beyond Latin-1 either way. */
+static void wide_to_ascii(char *dst, size_t dst_len, const wchar_t *src)
+{
+    size_t i = 0;
+    if (!dst_len) return;
+    if (src) {
+        for (; i + 1 < dst_len && src[i]; i++) {
+            const unsigned c = (unsigned)src[i];
+            dst[i] = (c >= 0x20 && c < 0x7F) ? (char)c : '?';
+        }
+    }
+    dst[i] = '\0';
+}
+
+void storage_usb_info(storage_usb_info_t *out)
+{
+    if (!out) return;
+    memset(out, 0, sizeof(*out));
+
+    out->powered = storage_usb_powered();
+
+    msc_host_device_handle_t const dev = s_msc_dev;
+    if (!dev || !s_mounted[STORAGE_USB]) return;
+
+    msc_host_device_info_t info;
+    if (msc_host_get_device_info(dev, &info) != ESP_OK) return;
+
+    out->present = true;
+    out->vid = info.idVendor;
+    out->pid = info.idProduct;
+    out->sector_size = info.sector_size;
+    out->capacity_mb = ((uint64_t)info.sector_count * info.sector_size)
+                       / (1024 * 1024);
+    wide_to_ascii(out->product, sizeof(out->product), info.iProduct);
+    wide_to_ascii(out->manufacturer, sizeof(out->manufacturer), info.iManufacturer);
+}
+
 /* ------------------------------------------------------------------ */
 
 /*

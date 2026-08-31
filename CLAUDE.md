@@ -467,6 +467,36 @@ Two would mean something else entirely. After pulling this change:
 or `idf.py fullclean`. Verify with `idf.py menuconfig` under
 *Component config -> FAT Filesystem support -> API character encoding*.
 
+This is not a one-off. It applies to **every** symbol added to
+`sdkconfig.defaults` after a tree's first build, and the failures are
+all of this shape: the file states a decision, the comments above it
+explain the decision, and the build ignores both. The optimisation level
+is the one that bites hardest -- `CONFIG_COMPILER_OPTIMIZATION_PERF`
+(`-O2`) sitting inert while the binary is built at `-Og`, so the decode
+loop is several times slower than every timing constant in `player.c`
+assumes. The top-level `CMakeLists.txt` warns about that particular one
+at configure time, because a stutter caused by an optimisation level
+looks exactly like a stutter caused by a slow card.
+
+`-Og` is still a legitimate thing to ask for. Stepping through
+`play_file()` at `-O2` is hopeless. The warning says so.
+
+Two things change when the switch does take effect:
+
+* **More warnings.** GCC's dataflow analysis is far stronger at `-O2`,
+  and code that only ever compiled clean at `-Og` has not really been
+  checked. `0608` is the worked example: `scroll_geom()` returns without
+  touching its out-params when the list fits, and nothing proved the
+  separate `s_count > rows` test agreed with it.
+* **The lock-free handoffs get their first real test.** `s_wave_ready`,
+  `s_fade_out`, `s_pcm_flush` and `s_rg_pending_ready` are all
+  write-the-payload-then-set-the-flag pairs across tasks. `volatile`
+  stops the compiler caching or reordering *those* accesses; it is not a
+  barrier and does not order a non-volatile payload write against the
+  volatile flag write. At `-Og` that is academic because nothing moves.
+  If something starts misbehaving after switching, look here first, and
+  reach for release/acquire rather than for more `volatile`.
+
 ### Cover art and tags beyond MP3
 
 `covertag.c` dispatches on magic bytes and reads whichever container is

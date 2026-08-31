@@ -68,6 +68,18 @@ typedef struct {
     bool battery_charging;
 
     /*
+     * No pack: the board is on the USB-C supply. Drawn as a connector
+     * where the battery would be, rather than as an empty battery.
+     *
+     * The distinction is the whole point. An outline with no fill means
+     * "there is a pack and I cannot read it"; a connector means "there
+     * is no pack, and the thing keeping this alive is the cable". Those
+     * are different situations and only one of them means unplugging is
+     * about to switch the player off.
+     */
+    bool ext_power;
+
+    /*
      * ReplayGain, when a measured gain is in effect for this track.
      *
      * Drawn in its own colour rather than folded into the volume
@@ -98,6 +110,7 @@ typedef enum {
     UI_ACTION_NONE = 0,
     UI_ACTION_PLAY_PAUSE,
     UI_ACTION_CHOOSE_FILE,   /* folder button: open the chooser */
+    UI_ACTION_SETTINGS,      /* gear button: open the settings panel */
     UI_ACTION_SCREEN_OFF,
     UI_ACTION_SCREEN_ON,
     UI_ACTION_PREV,         /* start of track, or the track before it */

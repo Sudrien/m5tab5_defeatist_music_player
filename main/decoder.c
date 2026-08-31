@@ -72,23 +72,58 @@ struct decoder {
 /* Extension mapping                                                   */
 /* ------------------------------------------------------------------ */
 
+/*
+ * The trim column is the answer for the FORMAT, before the file is
+ * opened. MP3 is the one entry that cannot be decided here -- whether
+ * the delay is known depends on whether that particular file has a Xing
+ * header -- so it is filled in at open from ex.detected_samples and the
+ * table value is only its starting point.
+ *
+ * WAV and FLAC are EXACT because there is nothing to trim: both store a
+ * sample count and neither has an encoder delay to remove. That is not
+ * an assumption about the backend, it is a property of the containers.
+ *
+ * Everything else is UNKNOWN, and that is a statement about what has
+ * been checked rather than about the formats. AAC, m4a and Opus all
+ * have encoder delay and all carry metadata describing it -- iTunSMPB
+ * or the edit list, the Opus ID header's pre-skip -- but
+ * esp_audio_simple_dec has no surface for any of it. Its API takes bytes
+ * and returns PCM; the info struct carries frame_size, not a delay. So
+ * the honest answer is that nobody here has verified the ends are being
+ * removed, and UNKNOWN is what that means.
+ *
+ * Opus is the one worth calling out: its pre-skip is not an optional
+ * nicety, the spec requires decoders to discard it. If a .opus file
+ * plays with 312 samples of nothing at the front, it is this line that
+ * says nobody has confirmed otherwise.
+ */
 static const struct {
     const char *ext;
     backend_t backend;
     esp_audio_simple_dec_type_t type;   /* ignored for minimp3 */
     const char *name;
+    decoder_trim_t trim;
 } k_formats[] = {
-    { ".mp3",  BACKEND_MINIMP3,   0,                              "mp3"  },
-    { ".flac", BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC, "flac" },
-    { ".wav",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_WAV,  "wav"  },
-    { ".m4a",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_M4A,  "m4a"  },
-    { ".mp4",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_M4A,  "m4a"  },
-    { ".aac",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,  "aac"  },
-    { ".ogg",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_OGG,  "ogg"  },
-    { ".opus", BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_OGG,  "ogg"  },
-    { ".ts",   BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_TS,   "ts"   },
-    { ".amr",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_AMRNB,"amr"  },
+    { ".mp3",  BACKEND_MINIMP3,   0,                              "mp3",  DECODER_TRIM_UNKNOWN },
+    { ".flac", BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_FLAC, "flac", DECODER_TRIM_EXACT   },
+    { ".wav",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_WAV,  "wav",  DECODER_TRIM_EXACT   },
+    { ".m4a",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_M4A,  "m4a",  DECODER_TRIM_UNKNOWN },
+    { ".mp4",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_M4A,  "m4a",  DECODER_TRIM_UNKNOWN },
+    { ".aac",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,  "aac",  DECODER_TRIM_UNKNOWN },
+    { ".ogg",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_OGG,  "ogg",  DECODER_TRIM_UNKNOWN },
+    { ".opus", BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_OGG,  "ogg",  DECODER_TRIM_UNKNOWN },
+    { ".ts",   BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_TS,   "ts",   DECODER_TRIM_UNKNOWN },
+    { ".amr",  BACKEND_ESP_CODEC, ESP_AUDIO_SIMPLE_DEC_TYPE_AMRNB,"amr",  DECODER_TRIM_UNKNOWN },
 };
+
+const char *decoder_trim_name(decoder_trim_t t)
+{
+    switch (t) {
+    case DECODER_TRIM_EXACT: return "exact";
+    case DECODER_TRIM_NONE:  return "untrimmed";
+    default:                 return "unknown";
+    }
+}
 
 /* There is no ESP_AUDIO_SIMPLE_DEC_TYPE_OPUS. There is _RAW_OPUS, and
  * the header is explicit that it "only supports input data with a size
@@ -185,6 +220,20 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
      * known and trimmed. Say so, because "gapless" silently not
      * happening is exactly the kind of thing that gets rediscovered
      * three months later. */
+    /*
+     * And now it is recorded rather than only said. detected_samples is
+     * nonzero exactly when minimp3_ex found a Xing/Info header, which is
+     * also the only case in which it knows the delay and padding and has
+     * removed them -- so this one word is the whole of the MP3 answer.
+     *
+     * NONE rather than UNKNOWN on the other branch, deliberately: a
+     * Xing-less MP3 is not a file whose trim state has gone unchecked,
+     * it is a file that has been checked and has encoder silence on both
+     * ends. The caller can tell those apart and should.
+     */
+    d->info.trim = d->ex.detected_samples ? DECODER_TRIM_EXACT
+                                          : DECODER_TRIM_NONE;
+
     ESP_LOGI(TAG, "mp3: layer %d, %s",
              d->ex.info.layer,
              d->ex.detected_samples ? "Xing/LAME found, gapless trim active"
@@ -277,6 +326,11 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
     }
 
     d->info.codec = k_formats[fmt].name;
+    /* Per format, and constant for the file. Nothing this backend
+     * returns can revise it: esp_audio_simple_dec never reports a delay
+     * or a padding count, which is itself the reason most of the column
+     * is UNKNOWN. See the table. */
+    d->info.trim = k_formats[fmt].trim;
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
      * has returned at least once. */

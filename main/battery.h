@@ -122,6 +122,28 @@ bool battery_charging(void);
  * convert into "will this last the album". */
 int battery_mv(void);
 
+/*
+ * No pack fitted -- the board is running from the USB-C supply.
+ *
+ * The INA226 sits on the rail, not on the pack, so with the battery out
+ * it goes on reading happily and reports whatever the charger is
+ * delivering. That is around 5 V, which is not a low battery: it is off
+ * the BOTTOM of the 2S curve the same way a single cell is off the top,
+ * and the curve dutifully returns 0%. The gauge then draws an empty
+ * outline and the player looks like it is about to die while plugged
+ * into the wall.
+ *
+ * A 2S lithium pack that is genuinely at 5.8 V is a pack that is flat
+ * past the point of being dangerous to discharge further, and the board
+ * will not be running off it in any case. So anything below that is not
+ * a reading of the battery at all, and saying so is more honest than
+ * pinning the curve at zero.
+ *
+ * battery_pct() returns -1 while this is true, for the same reason it
+ * does when there is no gauge: there is no percentage to report.
+ */
+bool battery_external(void);
+
 #ifdef __cplusplus
 }
 #endif

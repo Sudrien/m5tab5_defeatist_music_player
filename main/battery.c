@@ -140,6 +140,19 @@ static i2c_master_dev_handle_t s_dev;
 
 /* Published values. Ints, written by one task, read by any -- see the
  * threading note in the header. */
+/*
+ * The ceiling on "this cannot be a pack", and the hysteresis around it.
+ *
+ * 5800 mV because the curve's own zero is 6000 and a 2S pack does not
+ * come back up from there. The 200 mV band stops a supply sitting near
+ * the line from flickering the icon between a battery and a connector
+ * once every five seconds -- which, on a 5 s poll, would be the most
+ * eye-catching thing on the screen.
+ */
+#define NO_PACK_MV      (5800)
+#define NO_PACK_HYST_MV (200)
+
+static volatile bool s_external;
 static volatile int  s_pct = -1;
 static volatile int  s_mv;
 static volatile bool s_charging;
@@ -223,12 +236,25 @@ static void battery_task(void *arg)
             s_avg_mv = s_avg_mv ? s_avg_mv + (mv - s_avg_mv) / 8 : mv;
             s_mv = s_avg_mv;
 
-            /* Rounded to 5. See the header: the precision is not there,
-             * and displaying it anyway is what makes a gauge look
-             * broken when it is merely approximate. */
-            const int raw = curve_pct(s_avg_mv);
-            s_pct = ((raw + 2) / 5) * 5;
-            if (s_pct > 100) s_pct = 100;
+            /* Which supply this is, before the curve is asked about it.
+             * Latching either way with the band, so the answer only
+             * changes when the rail has genuinely moved. */
+            s_external = s_external ? (s_avg_mv < NO_PACK_MV + NO_PACK_HYST_MV)
+                                    : (s_avg_mv < NO_PACK_MV);
+
+            if (s_external) {
+                /* No percentage, rather than the 0% the curve would
+                 * return. See battery_external(): the curve is being
+                 * asked about a supply it does not describe. */
+                s_pct = -1;
+            } else {
+                /* Rounded to 5. See the header: the precision is not there,
+                 * and displaying it anyway is what makes a gauge look
+                 * broken when it is merely approximate. */
+                const int raw = curve_pct(s_avg_mv);
+                s_pct = ((raw + 2) / 5) * 5;
+                if (s_pct > 100) s_pct = 100;
+            }
         }
 
         /* 5 s. Nothing here changes faster than that, and each poll is
@@ -359,3 +385,4 @@ esp_err_t battery_start(void)
 int battery_pct(void)      { return s_pct; }
 bool battery_charging(void){ return s_charging; }
 int battery_mv(void)       { return s_mv; }
+bool battery_external(void) { return s_external; }

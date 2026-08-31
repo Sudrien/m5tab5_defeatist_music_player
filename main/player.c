@@ -36,6 +36,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "driver/i2c_master.h"
 #include "esp_check.h"
@@ -69,6 +70,7 @@
 #include "loudness.h"
 #include "replaygain.h"
 #include "hid.h"
+#include "panel.h"
 #include "playlist.h"
 #include "settings.h"
 #include "storage.h"
@@ -416,10 +418,27 @@ extern uint32_t g_tab5_dpi_underruns;
  * is dropped -- silence multiplied by anything is still silence, and
  * there is no reason to clock it out.
  *
- * 600 ms because that is comfortably longer than a cycle of anything
- * audible (a 20 Hz fundamental is 50 ms) so the ramp cannot itself be
- * heard as a pitch, and comfortably shorter than the shortest tail worth
- * having. It is not a musical fade and does not need to be.
+ * Three seconds, against a ring that holds twenty. The floor is far
+ * lower than this -- a few hundred milliseconds is already longer than
+ * a cycle of anything audible (a 20 Hz fundamental is 50 ms), so the
+ * ramp cannot be heard as a pitch and the click is gone. But the click
+ * is not the only thing worth avoiding: a fade short enough to be
+ * over before the hand has left the card reads as a cut with the edge
+ * sanded off, and the audio to do better than that is already sitting
+ * in PSRAM, paid for.
+ *
+ * So the constraint from below is "not a click" and the constraint from
+ * above is "not a player that ignores the eject", and three seconds is
+ * a long way from both. It is also the number a crossfade would want --
+ * an overlap this length is a musical fade rather than a debounce --
+ * which is the point of picking it here rather than the smallest value
+ * that removes the artefact.
+ *
+ * It must stay comfortably under what the ring holds, because the ramp
+ * is applied to queued audio and there is no more coming. Twenty
+ * seconds at 44.1 kHz is the nominal figure; a ring caught part-full
+ * has less, and the writer handles a ramp that outruns its audio (see
+ * the underrun branch there) rather than this number being trusted.
  *
  * PREP FOR CROSSFADE, AND THAT IS THE REASON IT LOOKS LIKE THIS.
  *
@@ -438,7 +457,7 @@ extern uint32_t g_tab5_dpi_underruns;
  * the next track early on purpose, which is a scheduling change and not
  * this one.
  */
-#define FADE_OUT_MS             (600)
+#define FADE_OUT_MS             (3000)
 
 /*
  * Two rings, alternating, one track each.
@@ -1007,6 +1026,22 @@ static volatile bool     s_fade_out;
 static volatile uint32_t s_fade_frames;   /* length of the ramp, in frames */
 static volatile uint32_t s_fade_pos;      /* how far through it we are */
 
+/*
+ * The ramp has finished and the screen is describing nothing.
+ *
+ * Set by the writer at the end of a fade -- the task that consumed the
+ * last audible sample, and therefore the only one that knows when the
+ * track stopped being heard. This is the same argument as s_tail_pending
+ * and it is deliberately the same shape: latched at the one unambiguous
+ * moment, cleared by the task that acts on it.
+ *
+ * Consumed by player_loop(), which is where load_track_visuals() and
+ * ui_clear_art() already run. The writer must not draw -- it is at
+ * priority 6 with a DMA deadline, and there is exactly one writer to the
+ * framebuffer in this program and it is not this task.
+ */
+static volatile bool     s_fade_cleanup;
+
 /* Is anything still going to come out of the speaker because of a fade?
  * Read by the UI task's idle gate, which would otherwise cut the
  * amplifier out from under the ramp -- nothing is decoding during one,
@@ -1021,7 +1056,7 @@ static bool fade_out_active(void)
  *
  * rate is the rate the samples will be CLOCKED OUT at, not the rate of
  * the file: the ring holds what the hardware is about to play, and a
- * ramp measured in frames only lands on 600 ms if it is measured
+ * ramp measured in frames only lands on FADE_OUT_MS if it is measured
  * against the clock that consumes them.
  */
 static void fade_out_begin(uint32_t rate)
@@ -1058,6 +1093,14 @@ static void fade_out_cancel(void)
     s_fade_out  = false;
     s_flush_why = "fade cancelled";
     s_pcm_flush = true;
+    /*
+     * And the screen is not cleared, because there is now something for
+     * it to describe. The clear belongs to a fade that reached silence
+     * with nothing behind it; this one was overtaken by a track. Left
+     * set, it would blank the incoming track's title and cover a moment
+     * after they were drawn.
+     */
+    s_fade_cleanup = false;
 }
 
 /*
@@ -1253,19 +1296,31 @@ static void i2s_writer_task(void *arg)
                 s_fade_out  = false;
                 s_flush_why = "fade";
                 s_pcm_flush = true;
+                /* Nothing after this chunk is audible, so nothing on
+                 * screen is describing anything that can still be
+                 * heard. player_loop() does the drawing. */
+                s_fade_cleanup = true;
                 ESP_LOGI(TAG, "faded out over %" PRIu32 " ms", (uint32_t)FADE_OUT_MS);
             }
         } else if (s_fade_out) {
             /*
              * The ring ran dry mid-ramp.
              *
-             * It should not: the fade is 600 ms and it is started
-             * against a ring that has some seconds in it. But "should
-             * not" is how a flag gets left set, and a fade left set is
-             * the next track starting silent. The ramp is over because
-             * there is nothing left to apply it to.
+             * It should not often: the ramp is FADE_OUT_MS against a
+             * ring that nominally holds twenty seconds. But it can --
+             * the card can leave while the ring is still filling after
+             * a seek, or on the first seconds of a track -- and the
+             * result is simply that the audio ran out first. The tail
+             * of the ramp is applied to nothing, which is what it would
+             * have produced anyway.
+             *
+             * Cleared here regardless, because a fade left set is the
+             * next track starting silent.
              */
             s_fade_out = false;
+            /* Same conclusion by a different route: there is no audio
+             * left, so the screen is stale either way. */
+            s_fade_cleanup = true;
             ESP_LOGW(TAG, "fade: the ring emptied before the ramp finished");
         }
         /*
@@ -1389,6 +1444,11 @@ static volatile bool     s_repaint_art;
  * opened from whichever task polls touch, so there is one writer to the
  * framebuffer. */
 static volatile bool     s_open_chooser;
+/* The gear's request, and a request rather than a call for the same
+ * reason the chooser's is: the press arrives partway through a UI
+ * iteration that has already sampled a touch, and the screen change has
+ * to happen at the top of the next one. */
+static volatile bool     s_open_panel;
 
 /* Set by the UI, consumed by the decode loop. -1 = nothing pending. Seek
  * is not implemented yet -- see README -- so the decode loop currently
@@ -1547,6 +1607,86 @@ static char              s_walked_path[512];
  * Couperin for five seconds.
  */
 static char              s_wave_path[512];
+
+/*
+ * Which track's envelope is ON SCREEN, as opposed to which track has had
+ * one prepared for it.
+ *
+ * THE BUG THIS EXISTS TO CLOSE.
+ *
+ * s_walked_path above means "the work of finding this track's envelope
+ * has been done". That is a statement about media_task's effort, and it
+ * was being used by track_change_begin() as though it also meant "the
+ * envelope is drawn" -- which it does not, because the two are joined by
+ * a handoff that only the decode loop consumes.
+ *
+ * So: let media_task load an envelope while NOTHING is playing. It
+ * primes the sidecar, fills s_walk, sets s_wave_path and raises
+ * s_wave_ready, and records the path in s_walked_path. There is no
+ * decode loop to consume the handoff, so nothing is drawn. Press play on
+ * that same track and track_change_begin() clears s_wave_ready (rightly
+ * -- a stale handoff must not survive a track change) and then skips the
+ * install because s_walked_path already names this path. The envelope
+ * exists in the cache, has been paid for, and is never drawn for the
+ * whole song.
+ *
+ * It needs an idle gap long enough for media_task to finish -- which is
+ * exactly what sitting on the settings panel for twenty seconds
+ * produces, and is why it surfaced when it did rather than being a new
+ * fault.
+ *
+ * The fix is to stop asking the wrong variable. This one is written only
+ * where waveform_set() is actually called, so it cannot drift from what
+ * the bar is drawing.
+ */
+static char              s_wave_shown[512];
+
+/*
+ * The path whose envelope is held in s_walk_pending, waiting for the
+ * handoff. Needed for the same reason s_wave_path is: by the time
+ * track_change_show() runs, `path` is out of scope and the pending
+ * envelope has to be able to say whose it is.
+ */
+static char              s_env_path[512];
+
+/* The two ways the bar's envelope changes, and the only two. Every
+ * waveform_set() call in this file goes through one of them, so
+ * s_wave_shown cannot fall out of step with what is drawn. */
+static void wave_show(const framewalk_t *w, const char *path)
+{
+    waveform_set(w);
+    snprintf(s_wave_shown, sizeof(s_wave_shown), "%s", path ? path : "");
+}
+
+static void wave_clear(void)
+{
+    waveform_set(NULL);
+    s_wave_shown[0] = '\0';
+}
+
+/*
+ * Is something else occupying the whole screen?
+ *
+ * The art path blits straight to the panel -- albumart_show(),
+ * ui_clear_art() and the format card all bypass ui_draw() -- so every
+ * one of those sites has to know whether there is a transport bar to
+ * draw on. Four of them asked browser_is_open(), which was the complete
+ * answer while the chooser was the only full-screen thing in the
+ * program.
+ *
+ * The settings panel is the second, and it inherited none of the
+ * guards: a track change or a cover landing while the panel was up
+ * painted the art strip across it. This is that answer, asked once, so
+ * that the third full-screen thing is one line here rather than another
+ * four sites nobody remembers to update.
+ *
+ * s_repaint_art is what brings the artwork back, and both screens set it
+ * on the way out.
+ */
+static bool screen_covered(void)
+{
+    return browser_is_open() || panel_is_open();
+}
 
 /*
  * The track's sidecar record, held open for the length of the track.
@@ -1895,7 +2035,13 @@ static void track_change_begin(const char *path)
      * one prefetch left in the cache -- which arrives fully drawn, with
      * no scan and no wait -- and nothing, which blanks it.
      */
-    if (strcmp(path, s_walked_path) != 0) {
+    /*
+     * Against what is DRAWN, not against what has been looked up. See
+     * s_wave_shown -- this test used to be strcmp(path, s_walked_path),
+     * which is true for a track media_task prepared an envelope for
+     * while nothing was playing, and the preparation is not the drawing.
+     */
+    if (strcmp(path, s_wave_shown) != 0) {
         /*
          * Its own buffer, not s_walk.
          *
@@ -1916,8 +2062,12 @@ static void track_change_begin(const char *path)
              * hearing yet. track_change_show() draws it at the handoff.
              * The buffer is safe to hold -- see the note above on why it
              * is not s_walk. */
-            if (!tail_playing()) waveform_set(&s_walk_pending);
-            else s_env_pending = ENV_PENDING_SET;
+            if (!tail_playing()) {
+                wave_show(&s_walk_pending, path);
+            } else {
+                s_env_pending = ENV_PENDING_SET;
+                snprintf(s_env_path, sizeof(s_env_path), "%s", path);
+            }
             snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
             /* Quiet when sidecar_prime() a few lines up is what put it
              * there: two lines describing one lookup reads as two. */
@@ -1925,8 +2075,8 @@ static void track_change_begin(const char *path)
                 ESP_LOGI(TAG, "envelope from cache at track change");
             }
         } else {
-            if (!tail_playing()) waveform_set(NULL);
-            else s_env_pending = ENV_PENDING_CLEAR;
+            if (!tail_playing()) wave_clear();
+            else                 s_env_pending = ENV_PENDING_CLEAR;
         }
     }
 
@@ -1955,8 +2105,8 @@ static void track_change_begin(const char *path)
  */
 static void track_change_show(void)
 {
-    if (s_env_pending == ENV_PENDING_SET)        waveform_set(&s_walk_pending);
-    else if (s_env_pending == ENV_PENDING_CLEAR) waveform_set(NULL);
+    if (s_env_pending == ENV_PENDING_SET)        wave_show(&s_walk_pending, s_env_path);
+    else if (s_env_pending == ENV_PENDING_CLEAR) wave_clear();
     s_env_pending = ENV_PENDING_NONE;
 }
 
@@ -1980,7 +2130,7 @@ static void load_track_visuals(const char *path)
      * open is exactly the case that flag was added for; it just was not
      * being consulted on this side.
      */
-    if (browser_is_open()) {
+    if (screen_covered()) {
         s_repaint_art = true;
         return;
     }
@@ -2081,7 +2231,7 @@ static void show_format_card(const char *path, long bytes, uint32_t gen)
          * Xing-less MP3 is seconds long. Checked every slice for the
          * same reason gen is: this loop is the one place in the art path
          * that spends real time, so it is where the world changes. */
-        if (browser_is_open()) {
+        if (screen_covered()) {
             s_repaint_art = true;
             return;
         }
@@ -2100,7 +2250,7 @@ static void show_format_card(const char *path, long bytes, uint32_t gen)
      * stands in for a missing cover did not, and it comes through
      * media_task by a different route.
      */
-    if (browser_is_open()) {
+    if (screen_covered()) {
         s_repaint_art = true;
         return;
     }
@@ -2157,7 +2307,7 @@ static void do_art(const char *path, uint32_t gen)
      * s_repaint_art brings it back when the chooser closes, which every
      * browser exit already sets.
      */
-    if (browser_is_open()) {
+    if (screen_covered()) {
         s_repaint_art = true;
         return;
     }
@@ -2559,6 +2709,87 @@ static bool sidecar_prime(const char *path)
 }
 
 
+
+/*
+ * File a format section for a track whose container would not say.
+ *
+ * WHY THIS SECTION EXISTS AT ALL, given the waveform section already
+ * carries a `sec`.
+ *
+ * Because that one is a side effect. The envelope's duration is
+ * whatever the frame walk happened to reach, filed under a section that
+ * is about drawing a picture, and it is only there when an envelope was
+ * wanted -- so a format with no stated length has its duration recorded
+ * or not depending on whether the bar wanted a waveform that day. The
+ * format section is the place where "this file is 203 seconds long" is
+ * a fact about the file rather than a property of a drawing of it.
+ *
+ * WHAT IS WORTH WRITING
+ *
+ * Only what was expensive to find. A Xing-less MP3 pays for a whole-file
+ * index build; raw ADTS and AMR pay for a frame walk. Those are the
+ * files this is for -- the ones where the answer cost seconds of card
+ * reads and is otherwise thrown away at the end of every play. A FLAC
+ * states its length in its header and does not need a copy of it in a
+ * sidecar.
+ *
+ * The bitrate goes in alongside because it is free once the duration is
+ * known and because the alternative is what the log currently shows: an
+ * Ogg drawing "0 kbps" on the format card, which is not a measurement,
+ * it is the absence of one printed as though it were.
+ *
+ * Merged into the held record rather than written here. rg_release()
+ * hands the whole thing to media_task at the track boundary, which is
+ * the one place a card write does not sit in front of a decode.
+ */
+static void rg_note_format(const char *path, const decoder_info_t *info,
+                           uint32_t len_sec, uint64_t file_bytes)
+{
+    if (!rg_holding(path) || !info || len_sec == 0) return;
+    if (s_rg.format.present && s_rg.format.sec == len_sec) return;
+
+    s_rg.format.present     = true;
+    s_rg.format.sec         = len_sec;
+    s_rg.format.sample_rate = (uint32_t)info->sample_rate;
+    s_rg.format.channels    = (uint8_t)info->channels;
+    snprintf(s_rg.format.codec, sizeof(s_rg.format.codec), "%s",
+             info->codec ? info->codec : "");
+
+    /*
+     * The decoder's figure when it has one, otherwise the file over its
+     * own duration.
+     *
+     * Deliberately the average and not a nominal: a Vorbis identification
+     * header states 96 kbps for a stream that may never sustain it, and
+     * on a VBR file the number people actually want is what it came out
+     * at. It is a couple of percent high because the container's own
+     * overhead is in the byte count -- which is why the format card
+     * marks it as approximate rather than pretending to four digits.
+     */
+    if (info->bitrate_kbps > 0) {
+        s_rg.format.kbps = (uint16_t)info->bitrate_kbps;
+    } else if (file_bytes) {
+        const uint64_t bps = (file_bytes * 8) / len_sec;
+        s_rg.format.kbps = (uint16_t)((bps + 500) / 1000);
+    }
+
+    /*
+     * From 0602, which is where the player learned to ask. EXACT is the
+     * only answer that means the ends have been dealt with; UNKNOWN and
+     * NONE both mean they have not, and storing that stops the next open
+     * re-checking a file that has already been found to say nothing.
+     *
+     * The delay and padding counts stay zero: minimp3_ex applies them
+     * internally and does not hand them back, so there is nothing
+     * truthful to put there yet.
+     */
+    s_rg.format.has_gapless = (info->trim == DECODER_TRIM_EXACT);
+
+    s_rg_dirty = true;
+    ESP_LOGI(TAG, "filed format: %" PRIu32 "s, %u kbps, trim %s",
+             len_sec, (unsigned)s_rg.format.kbps,
+             decoder_trim_name(info->trim));
+}
 
 /*
  * How full the PCM ring is, 0-100, or -1 when nothing is playing.
@@ -3105,6 +3336,43 @@ static void ui_task(void *arg)
             continue;
         }
 
+        /*
+         * The panel, on the same terms as the chooser above it.
+         *
+         * Ordered after the chooser's open branch and before its touch
+         * branch, so the two screens cannot both be up: the gear is on
+         * the transport bar and unreachable while the chooser is up, and
+         * this branch returns before the chooser's would run.
+         *
+         * The swallow and the draw-then-continue are the chooser's, for
+         * the chooser's reason: bdown was sampled at the top of this
+         * iteration, before the swallow existed, so falling through
+         * hands the panel the press that opened it.
+         */
+        if (s_open_panel) {
+            s_open_panel = false;
+            touch_swallow();
+            panel_open();
+            panel_draw();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        if (panel_is_open()) {
+            if (panel_touch(bdown, bx, by)) {
+                panel_close();
+                touch_swallow();
+                /* The bar underneath has been painted over, so it has to
+                 * be redrawn from scratch rather than updated -- the same
+                 * repaint the chooser asks for on its way out. */
+                s_repaint_art = true;
+            } else {
+                panel_draw();
+            }
+            vTaskDelay(pdMS_TO_TICKS(bdown ? 20 : 100));
+            continue;
+        }
+
         if (browser_is_open()) {
             const browser_result_t r = browser_touch(bdown, bx, by);
             switch (r.kind) {
@@ -3228,6 +3496,7 @@ static void ui_task(void *arg)
                             !s_tail_pending && !fade_out_active()));
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
+        st.ext_power = battery_external();
 
         const bool down = bdown;
         ui_action_t act = ui_touch(&st, down, bx, by);
@@ -3382,6 +3651,9 @@ static void ui_task(void *arg)
         case UI_ACTION_CHOOSE_FILE:
             s_open_chooser = true;
             break;
+        case UI_ACTION_SETTINGS:
+            s_open_panel = true;
+            break;
         case UI_ACTION_SCREEN_OFF:
             s_screen_off = true;
             backlight_set(0);
@@ -3411,6 +3683,7 @@ static void ui_task(void *arg)
         st.stats_valid = s_stats_valid;
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
+        st.ext_power = battery_external();
         ui_draw(&st);
 
         /* 50 Hz under a finger, 25 Hz while the title is travelling, 10 Hz
@@ -3588,7 +3861,21 @@ static track_end_t play_file(const char *path)
         const bool got = rg_holding(path);
         const replaygain_t *const have = &s_rg;
         const bool known = got && have->loudness.present;
-        measuring = !known;
+
+        /*
+         * Read once, here, and not again for the rest of the track.
+         *
+         * The switch can be thrown from the panel while this loop is
+         * running, and a loop that re-read it would apply a gain to the
+         * second half of a track it measured the first half of -- which
+         * is not "the setting took effect", it is a step in level and a
+         * measurement that describes neither version. Sampling it at the
+         * top makes the track the unit, which is what the panel promises
+         * the listener.
+         */
+        const bool rg_on = settings_rg_enabled();
+
+        measuring = rg_on && !known;
 
         if (got) {
             /* Seed the RAM caches so load_tags() and do_art() find
@@ -3624,8 +3911,17 @@ static track_end_t play_file(const char *path)
              * half later. decoder_open() overwrites it with its own
              * answer when it has one.
              */
-            if (have->format.present && have->format.sec) {
-                seed_len = have->format.sec;
+            /*
+             * The waveform's sec is the fallback, for every sidecar
+             * written before there was a format section to put it in.
+             * It is the same number by a worse route -- see
+             * rg_note_format() -- and a card full of old sidecars should
+             * not lose a working seek bar to a schema change.
+             */
+            uint32_t sec = have->format.present ? have->format.sec : 0;
+            if (!sec && have->waveform.present) sec = have->waveform.sec;
+            if (sec) {
+                seed_len = sec;
                 /* Only onto the screen if the screen is this track's
                  * already. During a decode-ahead the bar belongs to the
                  * song still playing; the gate publishes this one. */
@@ -3656,7 +3952,24 @@ static track_end_t play_file(const char *path)
          * the whole of this bug.
          */
         rg_pending_measuring = measuring;
-        if (measuring) {
+        if (!rg_on) {
+            /*
+             * Off: nothing measured, nothing applied, nothing shown.
+             *
+             * rg_scale stays at unity and rg_pending_active stays false,
+             * so the indicator does not appear -- which matters more than
+             * it sounds. The mark on the bar is a claim that the level
+             * being heard is not the file's own, and drawing it while the
+             * feature is off would be that claim made falsely.
+             *
+             * The sidecar is untouched either way. A measurement already
+             * on the card stays on the card, and turning the switch back
+             * on picks it up on the next play rather than measuring it
+             * all over again.
+             */
+            rg_pending_active = false;
+            rg_pending_db = 0.0f;
+        } else if (measuring) {
             loudness_reset(&s_loud);
             /*
              * Measuring and applying are mutually exclusive, and have to
@@ -3843,10 +4156,51 @@ static track_end_t play_file(const char *path)
      */
     bool can_seek = decoder_can_seek(dec);
     uint32_t len_sec = decoder_duration_sec(dec);
+
+    /*
+     * Whether the CONTAINER answered, before the sidecar's copy is
+     * allowed to stand in for it.
+     *
+     * The distinction is the whole of what gets filed later. A length
+     * that came out of a header costs nothing to find again next time
+     * and is not worth a sidecar section; one that had to be walked for
+     * is. Testing len_sec after the seed has been folded in cannot tell
+     * those apart -- the seed IS the sidecar, so every track would look
+     * like it already knew.
+     */
+    const bool len_from_header = (len_sec != 0);
+
     if (!len_sec) len_sec = seed_len;
     if (len_sec == 0) {
         ESP_LOGI(TAG, "no duration available; seek bar will stay empty");
     }
+
+    /*
+     * For the bitrate, when the backend will not give one -- which is
+     * every esp_audio_codec format. Taken once, here, because the file
+     * is open and cannot change under us, and because stat() on a USB
+     * drive mid-decode is a read the arbiter would have to schedule.
+     */
+    uint64_t file_bytes = 0;
+    {
+        struct stat st;
+        if (stat(path, &st) == 0 && st.st_size > 0) {
+            file_bytes = (uint64_t)st.st_size;
+        }
+    }
+
+    /*
+     * The last info the decoder handed back, outside the loop.
+     *
+     * decoder_read() fills a fresh one per call and it goes out of scope
+     * with the iteration, which is fine for the per-block work but not
+     * for the two places that file a format section -- one of them runs
+     * before the read, and the other runs after the loop has ended.
+     * Zeroed, so a track that never produced a block files nothing
+     * rather than filing whatever was on the stack.
+     */
+    decoder_info_t track_info;
+    memset(&track_info, 0, sizeof(track_info));
 
     while (1) {
         /* Pause stalls the decoder, not the writer: the ring drains to
@@ -3888,7 +4242,7 @@ static track_end_t play_file(const char *path)
              * this: the artwork no longer changes when a scan lands, so
              * the saved strip behind the finger bubble is still good.
              */
-            waveform_set(&s_walk);
+            wave_show(&s_walk, path);
 
             /* The walk counted frames on the way past. For a format that
              * states its own length this is redundant and is not used;
@@ -3902,6 +4256,11 @@ static track_end_t play_file(const char *path)
                 if (!visuals_pending) s_len_sec = len_sec;
                 ESP_LOGI(TAG, "duration from frame walk: %" PRIu32 "s",
                          len_sec);
+                /* Filed the moment it is known rather than at the track
+                 * end, because a walk that finished is a number already
+                 * paid for and a track can be skipped out of before its
+                 * boundary ever runs. */
+                rg_note_format(path, &track_info, len_sec, file_bytes);
             }
         }
 
@@ -4051,6 +4410,7 @@ static track_end_t play_file(const char *path)
         decoder_info_t info;
         const int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
         if (n <= 0) break;
+        track_info = info;
 
         const uint32_t read_ms =
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_read);
@@ -4086,9 +4446,28 @@ static track_end_t play_file(const char *path)
         }
 
         if ((uint32_t)info.sample_rate != cur_rate || info.channels != cur_chans) {
-            ESP_LOGI(TAG, "%s: %d Hz, %d ch, %d kbps",
+            /*
+             * The trim state, on the line that already describes the
+             * format, because that is where you look when a boundary
+             * sounds wrong.
+             *
+             * Nothing acts on it yet and nothing should: a hard cut at a
+             * slightly wrong sample is the behaviour this player has
+             * always had, and changing it is not what this patch is. It
+             * is here so that playing a library through and reading the
+             * log answers the question a crossfade has to ask before it
+             * can be built -- how much of this collection is actually
+             * sample-exact. If every track says "exact", the overlap can
+             * be unconditional. If half say "unknown", that is worth
+             * knowing before the overlap is written on top of it rather
+             * than after.
+             *
+             * See decoder_trim_t for why "unknown" and "untrimmed" are
+             * different answers.
+             */
+            ESP_LOGI(TAG, "%s: %d Hz, %d ch, %d kbps, trim %s",
                      info.codec, info.sample_rate, info.channels,
-                     info.bitrate_kbps);
+                     info.bitrate_kbps, decoder_trim_name(info.trim));
 
             /* For the format card, which is what a file with no picture
              * in it shows instead of a cover. Published rather than
@@ -4099,7 +4478,20 @@ static track_end_t play_file(const char *path)
                      info.codec ? info.codec : "");
             s_fmt_rate = info.sample_rate;
             s_fmt_chans = info.channels;
+            /*
+             * The backend's figure, or the file over its duration when
+             * there is not one -- which is every esp_audio_codec format.
+             * The card was drawing "0 kbps" for those, and a zero on a
+             * line of real measurements reads as a measurement.
+             *
+             * Only when both numbers are in: with no duration there is
+             * nothing to divide by, and zero stays, which is at least
+             * the honest form of not knowing.
+             */
             s_fmt_kbps = info.bitrate_kbps;
+            if (s_fmt_kbps <= 0 && file_bytes && len_sec) {
+                s_fmt_kbps = (int)(((file_bytes * 8) / len_sec + 500) / 1000);
+            }
             s_fmt_known = true;
 
             /*
@@ -4597,6 +4989,18 @@ static track_end_t play_file(const char *path)
      * not play. Reported as unreadable so the caller can count it, since
      * "finished, 0 blocks" and "finished, 261 blocks" mean opposite
      * things and only one of them is a reason to move on cheerfully. */
+    /*
+     * The other way a length gets learned: not from a walk but from the
+     * decoder's own index, built during the open. A Xing-less MP3 is the
+     * case -- decoder_duration_sec() answers only after minimp3_ex has
+     * read the whole file, which is the 1.4 s "open took" in every log.
+     *
+     * Filed at the end rather than at the open so it goes out with the
+     * loudness and the envelope in one write, and skipped entirely when
+     * the container stated the length itself.
+     */
+    if (!len_from_header) rg_note_format(path, &track_info, len_sec, file_bytes);
+
     if (why == TRACK_ENDED && blocks == 0) why = TRACK_UNREADABLE;
 
     /*
@@ -4825,6 +5229,71 @@ static void restore_last_track(void)
 }
 
 /*
+ * Take the track off the screen.
+ *
+ * Everything the bar draws about a song, cleared in one place: the
+ * title row and the tags behind it, the filename it falls back to, the
+ * cover, the envelope, the clock and the length, the seek affordance
+ * and the ReplayGain mark. Not the volume, not the battery, not the
+ * route -- those are the player's, not the track's, and they are still
+ * true.
+ *
+ * There was no such function before this because there was no such
+ * moment. A track leaving the screen was always a track arriving on it,
+ * and load_track_visuals() overwrites the lot; the one exception, the
+ * end of a playlist, leaves the last track up on purpose so you can see
+ * where you got to. Media removal is the case where the track is gone
+ * and nothing is coming, and leaving its cover and its waveform up over
+ * a card that is in your hand is the screen asserting something false.
+ *
+ * The generation bump is not decoration. media_task may be mid-JPEG for
+ * this track -- a single call into a decoder that cannot be cancelled --
+ * and it checks the generation before it draws. Without the bump, a
+ * cover decoded from a cache entry outlives the clear by a second and
+ * paints itself back onto a blank screen.
+ *
+ * Called from player_loop() only. Everything in here touches the
+ * framebuffer or the state the UI task reads while doing so.
+ */
+static void clear_play_screen(void)
+{
+    /* Ordered so the UI task cannot sample a half-cleared track: the
+     * strings that name it go first, the numbers that describe it
+     * after, and the flags that say those numbers are worth drawing
+     * are already false by the time anything reads them. */
+    s_stats_valid = false;
+    s_can_seek    = false;
+    s_pos_sec     = 0;
+    s_len_sec     = 0;
+
+    s_rg_active    = false;
+    s_rg_measuring = false;
+    s_rg_gain_db   = 0.0f;
+
+    s_fmt_known = false;
+
+    memset(&s_tags, 0, sizeof(s_tags));
+    s_display_name = "";
+    s_path[0] = '\0';
+
+    /* Anything still in flight for the track that just ended belongs to
+     * a generation that no longer exists. See do_art()'s gen checks. */
+    s_track_gen++;
+
+    /* The two that actually paint. The envelope first, because it is
+     * part of the bar and ui_clear_art() is the rest of the screen. */
+    wave_clear();
+    s_env_pending = ENV_PENDING_NONE;
+    /* And the record of the work, which clear_play_screen() must drop
+     * too: the file is on a volume that has gone, and a later card with
+     * the same path on it is a different file. */
+    s_walked_path[0] = '\0';
+    ui_clear_art();
+
+    ESP_LOGI(TAG, "the screen is empty; nothing is playing");
+}
+
+/*
  * One track after another, forever.
  *
  * This replaced a single play_file() call. The shape is: play what is
@@ -4884,6 +5353,35 @@ static void player_loop(void)
              * on screen with its envelope and its gain.
              */
             if (!s_restored) restore_last_track();
+
+            /*
+             * The fade has reached silence. See s_fade_cleanup.
+             *
+             * Here rather than at the removal, which is the whole of
+             * this patch: for the three seconds the ring is still being
+             * heard, the screen goes on showing the track being heard.
+             * It clears when the sound does, at the same moment and for
+             * the same reason.
+             *
+             * The chooser comes up behind it, deferred from the
+             * media-gone branch below for the same reason -- putting a
+             * file listing over a track that is still audible answers a
+             * question nobody has asked yet.
+             *
+             * The two extra terms close the window against a choice
+             * made in the last moments of the ramp: fade_out_cancel()
+             * drops the flag, but it can only do that before the writer
+             * sets it, and a track chosen in between would otherwise
+             * have its screen blanked a moment after it was drawn.
+             * Neither of these is true when there is nothing playing,
+             * which is every other time this runs.
+             */
+            if (s_fade_cleanup && !s_decoding && !s_pending_ready) {
+                s_fade_cleanup = false;
+                clear_play_screen();
+                s_repaint_art = false;   /* just done, and s_path is gone */
+                s_open_chooser = true;
+            }
 
             /* Idle: no decode loop is running, so the repaint that
              * normally happens there has to happen here. Otherwise a
@@ -4953,7 +5451,20 @@ static void player_loop(void)
              * track with a coincidentally equal path getting someone
              * else's cover. */
             mediacache_clear();
-            s_open_chooser = true;
+            /*
+             * The chooser waits for the fade, and so does the clear.
+             *
+             * Both are deferred to the idle branch above, which fires
+             * when the writer says the ramp has reached silence. Until
+             * then the track is still coming out of the speaker and the
+             * screen showing it is the truth.
+             *
+             * If no ramp is running -- the ring was empty, or the fade
+             * was refused -- there is nothing to wait for and the flag
+             * is set here instead, so the deferral can never be the
+             * reason a dead track stays on screen for ever.
+             */
+            if (!fade_out_active()) s_fade_cleanup = true;
             continue;
         }
 

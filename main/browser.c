@@ -31,6 +31,11 @@ static const char *TAG = "tab5_browser";
 #define C_TAB_OFF   RGB(0x10, 0x10, 0x10)
 #define C_BTN       RGB(0x26, 0x26, 0x26)
 #define C_RULE      RGB(0x33, 0x33, 0x33)
+/* Between C_RULE and C_DIM. The prefix note has to be readable when
+ * looked for and easy to look past when not, which neither of the
+ * existing greys manages -- one disappears, the other competes with the
+ * path above it. */
+#define C_FAINT     RGB(0x55, 0x55, 0x55)
 
 /* Layout. Sized for the same 294 PPI the transport bar is: a 88 px row is
  * about 7.5 mm, which is a comfortable thumb target, and the 27 px text in
@@ -40,6 +45,18 @@ static const char *TAG = "tab5_browser";
 #define LIST_TOP    (TAB_H + PATH_H)
 #define FOOT_H      (120)
 #define ROW_H       (88)
+
+/*
+ * The scrollbar: how wide it is drawn, and how much wider it is to hit.
+ *
+ * The two differ on purpose. A 16 px bar is the right weight next to
+ * 64 px rows; a 16 px target is not, at 294 PPI with a fingertip. The
+ * grab zone is the outer 72 px of the list, which is dead space in every
+ * row anyway -- filenames are drawn from the left and the ones long
+ * enough to reach the right edge are already being clipped there.
+ */
+#define SCROLL_W        (16)
+#define SCROLL_HIT_W    (72)
 #define NAME_SCALE  (3)
 #define LABEL_SCALE (2)
 
@@ -65,6 +82,28 @@ static entry_t *s_entries;
 static int s_count;
 static int s_top;               /* first visible row */
 
+/*
+ * A drag on the scrollbar, in progress.
+ *
+ * The bar was drawn from the first version and has never been touchable:
+ * eight pixels of decoration reporting a position on a list that could
+ * only be moved a page at a time from the footer. On a 9-track folder
+ * that is a curiosity. On a folder with two hundred files in it, it is
+ * twenty-two presses to reach the end of something the bar has been
+ * showing you the shape of the whole time.
+ *
+ * Held across polls because a drag is not a press: browser_touch() is
+ * otherwise built entirely on the down edge, which is right for buttons
+ * and useless for anything that has to follow a finger.
+ */
+static bool s_scroll_drag;
+
+/* The shared leading text of this folder's filenames, and its length.
+ * Declared up here rather than beside find_common_prefix() because
+ * entries_free() has to be able to drop it. */
+static char s_prefix[128];
+static int  s_prefix_len;
+
 static play_order_t s_order = PLAY_ORDER_ALL;
 static uint32_t s_seen_generation = UINT32_MAX;
 
@@ -76,6 +115,31 @@ static int rows_visible(void)
     return (gfx_h() - FOOT_H - LIST_TOP) / ROW_H;
 }
 
+/*
+ * The scrollbar's geometry, in one place.
+ *
+ * Drawing and hit-testing computed this independently in the first
+ * version of this patch and it was wrong within a day -- the thumb was
+ * drawn from LIST_TOP and grabbed from the top of the screen, so the
+ * finger led the bar by the height of the tab strip. One function, two
+ * callers, no chance to drift.
+ *
+ * Returns false when the list fits, which is also when there is nothing
+ * to drag.
+ */
+static bool scroll_geom(int *track_y, int *track_h, int *bar_h, int *max_top)
+{
+    const int rows = rows_visible();
+    if (s_count <= rows) return false;
+
+    *track_y = LIST_TOP;
+    *track_h = rows * ROW_H;
+    *bar_h = (*track_h * rows) / s_count;
+    if (*bar_h < 24) *bar_h = 24;
+    *max_top = s_count - rows;
+    return true;
+}
+
 /* ------------------------------------------------------------------ */
 /* Directory listing                                                   */
 /* ------------------------------------------------------------------ */
@@ -84,6 +148,11 @@ static void entries_free(void)
 {
     for (int i = 0; i < s_count; i++) free(s_entries[i].name);
     s_count = 0;
+    /* The prefix belonged to those names. A volume going away without a
+     * reload -- which is what calls this -- would otherwise leave the
+     * header claiming an elision over an empty list. */
+    s_prefix[0] = '\0';
+    s_prefix_len = 0;
 }
 
 /* Folders first, then files, each run sorted case-insensitively. Mixing
@@ -95,6 +164,11 @@ static int cmp_entry(const void *a, const void *b)
     if (x->is_dir != y->is_dir) return x->is_dir ? -1 : 1;
     return strcasecmp(x->name, y->name);
 }
+
+/* Defined below, next to the rules it enforces; called from the bottom
+ * of load_dir() because it can only run once the listing is complete
+ * and sorted. */
+static void find_common_prefix(void);
 
 static void load_dir(const char *dir)
 {
@@ -136,6 +210,97 @@ static void load_dir(const char *dir)
     closedir(d);
 
     qsort(s_entries, (size_t)s_count, sizeof(entry_t), cmp_entry);
+    find_common_prefix();
+}
+
+/*
+ * The bit of every filename in this folder that is not telling you
+ * anything.
+ *
+ * Ripped albums come off a CD as
+ *
+ *   Advent_Chamber_Orchestra_-_04_-_Mozart_-_Eine_Kleine_Nachtmusik.mp3
+ *
+ * and a folder of them is nine rows that agree for the first
+ * twenty-seven characters. At NAME_SCALE the row holds about forty, so
+ * the artist and the album spend two thirds of every line repeating
+ * what the folder name above them already says, and the part that
+ * differs -- the track number and the title, the only reason to look at
+ * the list -- is pushed off the right edge and clipped.
+ *
+ * So it is found once per folder and dropped from the drawing. THE
+ * ENTRIES ARE NOT MODIFIED: s_entries[i].name stays the real filename,
+ * because it is what gets opened, what is compared against the playing
+ * track, and what the playlist is built from. Only the row's starting
+ * offset moves.
+ *
+ * WHERE IT STOPS
+ *
+ * At a separator, never mid-word. The raw common prefix of 04_ and 05_
+ * includes the "0", which would leave rows reading "4_-_Mozart" and
+ * "5_-_Handel" -- technically shorter and actively worse, because a
+ * truncation that lands inside a number reads as data loss rather than
+ * as tidying. Backing up to the last _ - . or space costs a couple of
+ * characters and keeps every row starting on something whole.
+ *
+ * WHEN IT DECLINES
+ *
+ * Fewer than two files, a prefix shorter than MIN_PREFIX, or any file
+ * left with almost nothing after it. That last one is the case that
+ * matters: a folder holding 01.mp3 through 09.mp3 has a common prefix
+ * of "0", and hiding it turns a legible list into the digits 1 to 9.
+ * The point is to remove what is redundant, not to remove as much as
+ * possible.
+ *
+ * Directories are neither counted nor shortened. A subfolder is not part
+ * of the album's naming scheme and the prefix rarely applies to it.
+ */
+#define MIN_PREFIX      (8)     /* below this it is not worth the elision */
+#define MIN_REMAINDER   (4)     /* what every row must still have left */
+
+static bool is_sep(char c)
+{
+    return c == '_' || c == '-' || c == '.' || c == ' ';
+}
+
+static void find_common_prefix(void)
+{
+    s_prefix[0] = '\0';
+    s_prefix_len = 0;
+
+    const char *first = NULL;
+    int files = 0, lcp = 0;
+
+    for (int i = 0; i < s_count; i++) {
+        if (s_entries[i].is_dir) continue;
+        const char *n = s_entries[i].name;
+        if (!first) { first = n; lcp = (int)strlen(n); files = 1; continue; }
+        files++;
+
+        int k = 0;
+        while (k < lcp && first[k] && n[k] == first[k]) k++;
+        lcp = k;
+        if (lcp < MIN_PREFIX) return;   /* cannot recover; nothing to do */
+    }
+
+    if (files < 2 || lcp < MIN_PREFIX) return;
+
+    /* Back up to a separator, and include it -- the row should start on
+     * the next real character, not on the underscore before it. */
+    while (lcp > 0 && !is_sep(first[lcp - 1])) lcp--;
+    if (lcp < MIN_PREFIX) return;
+
+    /* Every row has to be left with something worth reading. */
+    for (int i = 0; i < s_count; i++) {
+        if (s_entries[i].is_dir) continue;
+        if ((int)strlen(s_entries[i].name) - lcp < MIN_REMAINDER) return;
+    }
+
+    if (lcp >= (int)sizeof(s_prefix)) lcp = (int)sizeof(s_prefix) - 1;
+    memcpy(s_prefix, first, (size_t)lcp);
+    s_prefix[lcp] = '\0';
+    s_prefix_len = lcp;
+    ESP_LOGI(TAG, "hiding a shared prefix on %d files: \"%s\"", files, s_prefix);
 }
 
 /* Path of the volume root for the active tab. */
@@ -192,6 +357,10 @@ void browser_open(const char *start)
 {
     s_open = true;
     s_was_down = false;
+    /* A drag cannot survive the screen it was on. Left set, the first
+     * press after reopening would be treated as the continuation of a
+     * gesture that ended somewhere else. */
+    s_scroll_drag = false;
     s_dirty = true;
     s_seen_generation = storage_generation();
 
@@ -406,8 +575,32 @@ void browser_draw(void)
      * that says where you are. With nothing mounted it says why, because
      * "no drive" and "no power" are the difference between waiting and
      * tapping. */
-    gfx_draw_text_tail(16, TAB_H + (PATH_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
-                       status_line(), LABEL_SCALE, w - 32, C_DIM);
+    /*
+     * One line normally, two when something is being hidden -- and the
+     * second line is not optional politeness. A list quietly showing
+     * names that are not the names on the card is a list you cannot
+     * trust; saying what came off the front makes it an abbreviation
+     * rather than a discrepancy.
+     *
+     * Both fit in PATH_H at LABEL_SCALE without moving LIST_TOP, so the
+     * list does not lose a row on folders that happen to be tidy.
+     */
+    if (s_prefix_len) {
+        const int gh = GFX_GLYPH_H(LABEL_SCALE);
+        const int pad = (PATH_H - 2 * gh) / 3;
+        gfx_draw_text_tail(16, TAB_H + pad, status_line(), LABEL_SCALE,
+                           w - 32, C_DIM);
+
+        char note[160];
+        snprintf(note, sizeof(note), "all start with  %s", s_prefix);
+        /* Head kept, not tail: the front of the prefix is what identifies
+         * it, and it is the front that the rows are missing. */
+        gfx_draw_text(16, TAB_H + 2 * pad + gh, note, LABEL_SCALE,
+                      w - 32, C_FAINT);
+    } else {
+        gfx_draw_text_tail(16, TAB_H + (PATH_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                           status_line(), LABEL_SCALE, w - 32, C_DIM);
+    }
     gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
 
     const int rows = rows_visible();
@@ -427,21 +620,39 @@ void browser_draw(void)
         } else {
             draw_note_icon(48, y + ROW_H / 2, playing ? C_ACCENT : C_DIM);
         }
-        gfx_draw_text(96, y + (ROW_H - GFX_GLYPH_H(NAME_SCALE)) / 2, s_entries[i].name,
-                      NAME_SCALE, w - 112, playing ? C_ACCENT : C_TEXT);
+        /* Files only. See find_common_prefix() -- the name itself is
+         * untouched; this is where the elision happens and the only
+         * place it happens. */
+        const char *label = s_entries[i].name
+                          + (s_entries[i].is_dir ? 0 : s_prefix_len);
+        gfx_draw_text(96, y + (ROW_H - GFX_GLYPH_H(NAME_SCALE)) / 2, label,
+                      NAME_SCALE, w - 112 - SCROLL_W, playing ? C_ACCENT : C_TEXT);
     }
 
-    /* Scroll position, as a bar down the right edge. A number of pages
-     * would need a font; a bar says the same thing in eight pixels. */
-    if (s_count > rows) {
-        const int track_h = rows * ROW_H;
-        int bar_h = (track_h * rows) / s_count;
-        if (bar_h < 24) bar_h = 24;
-        const int span = track_h - bar_h;
-        const int max_top = s_count - rows;
-        const int bar_y = LIST_TOP + (max_top > 0 ? (span * s_top) / max_top : 0);
-        gfx_fill_rect(w - 8, LIST_TOP, 8, track_h, C_ROW);
-        gfx_fill_rect(w - 8, bar_y, 8, bar_h, C_DIM);
+    /*
+     * Scroll position, as a bar down the right edge -- and, since 0606,
+     * the way to change it. A number of pages would need a font; a bar
+     * says the same thing in sixteen pixels and can be dragged.
+     *
+     * The call IS the test. s_count > rows is the same question
+     * scroll_geom() already answers, and asking it separately while
+     * discarding the answer is what let the outputs be read on a path
+     * the compiler could not prove they had been written on. One
+     * condition, and it is the one that fills the variables.
+     */
+    int track_y, track_h, bar_h, max_top;
+    if (scroll_geom(&track_y, &track_h, &bar_h, &max_top)) {
+        const int bar_y = track_y + (max_top > 0 ? ((track_h - bar_h) * s_top) / max_top : 0);
+
+        /*
+         * Wider than it was, because it is a control now rather than a
+         * readout. Eight pixels is legible; it is not something a finger
+         * aims at. SCROLL_W is still narrow enough to leave the row taps
+         * the whole of the rest of the width.
+         */
+        gfx_fill_rect(w - SCROLL_W, track_y, SCROLL_W, track_h, C_ROW);
+        gfx_fill_rect(w - SCROLL_W, bar_y, SCROLL_W, bar_h,
+                      s_scroll_drag ? C_TEXT : C_DIM);
     }
 
     const int fy = h - FOOT_H;
@@ -469,10 +680,63 @@ browser_result_t browser_touch(bool down, int x, int y)
     const bool tapped = down && !s_was_down;
     s_was_down = down;
 
-    if (!s_open || !tapped) return res;
+    if (!s_open) return res;
 
     const int w = gfx_w(), h = gfx_h();
     const int rows = rows_visible();
+
+    /*
+     * The scrollbar, before anything else and outside the tapped test.
+     *
+     * Outside it because a drag is a sequence of downs with one edge at
+     * the front, and everything else in this function wants only that
+     * edge. Before the rows because the grab zone overlaps them: a press
+     * inside it is a scroll, not a file, and a press that starts a drag
+     * must not also open whatever it happened to land on.
+     */
+    if (s_scroll_drag || (tapped && x >= w - SCROLL_HIT_W)) {
+        int track_y, track_h, bar_h, max_top;
+        if (down && scroll_geom(&track_y, &track_h, &bar_h, &max_top) &&
+            y >= track_y && y < track_y + track_h) {
+
+            /*
+             * The thumb centres on the finger rather than keeping the
+             * offset it was grabbed at.
+             *
+             * Grab-offset is the desktop behaviour and it is the right
+             * one for a mouse, where the pointer is a pixel and the
+             * thumb is visible under it. Here the thumb is under a
+             * fingertip that covers it entirely, so preserving an offset
+             * preserves something nobody can see, and a press on the
+             * track above the thumb would do nothing at all instead of
+             * going there. Centring makes press-anywhere and drag the
+             * same gesture.
+             */
+            const int span = track_h - bar_h;
+            int pos = y - track_y - bar_h / 2;
+            if (pos < 0) pos = 0;
+            if (pos > span) pos = span;
+
+            const int want = span > 0 ? (pos * max_top + span / 2) / span : 0;
+            if (want != s_top) {
+                s_top = want;
+                s_dirty = true;
+            }
+            /* Set after the move, so the first frame of a drag already
+             * draws the thumb in its held colour. */
+            s_scroll_drag = true;
+            return res;
+        }
+
+        if (!down && s_scroll_drag) {
+            s_scroll_drag = false;
+            s_dirty = true;          /* back to the resting colour */
+            ESP_LOGI(TAG, "scrolled to row %d of %d", s_top, s_count);
+            return res;
+        }
+    }
+
+    if (!tapped) return res;
 
     if (y < TAB_H) {
         const storage_id_t want = (x < w / 2) ? STORAGE_SD : STORAGE_USB;

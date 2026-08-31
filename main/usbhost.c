@@ -68,8 +68,21 @@ static volatile bool s_want;
 static volatile bool s_up;
 static TaskHandle_t  s_task;
 
+/*
+ * VBUS, separately from the stack.
+ *
+ * s_vbus_want is the request and s_vbus_on is what the line is actually
+ * doing, the same split as s_want/s_up above and for the same reason.
+ * They are separate from that pair because the stack and the power are
+ * now separate lifetimes: the stack goes up once and stays, and the
+ * power can be cycled underneath it any number of times.
+ */
+static volatile bool s_vbus_want = true;
+static volatile bool s_vbus_on;
+
 bool usbhost_powered(void) { return s_up || s_want; }
 bool usbhost_running(void) { return s_up; }
+bool usbhost_vbus_on(void) { return s_vbus_on; }
 
 esp_err_t usbhost_register_class(const char *name, usbhost_class_fn fn)
 {
@@ -112,6 +125,7 @@ static esp_err_t usb_vbus(bool on)
     }
 
     ESP_LOGI(TAG, "USB-A VBUS %s (expander 0x44, P3)", on ? "on" : "off");
+    s_vbus_on = on;
     if (on) vTaskDelay(pdMS_TO_TICKS(USB_VBUS_SETTLE_MS));
     return ESP_OK;
 }
@@ -175,7 +189,30 @@ static void usbhost_task(void *arg)
     (void)arg;
     while (1) {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+        /*
+         * Power, when the stack is already up. Checked first, because
+         * once s_up is set the bring-up below never runs again and this
+         * is the only thing left for this task to do.
+         */
+        if (s_up && s_vbus_want != s_vbus_on) {
+            const esp_err_t err = usb_vbus(s_vbus_want);
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "VBUS %s failed (%s)",
+                         s_vbus_want ? "on" : "off", esp_err_to_name(err));
+            }
+            continue;
+        }
+
         if (!s_want || s_up) continue;
+
+        /* Asked for with the power off -- bring the stack up but leave
+         * the line alone, so a port switched off before it was ever
+         * started does not come up anyway. */
+        if (!s_vbus_want) {
+            ESP_LOGI(TAG, "USB host start deferred: bus power is off");
+            continue;
+        }
 
         const esp_err_t err = bring_up();
         if (err == ESP_OK) {
@@ -204,5 +241,15 @@ void usbhost_start(void)
 {
     if (s_up) return;
     s_want = true;
+    if (s_task) xTaskNotifyGive(s_task);
+}
+
+void usbhost_set_power(bool on)
+{
+    if (on == s_vbus_want) return;
+    s_vbus_want = on;
+    /* A port that was never started still needs starting when it is
+     * switched on: the stack comes up, then the line. */
+    if (on) s_want = true;
     if (s_task) xTaskNotifyGive(s_task);
 }
