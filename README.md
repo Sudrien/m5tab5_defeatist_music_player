@@ -50,6 +50,7 @@ What do you mean no audio over Bluetooth
   - Skipping or seeking during that first listen cancels it - it will try again next time.
   - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn it off.
 - Reopen last played song on start. Not autoplay.
+- 3 second fade on media pull
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
