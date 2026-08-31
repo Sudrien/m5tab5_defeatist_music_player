@@ -48,9 +48,10 @@ What do you mean no audio over Bluetooth
 - ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
-  - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn it off.
+  - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn off calculation.
 - Reopen last played song on start. Not autoplay.
 - 3 second fade on media pull
+- configurable crossfade
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
@@ -59,7 +60,6 @@ What do you mean no audio over Bluetooth
 - Podcast over wifi downloader? Conceivable. Would want chapter support
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
-- 'Crossfade on manual skip (separate from gapless) is a common "why doesn't this exist" complaint on small players.'
 - Sleep timer
 - gapless playback is supposedly set up, but I need to get behavior nailed down
 
