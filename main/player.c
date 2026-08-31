@@ -1122,6 +1122,128 @@ static void fade_out_cancel(void)
  * boundary -- but they are frames, and they would otherwise be the
  * click this exists to remove.
  */
+/* ------------------------------------------------------------------ */
+/* Crossfade                                                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Equal power, 33 points of a quarter cosine, Q15.
+ *
+ * NOT the linear ramp fade_apply() uses, and the difference is the whole
+ * reason this is a table rather than a subtraction.
+ *
+ * A fade to silence is linear because there is nothing on the other side
+ * of it: halfway through, half the amplitude is exactly what half a fade
+ * should sound like. A crossfade has a second signal there, and two
+ * uncorrelated signals at 0.5 amplitude sum to 0.707 of the power, not
+ * 1.0 -- a ~3 dB hole in the middle of every transition. It is the most
+ * common complaint about naive crossfaders and it is audible as a lull
+ * exactly where the listener is paying attention.
+ *
+ * cos and sin instead: cos^2 + sin^2 = 1, so the power is constant for
+ * uncorrelated material. The table is the cosine and the sine is the
+ * same table read backwards, which is why there is only one.
+ *
+ * Equal power is wrong for CORRELATED material -- the same track against
+ * itself, or a track against its own reverb tail, where amplitudes add
+ * rather than powers, and linear would be right. Nothing can be right
+ * for both, every player picks one, and music at a track boundary is
+ * overwhelmingly the uncorrelated case.
+ *
+ * 33 points with linear interpolation between them: over a 3 s ramp each
+ * segment is 94 ms, and the curve's second derivative is small enough
+ * that the error never exceeds a tenth of a dB.
+ */
+static const uint16_t k_eqpower[33] = {
+    32767, 32728, 32609, 32412, 32137, 31785, 31356, 30852, 30273, 29621, 28898, 28105, 27245, 26319, 25329, 24279, 23170, 22005, 20787, 19519, 18204, 16846, 15446, 14010, 12539, 11039, 9512, 7962, 6393, 4808, 3212, 1608, 0
+};
+
+/* Gain at t, t in Q16 over [0,65536]. Outgoing when `out` is true. */
+static int32_t eqpower_q15(uint32_t t, bool out)
+{
+    if (t > 65536u) t = 65536u;
+    if (!out) t = 65536u - t;           /* sin(x) == cos(90-x) */
+
+    const uint32_t idx = t >> 11;               /* 0..32 */
+    const uint32_t frac = t & 0x7FFu;           /* 0..2047 */
+    if (idx >= 32) return k_eqpower[32];
+
+    const int32_t a = k_eqpower[idx];
+    const int32_t b = k_eqpower[idx + 1];
+    return a + (((b - a) * (int32_t)frac) >> 11);
+}
+
+/*
+ * Per-ring level trim, applied only during an overlap.
+ *
+ * WHY THIS EXISTS EVEN THOUGH REPLAYGAIN DOES THE SAME JOB.
+ *
+ * When ReplayGain is on and both tracks have been measured before, it
+ * does nothing: rg_scale was applied to the samples as they were
+ * decoded, both rings are at the reference, and the levels published
+ * for them say so -- the difference is zero and the trims stay unity.
+ *
+ * It still earns its place in that mode, because "both measured" is not
+ * guaranteed. The first play of a track measures at unity and applies
+ * nothing, so a never-heard track crossfading against a levelled one is
+ * a real mismatch with ReplayGain fully on. The published figure is the
+ * EFFECTIVE level of what went into the ring, which makes that case fall
+ * out of the same arithmetic instead of needing its own.
+ *
+ * When ReplayGain is OFF the two tracks are at whatever level they were
+ * mastered at, and that difference is inaudible at a hard cut and very
+ * audible during three seconds of overlap: a quiet track fading in under
+ * a loud one does not sound like a crossfade, it sounds like the next
+ * song failing to start. So the overlap gets its own match, for its own
+ * duration, and the moment it ends both tracks are back at their own
+ * levels -- the listener asked for ReplayGain off and does not get it
+ * imposed by the back door.
+ *
+ * ATTENUATION ONLY. The louder track is brought down to the quieter one
+ * and never the reverse. Boosting risks clipping, and clipping on a
+ * transition is a worse artefact than the imbalance it would fix.
+ *
+ * The numbers come from the loudness section of the sidecar, which is
+ * measured on every play since 0612 whether or not ReplayGain is
+ * applying anything -- that patch is what makes this possible with the
+ * switch off. The waveform's levels would also give a proxy, but a peak
+ * envelope is not loudness: a sparse track with loud transients and a
+ * dense quiet one can share a peak envelope and be 10 dB apart. The
+ * LUFS figure is the measurement that was actually taken.
+ *
+ * Unknown on either side means unity on both. A guess about the
+ * relationship between two tracks is worse than leaving them alone.
+ */
+static volatile float s_ring_lufs[PCM_RINGS];
+static volatile bool  s_ring_lufs_known[PCM_RINGS];
+
+/* Never trim by more than this. A 12 dB gap between two tracks is a
+ * mastering difference the listener can hear across the whole song, not
+ * something a three-second overlap should hide -- and pulling one track
+ * down 12 dB to meet the other makes the transition itself the loudest
+ * thing about it. */
+#define XFADE_MATCH_MAX_DB      (6.0f)
+
+/*
+ * The overlap, as the writer sees it.
+ *
+ * s_xfade_armed is set by the decode loop when it starts a track that
+ * MAY be crossfaded into -- the previous track ended on its own, the
+ * length is not zero, and the same-album rule allows it. The writer
+ * decides whether one actually happens, because the rest of the
+ * conditions are about the rings and only the writer can see them:
+ * matching rates, matching channel counts, and enough audio queued on
+ * both sides.
+ */
+static volatile bool     s_xfade_armed;
+static volatile uint32_t s_xfade_ms;
+
+static bool     s_xfade_active;     /* writer-only from here down */
+static uint32_t s_xfade_pos;        /* frames into the overlap */
+static uint32_t s_xfade_frames;     /* its length */
+static int32_t  s_xfade_gain_a;     /* match trims, Q15 */
+static int32_t  s_xfade_gain_b;
+
 static void fade_apply(int16_t *pcm, size_t frames)
 {
     const uint32_t total = s_fade_frames;
@@ -1141,6 +1263,119 @@ static void fade_apply(int16_t *pcm, size_t frames)
     s_fade_pos = pos;
 }
 
+/*
+ * Decide whether an overlap can start right now.
+ *
+ * Every condition here is about the rings, which is why it lives on the
+ * writer rather than in the decode loop with the rest of the policy.
+ */
+static bool xfade_can_start(int play, int fill, size_t avail_a, size_t avail_b,
+                            uint32_t need_frames)
+{
+    if (!s_xfade_armed || s_xfade_active || s_fade_out) return false;
+    if (play == fill) return false;                 /* no second track yet */
+
+    const uint32_t rate = s_frames_rate[play];
+    /*
+     * Rates must match, and there is no resampler to make them.
+     *
+     * 44.1 into 48 is not rare on a mixed library, and mixing them by
+     * pretending is a pitch shift on one of the two tracks for the
+     * length of the overlap. audio_out is reconfigured at the boundary
+     * for exactly this reason; a crossfade cannot span that.
+     */
+    if (rate == 0 || s_frames_rate[fill] != rate) return false;
+
+    /* Enough of the outgoing track left to fade out of, and enough of
+     * the incoming decoded to fade into. Without the second test a
+     * crossfade started against a track whose open is still in progress
+     * would ramp the outgoing one down into a ring that has nothing in
+     * it. */
+    const size_t need_bytes = (size_t)need_frames * PCM_BYTES_PER_FRAME;
+    if (avail_a < need_bytes) return false;
+    if (avail_b < PCM_CHUNK_BYTES * 4) return false;
+
+    return true;
+}
+
+/*
+ * The level match, computed once when the overlap starts.
+ *
+ * See s_ring_lufs. Unity on both sides whenever ReplayGain is applying,
+ * when either measurement is missing, or when the two are already close
+ * enough that the arithmetic would be noise.
+ */
+static void xfade_match(int play, int fill)
+{
+    s_xfade_gain_a = 32768;
+    s_xfade_gain_b = 32768;
+
+    if (!s_ring_lufs_known[play] || !s_ring_lufs_known[fill]) return;
+
+    float diff = s_ring_lufs[fill] - s_ring_lufs[play];   /* + means B louder */
+    if (diff > -0.5f && diff < 0.5f) return;
+
+    if (diff >  XFADE_MATCH_MAX_DB) diff =  XFADE_MATCH_MAX_DB;
+    if (diff < -XFADE_MATCH_MAX_DB) diff = -XFADE_MATCH_MAX_DB;
+
+    /* Attenuation only: whichever is louder comes down to the other. */
+    const float atten = powf(10.0f, -(diff < 0 ? -diff : diff) / 20.0f);
+    const int32_t q = (int32_t)(atten * 32768.0f + 0.5f);
+    if (diff > 0) s_xfade_gain_b = q;
+    else          s_xfade_gain_a = q;
+}
+
+/*
+ * Mix `frames` of B into A in place, ramping across the chunk.
+ *
+ * The gains are computed at both ends of the chunk and interpolated per
+ * frame between them, rather than evaluated per frame from the table.
+ * A chunk is 1024 frames -- 23 ms -- and the curve is smooth enough over
+ * that span that the straight line between its endpoints is inaudible,
+ * where a per-frame table lookup would be two extra multiplies on the
+ * one task in this program with a DMA deadline.
+ */
+static void xfade_mix(int16_t *a, const int16_t *b, size_t frames)
+{
+    const uint32_t total = s_xfade_frames;
+    const uint32_t p0 = s_xfade_pos;
+    const uint32_t p1 = (p0 + frames > total) ? total : p0 + frames;
+
+    const uint32_t t0 = (uint32_t)(((uint64_t)p0 << 16) / total);
+    const uint32_t t1 = (uint32_t)(((uint64_t)p1 << 16) / total);
+
+    /* Match trim folded in here, so the mix loop stays two multiplies
+     * and an add per sample. */
+    const int32_t ga0 = (eqpower_q15(t0, true)  * s_xfade_gain_a) >> 15;
+    const int32_t ga1 = (eqpower_q15(t1, true)  * s_xfade_gain_a) >> 15;
+    const int32_t gb0 = (eqpower_q15(t0, false) * s_xfade_gain_b) >> 15;
+    const int32_t gb1 = (eqpower_q15(t1, false) * s_xfade_gain_b) >> 15;
+
+    for (size_t f = 0; f < frames; f++) {
+        const int32_t step = frames > 1 ? (int32_t)((f << 15) / frames) : 0;
+        const int32_t ga = ga0 + (((ga1 - ga0) * step) >> 15);
+        const int32_t gb = gb0 + (((gb1 - gb0) * step) >> 15);
+
+        for (int c = 0; c < 2; c++) {
+            const size_t i = 2 * f + (size_t)c;
+            /*
+             * Saturated, not wrapped. Equal power keeps the SUM of
+             * powers at unity, which is not the same as keeping the sum
+             * of amplitudes there: two loud, correlated frames at the
+             * midpoint reach 1.41 full scale. Rare, brief, and a clamp
+             * is a far better answer to it than a sign flip.
+             */
+            int32_t v = (((int32_t)a[i] * ga) >> 15) +
+                        (((int32_t)b[i] * gb) >> 15);
+            if (v >  32767) v =  32767;
+            if (v < -32768) v = -32768;
+            a[i] = (int16_t)v;
+        }
+    }
+
+    s_xfade_pos = p1;
+}
+
 static volatile bool s_playing;
 
 static void ring_publish(void);
@@ -1150,6 +1385,12 @@ static void ring_publish(void);
 static void i2s_writer_task(void *arg)
 {
     uint8_t *buf = heap_caps_malloc(PCM_CHUNK_BYTES, MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    /* The incoming track's chunk during an overlap. Internal rather than
+     * DMA-capable: it is only ever read by the mix, never handed to the
+     * hardware. One chunk, allocated for the life of the task, because
+     * allocating it at the start of a crossfade would put a malloc on
+     * the path with the DMA deadline. */
+    uint8_t *mixbuf = heap_caps_malloc(PCM_CHUNK_BYTES, MALLOC_CAP_8BIT);
     /* No ring to drain into I2S without this, and nothing else can
      * recover it, so the task ends. play_file() sees a NULL s_pcm and
      * refuses the track rather than queueing into a ring nobody reads. */
@@ -1158,6 +1399,12 @@ static void i2s_writer_task(void *arg)
         s_pcm = NULL;
         vTaskDelete(NULL);
         return;
+    }
+    /* Playback survives without the mix buffer; crossfading does not.
+     * Degrading to hard cuts is the right failure -- the alternative is
+     * refusing to play music because a nicety could not be allocated. */
+    if (!mixbuf) {
+        ESP_LOGW(TAG, "no mix buffer; crossfade disabled this boot");
     }
 
     while (1) {
@@ -1256,7 +1503,96 @@ static void i2s_writer_task(void *arg)
         const int play = s_ring_play;
         if (play != s_ring_fill && xStreamBufferIsEmpty(s_ring[play])) {
             s_ring_play = s_ring_fill;
+            /* An overlap cannot outlive the ring it was fading out of.
+             * Reaching here mid-crossfade means the outgoing track ran
+             * dry early -- the incoming one is now simply the track. */
+            if (s_xfade_active) {
+                s_xfade_active = false;
+                s_xfade_armed = false;
+                ESP_LOGW(TAG, "crossfade cut short: the outgoing ring emptied");
+            }
             continue;
+        }
+
+        /* --- the overlap ---------------------------------------------
+         *
+         * Placed before the ordinary receive rather than inside it,
+         * because a mixed chunk has to be dequeued from BOTH rings in
+         * step and the single-ring path has no way to express that.
+         *
+         * Availability is checked before either receive. StreamBuffers
+         * cannot be peeked or pushed back, so taking from one ring and
+         * then discovering the other is short would leave frames
+         * dequeued with nowhere to go. Asking first means every byte
+         * taken is a byte that gets mixed.
+         */
+        const int fill = s_ring_fill;
+        if (mixbuf && (s_xfade_armed || s_xfade_active)) {
+            const size_t avail_a = xStreamBufferBytesAvailable(s_ring[play]);
+            const size_t avail_b = (fill != play)
+                                 ? xStreamBufferBytesAvailable(s_ring[fill]) : 0;
+
+            if (!s_xfade_active) {
+                const uint32_t rate = s_frames_rate[play];
+                const uint32_t want = rate
+                    ? (uint32_t)(((uint64_t)rate * s_xfade_ms) / 1000u) : 0;
+                if (want && xfade_can_start(play, fill, avail_a, avail_b, want)) {
+                    s_xfade_active = true;
+                    s_xfade_armed  = false;
+                    s_xfade_pos    = 0;
+                    s_xfade_frames = want;
+                    xfade_match(play, fill);
+                    ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms, "
+                                  "trim out %d%% in %d%%",
+                             s_xfade_ms,
+                             (int)((s_xfade_gain_a * 100) / 32768),
+                             (int)((s_xfade_gain_b * 100) / 32768));
+                }
+            }
+
+            if (s_xfade_active) {
+                size_t n = PCM_CHUNK_BYTES;
+                if (avail_a < n) n = avail_a;
+                if (avail_b < n) n = avail_b;
+                n &= ~(size_t)(PCM_BYTES_PER_FRAME - 1);
+
+                if (n) {
+                    xStreamBufferReceive(s_ring[play], buf, n, 0);
+                    xStreamBufferReceive(s_ring[fill], mixbuf, n, 0);
+                    xfade_mix((int16_t *)buf, (const int16_t *)mixbuf,
+                              n / PCM_BYTES_PER_FRAME);
+                    audio_out_write(buf, n);
+                    ring_publish();
+
+                    if (s_xfade_pos >= s_xfade_frames) {
+                        /*
+                         * Done. What is left of the outgoing ring is the
+                         * end of a track that has finished being heard,
+                         * at a gain of zero -- so it is dropped and the
+                         * writer moves to the incoming ring, which is
+                         * exactly the ordinary handoff arriving early.
+                         */
+                        s_xfade_active = false;
+                        const size_t left =
+                            xStreamBufferBytesAvailable(s_ring[play]);
+                        xStreamBufferReset(s_ring[play]);
+                        s_ring_play = fill;
+                        ring_publish();
+                        ESP_LOGI(TAG, "crossfade done; dropped %u KB of the "
+                                      "outgoing track", (unsigned)(left / 1024));
+                    }
+                    continue;
+                }
+
+                /*
+                 * One side had nothing this pass. The incoming ring
+                 * starving is the likely one -- a slow card behind a
+                 * decode that has only just started -- and the honest
+                 * response is to keep playing the outgoing track for a
+                 * chunk rather than to stall the DMA or to abandon an
+                 * overlap that is probably about to resume.
+                 */
+            }
         }
 
         const size_t got = xStreamBufferReceive(s_ring[s_ring_play], buf,
@@ -3752,6 +4088,43 @@ typedef enum {
     TRACK_UNREADABLE,
 } track_end_t;
 
+/*
+ * Where the previous track was and how it ended.
+ *
+ * Written at the bottom of play_file(), read at the top of the next
+ * one. Two variables rather than one because they answer different
+ * questions and a boundary can fail either: a skip within an album and
+ * a clean end between albums are both "no crossfade" for unrelated
+ * reasons.
+ */
+static char s_prev_dir[512];
+static bool s_prev_ended_clean;
+
+/*
+ * Same album means same folder.
+ *
+ * Not the same ALBUM tag, and that is a decision rather than an
+ * approximation. A folder is what the playlist was built from and what
+ * the listener actually picked; a tag is often missing entirely -- the
+ * Ogg rips this player is full of have no ALBUM field at all, so a
+ * tag-based test would call every one of them its own album and
+ * crossfade a record that was cut to run together.
+ *
+ * Compared on the directory part only, which is what the playlist walks.
+ * A subfolder is a different album by this test, which is right for
+ * discs and wrong for nothing much.
+ */
+static bool same_album(const char *a, const char *b)
+{
+    if (!a || !b || !b[0]) return false;
+
+    const char *sa = strrchr(a, '/');
+    if (!sa) return false;
+
+    const size_t len = (size_t)(sa - a);
+    return strlen(b) == len && strncmp(a, b, len) == 0;
+}
+
 static track_end_t play_file(const char *path)
 {
     const storage_id_t vol = storage_of_path(path);
@@ -3814,6 +4187,35 @@ static track_end_t play_file(const char *path)
     s_decoding = true;
 
     /*
+     * Whether this track may be crossfaded into.
+     *
+     * Decided here because everything in it is policy the writer cannot
+     * see: how the PREVIOUS track ended, and whether the two are from
+     * the same album. The writer decides whether an overlap actually
+     * happens -- rates, channel counts and how much is queued are its
+     * business and not this one's.
+     *
+     * s_prev_ended_clean is the important half. A crossfade belongs to a
+     * track that finished; a skip, a seek that ran off the end, an
+     * unreadable file or a pulled card are all boundaries the listener
+     * either caused or was told about, and softening them would be
+     * answering an instruction with a three-second blur. `next` should
+     * sound like next.
+     */
+    {
+        const uint32_t sec = settings_crossfade_sec();
+        bool ok = (sec > 0) && s_prev_ended_clean;
+
+        if (ok && !settings_crossfade_album() && same_album(path, s_prev_dir)) {
+            ok = false;
+            ESP_LOGI(TAG, "no crossfade: same album");
+        }
+
+        s_xfade_ms = sec * 1000u;
+        s_xfade_armed = ok;
+    }
+
+    /*
      * Anything still fading belongs to a track that ended before this
      * one was chosen. See fade_out_cancel() -- it is a no-op unless a
      * ramp is actually running, so a gapless boundary does not reach
@@ -3844,6 +4246,19 @@ static track_end_t play_file(const char *path)
      * else the listener is not supposed to see early. */
     bool  rg_pending_active = false;
     bool  rg_pending_measuring = false;
+
+    /*
+     * This track's measured loudness, for the crossfade's level match.
+     *
+     * Kept as a local and copied into the ring's slot alongside the
+     * sample rate, because it is a property of the audio being queued
+     * and the queue is what the writer reads. Unknown on a first play,
+     * which is exactly when there is no measurement yet -- the match
+     * falls back to unity and the overlap is unmatched rather than
+     * matched by a guess.
+     */
+    float track_lufs = 0.0f;
+    bool  track_lufs_known = false;
     float rg_pending_db = 0.0f;
     {
         /*
@@ -3969,6 +4384,16 @@ static track_end_t play_file(const char *path)
          * it is heard. Same number, two different moments, and that is
          * the whole of this bug.
          */
+        /*
+         * Taken from the record rather than from any of the branches
+         * below, because it is wanted in all of them: whether the gain
+         * is being applied or not, the number describes this file.
+         */
+        if (known && have->loudness.present) {
+            track_lufs = have->loudness.integrated_lufs;
+            track_lufs_known = true;
+        }
+
         rg_pending_measuring = measuring;
         if (!rg_on) {
             /*
@@ -4003,6 +4428,24 @@ static track_end_t play_file(const char *path)
         } else {
             const float g = replaygain_gain_db(&have->loudness);
             rg_scale = powf(10.0f, g / 20.0f);
+            /*
+             * EFFECTIVE loudness, not measured: the gain has been folded
+             * into the samples going into the ring, so what the writer
+             * will play is the file's level plus g -- the reference, by
+             * construction. Publishing the raw figure here would have
+             * the crossfade match two tracks that are already matched,
+             * and mismatch them in the process.
+             *
+             * This is also what makes the half-measured case right. With
+             * ReplayGain on and one of the two tracks never played
+             * before, one ring is at the reference and the other is at
+             * whatever it was mastered at, and the overlap between them
+             * is the one place that difference is audible. Comparing
+             * effective levels sees that; comparing measured ones, or
+             * skipping the match whenever ReplayGain is on, does not.
+             */
+            track_lufs = have->loudness.integrated_lufs + g;
+            track_lufs_known = true;
             rg_pending_active = true;
             rg_pending_db = g;
             ESP_LOGI(TAG, "replaygain: %.2f LUFS, peak %.2f dBFS -> %+.2f dB",
@@ -4759,6 +5202,11 @@ static track_end_t play_file(const char *path)
             frames_out += sent / PCM_BYTES_PER_FRAME;
             s_frames_rate[s_ring_fill] = cur_rate;
             s_frames_out[s_ring_fill] = frames_out;
+            /* Alongside the rate, and for the same reason: it describes
+             * the audio in this ring, and the writer needs it per ring
+             * to match two tracks against each other. See s_ring_lufs. */
+            s_ring_lufs[s_ring_fill] = track_lufs;
+            s_ring_lufs_known[s_ring_fill] = track_lufs_known;
             /* The handoff can happen while this call is parked on a
              * full ring, which with decode-ahead is most of a track. */
             VISUALS_GATE();
@@ -4991,6 +5439,30 @@ static track_end_t play_file(const char *path)
         s_writer_stop = false;
         s_ring_pct = 0;
     }
+    /*
+     * What the next track needs to know about this one.
+     *
+     * Recorded before anything below can return, so every exit from
+     * play_file() leaves it correct. `why` is the whole of the first
+     * half: only a track that reached its own end is a boundary worth
+     * softening, and everything else -- a skip, an unreadable file, a
+     * pulled card -- is a boundary the listener caused or was told
+     * about. See the arming block at the top.
+     */
+    s_prev_ended_clean = (why == TRACK_ENDED);
+    {
+        const char *slash = strrchr(path, '/');
+        if (slash) {
+            const size_t len = (size_t)(slash - path);
+            const size_t n = len < sizeof(s_prev_dir) - 1
+                           ? len : sizeof(s_prev_dir) - 1;
+            memcpy(s_prev_dir, path, n);
+            s_prev_dir[n] = '\0';
+        } else {
+            s_prev_dir[0] = '\0';
+        }
+    }
+
     /* No loop from here on, so no seek can be serviced. Cleared before
      * the log line rather than after, so nothing can slip in between. */
     s_decoding = false;
