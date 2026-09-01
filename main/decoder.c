@@ -35,6 +35,7 @@
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 
+#include "cbrseek.h"
 #include "duration.h"
 
 static const char *TAG = "tab5_dec";
@@ -64,6 +65,24 @@ struct decoder {
      * which is cheap but not free, and the answer is fixed. */
     bool probed;
     uint32_t probe_sec;
+
+    /* Constant-bitrate seek map, for the esp_audio_codec backend. Empty
+     * unless cbr_probe() proved the file's time-to-offset mapping is a
+     * straight line -- see cbrseek.h. */
+    cbr_map_t cbr;
+    bool cbr_ok;
+
+    /* Whether this decoder has ever produced a sample.
+     *
+     * The seek below moves the file underneath a parser that has already
+     * read the container's header, which is the only reason it can move
+     * at all: the WAV parser learns the format once and then converts
+     * whatever bytes arrive. Before the first frame it has not learned
+     * it yet, and a jump past the header would hand it PCM to parse as a
+     * RIFF chunk. So a seek that arrives before the first sample is
+     * refused rather than serviced -- a window of a few tens of
+     * milliseconds, and the honest answer inside it. */
+    bool produced;
 };
 
 #define ESP_IN_BUF  (8 * 1024)
@@ -331,6 +350,19 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
      * or a padding count, which is itself the reason most of the column
      * is UNKNOWN. See the table. */
     d->info.trim = k_formats[fmt].trim;
+
+    /*
+     * Can this file be seeked by arithmetic? For PCM WAV, CBR ADTS and
+     * fixed-mode AMR the answer is yes and the proof is three to five
+     * small reads; for everything else cbr_probe() says no and this
+     * backend stays unseekable, which is where it was.
+     *
+     * Done at open rather than at the first drag because it reads the
+     * file, and the open is the one moment this handle is not competing
+     * with the decode loop for the device.
+     */
+    d->cbr_ok = cbr_probe(d->f, &d->cbr);
+
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
      * has returned at least once. */
@@ -415,6 +447,66 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
     }
 }
 
+/*
+ * Seek by moving the file, not the decoder.
+ *
+ * esp_audio_simple_dec has no seek call and never will from here -- it
+ * takes bytes and returns PCM. What it does have is a parser that, once
+ * it has read the container header, is willing to be handed bytes from
+ * anywhere: PCM WAV converts whatever arrives, and the raw framed
+ * formats resynchronise on their own frame headers. So the jump is an
+ * fseek and a reset of the sliding window, and the parser is never told.
+ *
+ * Three things this deliberately does not do:
+ *
+ *   - It does not reopen the decoder handle. Reopening would put the
+ *     WAV parser back at "expecting a RIFF header" and hand it PCM,
+ *     which is the failure this whole path exists to avoid.
+ *   - It does not keep `eof`. The window may already have reached the
+ *     end of the file, and a seek backwards from there has to be
+ *     allowed to read again.
+ *   - It does not touch info. The rate and channel count are properties
+ *     of the stream, not of the position, and republishing them here
+ *     would race the caller's own comparison.
+ *
+ * The first frame decoded after a jump is not quite right on AAC, which
+ * has inter-frame window overlap the decoder no longer has the previous
+ * frame for. That is one frame -- 23 ms at 44.1 kHz -- and is what
+ * seeking into a lossy stream sounds like everywhere.
+ */
+static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
+{
+    if (!d->cbr_ok) return ESP_ERR_NOT_SUPPORTED;
+
+    /* See `produced`. Before the first frame the parser has not read the
+     * header yet and moving the file would take it away from it. */
+    if (!d->produced) {
+        ESP_LOGW(TAG, "%s: seek before the first frame, refused",
+                 d->info.codec);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    const long off = cbr_offset_for_sec(d->f, &d->cbr, sec);
+    if (off < 0) return ESP_FAIL;
+
+    if (fseek(d->f, off, SEEK_SET) != 0) {
+        ESP_LOGW(TAG, "%s: fseek to %ld failed", d->info.codec, off);
+        return ESP_FAIL;
+    }
+
+    /* The window holds bytes from the old position. Anything left in it
+     * would be decoded before the seek took audible effect, which is the
+     * same "the seek was ignored and then happened late" the PCM ring
+     * flush exists to prevent, one buffer further up. */
+    d->in_len = 0;
+    d->in_pos = 0;
+    d->eof = false;
+
+    ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld",
+             d->cbr.what, sec, off);
+    return ESP_OK;
+}
+
 /* ------------------------------------------------------------------ */
 /* Public                                                              */
 /* ------------------------------------------------------------------ */
@@ -446,6 +538,7 @@ int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info
     const int got = (d->backend == BACKEND_MINIMP3)
                   ? minimp3_read(d, out, max_int16)
                   : esp_codec_read(d, out, max_int16);
+    if (got > 0) d->produced = true;
     if (info) *info = d->info;
     return got;
 }
@@ -473,23 +566,51 @@ uint32_t decoder_duration_sec(decoder_t *d)
     if (!d->probed) {
         d->probed = true;
         d->probe_sec = duration_probe(d->f);
+        /*
+         * And the inference, when the container did not state one. This
+         * is the length raw ADTS and AMR lost when the frame walk was
+         * deleted in 0206 -- they state nothing about their own length
+         * and had no source for it but a whole-file count. A byte rate
+         * that has been PROVEN constant over a known extent is that
+         * count without the read.
+         *
+         * Second, not first: a stated length is a fact and this is a
+         * derivation, and the two only ever disagree when the derivation
+         * is wrong.
+         */
+        if (!d->probe_sec && d->cbr_ok) {
+            d->probe_sec = cbr_duration_sec(&d->cbr);
+        }
     }
     return d->probe_sec;
 }
 
 bool decoder_can_seek(decoder_t *d)
 {
-    /* minimp3 only, and only once its index exists. esp_audio_codec's
-     * simple decoder has no seek entry point at all -- for Ogg the
-     * mechanism would be a bisection over page granulepos, which is not
-     * written. */
-    return d && d->backend == BACKEND_MINIMP3 &&
-           d->ex.info.hz && d->ex.info.channels;
+    if (!d) return false;
+
+    /* minimp3, once its index exists. */
+    if (d->backend == BACKEND_MINIMP3) {
+        return d->ex.info.hz && d->ex.info.channels;
+    }
+
+    /*
+     * esp_audio_codec has no seek entry point, so what is seeked is the
+     * FILE, not the decoder -- which only works where the mapping from
+     * time to offset is a straight line and has been shown to be one.
+     * cbr_ok is that showing. Everything else on this backend is still
+     * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
+     * page granulepos, and neither is written.
+     */
+    return d->cbr_ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
 {
-    if (!d || d->backend != BACKEND_MINIMP3) return ESP_ERR_NOT_SUPPORTED;
+    if (!d) return ESP_ERR_NOT_SUPPORTED;
+
+    if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec);
+
     if (!d->ex.info.hz || !d->ex.info.channels) return ESP_ERR_INVALID_STATE;
 
     /* mp3dec_ex_seek() counts in int16 values across all channels, the

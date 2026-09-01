@@ -615,7 +615,9 @@ mislabelled file instead of nothing.
 
 This does not make those formats seekable. Ogg seeking is the same
 granulepos scan applied as a bisection over page boundaries, which is
-worth doing and is not done here.
+worth doing and is not done here. WAV, CBR ADTS and AMR *are* seekable,
+by a different route and on a different proof -- see "Seeking without
+seek data".
 
 ### The frame walk, and why it is gone (historical, 0206)
 
@@ -858,6 +860,86 @@ Two things happen on a successful seek that are easy to leave out:
 `mp3dec_ex_seek()` counts in int16 values across all channels, the same
 units as `ex.samples`. Seeking to `sec * hz` lands at half the intended
 point on stereo.
+
+### Seeking without seek data: prove the line, then draw it
+
+`cbrseek.c` makes the esp_audio_codec backend seekable for the formats
+whose time-to-offset mapping is a straight line. PCM WAV, constant
+-bitrate ADTS AAC, and AMR at a fixed mode.
+
+**Nothing about the decoder changed; the file moved.** The simple
+decoder has no seek entry point and is not going to get one -- it takes
+bytes and returns PCM. But a forward-only parser does not care where the
+bytes came from once it has read the container header, so the jump is an
+`fseek()` plus a reset of `in_len`/`in_pos`/`eof`, and the parser is
+never told. That is `esp_codec_seek()`, and it is fifteen lines.
+
+**The proof is the whole feature.** `duration.c` refuses file size over
+bitrate in those words, and it is right to -- correct for CBR, badly
+wrong for VBR, and a seek bar that lies is worse than one that does not
+move. The difference here is that the linearity is checked:
+
+| Format | How it is established |
+| --- | --- |
+| WAV | `fmt ` states the byte rate and `data` the extent. PCM is linear by construction; the format tag is checked so a compressed WAV is refused rather than mapped |
+| ADTS | short runs of frames are walked at five points across the file and the mean frame length has to agree between them within 1.5%. `buffer_fullness == 0x7FF` is the stream declaring itself VBR and is refused before any of that |
+| AMR | frame size is a function of the mode bits, so a constant mode is a constant size. Checked by reading one byte where each header must be |
+
+A file that fails is exactly where it was: no length from here, no seek,
+the bar stays a groove. **The failure mode is losing a feature, not
+gaining a wrong answer**, which is the same trade the `global_gain`
+envelope got wrong and took months to notice.
+
+Details that are load-bearing rather than tidy:
+
+- **The ADTS sample points must be spread, not consecutive.** A VBR
+  stream's mean frame length differs between a quiet passage and a loud
+  one by far more than the tolerance; five windows in the same place
+  would agree with each other and prove nothing.
+- **The AMR check includes the end of the file, and that is not one of
+  the five points.** The frame count is the file size divided by the
+  size the *first* frame declares, so a file that switches to a smaller
+  mode part way has more frames than that arithmetic says and every
+  evenly-spaced sample point lands before the switch. The tail is the
+  one place the miscount shows.
+- **One valid-looking ADTS header is not a frame start.** `FF F1`
+  appears inside AAC payload, so a candidate is accepted only when the
+  length it declares lands on another valid header, three deep. Same
+  trap that ID3 tags full of PNG set for MP3 sync scanning, same answer.
+- **A seek before the first decoded frame is refused.** The parser has
+  not read the header yet, and moving the file would take it away from
+  it. `produced` is that flag; the window is a few tens of milliseconds
+  and `ESP_ERR_INVALID_STATE` is the honest answer inside it. Do not
+  "fix" this by reopening the decoder handle -- that puts the WAV parser
+  back at *expecting a RIFF header* and hands it PCM.
+- **`storage_io` class is PLAYBACK**, not `duration.c`'s PREFETCH. Every
+  caller is `decoder_open()` on the decode loop, which is the pause
+  before the first sample. The PREFETCH classification elsewhere is a
+  wart this file declined to copy.
+
+**It also gives raw ADTS and AMR their duration back**, which is the one
+thing 0206 traded away when the frame walk was deleted: those formats
+state nothing about their own length and had no source for it but a
+whole-file count, so they read `--:--` until a full play recorded one in
+the sidecar. A byte rate that has been *proven* constant over a known
+extent is that count without the read. It is asked second, after
+`duration_probe()`, because a stated length is a fact and this is a
+derivation, and the two only disagree when the derivation is wrong.
+
+Accuracy: WAV and AMR land exactly, both having frames at a pitch known
+to the byte. ADTS lands on the first frame boundary at or after the
+target, so the error is under one frame (23 ms) plus whatever the
+tolerated 1.5% has accumulated -- under a second at the far end of a
+ten-minute track. A finger on a 720 px bar is asking for about 800 ms of
+that track, so the mapping is finer than the request.
+
+Host-tested under ASan and UBSan: synthetic WAV (with and without a
+LIST chunk between `fmt ` and `data`), CBR and VBR ADTS with and without
+a leading ID3v2 tag, fixed-mode and mode-changing AMR, and a file of
+noise; then 400 mutated cases per format (truncation, byte flips,
+`0xFF` injection) with a seek attempted at every second of the claimed
+duration. Not IDF-built, which is the caveat the 0200 series already
+paid for twice.
 
 ### Two volumes, mounted together
 
@@ -1814,7 +1896,10 @@ rather than against a board.
 
 ### What the controls do not do yet
 
-- **Seek on non-MP3 does nothing**, per above.
+- **Seek on non-MP3 works only where the byte rate is provably
+  constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
+  m4a and ts still refuse -- FLAC wants its SEEKTABLE and Ogg a
+  bisection over page granulepos, and neither is written.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
@@ -2363,12 +2448,11 @@ was wrong.
 - `covertag.c` is `PREFETCH` class for every caller, including the decode
   loop's own `load_tags()`, which should be `PLAYBACK`.
 - One lease covers the SD card and the USB port together.
-- Raw ADTS and AMR have no duration on a track that has never been played
-  through: the walk was their only source and it is gone. They read
-  `--:--` until a full play records a duration in the sidecar, after
-  which it is instant. This is the one place 0206 traded something away
-  rather than improving it -- the walk could produce a duration during a
-  prefetch of a track nobody had played.
+- ~~Raw ADTS and AMR have no duration on a track that has never been
+  played through.~~ Fixed: `cbrseek.c` derives it from a proven-constant
+  byte rate at open, for the CBR case, which is what those two formats
+  are in practice. A genuinely VBR ADTS file still reads `--:--` until a
+  full play records a duration in the sidecar.
 - The size-only handle in `do_art()` is deliberately left on plain
   `fopen()`: it opens, seeks, tells and closes without reading a byte, so
   a pool slot spent on it is a slot the decoder cannot have.
