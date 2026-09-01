@@ -82,6 +82,15 @@ typedef struct {
     uint32_t align;         /* offsets are rounded down to a multiple of this */
     bool     resync;        /* the offset must be walked onto a frame header */
     const char *what;       /* "wav pcm", "adts cbr", "amr" -- for the log */
+
+    /* What a freshly-opened parser has to be shown before the bytes at
+     * the seek target mean anything. See cbr_resume_preamble(). Zeroed
+     * for the formats that need none. */
+    uint16_t channels;
+    uint16_t bits;
+    uint32_t sample_rate;
+    uint8_t  magic[9];      /* AMR: the file's own magic */
+    uint8_t  magic_len;
 } cbr_map_t;
 
 /*
@@ -111,6 +120,24 @@ uint32_t cbr_duration_sec(const cbr_map_t *m);
  * takes the handle and is not arithmetic in the caller.
  */
 long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec);
+
+/*
+ * The bytes a fresh parser must be fed before the audio at `off`.
+ *
+ * Seeking here moves the file under a parser that has already read the
+ * container header, and 0700 is the bug that comes from assuming the
+ * parser tolerates that: esp_audio_codec's WAV decoder does not, and a
+ * seek left it erroring on the first block. So the decoder handle is
+ * reopened on every seek and shown a header again -- a synthesised
+ * 44-byte RIFF/WAVE for WAV, describing the same format the file
+ * declares with a data length of what is actually left, and the file's
+ * own magic for AMR. ADTS needs none: its frames are self-describing,
+ * which is what the resync finds.
+ *
+ * Returns the number of bytes written, which may be 0. `cap` should be
+ * at least 44.
+ */
+size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t cap);
 
 #ifdef __cplusplus
 }

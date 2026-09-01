@@ -55,6 +55,7 @@ struct decoder {
 
     /* esp_audio_codec */
     esp_audio_simple_dec_handle_t esp_dec;
+    esp_audio_simple_dec_type_t esp_type;  /* kept for the reopen on seek */
     uint8_t *inbuf;
     int in_len;         /* valid bytes in inbuf */
     int in_pos;         /* consumed bytes */
@@ -71,18 +72,6 @@ struct decoder {
      * straight line -- see cbrseek.h. */
     cbr_map_t cbr;
     bool cbr_ok;
-
-    /* Whether this decoder has ever produced a sample.
-     *
-     * The seek below moves the file underneath a parser that has already
-     * read the container's header, which is the only reason it can move
-     * at all: the WAV parser learns the format once and then converts
-     * whatever bytes arrive. Before the first frame it has not learned
-     * it yet, and a jump past the header would hand it PCM to parse as a
-     * RIFF chunk. So a seek that arrives before the first sample is
-     * refused rather than serviced -- a window of a few tens of
-     * milliseconds, and the honest answer inside it. */
-    bool produced;
 };
 
 #define ESP_IN_BUF  (8 * 1024)
@@ -334,6 +323,7 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
          * require and which we cannot satisfy from a file stream. */
         .use_frame_dec = false,
     };
+    d->esp_type = k_formats[fmt].type;
     if (esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
         ESP_LOGE(TAG, "esp_audio_codec has no %s decoder built in",
                  k_formats[fmt].name);
@@ -371,6 +361,10 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
 
 static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
 {
+    /* A reopen that failed leaves no handle. Reporting the stream as
+     * unusable is the only safe answer; calling into it is not. */
+    if (!d->esp_dec) return -1;
+
     while (1) {
         /* Top up. The simple decoder takes arbitrary lengths and tells
          * us how much it consumed, so this is a plain sliding window --
@@ -448,26 +442,35 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
 }
 
 /*
- * Seek by moving the file, not the decoder.
+ * Seek by moving the file, and reopening the parser onto it.
  *
  * esp_audio_simple_dec has no seek call and never will from here -- it
- * takes bytes and returns PCM. What it does have is a parser that, once
- * it has read the container header, is willing to be handed bytes from
- * anywhere: PCM WAV converts whatever arrives, and the raw framed
- * formats resynchronise on their own frame headers. So the jump is an
- * fseek and a reset of the sliding window, and the parser is never told.
+ * takes bytes and returns PCM. The first version of this moved the file
+ * and left the decoder handle alone, on the reasoning that a parser
+ * which has already read the container header does not care where the
+ * following bytes come from.
  *
- * Three things this deliberately does not do:
+ * That is 0700, and it was wrong in the way that matters. The WAV
+ * decoder does not merely remember the format, it tracks its position
+ * within the `data` chunk it was told about, so a jump landed it
+ * somewhere it did not expect and the next process() call failed. The
+ * decode loop reads a failure as the end of the track: play_file()
+ * returned TRACK_ENDED, the next track started decoding into the other
+ * ring while up to twenty seconds of the seeked-from position was still
+ * queued in this one -- and because TRACK_ENDED is what arms the
+ * crossfade, the two were mixed. On repeat-one, or anywhere the next
+ * track was the same file, that is a track playing over itself. The
+ * seek "worked"; what it did was end the track.
  *
- *   - It does not reopen the decoder handle. Reopening would put the
- *     WAV parser back at "expecting a RIFF header" and hand it PCM,
- *     which is the failure this whole path exists to avoid.
- *   - It does not keep `eof`. The window may already have reached the
- *     end of the file, and a seek backwards from there has to be
- *     allowed to read again.
- *   - It does not touch info. The rate and channel count are properties
- *     of the stream, not of the position, and republishing them here
- *     would race the caller's own comparison.
+ * So the parser is put into a state that is defined rather than assumed:
+ * the handle is closed and reopened, and fed a preamble that describes
+ * the audio at the new offset -- a synthesised RIFF/WAVE header for WAV,
+ * the file's magic for AMR, nothing for ADTS, whose frames say what they
+ * are. See cbr_resume_preamble().
+ *
+ * Reopening costs one alloc and one free per seek, on a path that is
+ * already dropping seconds of queued audio. It buys the property that
+ * every seek starts the parser from the same place a fresh open would.
  *
  * The first frame decoded after a jump is not quite right on AAC, which
  * has inter-frame window overlap the decoder no longer has the previous
@@ -477,14 +480,6 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
 static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
 {
     if (!d->cbr_ok) return ESP_ERR_NOT_SUPPORTED;
-
-    /* See `produced`. Before the first frame the parser has not read the
-     * header yet and moving the file would take it away from it. */
-    if (!d->produced) {
-        ESP_LOGW(TAG, "%s: seek before the first frame, refused",
-                 d->info.codec);
-        return ESP_ERR_INVALID_STATE;
-    }
 
     const long off = cbr_offset_for_sec(d->f, &d->cbr, sec);
     if (off < 0) return ESP_FAIL;
@@ -502,8 +497,35 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
     d->in_pos = 0;
     d->eof = false;
 
-    ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld",
-             d->cbr.what, sec, off);
+    if (d->esp_dec) {
+        esp_audio_simple_dec_close(d->esp_dec);
+        d->esp_dec = NULL;
+    }
+    esp_audio_simple_dec_cfg_t cfg = {
+        .dec_type = d->esp_type,
+        .dec_cfg = NULL,
+        .cfg_size = 0,
+        .use_frame_dec = false,
+    };
+    if (esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
+        /* Nothing can recover this: the file is fine and the decoder is
+         * gone. esp_codec_read() reports the stream unusable from here,
+         * which ends the track -- honestly this time, and with a line in
+         * the log saying why. */
+        d->esp_dec = NULL;
+        ESP_LOGE(TAG, "%s: could not reopen the decoder after a seek",
+                 d->info.codec);
+        return ESP_FAIL;
+    }
+
+    /* The preamble goes into the window ahead of the file's own bytes,
+     * so the first process() call after this sees a header and then
+     * audio, exactly as it would at an ordinary open. */
+    const size_t plen = cbr_resume_preamble(&d->cbr, off, d->inbuf, ESP_IN_BUF);
+    d->in_len = (int)plen;
+
+    ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld (+%u B header)",
+             d->cbr.what, sec, off, (unsigned)plen);
     return ESP_OK;
 }
 
@@ -538,7 +560,6 @@ int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info
     const int got = (d->backend == BACKEND_MINIMP3)
                   ? minimp3_read(d, out, max_int16)
                   : esp_codec_read(d, out, max_int16);
-    if (got > 0) d->produced = true;
     if (info) *info = d->info;
     return got;
 }
