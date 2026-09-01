@@ -986,6 +986,74 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### FLAC seeks by bisection (0704)
+
+`flacseek.c`. FLAC is the opposite problem from the CBR formats and has
+the better answer.
+
+There is no line to prove -- a silent passage costs a handful of bytes
+and a dense one costs thousands -- so `cbr_probe()` is unavailable by
+construction. But **every FLAC frame header carries the sample it starts
+at, and a CRC-8 over itself**, so the position of any byte in the file
+can be *read* rather than estimated. Finding a target is a binary search
+over byte offsets: about fifteen probes of a few tens of KB, at the
+drag, with nothing read at open beyond STREAMINFO.
+
+The result is the most accurate seek in the player. cbrseek lands within
+a tolerated drift; this lands on the frame that contains the sample
+asked for, and says which sample that turned out to be.
+
+**The SEEKTABLE is deliberately not read.** It is optional and plenty of
+encoders omit it, so a mechanism built on it needs the bisection written
+anyway for the rest; its points are typically ten seconds apart, which
+is a coarser answer than the bisection gives and would have to be
+decoded through -- the cost 0703 accepted for MP3 and there is no reason
+to accept here. A file that has one is simply ignored, which costs
+nothing and removes a second path exercised only on some files.
+
+**The CRC-8 is what makes the resync reliable rather than a heuristic.**
+FLAC audio data is high-entropy and `FF F8` appears in it constantly --
+the same trap an ID3 tag full of PNG sets for MP3 sync scanning. The
+header's own CRC turns "looks like a header" into "is a header" with a
+one-in-256 residual, and the field checks against STREAMINFO plus a
+confirmation that the *next* header's sample number is exactly this
+one's plus its block size take that the rest of the way. A candidate
+that cannot be confirmed is skipped.
+
+**Fixed blocking counts frames; variable blocking counts samples.** One
+bit in the header says which, and getting it wrong scales every position
+by the block size -- a few thousand times out. The search would still
+converge, on the wrong answer, because it only requires the numbers to
+be ordered. Both are generated and tested.
+
+**The bisection is bounded at 24 rounds rather than run to
+convergence.** What makes a bisection terminate is the interval
+shrinking every round, and this one shrinks by landing on a header whose
+position is decided by the data. On the decode loop, a bound is worth
+more than a proof.
+
+##### A seek reports where it landed
+
+`decoder_seek_sec_at()` exists because this is the first mechanism whose
+answer is not the question. minimp3 decodes forward to the exact sample;
+the CBR path lands on the first frame at or after the target; the
+bisection lands on the frame *containing* it, which starts up to 93 ms
+before. Small, and not zero.
+
+`player.c` re-anchors `frames_out` and `s_pos_sec` from a seek, so
+anchoring to what was asked for rather than to what was reached puts the
+clock permanently out of step with the audio by the width of a frame --
+an error that never corrects itself, on the one control whose whole
+purpose is to agree with the position. The landed value is logged when
+it differs, so the size of the gap is visible rather than assumed.
+
+Host-tested under ASan and UBSan: synthetic streams in both blocking
+strategies, with and without a 500 KB PICTURE block ahead of the audio,
+random high-entropy payload throughout (which does contain false syncs
+-- the confirmation is what rejects them), every second of each file
+seeked and checked against the generator's own frame offsets; then 400
+mutated cases per file. Not IDF-built.
+
 #### Two things a crossfade must not do (0702)
 
 0701 removed the decode error. It did not remove what the decode error
@@ -2062,8 +2130,9 @@ rather than against a board.
 
 - **Seek on non-MP3 works only where the byte rate is provably
   constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  m4a and ts still refuse -- FLAC wants its SEEKTABLE and Ogg a
-  bisection over page granulepos, and neither is written.
+  m4a and ts still refuse. FLAC no longer does -- see 0704 -- and Ogg
+  wants the same bisection applied over page granulepos, which is the
+  next one worth doing.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.

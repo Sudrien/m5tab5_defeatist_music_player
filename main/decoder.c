@@ -37,6 +37,7 @@
 #include "esp_audio_simple_dec_default.h"
 
 #include "cbrseek.h"
+#include "flacseek.h"
 #include "duration.h"
 
 static const char *TAG = "tab5_dec";
@@ -73,6 +74,11 @@ struct decoder {
      * straight line -- see cbrseek.h. */
     cbr_map_t cbr;
     bool cbr_ok;
+
+    /* FLAC seeks by bisecting frame headers instead, because there is no
+     * line to prove -- see flacseek.h. At most one of these two is ever
+     * true. */
+    flac_seek_t flac;
 
     /* True when the index minimp3 is holding came from a sidecar rather
      * than from its own scan. Only used to keep the harvest below from
@@ -459,6 +465,17 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
      */
     d->cbr_ok = cbr_probe(d->f, &d->cbr);
 
+    /*
+     * And the variable-rate half. A FLAC states nothing about its byte
+     * rate that would survive cbr_probe(), and does not need to: every
+     * frame header says which sample it starts at, so the position of a
+     * byte can be read rather than estimated. This reads STREAMINFO and
+     * finds where the audio starts; the bisection happens at the drag.
+     */
+    if (!d->cbr_ok) {
+        (void)flac_seek_probe(d->f, &d->flac);
+    }
+
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
      * has returned at least once. */
@@ -583,11 +600,24 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
  * frame for. That is one frame -- 23 ms at 44.1 kHz -- and is what
  * seeking into a lossy stream sounds like everywhere.
  */
-static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
+static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
 {
-    if (!d->cbr_ok) return ESP_ERR_NOT_SUPPORTED;
+    long off;
+    uint8_t preamble[FLAC_PREAMBLE_BYTES];
+    size_t plen = 0;
+    uint32_t at_sec = sec;
 
-    const long off = cbr_offset_for_sec(d->f, &d->cbr, sec);
+    if (d->cbr_ok) {
+        off = cbr_offset_for_sec(d->f, &d->cbr, sec);
+    } else if (d->flac.ok) {
+        uint64_t landed_sample = 0;
+        off = flac_seek_find(d->f, &d->flac, sec, &landed_sample);
+        if (off >= 0 && d->flac.sample_rate) {
+            at_sec = (uint32_t)(landed_sample / d->flac.sample_rate);
+        }
+    } else {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
     if (off < 0) return ESP_FAIL;
 
     if (fseek(d->f, off, SEEK_SET) != 0) {
@@ -627,11 +657,19 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
     /* The preamble goes into the window ahead of the file's own bytes,
      * so the first process() call after this sees a header and then
      * audio, exactly as it would at an ordinary open. */
-    const size_t plen = cbr_resume_preamble(&d->cbr, off, d->inbuf, ESP_IN_BUF);
+    if (d->cbr_ok) {
+        plen = cbr_resume_preamble(&d->cbr, off, d->inbuf, ESP_IN_BUF);
+    } else {
+        plen = flac_seek_preamble(&d->flac, preamble, sizeof(preamble));
+        if (plen) memcpy(d->inbuf, preamble, plen);
+    }
     d->in_len = (int)plen;
 
-    ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld (+%u B header)",
-             d->cbr.what, sec, off, (unsigned)plen);
+    if (landed) *landed = at_sec;
+    ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
+                  "s (+%u B header)",
+             d->cbr_ok ? d->cbr.what : "flac", sec, off, at_sec,
+             (unsigned)plen);
     return ESP_OK;
 }
 
@@ -734,14 +772,20 @@ bool decoder_can_seek(decoder_t *d)
      * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
      * page granulepos, and neither is written.
      */
-    return d->cbr_ok;
+    return d->cbr_ok || d->flac.ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
 {
-    if (!d) return ESP_ERR_NOT_SUPPORTED;
+    return decoder_seek_sec_at(d, sec, NULL);
+}
 
-    if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec);
+esp_err_t decoder_seek_sec_at(decoder_t *d, uint32_t sec, uint32_t *landed)
+{
+    if (!d) return ESP_ERR_NOT_SUPPORTED;
+    if (landed) *landed = sec;
+
+    if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec, landed);
 
     if (!d->ex.info.hz || !d->ex.info.channels) return ESP_ERR_INVALID_STATE;
 
