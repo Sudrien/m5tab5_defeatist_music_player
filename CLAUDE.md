@@ -986,6 +986,62 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### TS seeks on a lattice (0706)
+
+`tsseek.c`, and the archive was read first again. `ts_parse.c.obj` is
+2894 bytes of RISC-V: it compares against the 0x47 sync byte in nine
+places, parses PAT and PMT, filters by PID and reads PES headers -- and
+it contains exactly one four-bit mask, which is the PSI section
+length's high nibble. **The continuity counter is not tracked.** That is
+the field a demuxer would use to notice a jump, and it does not look at
+it.
+
+**The lattice makes this the easiest of the four seeks.** A transport
+stream is fixed-size packets at a fixed stride, so every candidate
+offset is `base + n * stride` and there is no resynchronisation to get
+right and no confirmation to construct -- the sync byte at the computed
+place is the confirmation. Three strides are handled: 188, 192 (m2ts,
+which prefixes a four-byte arrival timestamp) and 204 (188 plus
+Reed-Solomon parity). They are told apart by checking five sync bytes,
+not by parsing anything.
+
+**PAT and PMT are the preamble.** Without them a fresh parser does not
+know which PID carries audio or what codec is in it, so it would filter
+for a PID nobody has told it about. Two packets, replayed verbatim --
+Ogg's header pages, WAV's synthesised header, and now this: the third
+instance of the same shape, and the reason `decoder.c` has one queueing
+mechanism for preambles rather than two.
+
+**Non-monotonic timestamps are refused, not searched.** PTS is 33 bits
+at 90 kHz, so it wraps every 26.5 hours, and a stream spliced from two
+sources can restart it part way. A bisection needs a key that
+increases; over one that does not it **does not fail, it converges on
+the wrong packet**. So the probe checks that the last timestamp is
+after the first and declines the whole file otherwise -- no seek, and
+no duration either.
+
+**It also gives .ts a duration**, which `duration.c` never could: there
+is no header stating one, only the span between the first and last
+presentation timestamps, and the seek probe has already read both for
+its own clamp.
+
+Two smaller decisions:
+
+- **A stream type this player does not recognise is still tried** if it
+  is the only elementary stream in the programme. The decoder will say
+  so if it cannot read it, and refusing at the PMT would cost a seek on
+  a file that plays.
+- **PSI sections spanning packets are not reassembled.** A PAT is four
+  bytes of payload and a radio PMT a few dozen; both fit in one packet
+  in any stream this will meet, and a reassembler is a parser for a
+  case that does not arise.
+
+Host-tested under ASan and UBSan: synthetic streams at all three
+strides, with and without an interleaved video PID putting hundreds of
+packets between audio PES headers, every second seeked and checked to
+land on a real audio PES start with the clock within a second of the
+request; then 400 mutated cases per file. Not IDF-built.
+
 #### Ogg seeks too, and the archive is what settled it (0705)
 
 `oggseek.c`. Same bisection as FLAC, over page granule positions
@@ -2223,9 +2279,14 @@ rather than against a board.
 
 - **Seek on non-MP3 works only where the byte rate is provably
   constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  m4a and ts still refuse. FLAC (0704) and Ogg (0705) do not: both
-  bisect. What is left is MP4, whose sample tables would make it exact
-  and are a bigger parser than either.
+  Only m4a still refuses. WAV, ADTS and AMR go by proven byte rate,
+  FLAC and Ogg and TS by bisection. MP4 is what is left, and it is the
+  one case where the archive says no: `m4a_parse.c.obj` builds the
+  sample tables itself and walks them, so its cursor cannot be moved
+  and feeding it a new position desynchronises it against a table it
+  believes it is tracking. Seeking it means parsing `moov` here and
+  remuxing AAC to ADTS -- a bigger parser than any of these four, and
+  one that would leave ALAC on the existing path.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
