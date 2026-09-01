@@ -40,6 +40,7 @@
 #include "flacseek.h"
 #include "oggseek.h"
 #include "tsseek.h"
+#include "mp4seek.h"
 #include "duration.h"
 
 static const char *TAG = "tab5_dec";
@@ -91,6 +92,15 @@ struct decoder {
      * packet lattice -- the easiest of the four, because there is no
      * resynchronisation to get right. See tsseek.h. */
     ts_seek_t ts;
+
+    /*
+     * MP4 is the one the archive said no to, so it is the one that does
+     * not use their parser at all: the tables are read here, the AAC is
+     * remuxed to ADTS, and the AAC decoder is fed instead of the M4A
+     * one. See mp4seek.h. Empty for ALAC and anything else that cannot
+     * be remuxed, which then takes the ordinary M4A path unchanged.
+     */
+    mp4_t mp4;
 
     /*
      * Bytes that must reach the parser before the file's own do.
@@ -454,8 +464,19 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
     d->inbuf = heap_caps_malloc(ESP_IN_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!d->inbuf) { storage_io_close(d->f); d->f = NULL; return ESP_ERR_NO_MEM; }
 
+    /*
+     * Before the decoder is opened, because it decides WHICH decoder.
+     * A remuxable .m4a is opened as AAC and never meets the M4A parser;
+     * everything else falls through with the type the table gives, and
+     * the fallback is the behaviour that shipped.
+     */
+    esp_audio_simple_dec_type_t type = k_formats[fmt].type;
+    if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_M4A && mp4_probe(d->f, &d->mp4)) {
+        type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+    }
+
     esp_audio_simple_dec_cfg_t cfg = {
-        .dec_type = k_formats[fmt].type,
+        .dec_type = type,
         .dec_cfg = NULL,
         .cfg_size = 0,
         /* false = let the decoder's own parser find frame boundaries in
@@ -464,7 +485,7 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
          * require and which we cannot satisfy from a file stream. */
         .use_frame_dec = false,
     };
-    d->esp_type = k_formats[fmt].type;
+    d->esp_type = type;
     if (esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
         ESP_LOGE(TAG, "esp_audio_codec has no %s decoder built in",
                  k_formats[fmt].name);
@@ -492,7 +513,10 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
      * file, and the open is the one moment this handle is not competing
      * with the decode loop for the device.
      */
-    d->cbr_ok = cbr_probe(d->f, &d->cbr);
+    /* Not asked at all when the MP4 path took the file: its tables are
+     * the answer, and a second mechanism claiming the same file is one
+     * that can disagree with the first. */
+    d->cbr_ok = d->mp4.ok ? false : cbr_probe(d->f, &d->cbr);
 
     /*
      * And the variable-rate half. A FLAC states nothing about its byte
@@ -501,13 +525,13 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
      * byte can be read rather than estimated. This reads STREAMINFO and
      * finds where the audio starts; the bisection happens at the drag.
      */
-    if (!d->cbr_ok) {
+    if (!d->mp4.ok && !d->cbr_ok) {
         (void)flac_seek_probe(d->f, &d->flac);
     }
-    if (!d->cbr_ok && !d->flac.ok) {
+    if (!d->mp4.ok && !d->cbr_ok && !d->flac.ok) {
         (void)ogg_seek_probe(d->f, &d->ogg);
     }
-    if (!d->cbr_ok && !d->flac.ok && !d->ogg.ok) {
+    if (!d->mp4.ok && !d->cbr_ok && !d->flac.ok && !d->ogg.ok) {
         (void)ts_seek_probe(d->f, &d->ts);
     }
 
@@ -547,7 +571,13 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
                 room -= take;
             }
             if (room) {
-                got += storage_io_fread(d->inbuf + keep + got, room,
+                /* The MP4 path does not read the file as a stream: it
+                 * reads the samples the table points at and writes an
+                 * ADTS header in front of each. Everything downstream
+                 * sees an ordinary AAC stream. */
+                got += d->mp4.ok
+                     ? mp4_read(d->f, &d->mp4, d->inbuf + keep + got, room)
+                     : storage_io_fread(d->inbuf + keep + got, room,
                                         d->f, STORAGE_IO_PLAYBACK);
             }
             d->in_len += (int)got;
@@ -669,12 +699,24 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         off = ogg_seek_find(d->f, &d->ogg, sec, &at_sec);
     } else if (d->ts.ok) {
         off = ts_seek_find(d->f, &d->ts, sec, &at_sec);
+    } else if (d->mp4.ok) {
+        /*
+         * The one seek here that is a lookup rather than a search, and
+         * the one that needs no preamble and no reopen: every frame
+         * handed to the decoder carries its own ADTS header, so a jump
+         * is just the next frame coming from a different sample. The
+         * offset below is nominal -- mp4_read() reads from the table,
+         * not from the file position -- so it only has to be a value
+         * that is not an error.
+         */
+        at_sec = mp4_seek_sec(&d->mp4, sec);
+        off = 0;
     } else {
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (off < 0) return ESP_FAIL;
 
-    if (fseek(d->f, off, SEEK_SET) != 0) {
+    if (!d->mp4.ok && fseek(d->f, off, SEEK_SET) != 0) {
         ESP_LOGW(TAG, "%s: fseek to %ld failed", d->info.codec, off);
         return ESP_FAIL;
     }
@@ -686,6 +728,20 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
     d->in_len = 0;
     d->in_pos = 0;
     d->eof = false;
+
+    /*
+     * The MP4 path skips the reopen. It is the only mechanism here
+     * whose parser was never handed a container in the first place --
+     * it sees ADTS frames and nothing else -- so there is no header
+     * state to restore and no half-assembled packet to discard.
+     */
+    if (d->mp4.ok) {
+        if (landed) *landed = at_sec;
+        ESP_LOGI(TAG, "mp4: seek to %" PRIu32 "s, landed %" PRIu32 "s, "
+                      "sample %" PRIu32,
+                 sec, at_sec, d->mp4.cur);
+        return ESP_OK;
+    }
 
     if (d->esp_dec) {
         esp_audio_simple_dec_close(d->esp_dec);
@@ -828,6 +884,9 @@ uint32_t decoder_duration_sec(decoder_t *d)
         if (!d->probe_sec && d->ts.ok) {
             d->probe_sec = ts_seek_duration_sec(&d->ts);
         }
+        if (!d->probe_sec && d->mp4.ok) {
+            d->probe_sec = mp4_duration_sec(&d->mp4);
+        }
     }
     return d->probe_sec;
 }
@@ -849,7 +908,7 @@ bool decoder_can_seek(decoder_t *d)
      * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
      * page granulepos, and neither is written.
      */
-    return d->cbr_ok || d->flac.ok || d->ogg.ok || d->ts.ok;
+    return d->cbr_ok || d->flac.ok || d->ogg.ok || d->ts.ok || d->mp4.ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
@@ -979,6 +1038,7 @@ void decoder_close(decoder_t *d)
     } else {
         if (d->esp_dec) esp_audio_simple_dec_close(d->esp_dec);
         ogg_seek_free(&d->ogg);
+        mp4_free(&d->mp4);
         free(d->inbuf);
     }
     if (d->f) storage_io_close(d->f);

@@ -986,6 +986,90 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### MP4 is the one where the archive said no (0707)
+
+Every seek from 0700 to 0706 works by moving the file underneath
+esp_audio_codec's parser, which is allowed because those parsers are
+stateless about position -- they find their own boundaries in whatever
+arrives. `m4a_parse.c.obj` is not. It is 6652 bytes and its strings say
+what it does: `Chunk number %d`, `Sample number %d`, `STSC map count
+%d`, `Fail to allocate memory for stco` / `stsz` / `stsc`, `All sample
+sent`. **It reads the sample tables into memory at open and walks
+them**, driving position itself and telling the caller which bytes to
+skip.
+
+So there is no position to move it to. Reopening restarts it at sample
+zero and feeding it bytes from elsewhere desynchronises it against a
+table it believes it is tracking.
+
+**So this one stops using it.** `mp4seek.c` reads the same tables --
+`stts` for timing, `stsc`/`stco`/`stsz` for where each sample is,
+`esds` for the AudioSpecificConfig -- synthesises an ADTS header per
+sample from that config, and feeds the AAC decoder, which takes
+arbitrary-length input and resynchronises on its own sync word.
+
+The remux is fifteen lines because the AudioSpecificConfig is five bits
+of object type, four of sampling frequency index and four of channel
+configuration, and those are exactly the three fields an ADTS header
+carries. It is a reframing, not a transcode.
+
+**It is the only exact seek in the player, and the only one that is a
+lookup rather than a search.** The table says where every sample begins,
+so there is no bisection, no preamble, and no reopen -- every frame
+handed over carries its own header, so a jump is the next frame coming
+from a different sample.
+
+##### What it declines, and why that is the design
+
+ALAC, and anything else in an MP4 that is not AAC. There is no ADTS
+framing for ALAC, so those files stay on esp_audio_codec's M4A path
+exactly as they are today: unseekable, working, unchanged. Every reason
+`mp4_probe()` can fail lands there -- a sample entry that is not
+`mp4a`, a missing or unusable `esds`, an escape-coded sample rate ADTS
+cannot express, more than `MP4_MAX_SAMPLES`, an offset past 4 GB.
+
+Putting the decision in a probe rather than in the extension table is
+what makes that fallback free. The format table still says `.m4a` is
+M4A; the probe upgrades it to AAC when it can.
+
+The other seek probes are not asked at all once this one has the file.
+Two mechanisms claiming the same file is two mechanisms that can
+disagree.
+
+##### Details
+
+- **`stsc` is runs, and its last run covers every remaining chunk.**
+  That is why the expansion cannot be one loop: the final entry has no
+  successor to bound it, and writing it as though it did leaves the
+  tail of the track unplaced. The check is that the number of samples
+  placed equals the number `stsz` declared, and a disagreement rejects
+  the file rather than playing part of it.
+- **Buffer fullness is written as 0x7FF**, meaning variable. That is
+  the truth about a remuxed stream, and it is also exactly what
+  `cbrseek.c` reads as a refusal to treat a stream as constant-rate.
+  Both are right, and they agree with each other by accident of both
+  being honest.
+- **HE-AAC and PS signal the base object type**, which is what implicit
+  signalling means and what every ADTS remuxer does. Scalable, ER and
+  USAC configurations are refused instead of being written as something
+  they are not.
+- **`MP4_MAX_SAMPLES` is 200000**, which is 1.6 MB of PSRAM and 77
+  minutes at 1024 samples and 44.1 kHz. Past it the file gets the
+  fallback rather than an allocation nobody budgeted for.
+- **A contiguous run of samples costs no seeks.** The reader tracks
+  where the handle is and only calls `fseek()` when the next sample is
+  not where it left off, which for a normally-muxed file is never --
+  the samples are in order in `mdat` and the stdio buffer does the
+  rest. A seek sets the position to -1 so the next read cannot mistake
+  a jump for a continuation.
+
+Host-tested under ASan and UBSan: synthetic files at one, seven and
+thirteen samples per chunk and with both `stco` and `co64`, every
+sample's computed offset and size checked against the generator's,
+every second seeked with the resulting ADTS header decoded back and the
+payload compared byte for byte; then 400 mutated cases per file. Not
+IDF-built.
+
 #### TS seeks on a lattice (0706)
 
 `tsseek.c`, and the archive was read first again. `ts_parse.c.obj` is
@@ -2279,14 +2363,12 @@ rather than against a board.
 
 - **Seek on non-MP3 works only where the byte rate is provably
   constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  Only m4a still refuses. WAV, ADTS and AMR go by proven byte rate,
-  FLAC and Ogg and TS by bisection. MP4 is what is left, and it is the
-  one case where the archive says no: `m4a_parse.c.obj` builds the
-  sample tables itself and walks them, so its cursor cannot be moved
-  and feeding it a new position desynchronises it against a table it
-  believes it is tracking. Seeking it means parsing `moov` here and
-  remuxing AAC to ADTS -- a bigger parser than any of these four, and
-  one that would leave ALAC on the existing path.
+  Every format this player decodes is seekable as of 0707, by four
+  mechanisms: a proven-constant byte rate (WAV, CBR ADTS, AMR), a
+  bisection over frame headers, page granules or PES timestamps (FLAC,
+  Ogg, TS), and a sample table read directly with the audio remuxed to
+  ADTS (MP4). The one exception is ALAC in an MP4, which cannot be
+  remuxed and keeps the old unseekable path.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
