@@ -38,6 +38,7 @@
 
 #include "cbrseek.h"
 #include "flacseek.h"
+#include "oggseek.h"
 #include "duration.h"
 
 static const char *TAG = "tab5_dec";
@@ -79,6 +80,28 @@ struct decoder {
      * line to prove -- see flacseek.h. At most one of these two is ever
      * true. */
     flac_seek_t flac;
+
+    /* And Ogg, which bisects page granule positions -- see oggseek.h,
+     * and in particular what the precompiled parser turned out to do
+     * with a page from a new position. */
+    ogg_seek_t ogg;
+
+    /*
+     * Bytes that must reach the parser before the file's own do.
+     *
+     * WAV and AMR resume behind a preamble of tens of bytes, which fits
+     * in the input window with room to spare. Vorbis does not: its three
+     * header packets include the codebooks, several KB and sometimes
+     * more than the 8 KB window. So the preamble is a source the window
+     * is filled FROM, ahead of the file, rather than something written
+     * into it once.
+     *
+     * Borrowed, not owned -- it points into the ogg_seek_t's own
+     * storage, which outlives every read that consumes it.
+     */
+    const uint8_t *pre;
+    size_t pre_len;
+    size_t pre_pos;
 
     /* True when the index minimp3 is holding came from a sidecar rather
      * than from its own scan. Only used to keep the harvest below from
@@ -475,6 +498,9 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
     if (!d->cbr_ok) {
         (void)flac_seek_probe(d->f, &d->flac);
     }
+    if (!d->cbr_ok && !d->flac.ok) {
+        (void)ogg_seek_probe(d->f, &d->ogg);
+    }
 
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
@@ -497,9 +523,24 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
             memmove(d->inbuf, d->inbuf + d->in_pos, (size_t)keep);
             d->in_pos = 0;
             d->in_len = keep;
-            const size_t got = storage_io_fread(d->inbuf + keep,
-                                                (size_t)(ESP_IN_BUF - keep),
-                                                d->f, STORAGE_IO_PLAYBACK);
+            size_t room = (size_t)(ESP_IN_BUF - keep);
+            size_t got = 0;
+
+            /* The preamble first, and only then the file. A partially
+             * consumed preamble is the ordinary case for Vorbis, whose
+             * headers are larger than this window. */
+            if (d->pre && d->pre_pos < d->pre_len) {
+                const size_t take = (d->pre_len - d->pre_pos < room)
+                                  ? (d->pre_len - d->pre_pos) : room;
+                memcpy(d->inbuf + keep, d->pre + d->pre_pos, take);
+                d->pre_pos += take;
+                got = take;
+                room -= take;
+            }
+            if (room) {
+                got += storage_io_fread(d->inbuf + keep + got, room,
+                                        d->f, STORAGE_IO_PLAYBACK);
+            }
             d->in_len += (int)got;
             if (got == 0) d->eof = true;
         }
@@ -615,6 +656,8 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         if (off >= 0 && d->flac.sample_rate) {
             at_sec = (uint32_t)(landed_sample / d->flac.sample_rate);
         }
+    } else if (d->ogg.ok) {
+        off = ogg_seek_find(d->f, &d->ogg, sec, &at_sec);
     } else {
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -657,18 +700,30 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
     /* The preamble goes into the window ahead of the file's own bytes,
      * so the first process() call after this sees a header and then
      * audio, exactly as it would at an ordinary open. */
+    d->pre = NULL;
+    d->pre_len = 0;
+    d->pre_pos = 0;
+
     if (d->cbr_ok) {
         plen = cbr_resume_preamble(&d->cbr, off, d->inbuf, ESP_IN_BUF);
-    } else {
+        d->in_len = (int)plen;
+    } else if (d->flac.ok) {
         plen = flac_seek_preamble(&d->flac, preamble, sizeof(preamble));
         if (plen) memcpy(d->inbuf, preamble, plen);
+        d->in_len = (int)plen;
+    } else {
+        /* Too big for the window, so it is queued rather than copied.
+         * The window fills from it on the next read. */
+        d->pre = ogg_seek_preamble(&d->ogg, &d->pre_len);
+        plen = d->pre_len;
+        d->in_len = 0;
     }
-    d->in_len = (int)plen;
 
     if (landed) *landed = at_sec;
     ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
                   "s (+%u B header)",
-             d->cbr_ok ? d->cbr.what : "flac", sec, off, at_sec,
+             d->cbr_ok ? d->cbr.what : (d->flac.ok ? "flac" : "ogg"),
+             sec, off, at_sec,
              (unsigned)plen);
     return ESP_OK;
 }
@@ -772,7 +827,7 @@ bool decoder_can_seek(decoder_t *d)
      * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
      * page granulepos, and neither is written.
      */
-    return d->cbr_ok || d->flac.ok;
+    return d->cbr_ok || d->flac.ok || d->ogg.ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
@@ -901,6 +956,7 @@ void decoder_close(decoder_t *d)
         mp3dec_ex_close(&d->ex);
     } else {
         if (d->esp_dec) esp_audio_simple_dec_close(d->esp_dec);
+        ogg_seek_free(&d->ogg);
         free(d->inbuf);
     }
     if (d->f) storage_io_close(d->f);
