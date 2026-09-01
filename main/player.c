@@ -4191,6 +4191,9 @@ typedef enum {
  * reasons.
  */
 static char s_prev_dir[512];
+/* The whole path, not just the folder. See the arming block: a track
+ * cannot be crossfaded into itself. */
+static char s_prev_path[512];
 static bool s_prev_ended_clean;
 
 /*
@@ -4298,6 +4301,19 @@ static track_end_t play_file(const char *path)
     {
         const uint32_t sec = settings_crossfade_sec();
         bool ok = (sec > 0) && s_prev_ended_clean;
+
+        /*
+         * Never over itself. Repeat-one, or a `next` that wraps a
+         * one-track folder, hands this function the file that is still
+         * playing out of the other ring -- and an overlap of a recording
+         * with itself three seconds out of phase is not a transition,
+         * it is a flanger. The rings cannot tell: same rate, same
+         * channels, both full.
+         */
+        if (ok && strcmp(path, s_prev_path) == 0) {
+            ok = false;
+            ESP_LOGI(TAG, "no crossfade: same file");
+        }
 
         if (ok && !settings_crossfade_album() && same_album(path, s_prev_dir)) {
             ok = false;
@@ -4608,6 +4624,17 @@ static track_end_t play_file(const char *path)
     int blocks = 0;
     uint64_t frames_out = 0;
     track_end_t why = TRACK_ENDED;
+
+    /*
+     * Where the last serviced seek left the frame counter, and whether
+     * there was one.
+     *
+     * Only used to answer one question at the bottom of this function:
+     * did the track end because it reached its end, or because a seek
+     * put the decoder within a moment of it. See s_prev_ended_clean.
+     */
+    uint64_t frames_at_seek = 0;
+    bool     seeked = false;
 
     /*
      * The screen changes when the sound does, not when the decode does.
@@ -4941,6 +4968,8 @@ static track_end_t play_file(const char *path)
                      * point. */
                     frames_out = (uint64_t)target * (cur_rate ? cur_rate : 1);
                     s_frames_out[s_ring_fill] = frames_out;
+                    frames_at_seek = frames_out;
+                    seeked = true;
                     s_pos_sec = target;
                     ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
                 }
@@ -5542,8 +5571,44 @@ static track_end_t play_file(const char *path)
      * pulled card -- is a boundary the listener caused or was told
      * about. See the arming block at the top.
      */
-    s_prev_ended_clean = (why == TRACK_ENDED);
+    /*
+     * A SEEK THAT RAN OFF THE END IS NOT A TRACK THAT ENDED.
+     *
+     * The arming block at the top says so in words and this is what
+     * makes it true. A drag to the last inch of the bar leaves under a
+     * second of audio, the decoder reaches the end of it almost at once,
+     * and `why` is TRACK_ENDED -- indistinguishable, from here, from a
+     * track played through.
+     *
+     * It is not the same boundary. The listener just moved the playhead
+     * themselves, so the next track arriving is a consequence of a press
+     * and should sound like one; and with up to a ring of the old
+     * position still queued, softening it means MIXING the tail of the
+     * seeked-from audio with the incoming track. Where the incoming
+     * track is the same file -- repeat-one, or a `next` back round to it
+     * -- that is the same recording played over itself, which is how
+     * 0700 was noticed.
+     *
+     * One second of decoded audio after the seek is the threshold. Below
+     * it the seek is what ended the track; above it the track ran on and
+     * ended on its own terms.
+     */
+    bool clean = (why == TRACK_ENDED);
+    if (clean && seeked && cur_rate && frames_out - frames_at_seek < cur_rate) {
+        ESP_LOGI(TAG, "the seek ran off the end; not a clean boundary");
+        clean = false;
+    }
+    s_prev_ended_clean = clean;
+
+    /*
+     * `why` itself is deliberately NOT changed by the test above. It is
+     * the caller's instruction about what to play next -- TRACK_ENDED
+     * advances the playlist, TRACK_INTERRUPTED does not -- and a seek to
+     * the last second of a track still wants the next one. The only
+     * thing the distinction governs is the crossfade.
+     */
     {
+        snprintf(s_prev_path, sizeof(s_prev_path), "%s", path);
         const char *slash = strrchr(path, '/');
         if (slash) {
             const size_t len = (size_t)(slash - path);
