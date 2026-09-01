@@ -4948,9 +4948,11 @@ static track_end_t play_file(const char *path)
                 /* See SEEK_NOOP. Everything below runs as if the seek
                  * had succeeded; the decoder is simply never asked. */
                 const esp_err_t sr = ESP_OK;
+                uint32_t landed = target;
                 ESP_LOGW(TAG, "SEEK_NOOP: not seeking to %" PRIu32 "s", target);
 #else
-                const esp_err_t sr = decoder_seek_sec(dec, target);
+                uint32_t landed = target;
+                const esp_err_t sr = decoder_seek_sec_at(dec, target, &landed);
 #endif
                 if (sr == ESP_ERR_NOT_SUPPORTED) {
                     ESP_LOGI(TAG, "seek ignored: %s cannot seek", "this backend");
@@ -4986,15 +4988,33 @@ static track_end_t play_file(const char *path)
                      * is acted on. */
                     battery_trace_arm("seek");
 
-                    /* Re-anchor the position counter, or the clock counts
-                     * on from where it was rather than from the new
-                     * point. */
-                    frames_out = (uint64_t)target * (cur_rate ? cur_rate : 1);
+                    /*
+                     * Re-anchor the position counter, or the clock
+                     * counts on from where it was rather than from the
+                     * new point.
+                     *
+                     * Anchored to where the decoder LANDED, not to what
+                     * was asked for. They are the same on minimp3,
+                     * which decodes forward to the exact sample, and
+                     * they are not on the FLAC bisection, which lands
+                     * on the frame containing the target -- up to 93 ms
+                     * before it at a 4096-sample block. Anchoring to
+                     * the request would make the clock disagree with
+                     * the audio by that much for the rest of the track,
+                     * which is a small error that never corrects
+                     * itself.
+                     */
+                    frames_out = (uint64_t)landed * (cur_rate ? cur_rate : 1);
                     s_frames_out[s_ring_fill] = frames_out;
                     frames_at_seek = frames_out;
                     seeked = true;
-                    s_pos_sec = target;
-                    ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
+                    s_pos_sec = landed;
+                    if (landed != target) {
+                        ESP_LOGI(TAG, "seek to %" PRIu32 "s (landed %" PRIu32 "s)",
+                                 target, landed);
+                    } else {
+                        ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
+                    }
                 }
             }
         }

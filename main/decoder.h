@@ -214,6 +214,22 @@ uint32_t decoder_duration_sec(decoder_t *d);
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec);
 
 /*
+ * As decoder_seek_sec(), but reports where it actually landed.
+ *
+ * Not every mechanism lands on the second asked for. minimp3 decodes
+ * forward to the exact sample and always does; the FLAC bisection lands
+ * on the frame CONTAINING the target, which starts at or before it; the
+ * CBR path lands on the first frame at or after. The differences are
+ * small -- a FLAC frame is 93 ms at 4096 samples -- and they are not
+ * zero, and the caller re-anchors its position counter from this.
+ *
+ * Anchoring to what was asked for rather than to what was reached is
+ * how a clock comes to disagree with the audio by the width of a frame
+ * and stay that way for the rest of the track. `landed` may be NULL.
+ */
+esp_err_t decoder_seek_sec_at(decoder_t *d, uint32_t sec, uint32_t *landed);
+
+/*
  * Can this backend seek at all?
  *
  * Separate from having a duration, which is the mistake the first version
