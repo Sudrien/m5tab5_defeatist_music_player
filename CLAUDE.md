@@ -613,11 +613,11 @@ extension. The caller already chose a decoder by extension; a probe that
 trusted the same wrong extension would return a confident number for a
 mislabelled file instead of nothing.
 
-This does not make those formats seekable. Ogg seeking is the same
-granulepos scan applied as a bisection over page boundaries, which is
-worth doing and is not done here. WAV, CBR ADTS and AMR *are* seekable,
-by a different route and on a different proof -- see "Seeking without
-seek data".
+This does not make those formats seekable, and by 0705 all of them are
+anyway, by three different routes: a proven-constant byte rate for WAV,
+CBR ADTS and AMR, a frame-header bisection for FLAC, and a page-granule
+bisection for Ogg -- which is exactly the scan described here, applied
+as a search rather than as a single read.
 
 ### The frame walk, and why it is gone (historical, 0206)
 
@@ -985,6 +985,99 @@ defines it.** Reopening plus a preamble is cheap -- one alloc and one
 free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
+
+#### Ogg seeks too, and the archive is what settled it (0705)
+
+`oggseek.c`. Same bisection as FLAC, over page granule positions
+instead of frame headers.
+
+**This was deferred twice on a question that could have been answered by
+reading the binary.** The doubt was whether esp_audio_codec's Ogg parser
+would accept pages from a new position: a demuxer is entitled to treat a
+page sequence number that jumps as a hole and to drop pages or fail, and
+the component ships as a precompiled archive, so the header says nothing.
+The recommendation both times was to flash a test.
+
+`esp_ogg_parse_frame` in `libesp_audio_simple_dec.a` is 1232 bytes of
+RISC-V, and disassembling it answers the question outright:
+
+- it **scans forward for `OggS`** anywhere in the buffer it is given and
+  reports the skipped bytes rather than failing, so resynchronisation is
+  a supported operation;
+- it checks the version byte and compares the **serial number** against
+  the one learned at the start of the stream;
+- it **never reads the page sequence number at offset 18, and never
+  reads the CRC at offset 22.** There is no CRC table in the object --
+  the only `.rodata` in it is format strings.
+
+So a sequence-number jump is invisible to it. Half a day of flashing
+replaced by twenty minutes with `nm` and a disassembler, on a question
+that had already cost two rounds of "it would take an experiment".
+
+**Ship's-log note, since this is the second time it has come up:** a
+precompiled dependency is not a black box. `nm`, `strings` and a
+disassembler answer questions about it that its header does not, and
+this project already has to know things about esp_audio_codec that are
+not documented -- the MP3 symbol collision in `minimp3_prefix.h` was
+found the same way.
+
+##### The headers still have to be replayed
+
+The disassembly also shows the two pieces of state a jump invalidates: a
+flag saying the beginning-of-stream headers have been parsed, and a
+partially-assembled packet that `append_packet` splices across pages. So
+this is 0701's shape again -- close the decoder, reopen it, replay the
+stream's own header pages verbatim, then the pages at the target. Not
+because the sequence numbers need fixing, but because the parser's
+packet assembler is mid-packet and its header state would be missing.
+
+Verbatim rather than synthesised: real pages carry correct CRCs, and
+although this parser does not check them, the next version might, and a
+synthesised page is the kind of thing that works until it does not.
+
+**Header pages are the pages at the front whose granule position is
+zero.** Vorbis has three header packets and Opus two, and neither can
+have produced samples yet, so the first page with a nonzero granule is
+audio. Far more robust than counting packets, which for Vorbis means
+walking a segment table across page boundaries to find where the setup
+header ends.
+
+**Vorbis is why the preamble is a source rather than a memcpy.** Its
+codebooks run to several KB and can exceed the decoder's 8 KB input
+window, so `decoder.c` grew `pre`/`pre_len`/`pre_pos` and fills the
+window from the preamble before the file. WAV's 44 bytes and AMR's six
+still go straight in.
+
+Details:
+
+- **Opus granule is always 48 kHz units and includes the pre-skip**, and
+  `OpusHead` carries an input-rate field that invites the wrong divisor.
+  Same trap `duration.c` documents; same answer, in a second place
+  because these are two different questions about the same number.
+- **A page that continues a packet is not a landing site.** The parser
+  would be handed the tail of a packet whose head it has never seen. A
+  continuation page is still good evidence about position, so it still
+  moves the interval -- it just cannot be the answer. Same for a granule
+  of -1, which means no packet finishes on the page.
+- **The landing page's own granule is not where the audio resumes.** A
+  granule is the position of the END of the last packet finishing on
+  that page, so resuming there produces audio starting where the
+  PREVIOUS page ended. Reporting the landing page's granule would put
+  the clock up to one page ahead of the sound -- 20 to 200 ms,
+  permanently, for the rest of the track. One extra read of the window
+  before the landing page gets the predecessor's granule, and that is
+  what `decoder_seek_sec_at()` reports.
+- **The window is 24 KB with a 65 KB fallback.** A page can be 65307
+  bytes, so a window that always guaranteed a page start would be a
+  megabyte of reads per drag. 24 KB covers five or six typical audio
+  pages; the full size is the retry for a probe that found nothing.
+
+Host-tested under ASan and UBSan: synthetic Vorbis and Opus streams with
+multi-page headers and variable page sizes, every second seeked and the
+result checked to be a real page start with the clock within one second
+of the request; then 400 mutated cases per file. Not IDF-built, and the
+decoder handoff -- reopen, replay, resume -- is the part no host test
+can reach.
 
 #### FLAC seeks by bisection (0704)
 
@@ -2130,9 +2223,9 @@ rather than against a board.
 
 - **Seek on non-MP3 works only where the byte rate is provably
   constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  m4a and ts still refuse. FLAC no longer does -- see 0704 -- and Ogg
-  wants the same bisection applied over page granulepos, which is the
-  next one worth doing.
+  m4a and ts still refuse. FLAC (0704) and Ogg (0705) do not: both
+  bisect. What is left is MP4, whose sample tables would make it exact
+  and are a bigger parser than either.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
