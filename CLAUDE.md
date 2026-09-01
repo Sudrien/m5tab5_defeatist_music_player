@@ -986,6 +986,43 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### Two things a crossfade must not do (0702)
+
+0701 removed the decode error. It did not remove what the decode error
+found, which is that the crossfade will happily mix a track with itself
+and had two ways to be asked to.
+
+**A seek that ran off the end is not a track that ended.** The arming
+block said so in words already; nothing made it true. A drag to the last
+inch of the bar leaves under a second of audio, the decoder reaches the
+end of it at once, and `why` is `TRACK_ENDED` -- indistinguishable, from
+the bottom of `play_file()`, from a track played through. It is not the
+same boundary: the listener just moved the playhead themselves, so what
+follows is a consequence of a press and should sound like one. The test
+is one second of decoded audio after the last serviced seek. Below it
+the seek ended the track; above it the track ran on and ended on its own
+terms.
+
+`why` itself is deliberately not changed by that test. It is the
+caller's instruction about what to play next -- `TRACK_ENDED` advances
+the playlist and `TRACK_INTERRUPTED` does not -- and a seek to the last
+second of a track still wants the next one. Only `s_prev_ended_clean`
+moves.
+
+**Never over itself.** Repeat-one, or a `next` that wraps a one-track
+folder, hands `play_file()` the file that is still playing out of the
+other ring. An overlap of a recording with itself three seconds out of
+phase is not a transition, it is a flanger. The rings cannot tell the
+difference -- same rate, same channels, both full -- so the check is on
+the path, next to the same-album one, and `s_prev_path` exists for it
+where `s_prev_dir` already existed for the album.
+
+Both are policy about how the previous track ended, which is why they
+sit in the arming block on the decode loop rather than in
+`xfade_can_start()` on the writer. The split is unchanged: the decode
+loop decides whether an overlap is *allowed*, the writer decides whether
+one is *possible*.
+
 ### Two volumes, mounted together
 
 `storage.c` owns the microSD slot and the USB-A port, and both are mounted
