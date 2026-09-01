@@ -62,6 +62,7 @@ What do you mean no audio over Bluetooth
 - m3u/m3u8 - playlists are significant potential UI
 - Sleep timer
 - gapless playback is supposedly set up, but I need to get behavior nailed down
+- seek for files that don't have as much provision for it
 
 ## What could not happen with current published code
 - classic BT dongle support
