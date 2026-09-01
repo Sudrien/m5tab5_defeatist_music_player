@@ -39,6 +39,7 @@
 #include "cbrseek.h"
 #include "flacseek.h"
 #include "oggseek.h"
+#include "tsseek.h"
 #include "duration.h"
 
 static const char *TAG = "tab5_dec";
@@ -85,6 +86,11 @@ struct decoder {
      * and in particular what the precompiled parser turned out to do
      * with a page from a new position. */
     ogg_seek_t ogg;
+
+    /* And the transport stream, which bisects PES timestamps on a fixed
+     * packet lattice -- the easiest of the four, because there is no
+     * resynchronisation to get right. See tsseek.h. */
+    ts_seek_t ts;
 
     /*
      * Bytes that must reach the parser before the file's own do.
@@ -501,6 +507,9 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
     if (!d->cbr_ok && !d->flac.ok) {
         (void)ogg_seek_probe(d->f, &d->ogg);
     }
+    if (!d->cbr_ok && !d->flac.ok && !d->ogg.ok) {
+        (void)ts_seek_probe(d->f, &d->ts);
+    }
 
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
@@ -658,6 +667,8 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         }
     } else if (d->ogg.ok) {
         off = ogg_seek_find(d->f, &d->ogg, sec, &at_sec);
+    } else if (d->ts.ok) {
+        off = ts_seek_find(d->f, &d->ts, sec, &at_sec);
     } else {
         return ESP_ERR_NOT_SUPPORTED;
     }
@@ -712,9 +723,12 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         if (plen) memcpy(d->inbuf, preamble, plen);
         d->in_len = (int)plen;
     } else {
-        /* Too big for the window, so it is queued rather than copied.
-         * The window fills from it on the next read. */
-        d->pre = ogg_seek_preamble(&d->ogg, &d->pre_len);
+        /* Ogg's headers are too big for the window and the TS pair is
+         * 376 bytes, but both are borrowed rather than copied and both
+         * go through the same path -- one queueing mechanism beats two,
+         * and the window fills from it on the next read. */
+        d->pre = d->ogg.ok ? ogg_seek_preamble(&d->ogg, &d->pre_len)
+                           : ts_seek_preamble(&d->ts, &d->pre_len);
         plen = d->pre_len;
         d->in_len = 0;
     }
@@ -722,7 +736,8 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
     if (landed) *landed = at_sec;
     ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
                   "s (+%u B header)",
-             d->cbr_ok ? d->cbr.what : (d->flac.ok ? "flac" : "ogg"),
+             d->cbr_ok ? d->cbr.what
+                       : (d->flac.ok ? "flac" : (d->ogg.ok ? "ogg" : "ts")),
              sec, off, at_sec,
              (unsigned)plen);
     return ESP_OK;
@@ -806,6 +821,13 @@ uint32_t decoder_duration_sec(decoder_t *d)
         if (!d->probe_sec && d->cbr_ok) {
             d->probe_sec = cbr_duration_sec(&d->cbr);
         }
+        /* And a transport stream, which duration.c cannot answer at all
+         * -- there is no header stating a length, only the span between
+         * the first and last presentation timestamps, which the seek
+         * probe has already read for its own clamp. */
+        if (!d->probe_sec && d->ts.ok) {
+            d->probe_sec = ts_seek_duration_sec(&d->ts);
+        }
     }
     return d->probe_sec;
 }
@@ -827,7 +849,7 @@ bool decoder_can_seek(decoder_t *d)
      * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
      * page granulepos, and neither is written.
      */
-    return d->cbr_ok || d->flac.ok || d->ogg.ok;
+    return d->cbr_ok || d->flac.ok || d->ogg.ok || d->ts.ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
