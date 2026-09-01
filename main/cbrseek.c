@@ -85,14 +85,24 @@ static bool probe_wav(FILE *f, long base, cbr_map_t *m)
         const uint32_t clen = le32(h + 4);
 
         if (memcmp(h, "fmt ", 4) == 0 && clen >= 16) {
-            uint8_t fmt[16];
-            if (!read_at(f, pos + 8, fmt, sizeof(fmt))) break;
-            const uint16_t tag = le16(fmt);
-            /* 1 = PCM, 3 = IEEE float, 0xFFFE = extensible, whose real
-             * tag is in the extension -- and which is only ever used
-             * here to carry PCM with a channel mask or more than 16
-             * bits. Both are linear in bytes. */
-            pcm = (tag == 0x0001 || tag == 0x0003 || tag == 0xFFFE);
+            uint8_t fmt[40];
+            const size_t want = (clen >= 40) ? 40 : 16;
+            if (!read_at(f, pos + 8, fmt, want)) break;
+            uint16_t tag = le16(fmt);
+            m->channels = le16(fmt + 2);
+            m->sample_rate = le32(fmt + 4);
+            m->bits = le16(fmt + 14);
+            /*
+             * Extensible carries its real format in the first two bytes
+             * of the subformat GUID, and it is read rather than assumed:
+             * the resume preamble below re-declares the stream as plain
+             * PCM, so accepting a format that is not PCM would describe
+             * it wrongly to the parser at every seek. Float is refused
+             * for the same reason rather than because it is not linear,
+             * which it is.
+             */
+            if (tag == 0xFFFE && want == 40) tag = le16(fmt + 24);
+            pcm = (tag == 0x0001);
             byte_rate = le32(fmt + 8);
             block_align = le16(fmt + 12);
             have_fmt = true;
@@ -115,6 +125,7 @@ static bool probe_wav(FILE *f, long base, cbr_map_t *m)
     if (!have_fmt || data_off < 0 || !byte_rate || !block_align || !data_len) {
         return false;
     }
+    if (!m->channels || !m->sample_rate || !m->bits) return false;
     if (!pcm) {
         ESP_LOGI(TAG, "wav is not PCM (compressed), not mapping it");
         return false;
@@ -409,6 +420,8 @@ static bool probe_amr(FILE *f, long base, cbr_map_t *m)
         }
     }
 
+    memcpy(m->magic, magic, (size_t)(data - base));
+    m->magic_len = (uint8_t)(data - base);
     m->data_start = data;
     m->data_end = data + frames * sz;
     m->byte_rate = (uint32_t)sz * 50;           /* 20 ms per frame */
@@ -520,4 +533,60 @@ long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec)
         return -1;
     }
     return off + found;
+}
+
+/* ------------------------------------------------------------------ */
+
+static void w32le(uint8_t *p, uint32_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+    p[2] = (uint8_t)(v >> 16); p[3] = (uint8_t)(v >> 24);
+}
+
+static void w16le(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8);
+}
+
+size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t cap)
+{
+    if (!m || !buf) return 0;
+
+    if (m->magic_len) {                         /* AMR */
+        if (cap < m->magic_len) return 0;
+        memcpy(buf, m->magic, m->magic_len);
+        return m->magic_len;
+    }
+
+    if (!m->channels || !m->bits) return 0;     /* ADTS: nothing needed */
+    if (cap < 44) return 0;
+
+    /*
+     * Canonical 44-byte RIFF/WAVE. Not the file's own header re-read:
+     * the file's `data` length describes the whole track and the parser
+     * is being handed the middle of it, so the length written here is
+     * what is actually left from `off`. A parser that clamps its output
+     * to the declared length then stops at the real end of the audio
+     * rather than a track's worth of bytes past it.
+     */
+    long left = m->data_end - off;
+    if (left < 0) left = 0;
+
+    memcpy(buf, "RIFF", 4);
+    w32le(buf + 4, (uint32_t)(36 + left));
+    memcpy(buf + 8, "WAVE", 4);
+    memcpy(buf + 12, "fmt ", 4);
+    w32le(buf + 16, 16);
+    w16le(buf + 20, 1);                         /* PCM; extensible is not
+                                                 * re-declared, because what
+                                                 * follows it here is plain
+                                                 * PCM either way */
+    w16le(buf + 22, m->channels);
+    w32le(buf + 24, m->sample_rate);
+    w32le(buf + 28, m->byte_rate);
+    w16le(buf + 32, (uint16_t)m->align);
+    w16le(buf + 34, m->bits);
+    memcpy(buf + 36, "data", 4);
+    w32le(buf + 40, (uint32_t)left);
+    return 44;
 }

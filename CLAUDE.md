@@ -941,6 +941,51 @@ noise; then 400 mutated cases per format (truncation, byte flips,
 duration. Not IDF-built, which is the caveat the 0200 series already
 paid for twice.
 
+#### The parser has to be reopened, not merely moved (0701)
+
+0700 moved the file and left the decoder handle alone, reasoning that a
+parser which has already read the container header does not care where
+the following bytes come from. That is true of ADTS and it is not true
+of WAV: esp_audio_codec's WAV decoder tracks its position within the
+`data` chunk it was told about, so a jump landed it somewhere it did not
+expect and the next `process()` call failed.
+
+**A decode error is how a track ends.** That is what made a wrong
+assumption into an audible fault rather than a glitch -- the symptom was
+not a click at the seek, it was the track playing over itself. See the
+next section.
+
+So the handle is closed and reopened on every seek, and fed a preamble
+that describes the audio at the new offset: a synthesised 44-byte
+RIFF/WAVE header for WAV, the file's own magic for AMR, nothing for
+ADTS. `cbr_resume_preamble()` builds it.
+
+- **The synthesised header is not the file's own.** The file's `data`
+  length describes the whole track and the parser is being handed the
+  middle of it, so the length written is what is left from the seek
+  offset. A parser that clamps its output to the declared length then
+  stops at the real end of the audio rather than a track's worth of
+  bytes past it.
+- **It re-declares the stream as plain PCM**, which is why `probe_wav()`
+  now reads the extensible subformat GUID rather than accepting tag
+  0xFFFE on sight, and why IEEE float is refused. Not because float is
+  non-linear -- it is perfectly linear -- but because describing it as
+  PCM at every seek would be a lie the parser believes.
+- **A failed reopen leaves no handle**, so `esp_codec_read()` checks for
+  one and reports the stream unusable. Ending the track honestly is the
+  only available answer; calling into a NULL handle is not.
+- **The `produced` guard is gone with the assumption it protected.**
+  0700 refused a seek before the first decoded frame because the parser
+  had not read the header yet. With the header now supplied on every
+  seek, there is no such state.
+
+The general form, which is the part worth keeping: **a parser handed
+bytes from a new position is in an undefined state unless something
+defines it.** Reopening plus a preamble is cheap -- one alloc and one
+free on a path already dropping seconds of queued audio -- and it buys
+the property that every seek starts the parser exactly where a fresh
+open would.
+
 ### Two volumes, mounted together
 
 `storage.c` owns the microSD slot and the USB-A port, and both are mounted
