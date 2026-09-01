@@ -133,19 +133,31 @@ void decoder_close(decoder_t *d);
  *
  * minimp3_ex knows this because MP3D_SEEK_TO_SAMPLE builds the index up
  * front. The esp_audio_codec simple decoder does not expose a total --
- * its info struct carries frame_size, not stream length -- so FLAC, WAV
- * and the rest return 0 and the seek bar renders empty rather than
- * lying. */
+ * its info struct carries frame_size, not stream length -- so the answer
+ * comes from the container instead (duration.c), and failing that from a
+ * proven-constant byte rate over a known extent (cbrseek.c), which is
+ * what gives raw ADTS and AMR a length again. Still 0 when none of the
+ * three can say, and the seek bar renders empty rather than lying. */
 uint32_t decoder_duration_sec(decoder_t *d);
 
 /* Jump to a position in seconds. ESP_ERR_NOT_SUPPORTED when the backend
  * cannot seek, which the caller should treat as "carry on playing", not
  * as a failure.
  *
- * Only minimp3 can. MP3D_SEEK_TO_SAMPLE built a sample-accurate index at
- * open time, so mp3dec_ex_seek() is exact rather than a byte-offset
- * guess. The esp_audio_codec simple decoder has no seek entry point at
- * all -- its parsers are forward-only over a stream. */
+ * Two mechanisms behind it, and they are not the same kind of thing.
+ *
+ * minimp3 seeks the DECODER: MP3D_SEEK_TO_SAMPLE built a sample-accurate
+ * index at open, so mp3dec_ex_seek() lands exactly.
+ *
+ * The esp_audio_codec backend seeks the FILE. Its simple decoder has no
+ * seek entry point -- the parsers are forward-only over a stream -- but a
+ * forward-only parser does not care where the stream came from, so where
+ * the mapping from time to byte offset is a straight line, an fseek and
+ * a reset of the input window is a seek. cbrseek.c establishes whether
+ * that line exists for this file: PCM WAV always, ADTS and AMR when a
+ * sampled walk shows the frame rate really is constant. Everything else
+ * on that backend -- FLAC, Ogg, m4a, ts -- still returns
+ * ESP_ERR_NOT_SUPPORTED. */
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec);
 
 /*
