@@ -1306,12 +1306,11 @@ Waveform, loudness, tags, format (rate, channels, bitrate, codec,
 duration, gapless delay/padding), art location, abandonment count -- all
 produced and consumed.
 
-**The seek index is defined, tested and unwired.** It is now the largest
-remaining win by a wide margin: with everything else answered from the
-sidecar before `decoder_open()` returns, `index built` is essentially the
-whole of the 1.2-1.8 s open. Wiring it means `decoder.c` handing minimp3
-a prebuilt index rather than `MP3D_DO_NOT_SCAN`'s absence of one, which
-is a change inside the decoder's seek path rather than around it.
+**The seek index is wired as of 0703.** It was the largest remaining
+win and it was the last: with everything else answered from the sidecar
+before `decoder_open()` returns, `index built` was essentially the whole
+of the 1.2-1.8 s open. See "The seek table is harvested, not scanned
+for".
 
 Entries are (offset, sample) pairs at a **stored** spacing -- 10 s by
 default, not minimp3's per-frame, because one pixel of a 720 px bar is
@@ -1323,6 +1322,89 @@ Two read-side rejections, both silent-wrong-seek hazards rather than
 crashes: ragged offset/sample arrays (pairing an offset with the wrong
 sample seeks to the wrong place), and any offset past the end of the file
 (a record about a different file that happened to match size and mtime).
+
+### The seek table is harvested, not scanned for (0703)
+
+An MP3 with no Xing header states nothing about its own length, so
+minimp3 finds out by walking every frame header in the file --
+`MP3D_SEEK_TO_SAMPLE` at open. That walk is where the duration and the
+seekability come from, and it is 1.2 to 1.8 seconds of every play in
+every log taken since 0105.
+
+**It is a whole-file read whose result is the same every time.** The
+sidecar has held a place for that result since 0200 -- `(offset,
+sample)` pairs at a stored spacing -- and 0703 fills it and reads it
+back:
+
+| | Xing-less MP3 |
+| --- | --- |
+| First play | scans as before, and the table is harvested from what the scan built |
+| Every play after | `MP3D_DO_NOT_SCAN`, table installed, open reads one frame |
+
+Nothing is walked to produce the table. `decoder_index_extract()`
+decimates the index minimp3 has already built, which is the same shape
+as the loudness measurement and the envelope: the expensive step is one
+the player was having anyway, and this is arithmetic on a structure that
+already exists.
+
+**A Xing-tagged MP3 gets one too, from the other end.** It never scans
+at open -- minimp3 stops as soon as it finds the tag -- and pays instead
+on the first drag, inside `mp3dec_ex_seek()`, which builds the index
+lazily. Same walk, moved to a worse moment. Harvesting is at the end of
+the track either way, so whichever walk happened is the one that gets
+recorded.
+
+Details that are load-bearing:
+
+- **The record counts PCM frames; minimp3 counts int16 values across
+  all channels.** The multiply is in `minimp3_install_index()` and the
+  divide in the extract, and getting either wrong seeks to half or
+  double the requested point on stereo -- the same trap `ex.samples`
+  sets two functions away, and the reason the stored format is the
+  codec-neutral one.
+- **`indexes_built` is the claim, not a poke at internals.** It is the
+  flag minimp3 sets when its own scan has completed, and installing a
+  table asserts exactly what that flag asserts. `mp3dec_ex_close()`
+  frees `index.frames` unconditionally, so the allocation is handed
+  over rather than owned by `decoder.c`.
+- **A table that fails validation is ignored, not half-installed.**
+  Out-of-order pairs seek to the wrong place and nothing downstream can
+  tell, which makes them worse than no table at all; a rejected one
+  leaves `indexes_built` at 0 and minimp3 builds its own on the first
+  seek. Slower than intended and never wrong. `replaygain.c` already
+  rejected ragged arrays and offsets past the end of the file for the
+  same reason; this adds monotonicity, which it could not check without
+  knowing what the pairs mean.
+- **`MP3D_DO_NOT_SCAN` is used only when there is a table.** Without
+  one the scan is still the only source of a duration for a Xing-less
+  file, and switching it off unconditionally trades a slow open for a
+  dead seek bar. That is what `BOUNDARY_NO_INDEX` does deliberately and
+  temporarily, and it is not a default.
+- **The harvest is outside the `TRACK_ENDED` test.** An index is a fact
+  about where the frames are, not a measurement of the audio, so a
+  skipped track has learned it as completely as one played through --
+  the same reasoning the tags and the art flag are written under, and
+  the opposite of the loudness, which a skip invalidates.
+
+**The cost, stated rather than discovered.** Entries are ten seconds
+apart and minimp3's own are 26 ms apart, and `mp3dec_ex_seek()` backs
+off `MINIMP3_PREDECODE_FRAMES` *entries* before the target to fill the
+bit reservoir -- two frames' worth on its own index, twenty seconds'
+worth on this one -- then decodes forward to the sample asked for. So a
+seek can cost up to thirty seconds of MP3 decode where it used to cost
+a lookup, and the decode loop cannot look at a button while it is in
+there.
+
+That is the trade: a few hundred milliseconds on each seek against 1.2
+to 1.8 seconds on every play. It is worth taking and it is worth
+measuring, which is why `decoder_seek_sec()` now logs anything over
+100 ms and says whether a table was in use. **If that number is bad,
+the answer is a denser table, not a return to scanning at open** -- the
+spacing is stored in the record precisely so it can change without
+invalidating what is already written. The prediction to falsify: a
+44.1 kHz stereo track should seek in well under 500 ms with a table,
+and the same line should read as the whole file on the first drag of a
+Xing-tagged track that has never been seeked in.
 
 ### The listening text
 
@@ -2509,21 +2591,20 @@ was wrong.
 
 - **Check `worst wait` now that prefetch runs.** It is the first real
   test of 0100 and the number that says whether the arbiter was worth it.
-- **The seek index.** The one piece of the sidecar that is defined,
-  tested and still unwired -- `replaygain_index_t`, (offset, sample)
-  pairs at a stored spacing. It is now the largest remaining win by a
-  wide margin: with tags, art, duration and the envelope all answered
-  from the sidecar, `index built` is essentially all of the 1.2-1.5 s
-  open. Wiring it means `decoder.c` handing minimp3 a prebuilt index
-  rather than `MP3D_DO_NOT_SCAN`'s absence of one, which is a change
-  inside the decoder's seek path rather than around it.
+- ~~The seek index.~~ Wired in 0703. What is left to check is the
+  number it trades for: the seek timing `decoder_seek_sec()` now logs.
+  A coarse table moves the cost from every play to every seek, and
+  whether that is the right spacing is a measurement nobody has taken
+  yet.
 - **Gapless**, which wants the next track decoding before the current one
   ends. At 0.85% card duty there is room; the ring is 10 MB and reaches
   0% at first sound, so the head start has to be built rather than
   assumed.
-- `MP3D_DO_NOT_SCAN` is now the **only** thing between a press and
-  sound. Everything else on the open path is answered from the sidecar
-  before `decoder_open()` returns; this is what is left.
+- ~~`MP3D_DO_NOT_SCAN` is now the only thing between a press and
+  sound.~~ Taken in 0703, on the second and later plays of a file. The
+  first play of a Xing-less MP3 still scans, because the table has to
+  come from somewhere and a walk the player is already doing is the
+  cheapest place for it to come from.
 
 ### Things left deliberately broken or unfinished
 

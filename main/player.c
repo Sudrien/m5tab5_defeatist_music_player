@@ -4263,8 +4263,31 @@ static track_end_t play_file(const char *path)
      */
     (void)storage_io_phase_ms();
 
+    /*
+     * The seek table, if this file has one on the card.
+     *
+     * s_rg was loaded in track_change_begin(), before this, for exactly
+     * this class of reason: everything the open would otherwise have to
+     * find out for itself is already in hand. With a table, minimp3
+     * opens with MP3D_DO_NOT_SCAN and does not walk the file -- which on
+     * a Xing-less MP3 is the 1.2 to 1.8 seconds that is now essentially
+     * the whole of the open.
+     *
+     * Built as a local view rather than passed as the sidecar struct,
+     * because decoder.c has no business knowing what a replaygain_t is.
+     */
+    decoder_index_t ix = {0};
+    const bool have_ix = rg_holding(path) && s_rg.index.present &&
+                         s_rg.index.count > 1;
+    if (have_ix) {
+        ix.count = s_rg.index.count;
+        ix.spacing_sec = s_rg.index.spacing_sec;
+        ix.offset = s_rg.index.offset;
+        ix.frame = s_rg.index.sample;
+    }
+
     const int64_t t_open = esp_timer_get_time();
-    decoder_t *dec = decoder_open(path);
+    decoder_t *dec = decoder_open_indexed(path, have_ix ? &ix : NULL);
     const uint32_t open_ms = (uint32_t)((esp_timer_get_time() - t_open) / 1000);
     if (!dec) {
         storage_io_report("failed open");
@@ -5631,6 +5654,44 @@ static track_end_t play_file(const char *path)
     if (s_seek_pct >= 0) {
         ESP_LOGI(TAG, "dropping unserviced seek (%s): track over", s_seek_why);
         s_seek_pct = -1;
+    }
+
+    /*
+     * The seek table, harvested from whatever index the decoder ended up
+     * holding.
+     *
+     * Outside the TRACK_ENDED test, deliberately, and outside the
+     * loudness block it sits after: an index is a fact about where the
+     * frames are, not a measurement of the audio, so a skipped track has
+     * learned it just as completely as a track played through. That is
+     * the same reasoning the tags and the art flag are written under.
+     *
+     * decoder_index_extract() returns false when the index came from
+     * this record in the first place, so a file that already has a table
+     * reads it, uses it, and writes nothing.
+     *
+     * The two ways one exists to be harvested are the two ways minimp3
+     * builds one: the scan at open on a file with no table, and the
+     * lazy build inside the first mp3dec_ex_seek() on a Xing-tagged
+     * file, which never scans at open and pays for it on the first drag.
+     * Both are whole-file walks the player has already spent; this is
+     * what stops it spending them again next time.
+     */
+    if (rg_holding(path)) {
+        uint32_t ixoff[REPLAYGAIN_INDEX_MAX];
+        uint32_t ixfrm[REPLAYGAIN_INDEX_MAX];
+        int ixn = 0;
+        uint32_t ixsp = 0;
+        if (decoder_index_extract(dec, ixoff, ixfrm, REPLAYGAIN_INDEX_MAX,
+                                  REPLAYGAIN_INDEX_SPACING_SEC,
+                                  &ixn, &ixsp)) {
+            s_rg.index.present = true;
+            s_rg.index.count = ixn;
+            s_rg.index.spacing_sec = ixsp;
+            memcpy(s_rg.index.offset, ixoff, (size_t)ixn * sizeof(uint32_t));
+            memcpy(s_rg.index.sample, ixfrm, (size_t)ixn * sizeof(uint32_t));
+            s_rg_dirty = true;
+        }
     }
 
     /* Why, not just that. "finished" on a track the user skipped out of

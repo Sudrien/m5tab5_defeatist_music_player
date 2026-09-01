@@ -10,6 +10,7 @@
 #include <strings.h>
 
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 #include "esp_log.h"
 
 /* BOUNDARY_NO_INDEX lives with the other seek diagnostics. */
@@ -72,6 +73,11 @@ struct decoder {
      * straight line -- see cbrseek.h. */
     cbr_map_t cbr;
     bool cbr_ok;
+
+    /* True when the index minimp3 is holding came from a sidecar rather
+     * than from its own scan. Only used to keep the harvest below from
+     * writing back what it was just given. */
+    bool indexed;
 };
 
 #define ESP_IN_BUF  (8 * 1024)
@@ -181,7 +187,76 @@ static int mp3_io_seek(uint64_t position, void *user)
     return fseek((FILE *)user, (long)position, SEEK_SET);
 }
 
-static esp_err_t minimp3_open(decoder_t *d, const char *path)
+/*
+ * Validate and install a caller-supplied table into minimp3's own index.
+ *
+ * minimp3 keeps (offset, sample) pairs in exactly this shape, so the
+ * installation is a copy and two field assignments. What makes it safe
+ * rather than a poke at internals is `indexes_built`: the flag minimp3
+ * sets when its own scan has run is the flag that says "this index is
+ * complete, do not build one", and that is precisely the claim being
+ * made here.
+ *
+ * ONE COST, STATED RATHER THAN DISCOVERED
+ *
+ * The entries are ten seconds apart and minimp3's are per frame, 26 ms
+ * apart. mp3dec_ex_seek() backs off MINIMP3_PREDECODE_FRAMES entries
+ * before the target to fill the bit reservoir -- two frames' worth of
+ * back-off on its own index, and twenty seconds' worth on this one --
+ * and then decodes forward to the requested sample. So a seek costs up
+ * to thirty seconds of MP3 decode where it used to cost a lookup.
+ *
+ * That is the trade this patch makes: a few hundred milliseconds on
+ * each seek in exchange for 1.2 to 1.8 seconds on every play. It is
+ * worth taking and it is worth measuring, which is why decoder_seek_sec()
+ * now logs how long it spent. IF THAT NUMBER IS BAD, the fix is a
+ * denser table, not a return to scanning at open: the spacing is stored
+ * in the record precisely so it can change without invalidating what is
+ * already written.
+ *
+ * Every rejection below is a silent-wrong-seek hazard rather than a
+ * crash, which is why they are checked here rather than trusted from
+ * the file: an index whose pairs are out of order seeks to the wrong
+ * place and nothing downstream can tell.
+ */
+static bool minimp3_install_index(decoder_t *d, const decoder_index_t *ix)
+{
+    if (!ix || ix->count <= 0 || !ix->offset || !ix->frame) return false;
+    if (!d->ex.info.channels || !d->ex.info.hz) return false;
+
+    for (int k = 1; k < ix->count; k++) {
+        if (ix->offset[k] <= ix->offset[k - 1] ||
+            ix->frame[k]  <= ix->frame[k - 1]) {
+            ESP_LOGW(TAG, "seek table is not increasing at %d; ignoring it", k);
+            return false;
+        }
+    }
+
+    mp3dec_frame_t *frames = calloc((size_t)ix->count, sizeof(*frames));
+    if (!frames) return false;
+
+    for (int k = 0; k < ix->count; k++) {
+        frames[k].offset = ix->offset[k];
+        /* minimp3 counts int16 values across all channels. The stored
+         * record counts PCM frames. This multiply is the whole of the
+         * difference and getting it wrong seeks to half or double the
+         * requested point on stereo -- the same trap ex.samples sets
+         * two functions down. */
+        frames[k].sample = (uint64_t)ix->frame[k] * (uint64_t)d->ex.info.channels;
+    }
+
+    /* mp3dec_ex_close() frees index.frames unconditionally, so this
+     * allocation is handed over rather than owned here. */
+    d->ex.index.frames = frames;
+    d->ex.index.num_frames = (size_t)ix->count;
+    d->ex.index.capacity = (size_t)ix->count;
+    d->ex.indexes_built = 1;
+    d->indexed = true;
+    return true;
+}
+
+static esp_err_t minimp3_open(decoder_t *d, const char *path,
+                              const decoder_index_t *ix)
 {
     d->f = storage_io_open(path, "rb");
     if (!d->f) return ESP_ERR_NOT_FOUND;
@@ -195,6 +270,18 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
      * file on this SD bus is a noticeable pause before the first sample.
      * MP3D_DO_NOT_SCAN skips it: no seeking, no duration, but playback
      * starts immediately. Swap when scrubbing is wanted. */
+    /*
+     * MP3D_DO_NOT_SCAN only when there is a table to stand in for the
+     * scan. Without one the scan is still the only thing that can
+     * produce a duration or a seek on a Xing-less file, and turning it
+     * off unconditionally would trade a slow open for a dead seek bar
+     * -- which is what BOUNDARY_NO_INDEX exists to do deliberately and
+     * temporarily, and is not a default.
+     */
+    const bool have_index = (ix && ix->count > 0);
+    const int open_flags = MP3D_SEEK_TO_SAMPLE |
+                           (have_index ? MP3D_DO_NOT_SCAN : 0);
+
 #if BOUNDARY_NO_INDEX
     /*
      * DIAGNOSTIC, 0509. See the flag in player.c.
@@ -210,7 +297,7 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
     ESP_LOGW(TAG, "BOUNDARY_NO_INDEX: skipping the index build");
     if (mp3dec_ex_open_cb(&d->ex, &d->io, MP3D_DO_NOT_SCAN) != 0) {
 #else
-    if (mp3dec_ex_open_cb(&d->ex, &d->io, MP3D_SEEK_TO_SAMPLE) != 0) {
+    if (mp3dec_ex_open_cb(&d->ex, &d->io, open_flags) != 0) {
 #endif
         ESP_LOGE(TAG, "minimp3 could not open %s", path);
         storage_io_close(d->f);
@@ -241,6 +328,25 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path)
      */
     d->info.trim = d->ex.detected_samples ? DECODER_TRIM_EXACT
                                           : DECODER_TRIM_NONE;
+
+    /*
+     * After the open, because the channel count the entries are scaled
+     * by is not known until minimp3 has read a frame header -- and
+     * before anything can seek, because a half-installed table is a
+     * wrong seek rather than a slow one.
+     *
+     * A table that fails validation leaves indexes_built at whatever
+     * the open set, which for a DO_NOT_SCAN open is 0: minimp3 then
+     * builds its own index on the first seek, one whole-file read, and
+     * the seek works. Slower than intended and never wrong.
+     */
+    if (have_index && !minimp3_install_index(d, ix)) {
+        ESP_LOGW(TAG, "mp3: seek table rejected; minimp3 will build its own");
+    } else if (have_index) {
+        ESP_LOGI(TAG, "mp3: seek table installed, %d entries every %" PRIu32 " s;"
+                      " no scan at open",
+                 ix->count, ix->spacing_sec);
+    }
 
     ESP_LOGI(TAG, "mp3: layer %d, %s",
              d->ex.info.layer,
@@ -535,6 +641,11 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec)
 
 decoder_t *decoder_open(const char *path)
 {
+    return decoder_open_indexed(path, NULL);
+}
+
+decoder_t *decoder_open_indexed(const char *path, const decoder_index_t *ix)
+{
     const int fmt = format_index(path);
     if (fmt < 0) {
         ESP_LOGE(TAG, "no decoder for %s", path);
@@ -546,7 +657,7 @@ decoder_t *decoder_open(const char *path)
     d->backend = k_formats[fmt].backend;
 
     const esp_err_t ret = (d->backend == BACKEND_MINIMP3)
-                        ? minimp3_open(d, path)
+                        ? minimp3_open(d, path, ix)
                         : esp_codec_open(d, path, fmt);
     if (ret != ESP_OK) {
         free(d);
@@ -642,11 +753,101 @@ esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
         target = d->ex.samples ? d->ex.samples - 1 : 0;
     }
 
-    if (mp3dec_ex_seek(&d->ex, target) != 0) {
-        ESP_LOGW(TAG, "seek failed (err %d)", d->ex.last_error);
+    /*
+     * Timed, because this is where the cost of a coarse table lands.
+     *
+     * With minimp3's own per-frame index this is a lookup and a short
+     * read. With a ten-second table it is that plus up to thirty
+     * seconds of forward MP3 decode -- see minimp3_install_index(). The
+     * decode loop cannot look at a button while it is in here, so this
+     * number IS control latency, and it is the one that says whether
+     * the spacing wants to come down.
+     *
+     * It also covers the case nobody plans for: an open with no table
+     * and no Xing header, where the first seek is minimp3 building its
+     * own index and this reads as the whole file.
+     */
+    const int64_t t0 = esp_timer_get_time();
+    const int rc = mp3dec_ex_seek(&d->ex, target);
+    const uint32_t ms = (uint32_t)((esp_timer_get_time() - t0) / 1000);
+
+    if (rc != 0) {
+        ESP_LOGW(TAG, "seek failed (err %d) after %" PRIu32 " ms",
+                 d->ex.last_error, ms);
         return ESP_FAIL;
     }
+    if (ms > 100) {
+        ESP_LOGW(TAG, "mp3 seek took %" PRIu32 " ms (%s)", ms,
+                 d->indexed ? "table" : "no table; index built here");
+    }
     return ESP_OK;
+}
+
+/*
+ * Decimate minimp3's index into a caller's arrays.
+ *
+ * This is where the table comes from, and it costs nothing: minimp3
+ * builds a per-frame index either at open or on the first seek, and
+ * everything here is arithmetic on a structure that already exists. The
+ * same shape as the loudness measurement -- the expensive step is one
+ * the player was having anyway.
+ *
+ * Not extracted when the index was installed rather than built: that
+ * would rewrite the sidecar with the bytes it was just read from,
+ * every play, and the dirty flag would be decoration.
+ */
+bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
+                           int max, uint32_t want_spacing_sec,
+                           int *count, uint32_t *spacing_sec)
+{
+    if (!d || !offset || !frame || max <= 0 || !count || !spacing_sec) {
+        return false;
+    }
+    if (d->backend != BACKEND_MINIMP3 || d->indexed) return false;
+    if (!d->ex.index.frames || d->ex.index.num_frames < 2) return false;
+    if (!d->ex.info.hz || !d->ex.info.channels) return false;
+
+    const uint64_t per_sec = (uint64_t)d->ex.info.hz * d->ex.info.channels;
+    if (!per_sec) return false;
+
+    uint32_t spacing = want_spacing_sec ? want_spacing_sec : 10;
+    const mp3dec_frame_t *f = d->ex.index.frames;
+    const size_t n = d->ex.index.num_frames;
+
+    /* Double the spacing until the whole file fits, the same way the
+     * envelope's columns are merged. A reader must use the stored value
+     * rather than the constant, which is why it is returned. */
+    for (;;) {
+        const uint64_t step = (uint64_t)spacing * per_sec;
+        const uint64_t last = f[n - 1].sample;
+        if ((last / step) + 1 <= (uint64_t)max) break;
+        if (spacing > (1u << 20)) return false;         /* absurd; give up */
+        spacing *= 2;
+    }
+
+    const uint64_t step = (uint64_t)spacing * per_sec;
+    int out = 0;
+    uint64_t next = 0;
+    for (size_t i = 0; i < n && out < max; i++) {
+        if (f[i].sample < next) continue;
+        /* An offset past 4 GB cannot be stored, and a file that large is
+         * not on a FAT volume. Stop rather than truncate the value into
+         * a wrong offset. */
+        if (f[i].offset > UINT32_MAX) break;
+        if (out && f[i].offset <= offset[out - 1]) continue;
+        offset[out] = (uint32_t)f[i].offset;
+        frame[out] = (uint32_t)(f[i].sample / d->ex.info.channels);
+        out++;
+        next = f[i].sample + step;
+    }
+
+    if (out < 2) return false;
+    *count = out;
+    *spacing_sec = spacing;
+    ESP_LOGI(TAG, "mp3: seek table built, %d entries every %" PRIu32 " s "
+                  "from %u frames",
+             out, spacing, (unsigned)n);
+    return true;
 }
 
 void decoder_close(decoder_t *d)

@@ -112,8 +112,61 @@ typedef struct {
 /* Extensions decoder_open() will accept, for the directory scan. */
 bool decoder_supports(const char *path);
 
+/*
+ * A seek table, handed in from outside.
+ *
+ * Offsets are absolute byte positions of real frame headers; `frame` is
+ * the PCM frame position (PER CHANNEL) reached at that offset. Frames
+ * rather than minimp3's own units, which count int16 values across all
+ * channels: this record is written to a file that outlives the decoder
+ * that produced it, and "sample position" in a stored format should not
+ * mean something different for a mono file. decoder.c multiplies by the
+ * channel count on the way in.
+ *
+ * Both arrays must be strictly increasing and `count` entries long.
+ */
+typedef struct {
+    int count;
+    uint32_t spacing_sec;       /* what the entries are actually spaced at */
+    const uint32_t *offset;
+    const uint32_t *frame;
+} decoder_index_t;
+
 /* NULL on failure. Logs the reason. */
 decoder_t *decoder_open(const char *path);
+
+/*
+ * As decoder_open(), but with a table the caller already has.
+ *
+ * A usable table is the difference between an open that reads the whole
+ * file and one that reads a frame: minimp3 builds its index by walking
+ * every frame header in the file, which is 1.2 to 1.8 seconds of every
+ * play of a Xing-less MP3 and essentially all of the delay before the
+ * first sound. Given a table, MP3D_DO_NOT_SCAN skips the walk and the
+ * table stands in for what it would have produced.
+ *
+ * ix may be NULL, and a table that fails validation is ignored rather
+ * than half-installed -- the open then behaves exactly as decoder_open()
+ * does, which is the correct fallback for every reason a table can be
+ * bad. It is only ever an accelerator.
+ */
+decoder_t *decoder_open_indexed(const char *path, const decoder_index_t *ix);
+
+/*
+ * Decimate whatever index the decoder is holding into caller storage,
+ * so it can be written to a sidecar and handed back next time.
+ *
+ * True when something was written. False when the decoder has no index,
+ * which is the ordinary state on a backend that is not minimp3 and on a
+ * track nobody has seeked in.
+ *
+ * `spacing_sec` is what the entries came out spaced at, which is not
+ * necessarily what was asked for: a long file doubles it to stay within
+ * `max`. The caller must store the value rather than the constant.
+ */
+bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
+                           int max, uint32_t want_spacing_sec,
+                           int *count, uint32_t *spacing_sec);
 
 /* Fill out with interleaved int16. Returns the number of int16 values
  * written, 0 at end of stream, or negative on an unrecoverable error.
