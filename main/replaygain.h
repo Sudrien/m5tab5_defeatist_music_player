@@ -141,7 +141,24 @@ extern "C" {
  * REPLAYGAIN_INDEX_MAX caps a very long file; past that the spacing
  * doubles, the same way the envelope's does.
  */
-#define REPLAYGAIN_INDEX_SPACING_SEC (10)
+/*
+ * Two seconds, not ten.
+ *
+ * Ten was chosen to keep the record small, before anything had measured
+ * what a coarse table costs at the other end. The board did:
+ * mp3dec_ex_seek() backs off MINIMP3_PREDECODE_FRAMES *entries* to fill
+ * the bit reservoir and then decodes forward, so at ten seconds a drag
+ * decoded up to thirty seconds of MP3 and blocked the decode loop for
+ * **1705 ms**. At two it is six seconds of audio and about a fifth of
+ * that.
+ *
+ * The cost is entries, and there are enough: 256 at two seconds covers
+ * eight and a half minutes before the spacing doubles, and doubling is
+ * the mechanism that keeps a long file inside the cap. Readers take the
+ * spacing from the record rather than from this constant, so changing
+ * it does not invalidate a table already written.
+ */
+#define REPLAYGAIN_INDEX_SPACING_SEC (2)
 #define REPLAYGAIN_INDEX_MAX         (256)
 
 typedef struct {
