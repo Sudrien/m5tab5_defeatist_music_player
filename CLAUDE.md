@@ -986,6 +986,55 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### What real files found that synthetic ones did not (0708)
+
+Every seek in 0700-0707 was tested against files this project generated
+itself, and all of them passed. The first run against ffmpeg output
+found two faults in ten seconds, both in code that had passed hundreds
+of synthetic cases and four hundred mutations each.
+
+**FLAC: a drag to the end of a track landed at 0:13.** `find_frame()`
+was written as "confirmed unless the following header disagrees", with
+the confirmation flag initialised to true -- so a candidate with no
+following header in the window was accepted unexamined. The tail of a
+real file is exactly where that happens. A 445-byte run of audio data
+at the end of the file passed the CRC-8, had nothing after it to
+contradict it, and declared a sample number 45 seconds out of place.
+
+Confirmation is now required rather than preferred. The cost is that
+the genuinely last frame can never be confirmed and so is never landed
+on: one frame, 93 ms, at the very end of a track, erring towards
+playing slightly more.
+
+**Ogg: every seek landed two seconds early.** The bisection kept the
+last page ending at or before the target, and a granule position is
+where a page *ends* -- so the audio resumed where the page before that
+one ended, two pages back. On synthetic files with small pages the
+error was under the tolerance and invisible. ffmpeg writes Vorbis and
+Opus pages of roughly a second, and two seconds is not invisible at
+all.
+
+It now takes the first page ending *after* the target, so the audio
+resumes where the page before it ended: at or before the target and
+within one page. Half the error and on the correct side.
+
+**The lesson is about the test data, not the bugs.** Both faults were
+in the tolerance between "a plausible file" and "a file an encoder
+actually writes" -- page sizes an order of magnitude larger than
+assumed, and a tail that real muxers produce and synthetic generators
+do not. Generated test files verify the logic against the format as
+understood; they cannot verify the understanding. `seektest/` exists so
+that the next mechanism is measured against ffmpeg's output before it
+is called done.
+
+Two things the suite documents rather than fixes, because they are
+correct: ffmpeg's AAC encoder writes `buffer_fullness = 0x7FF` in every
+ADTS header, which is the stream declaring itself VBR, and `cbrseek.c`
+takes it at its word and refuses -- so raw ADTS from ffmpeg does not
+seek. And `.ts` reports a duration one second short, because the last
+timestamp is the start of the last packet rather than the end of the
+audio.
+
 #### MP4 is the one where the archive said no (0707)
 
 Every seek from 0700 to 0706 works by moving the file underneath
