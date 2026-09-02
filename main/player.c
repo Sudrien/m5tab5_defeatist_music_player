@@ -4326,6 +4326,32 @@ static track_end_t play_file(const char *path)
         bool ok = (sec > 0) && s_prev_ended_clean;
 
         /*
+         * NOT INTO A TRACK SHORTER THAN THE FADE.
+         *
+         * The writer clamps the fade to the outgoing tail -- `tail was
+         * shorter` -- and nothing clamped it to the INCOMING track. A
+         * three-second file under a ten-second fade never reaches full
+         * volume and is over before the fade ends, so it is not played
+         * so much as passed through: the board ran a 10244 ms fade into
+         * a 3 s track and the track was inaudible.
+         *
+         * Twice the fade is the threshold, so the incoming track gets
+         * at least as long at full volume as it spent arriving. The
+         * length comes from the sidecar, which track_change_begin()
+         * loaded a moment ago; a track with no recorded length is not
+         * refused, because unknown is not short.
+         */
+        if (ok && sec) {
+            const uint32_t in_len = (rg_holding(path) && s_rg.format.present)
+                                  ? s_rg.format.sec : 0;
+            if (in_len && in_len < sec * 2) {
+                ok = false;
+                ESP_LOGI(TAG, "no crossfade: the incoming track is only "
+                              "%" PRIu32 " s", in_len);
+            }
+        }
+
+        /*
          * Never over itself. Repeat-one, or a `next` that wraps a
          * one-track folder, hands this function the file that is still
          * playing out of the other ring -- and an overlap of a recording
@@ -5204,9 +5230,21 @@ static track_end_t play_file(const char *path)
                      * which is after the decision to crossfade was
                      * made.
                      */
-                    if (s_xfade_armed) {
+                    if (s_xfade_armed || s_xfade_active) {
                         ESP_LOGI(TAG, "no crossfade: the rate changes");
                         s_xfade_armed = false;
+                        /*
+                         * The active flag as well as the armed one.
+                         * 0710 cleared only `armed`, which stops a fade
+                         * that has not begun -- and the board then ran
+                         * one that had, mixing against a ring the
+                         * decode loop could not refill and logging
+                         * `crossfade cut short: the outgoing ring
+                         * emptied` nine seconds later. A fade already
+                         * under way is exactly the case this needs to
+                         * stop.
+                         */
+                        s_xfade_active = false;
                     }
                     while (s_ring_play != s_ring_fill) {
                         if (s_pending_ready || s_seek_pct >= 0) break;
@@ -5809,6 +5847,39 @@ static track_end_t play_file(const char *path)
                        (size_t)s_rg.waveform.columns);
                 s_rg_dirty = true;
                 ESP_LOGI(TAG, "envelope from playback: %d columns", cols);
+            }
+
+            /*
+             * AND THE LENGTH, WHEN NOTHING ELSE COULD SAY.
+             *
+             * A raw ADTS file that declares itself VBR has no duration
+             * from any of the four mechanisms, so its bar stays a
+             * groove for ever -- the board played one twice and read
+             * `0s` from the sidecar both times.
+             *
+             * But an uninterrupted play measured it exactly. This is
+             * the same trade as the loudness and the envelope: one
+             * complete listen buys something the file would not say,
+             * and the record is where it goes. Only when the decoder
+             * had no answer, because a stated length is a fact and this
+             * is an observation.
+             */
+            if (rg_holding(path) && cur_rate &&
+                (!s_rg.format.present || !s_rg.format.sec)) {
+                const uint32_t measured = (uint32_t)(frames_out / cur_rate);
+                if (measured) {
+                    s_rg.format.present = true;
+                    s_rg.format.sec = measured;
+                    /* And the envelope written moments ago, which took
+                     * its span from the same missing number and would
+                     * otherwise draw 375 columns across `0s`. */
+                    if (s_rg.waveform.present && !s_rg.waveform.sec) {
+                        s_rg.waveform.sec = measured;
+                    }
+                    s_rg_dirty = true;
+                    ESP_LOGI(TAG, "length from playback: %" PRIu32 " s",
+                             measured);
+                }
             }
         }
     }
