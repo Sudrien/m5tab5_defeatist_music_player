@@ -168,6 +168,34 @@ bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
                            int max, uint32_t want_spacing_sec,
                            int *count, uint32_t *spacing_sec);
 
+/*
+ * Whether this stream has no way to seek EXCEPT a table somebody
+ * records for it.
+ *
+ * True only for raw ADTS that failed cbr_probe() -- a file whose every
+ * frame header says `buffer_fullness = 0x7FF`, which is the stream
+ * declaring itself variable, and which every encoder ffmpeg ships does.
+ * There is nothing in such a file that maps time to offset, and no
+ * container to ask, so the only honest source is a play that watched it
+ * happen.
+ *
+ * Narrow on purpose. Every other format either proves a rate, bisects,
+ * or reads a table it already has; a stream that reaches here is one
+ * where those have all been tried and declined.
+ */
+bool decoder_needs_table(decoder_t *d);
+
+/*
+ * File offset of the next byte the decoder will consume.
+ *
+ * Exact, not approximate: the input window's unread tail is subtracted,
+ * so this is the byte the next frame starts at or within, not wherever
+ * the read pointer happens to have run ahead to. That is what makes a
+ * recorded pair worth storing -- an offset half a window late would put
+ * every later seek half a second past where the bar said.
+ */
+long decoder_stream_pos(decoder_t *d);
+
 /* Fill out with interleaved int16. Returns the number of int16 values
  * written, 0 at end of stream, or negative on an unrecoverable error.
  *

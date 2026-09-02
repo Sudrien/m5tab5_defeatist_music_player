@@ -986,6 +986,57 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### A table for the file that has nothing to build one from (0716)
+
+Raw ADTS that writes `buffer_fullness = 0x7FF` in every frame header --
+which is every file ffmpeg's AAC encoder produces -- declares itself
+variable, `cbrseek.c` believes it, and the file then has **no** source
+of a time-to-offset map: no proven rate, no container, no page granule,
+no sample table. It sat in the seek bar's middle state, showing a
+position it could not be dragged to.
+
+Its frames are self-syncing, so the resume half was always free. The
+missing half is where a second lives, and the only honest source for
+that is **a play that watched it happen**:
+
+- `decoder_stream_pos()` returns the offset of the next byte the
+  decoder will consume -- `ftell()` minus the window's unread tail, so
+  it is the byte being decoded rather than wherever the read pointer
+  ran ahead to. Half a window of error here would put every later seek
+  half a second past what the bar said.
+- The decode loop records one `(offset, frames)` pair every
+  `REPLAYGAIN_INDEX_SPACING_SEC` of **output**, not of wall clock: the
+  decode runs ahead of the audio, and a table keyed to when the
+  sampling happened would be keyed to nothing.
+- On a later play the table is installed, the seek picks the pair at or
+  before the target, and `cbr_adts_resync()` walks forward to the next
+  real frame header -- exported from `cbrseek.c` rather than rewritten,
+  because a raw AAC payload contains `FF F1` constantly and the
+  chain-of-three validation is the part that matters.
+
+**Costs nothing to record.** An `ftell()` every two seconds, on a play
+that was happening anyway -- the same bargain as the loudness, the
+envelope, and 0703's MP3 table. Nothing is scanned and nothing is read
+twice.
+
+**A seek during the recording ends it.** From that point the frame
+count no longer counts the file from its start, so every later pair
+would be wrong by the size of the jump. Same rule at the end: written
+only from a play that reached the end without one, because a partial
+table is worse than none -- a drag past where the recording stopped
+lands on the last pair and reads as the press having been ignored.
+
+**Narrow on purpose.** `decoder_needs_table()` is true only for a
+stream that has been offered a proven byte rate, three bisections and a
+sample table and matched none of them. It is the exception path, not a
+general mechanism, and every format that has a real answer keeps using
+it.
+
+So the ADTS file needs three complete plays to become seekable: one to
+learn its loudness, one to learn its length (0714), one to record its
+table. That is the defeatist bargain stated plainly -- **nothing is
+scanned, so everything is learned by listening.**
+
 #### Repeat-one found the sidecar reading its own stale copy (0715)
 
 0714 worked: `length from playback: 59 s`. Then the very next open of

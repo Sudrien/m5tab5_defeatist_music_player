@@ -590,3 +590,23 @@ size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t ca
     w32le(buf + 40, (uint32_t)left);
     return 44;
 }
+
+/* ------------------------------------------------------------------ */
+
+long cbr_adts_resync(FILE *f, long off, long end)
+{
+    if (!f || off < 0 || end <= off) return -1;
+
+    uint8_t *buf = malloc(ADTS_GROUP_BYTES);
+    if (!buf) return -1;
+
+    long want = end - off;
+    if (want > ADTS_GROUP_BYTES) want = ADTS_GROUP_BYTES;
+
+    long found = -1;
+    if (want >= 7 && read_at(f, off, buf, (size_t)want)) {
+        found = adts_find(buf, (size_t)want, 0);
+    }
+    free(buf);
+    return (found < 0) ? -1 : off + found;
+}
