@@ -205,7 +205,36 @@ static long adts_find(const uint8_t *buf, size_t avail, size_t at)
     return -1;
 }
 
-#define ADTS_GROUP_BYTES  4096      /* one read per sample point */
+/*
+ * THE WINDOW HAS TO BE WIDER THAN THE ENCODER'S BIT RESERVOIR.
+ *
+ * 4096 was the size when the only file that ever reached this branch
+ * was a synthetic one whose frames had been padded to a constant
+ * length. A real CBR encoder does not work that way: it holds a
+ * constant AVERAGE rate and borrows bits between frames, so a short
+ * window sees the borrowing rather than the average.
+ *
+ * Measured on the host against an fdk-aac 128k file -- the spread
+ * across five sample points, which is what ADTS_TOLERANCE is compared
+ * against:
+ *
+ *      4 KB   3.42%      refused
+ *      8 KB   1.59%      refused
+ *     16 KB   0.28%      accepted
+ *     64 KB   0.19%
+ *
+ * So every genuine CBR AAC file this player has ever been handed was
+ * turned away, and the branch looked correct because nothing real had
+ * reached it. 16 KB is ten frames at 4096 and forty-odd here, which is
+ * enough for the reservoir to average out and is still five reads of
+ * 16 KB at open rather than any kind of scan.
+ *
+ * The resync windows are a different question and stay where they are:
+ * they only have to contain one frame header, not a representative
+ * sample of the stream.
+ */
+#define ADTS_GROUP_BYTES  (16 * 1024)   /* one read per sample point */
+#define ADTS_SYNC_BYTES   4096          /* enough to find a header */
 #define ADTS_GROUPS       5
 #define ADTS_TOLERANCE    15        /* thousandths: 1.5% spread allowed */
 
@@ -516,11 +545,11 @@ long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec)
      * put the target inside the last frame of the file -- a fallback
      * that gives up rather than returning a byte that is not a header.
      */
-    uint8_t *buf = malloc(ADTS_GROUP_BYTES);
+    uint8_t *buf = malloc(ADTS_SYNC_BYTES);
     if (!buf) return -1;
 
     long want = m->data_end - off;
-    if (want > ADTS_GROUP_BYTES) want = ADTS_GROUP_BYTES;
+    if (want > ADTS_SYNC_BYTES) want = ADTS_SYNC_BYTES;
     long found = -1;
     if (want >= 7 && read_at(f, off, buf, (size_t)want)) {
         found = adts_find(buf, (size_t)want, 0);
@@ -529,7 +558,7 @@ long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec)
 
     if (found < 0) {
         ESP_LOGW(TAG, "no frame header within %d B of the seek target",
-                 ADTS_GROUP_BYTES);
+                 ADTS_SYNC_BYTES);
         return -1;
     }
     return off + found;
@@ -597,11 +626,11 @@ long cbr_adts_resync(FILE *f, long off, long end)
 {
     if (!f || off < 0 || end <= off) return -1;
 
-    uint8_t *buf = malloc(ADTS_GROUP_BYTES);
+    uint8_t *buf = malloc(ADTS_SYNC_BYTES);
     if (!buf) return -1;
 
     long want = end - off;
-    if (want > ADTS_GROUP_BYTES) want = ADTS_GROUP_BYTES;
+    if (want > ADTS_SYNC_BYTES) want = ADTS_SYNC_BYTES;
 
     long found = -1;
     if (want >= 7 && read_at(f, off, buf, (size_t)want)) {

@@ -4862,6 +4862,7 @@ static track_end_t play_file(const char *path)
     int blocks = 0;
     uint64_t frames_out = 0;
     track_end_t why = TRACK_ENDED;
+    bool decode_failed = false;
 
     /*
      * Where the last serviced seek left the frame counter, and whether
@@ -5274,7 +5275,24 @@ static track_end_t play_file(const char *path)
 
         decoder_info_t info;
         const int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
-        if (n <= 0) break;
+        /*
+         * A FAILED DECODE IS NOT THE END OF THE TRACK, AND THE
+         * DIFFERENCE IS WHAT GETS WRITTEN TO THE CARD.
+         *
+         * These were one test, so a stream that errored on its first
+         * frame looked exactly like one that ran out of file. File 15
+         * produced a single block, failed, and was still counted as a
+         * complete uninterrupted play: -46.16 LUFS off zero gated
+         * blocks and a one-column envelope for a sixty second track,
+         * written to a sidecar and loaded back on the next play. A
+         * measurement nothing can later tell apart from a real one is
+         * the exact thing the write rules exist to prevent.
+         */
+        if (n < 0) {
+            decode_failed = true;
+            break;
+        }
+        if (n == 0) break;
         track_info = info;
 
         const uint32_t read_ms =
@@ -6113,6 +6131,18 @@ static track_end_t play_file(const char *path)
      * it the seek is what ended the track; above it the track ran on and
      * ended on its own terms.
      */
+    /*
+     * Played to the end AND got there by decoding. Everything written
+     * to the sidecar hangs off this rather than off `why` alone: `why`
+     * answers what to play next, and a track that died mid-file still
+     * wants the playlist to move on.
+     */
+    const bool complete = (why == TRACK_ENDED) && !decode_failed;
+    if (decode_failed) {
+        ESP_LOGW(TAG, "the decoder failed part way; nothing measured "
+                      "here is being kept");
+    }
+
     bool clean = (why == TRACK_ENDED);
     if (clean && seeked && cur_rate && frames_out - frames_at_seek < cur_rate) {
         ESP_LOGI(TAG, "the seek ran off the end; not a clean boundary");
@@ -6137,7 +6167,7 @@ static track_end_t play_file(const char *path)
      * track ended and depends on nothing but that: played to the end,
      * with no seek in it, on a rate that was known.
      */
-    if (why == TRACK_ENDED && !seeked && cur_rate && rg_holding(path) &&
+    if (complete && !seeked && cur_rate && rg_holding(path) &&
         (!s_rg.format.present || !s_rg.format.sec)) {
         /*
          * Rounded, not truncated. The count is frames that reached the
@@ -6169,7 +6199,7 @@ static track_end_t play_file(const char *path)
      * a drag past where the recording stopped would land on the last
      * pair and read as the bar having ignored the press.
      */
-    if (tbl_rec && why == TRACK_ENDED && !seeked && tbl_n <= 1) {
+    if (tbl_rec && complete && !seeked && tbl_n <= 1) {
         /* Loud, because the silent version of this cost fifteen plays.
          * A recording that reaches the end of a track with nothing in
          * it is a fault in the recording, not a property of the file. */
@@ -6177,7 +6207,7 @@ static track_end_t play_file(const char *path)
                  tbl_n);
     }
 
-    if (why == TRACK_ENDED && !seeked && tbl_rec && tbl_n > 1 &&
+    if (complete && !seeked && tbl_rec && tbl_n > 1 &&
         rg_holding(path)) {
         s_rg.index.present = true;
         s_rg.index.count = tbl_n;
@@ -6294,11 +6324,18 @@ static track_end_t play_file(const char *path)
      * same path, which resets the accumulator, so the restarted play
      * gets its own clean attempt and writes if IT reaches the end.
      */
-    if (measuring && why == TRACK_ENDED) {
+    if (measuring && complete) {
         float lufs = 0.0f, peak = 0.0f;
         uint32_t gated = 0;
         if (loudness_finish(&s_loud, &lufs, &peak, &gated)) {
-            if (rg_holding(path)) {
+            /* Zero gated blocks is not a quiet track, it is no track:
+             * the gate never opened because nothing above the absolute
+             * threshold arrived. Belt to the decode_failed braces --
+             * whatever else goes wrong upstream, a loudness computed
+             * from nothing does not get filed as one. */
+            if (gated == 0) {
+                ESP_LOGW(TAG, "loudness gated nothing; not stored");
+            } else if (rg_holding(path)) {
                 s_rg.loudness.present = true;
                 s_rg.loudness.integrated_lufs = lufs;
                 s_rg.loudness.sample_peak_dbfs = peak;
@@ -6322,7 +6359,11 @@ static track_end_t play_file(const char *path)
             uint8_t env[LOUDNESS_ENV_COLUMNS];
             int cols = 0;
             loudness_envelope(&s_loud, env, &cols);
-            if (cols > 0 && rg_holding(path)) {
+            /* Two columns, not one. A single column is not a waveform
+             * of anything -- it is one block's peak stretched across
+             * the whole width, which is what file 15 drew: `envelope:
+             * 1 columns, levels 0..255` under a sixty second bar. */
+            if (cols > 1 && gated && rg_holding(path)) {
                 s_rg.waveform.present = true;
                 /* len_sec, or the length just measured from this very
                  * play when the file never stated one -- otherwise the

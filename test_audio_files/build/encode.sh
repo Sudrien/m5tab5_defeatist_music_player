@@ -86,15 +86,35 @@ $F -ac 1 -ar 22050 -c:a pcm_s16le "$OUT/14 wav-mono-22k.wav"
 # ---------------------------------------------------------------- 0801
 # Files for the mechanisms the first fourteen never reached.
 
-# 15 -- CBR ADTS. cbrseek.c's ADTS branch has never run: 08 declares
-# itself VBR and stops the probe before it. No stock ffmpeg has a CBR
-# AAC encoder, so this one is made rather than encoded -- see
-# adts_cbr.py. 48k is not a quality choice: the probe needs four whole
-# frames inside a 4096-byte window from an arbitrary start, so the
-# padded frame length has to stay under 819 bytes.
-$F -c:a aac -b:a 48k -f adts "$OUT/tmp-vbr.aac"
-python3 adts_cbr.py "$OUT/tmp-vbr.aac" "$OUT/15 aac-adts-cbr.aac"
-rm -f "$OUT/tmp-vbr.aac"
+# 15 -- CBR ADTS, and the one file here that ffmpeg cannot make.
+#
+# cbrseek.c's ADTS branch needs a stream that declares a real
+# buffer_fullness and holds a steady rate. ffmpeg's AAC encoder writes
+# 0x7FF in every header -- that is file 08, and 08's refusal is what 08
+# is for -- so this needs an encoder ffmpeg does not ship.
+#
+# 0801 faked it by padding every frame to a constant length. That was
+# wrong on hardware: the padding is zero bytes after the raw data
+# block's terminator, and a zero byte is not nothing to an AAC decoder,
+# it is ID_SCE. ffmpeg stops at the terminator and never looks;
+# Espressif's decoder reads on to the declared frame length and tries
+# to decode a channel out of the zeros. "Failed to decode aac frame,
+# error:30", one block, and a corpse of a sidecar. Verified transparent
+# against the wrong decoder, which is the whole lesson.
+#
+# So: fdk-aac, built from source, about two minutes.
+#
+#   git clone https://github.com/mstorsjo/fdk-aac
+#   cd fdk-aac && cmake -S . -B build -DBUILD_PROGRAMS=ON \
+#       -DBUILD_SHARED_LIBS=OFF && cmake --build build
+#
+# and put build/aac-enc on PATH. Without it this one file is skipped
+# and the other twenty still build.
+if command -v aac-enc >/dev/null 2>&1; then
+    aac-enc -r 128000 -t 2 -v 0 landmark.wav "$OUT/15 aac-adts-cbr.aac"
+else
+    echo "skipping 15: aac-enc not on PATH (see the note above)" >&2
+fi
 
 # 16 -- fragmented MP4. mp4seek.c looks for moov/trak/mdia/minf/stbl and
 # nothing else; a file whose sample tables live in moof boxes has no
