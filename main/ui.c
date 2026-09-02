@@ -618,69 +618,97 @@ static void draw_rg(const ui_state_t *st)
 #define C_BATT_CHG   RGB(0x4C, 0xC0, 0x5E)
 
 /*
- * A USB-C PLUG, not a port.
+ * A USB-C PLUG, not a port, and not a memory stick either.
  *
- * The distinction is the point of the icon. A port is a hole in the
- * side of the device -- a thing that is always there, whether or not
- * anything is in it -- and this marker means the opposite: something
+ * The first half of that distinction is 0723's and still holds: a port
+ * is a hole in the side of the device, true at every moment and
+ * therefore saying nothing about now, where this marker means something
  * has been plugged in and the battery is no longer what is being
- * answered. Drawing the receptacle said "there is a socket here",
- * which is true of the hardware at every moment and therefore says
- * nothing about now.
+ * answered.
  *
- * So: the shell, and a lead coming out of it. The lead is the whole
- * message; a shell on its own at this size is a lozenge.
+ * The second half is what this is. 0723 drew the shell as a hollow
+ * stadium the full height of the battery with a short lead beside it,
+ * and at 24 px that silhouette is a body with a cap on it -- which is
+ * a flash drive, which is also a thing you plug into this device, so
+ * the icon was not merely vague but wrong in a specific and available
+ * way.
  *
- * Same footprint and same centre as the battery it replaces, so the
- * corner that answers "how long has this got" keeps answering it -- the
- * answer becoming "as long as the cable is in" rather than a
- * percentage.
+ * What separates the two is where the mass sits. A memory stick is
+ * nearly all body. A plug is a flat shell, a collar barely taller than
+ * it, and then a cable that keeps going -- so the ink is spread along
+ * the length instead of pooled at one end, and the eye reads a lead
+ * leaving the frame rather than an object sitting in it.
+ *
+ * Three parts, and the proportions between them are the whole icon:
+ *
+ *      shell   24 x 13, hollow, 2 px wall -- flatter than it is long
+ *      collar  11 x 13, solid            -- a step, not a bulge
+ *      cable    5 tall, running to the right edge
+ *
+ * The shell is hollow because a solid one at this size is a lozenge,
+ * and its wall is 2 rather than the battery's 3: the battery is a
+ * closed outline whose weight comes from four sides, and matching that
+ * number here made a shape with a collar and a cable hanging off it
+ * read heavier than the icon it replaces.
+ *
+ * Same footprint and same centre as that battery, so the corner that
+ * answers "how long has this got" keeps answering it -- the answer
+ * becoming "as long as the cable is in" rather than a percentage.
  */
-#define USB_LEAD_W  (12)    /* the cable stub */
-#define USB_LEAD_H  (10)
-#define USB_GRIP_W  (5)     /* strain relief, where lead meets shell */
-#define USB_GRIP_H  (16)    /* between the lead and the shell, so the
-                             * joint reads as a taper rather than a step */
-#define USB_GRIP_LAP (4)    /* how far the relief reaches back INTO the
-                             * shell. Without it the shell's rounded end
-                             * and the relief's square one meet at a
-                             * tangent and leave a hairline of background
-                             * between them -- two objects instead of
-                             * one. */
+#define USB_SHELL_W  (24)
+#define USB_SHELL_H  (13)
+#define USB_SHELL_R  (3)
+#define USB_WALL     (2)
+#define USB_COLLAR_W (11)
+#define USB_COLLAR_H (13)
+#define USB_COLLAR_R (2)
+#define USB_CABLE_H  (5)
+#define USB_LAP      (2)    /* how far the collar reaches back into the
+                             * shell, and the cable into the collar.
+                             * Without it the rounded corners of two
+                             * neighbours meet at a tangent and leave a
+                             * hairline of background between them --
+                             * three objects in a row instead of one
+                             * thing with parts. */
+
+/* gfx has rectangles and circles; a rounded rectangle is four of one
+ * and two of the other. Corners first, then the cross, so nothing is
+ * drawn over a corner that has already been placed. */
+static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
+{
+    if (r * 2 > w) r = w / 2;
+    if (r * 2 > h) r = h / 2;
+    gfx_fill_circle(x + r, y + r, r, c);
+    gfx_fill_circle(x + w - 1 - r, y + r, r, c);
+    gfx_fill_circle(x + r, y + h - 1 - r, r, c);
+    gfx_fill_circle(x + w - 1 - r, y + h - 1 - r, r, c);
+    gfx_fill_rect(x + r, y, w - 2 * r, h, c);
+    gfx_fill_rect(x, y + r, w, h - 2 * r, c);
+}
 
 static void draw_usb_c(int cx, int cy)
 {
-    const int h = BATT_H;
     const int w = BATT_W + BATT_NUB_W;      /* same footprint as the battery */
     const int left = cx - w / 2;
 
-    /* The shell: a stadium, ending where the strain relief begins. */
-    const int bw = w - USB_LEAD_W - USB_GRIP_W;
-    const int r = h / 2;
-    gfx_fill_circle(left + r, cy, r, C_ICON);
-    gfx_fill_circle(left + bw - r, cy, r, C_ICON);
-    gfx_fill_rect(left + r, cy - r, bw - 2 * r, h, C_ICON);
+    /* The shell, hollowed to its wall. */
+    fill_rrect(left, cy - USB_SHELL_H / 2, USB_SHELL_W, USB_SHELL_H,
+               USB_SHELL_R, C_ICON);
+    fill_rrect(left + USB_WALL, cy - USB_SHELL_H / 2 + USB_WALL,
+               USB_SHELL_W - 2 * USB_WALL, USB_SHELL_H - 2 * USB_WALL,
+               USB_SHELL_R - 1, C_BG);
 
-    /*
-     * Hollowed, leaving BATT_WALL of shell -- the same wall the battery
-     * outline uses, so the two icons weigh the same on the row. A solid
-     * blob would read as heavier than the battery it stands in for and
-     * make the corner jump when power is connected.
-     */
-    const int ir = r - BATT_WALL;
-    gfx_fill_circle(left + r, cy, ir, C_BG);
-    gfx_fill_circle(left + bw - r, cy, ir, C_BG);
-    gfx_fill_rect(left + r, cy - ir, bw - 2 * r, 2 * ir, C_BG);
+    /* The collar, overlapping the shell's rounded end. */
+    const int collar_x = left + USB_SHELL_W - USB_LAP;
+    fill_rrect(collar_x, cy - USB_COLLAR_H / 2, USB_COLLAR_W, USB_COLLAR_H,
+               USB_COLLAR_R, C_ICON);
 
-    /* Strain relief: shorter than the shell and taller than the lead,
-     * so the lead reads as leaving the connector rather than as a
-     * second object beside it. */
-    gfx_fill_rect(left + bw - USB_GRIP_LAP, cy - USB_GRIP_H / 2,
-                  USB_GRIP_W + USB_GRIP_LAP, USB_GRIP_H, C_ICON);
-
-    /* The lead. */
-    gfx_fill_rect(left + bw + USB_GRIP_W, cy - USB_LEAD_H / 2,
-                  USB_LEAD_W, USB_LEAD_H, C_ICON);
+    /* The cable, to the right edge of the footprint: it leaves the icon
+     * rather than ending inside it, which is the difference between a
+     * lead and a stub. */
+    const int cable_x = collar_x + USB_COLLAR_W - USB_LAP;
+    fill_rrect(cable_x, cy - USB_CABLE_H / 2, left + w - cable_x,
+               USB_CABLE_H, USB_CABLE_H / 2, C_ICON);
 }
 
 static void draw_battery(int pct, bool charging, bool ext)
