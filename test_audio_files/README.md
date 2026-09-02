@@ -37,7 +37,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 05 flac | 0704 bisection | seeks, within a frame |
 | 06 ogg-vorbis | 0705, multi-page codebooks in the preamble | seeks, within a page |
 | 07 opus | 0705, 48 kHz granule and pre-skip | seeks, within a page |
-| 08 aac-adts | cbrseek's ADTS refusal, then 0716's harvested table | no seek on the first two plays; seeks after the third |
+| 08 aac-adts | cbrseek's ADTS refusal, then 0805's header walk | bar empty for a second or two, then fills and seeks -- on the first play |
 | 09 m4a-aac | 0707 sample table and ADTS remux | seeks, exact |
 | 10 m4a-alac | 0707's deliberate fallback | **plays, does not seek** (needs `+faststart`) |
 | 11 ts-aac | 0706 packet lattice | seeks, within a frame |
@@ -52,27 +52,34 @@ place; one that is wrong by more is obvious from the beep count.
 | 20 wav-float32 | 32-bit float, indistinguishable from 19 at the decoder | **refuses, identically** |
 | 21 flac-24bit | the fold on a real decoder rather than a PCM chunk | plays, seeks |
 
-## 08 takes three plays, and 10 never gets there
+## 08 seeks during the first play now, and 10 never does
 
-**08 is now the file that has to be listened to before it can be
-seeked.** ffmpeg's AAC encoder writes `buffer_fullness = 0x7FF` in every
-ADTS header, which is the stream declaring itself variable bitrate, and
-`cbrseek.c` refuses those rather than pretending the byte rate is a
-line. That refusal is still the first thing this file tests. What
-changed is what happens next: 0716 gives a stream with no other
-mechanism a table recorded from a play that reached the end without a
-seek in it, and 0717 fixed the guard that stopped any pair from ever
-being appended.
+**08 is the file with no seek mechanism at all.** ffmpeg's AAC encoder
+writes `buffer_fullness = 0x7FF` in every ADTS header, which is the
+stream declaring itself variable bitrate, and `cbrseek.c` refuses those
+rather than pretending the byte rate is a line. That refusal is still
+the first thing this file tests, and the log still opens with `adts
+declares VBR`.
 
-So the file needs two complete, uninterrupted plays, not three: the
-loudness, the length and the table are all harvested from the same
-pass, and the second play is the one that uses them. Drag before that and
-the press is correctly ignored. The log says which stage it is at -- `adts declares VBR` and `no seek
-mechanism; recording a table as it plays` on the first, then `table
-recorded, N entries every 2 s` when it ends, and `adts: recorded table,
-N entries every 2 s` at the open of every play after. A drag during the
-recording play throws that play's measurement away and it starts again
-next time, which is easy to do by accident when testing.
+What happens next has changed twice. 0716 had a complete uninterrupted
+play record a table as it went -- one play to learn it, a second to use
+it, and a drag during the first threw the learning away. 0805 walks the
+frame headers instead: every ADTS header states its own length, so the
+file can be chained header to header without decoding anything, and the
+walk runs on media_task behind the music.
+
+So on a first, never-before-played 08 the bar starts empty and fills a
+second or two in, and the drag works from that moment. The log says
+which stage it is at -- `no seek mechanism; walking the headers for
+one`, then `walked 979 KB in N ms, 30 entries every 2 s`, then
+`duration from the header walk: 60 s`. On every play after, the table
+comes from the sidecar at the open: `adts: recorded table, 30 entries
+every 2 s`.
+
+The recording path is still armed underneath. If the walk finds nothing
+usable, or the card is too slow, or the track is skipped before it
+finishes, a complete uninterrupted play still writes the table down the
+old way -- which is why that code stayed rather than being replaced.
 
 **10 does not seek at all.** ALAC has no ADTS framing, so 0707 cannot
 remux it and leaves it on esp_audio_codec's own M4A path -- playing,

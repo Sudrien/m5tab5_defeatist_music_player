@@ -186,6 +186,19 @@ bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
 bool decoder_needs_table(decoder_t *d);
 
 /*
+ * Give a decoder a table part way through a track.
+ *
+ * The walk that produces one for a raw ADTS stream reads the whole file
+ * and so runs behind the music; this is how its answer gets in without
+ * reopening anything. Only meaningful where decoder_needs_table() was
+ * true, and validated exactly as the open's table is.
+ *
+ * MUST be called from the thread that owns the decoder -- the decode
+ * loop -- and not from whatever background task did the walking.
+ */
+bool decoder_install_index(decoder_t *d, const decoder_index_t *ix);
+
+/*
  * File offset of the next byte the decoder will consume.
  *
  * Exact, not approximate: the input window's unread tail is subtracted,

@@ -71,6 +71,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "storage_io.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -150,6 +152,38 @@ size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t ca
  * nothing.
  */
 long cbr_adts_resync(FILE *f, long off, long end);
+
+/*
+ * Build a time-to-offset table by chaining ADTS frame headers, without
+ * decoding anything.
+ *
+ * For the one stream that has no other source of one: raw ADTS that
+ * declares itself VBR. 0716 had a complete play record the table as it
+ * went, which meant one play to learn it and a second to use it, and
+ * meant a drag during the first threw it away. Every ADTS header
+ * declares its own frame length, so the file can be chained
+ * header-to-header instead -- no decoder, no audio, just a sequential
+ * read.
+ *
+ * It IS a sequential read of the whole file, so it belongs behind the
+ * music rather than in front of the first sound; `cls` is how the
+ * caller says which. `frames_total` comes out of the same pass and is
+ * the exact output length in samples.
+ *
+ * `spacing_sec` may come back larger than `want_spacing_sec`: a file
+ * long enough to fill `max` doubles it and halves what it has, so the
+ * table gets coarser rather than stopping part way through the file.
+ *
+ * False if the walk did not reach the end or found fewer than two
+ * entries. Nothing partial is reported as usable -- a table that stops
+ * half way is worse than none, because a drag past its end lands on the
+ * last pair and reads as the press having been ignored.
+ */
+bool cbr_adts_walk(FILE *f, long start, long end, storage_io_class_t cls,
+                   uint32_t *offset, uint32_t *frame, int max,
+                   uint32_t want_spacing_sec,
+                   int *count, uint32_t *spacing_sec,
+                   uint64_t *frames_total, uint32_t *rate_out);
 
 #ifdef __cplusplus
 }
