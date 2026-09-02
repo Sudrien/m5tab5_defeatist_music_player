@@ -39,6 +39,15 @@ static inline uint32_t le32(const uint8_t *p)
  * CLAUDE.md already records against covertag.c; there is no reason to
  * copy it into a new file.
  */
+/* The walk runs behind the music and says so, rather than competing
+ * with it at the playback class. */
+static bool read_at_as(FILE *f, long off, void *buf, size_t len,
+                       storage_io_class_t cls)
+{
+    if (off < 0) return false;
+    return storage_io_read_at(f, off, buf, len, cls);
+}
+
 static bool read_at(FILE *f, long off, void *buf, size_t len)
 {
     if (off < 0) return false;
@@ -235,6 +244,10 @@ static long adts_find(const uint8_t *buf, size_t avail, size_t at)
  */
 #define ADTS_GROUP_BYTES  (16 * 1024)   /* one read per sample point */
 #define ADTS_SYNC_BYTES   4096          /* enough to find a header */
+/* The walk reads the whole file, so this is a throughput knob rather
+ * than a correctness one: big enough that the per-read overhead
+ * disappears, small enough to be an ordinary allocation. */
+#define ADTS_WALK_BYTES   (32 * 1024)
 #define ADTS_GROUPS       5
 #define ADTS_TOLERANCE    15        /* thousandths: 1.5% spread allowed */
 
@@ -621,6 +634,138 @@ size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t ca
 }
 
 /* ------------------------------------------------------------------ */
+
+/*
+ * Walk every frame header in an ADTS file and write down where the
+ * seconds are.
+ *
+ * WHY THIS EXISTS AT ALL
+ *
+ * A raw ADTS file that declares itself VBR has nothing that maps time
+ * to offset -- no container, no proven rate, no seek table -- so 0716
+ * had a play record one as it went. That works, and it costs the
+ * listener a whole play of a track they cannot seek in, plus a second
+ * one to use what the first learned. Worse, a drag during the recording
+ * play throws it away, so the person most likely to want the table is
+ * the one least likely to get it.
+ *
+ * But nothing about ADTS requires decoding to find the frames. Every
+ * header declares its own length, so the file can be chained
+ * header-to-header without ever handing a byte to a decoder: the walk
+ * is a read and an add. What it costs is a sequential pass over the
+ * file, which is why the caller runs it in the background while the
+ * music plays rather than in front of the first sound.
+ *
+ * SPACING, AND WHY IT DOUBLES
+ *
+ * The same rule the recorder used, so the two produce interchangeable
+ * tables and the sidecar format does not learn anything new: one pair
+ * every `want_spacing_sec` of output, and when the array fills, every
+ * other entry is dropped and the spacing doubles. A long file therefore
+ * ends up coarser rather than truncated, which is the right way round
+ * -- a table that stops half way through a file is worse than no table,
+ * because a drag past where it stops lands on the last pair and reads
+ * as the press having been ignored.
+ *
+ * `frames_total` is the other thing the play used to be needed for: the
+ * length. It is the sum of the samples-per-frame fields, which is the
+ * count of what the decoder will emit, and it is exact rather than
+ * estimated from a byte rate.
+ */
+bool cbr_adts_walk(FILE *f, long start, long end, storage_io_class_t cls,
+                   uint32_t *offset, uint32_t *frame, int max,
+                   uint32_t want_spacing_sec,
+                   int *count, uint32_t *spacing_sec,
+                   uint64_t *frames_total, uint32_t *rate_out)
+{
+    if (!f || !offset || !frame || max < 2 || start < 0 || end <= start) {
+        return false;
+    }
+
+    uint8_t *buf = malloc(ADTS_WALK_BYTES);
+    if (!buf) return false;
+
+    long at = start;
+    uint64_t frames = 0;                /* output samples so far */
+    uint32_t rate = 0;
+    uint32_t spacing = want_spacing_sec ? want_spacing_sec : 1;
+    uint64_t next = 0;
+    int n = 0;
+    bool ok = false;
+
+    while (at < end) {
+        long want = end - at;
+        if (want > ADTS_WALK_BYTES) want = ADTS_WALK_BYTES;
+        if (want < 7) break;
+        if (!read_at_as(f, at, buf, (size_t)want, cls)) break;
+
+        size_t p = 0;
+        bool moved = false;
+
+        while (p + 7 <= (size_t)want) {
+            adts_hdr_t h;
+            if (!adts_at(buf + p, (size_t)want - p, &h)) {
+                /* Not a header. Either the window ended inside one, in
+                 * which case the next read starts here and finds it, or
+                 * the file has garbage in it and the walk stops -- a
+                 * partial table is not written, see the caller. */
+                break;
+            }
+            if (p + h.len > (size_t)want) break;     /* frame crosses the window */
+
+            if (!rate) {
+                rate = k_adts_rates[h.sf_index];
+                if (!rate) break;
+                next = 0;
+            }
+
+            if (frames >= next && n < max) {
+                offset[n] = (uint32_t)(at + (long)p);
+                frame[n] = (uint32_t)frames;
+                n++;
+                next = frames + (uint64_t)spacing * rate;
+            }
+
+            if (n >= max) {
+                /* Full. Halve it and carry on at twice the spacing --
+                 * the entries kept are still correct, they are just
+                 * further apart. */
+                for (int k = 1; k * 2 < n; k++) {
+                    offset[k] = offset[k * 2];
+                    frame[k] = frame[k * 2];
+                }
+                n = (n + 1) / 2;
+                spacing *= 2;
+                next = frames + (uint64_t)spacing * rate;
+            }
+
+            frames += h.samples;
+            p += h.len;
+            moved = true;
+        }
+
+        if (!moved) {
+            /* The window began inside a frame or on rubbish. One resync
+             * attempt, then give up: this is a walk, not a repair. */
+            const long found = adts_find(buf, (size_t)want, 0);
+            if (found <= 0) break;
+            at += found;
+            continue;
+        }
+        at += (long)p;
+        ok = true;
+    }
+
+    free(buf);
+
+    if (!ok || n < 2 || !rate) return false;
+
+    if (count) *count = n;
+    if (spacing_sec) *spacing_sec = spacing;
+    if (frames_total) *frames_total = frames;
+    if (rate_out) *rate_out = rate;
+    return true;
+}
 
 long cbr_adts_resync(FILE *f, long off, long end)
 {

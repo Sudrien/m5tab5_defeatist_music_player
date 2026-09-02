@@ -474,6 +474,49 @@ static int minimp3_read(decoder_t *d, int16_t *out, int max_int16)
 
 static bool s_esp_codec_registered;
 
+/*
+ * Take a table for a stream that has no other way to seek.
+ *
+ * Factored out of the open because 0805 also installs one part way
+ * through a track: the header walk that produces it runs behind the
+ * music, so the table arrives after the first sound rather than before
+ * it. Same validation either way -- both arrays strictly increasing, or
+ * the whole thing is refused rather than half-installed.
+ */
+static bool install_table(decoder_t *d, const decoder_index_t *ix,
+                          const char *what)
+{
+    if (!d->tbl_wanted || !ix || ix->count <= 1 || !ix->offset || !ix->frame) {
+        return false;
+    }
+    for (int k = 1; k < ix->count; k++) {
+        if (ix->offset[k] <= ix->offset[k - 1] ||
+            ix->frame[k]  <= ix->frame[k - 1]) {
+            ESP_LOGW(TAG, "adts: %s is not increasing; ignoring", what);
+            return false;
+        }
+    }
+
+    uint32_t *off = malloc((size_t)ix->count * sizeof(uint32_t));
+    uint32_t *frm = malloc((size_t)ix->count * sizeof(uint32_t));
+    if (!off || !frm) { free(off); free(frm); return false; }
+
+    memcpy(off, ix->offset, (size_t)ix->count * sizeof(uint32_t));
+    memcpy(frm, ix->frame, (size_t)ix->count * sizeof(uint32_t));
+
+    /* Replacing, not adding: a second table for the same stream is the
+     * walk's answer arriving after a stored one was already in. */
+    free(d->tbl_off);
+    free(d->tbl_frm);
+    d->tbl_off = off;
+    d->tbl_frm = frm;
+    d->tbl_count = ix->count;
+    d->tbl_ok = true;
+    ESP_LOGI(TAG, "adts: %s, %d entries every %" PRIu32 " s",
+             what, ix->count, ix->spacing_sec);
+    return true;
+}
+
 static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
                                 const decoder_index_t *ix)
 {
@@ -576,29 +619,7 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
                     !d->ogg.ok && !d->ts.ok &&
                     d->esp_type == ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
 
-    if (d->tbl_wanted && ix && ix->count > 1 && ix->offset && ix->frame) {
-        bool sane = true;
-        for (int k = 1; k < ix->count; k++) {
-            if (ix->offset[k] <= ix->offset[k - 1] ||
-                ix->frame[k]  <= ix->frame[k - 1]) { sane = false; break; }
-        }
-        if (sane) {
-            d->tbl_off = malloc((size_t)ix->count * sizeof(uint32_t));
-            d->tbl_frm = malloc((size_t)ix->count * sizeof(uint32_t));
-            if (d->tbl_off && d->tbl_frm) {
-                memcpy(d->tbl_off, ix->offset,
-                       (size_t)ix->count * sizeof(uint32_t));
-                memcpy(d->tbl_frm, ix->frame,
-                       (size_t)ix->count * sizeof(uint32_t));
-                d->tbl_count = ix->count;
-                d->tbl_ok = true;
-                ESP_LOGI(TAG, "adts: recorded table, %d entries every %"
-                              PRIu32 " s", ix->count, ix->spacing_sec);
-            }
-        } else {
-            ESP_LOGW(TAG, "adts: recorded table is not increasing; ignoring");
-        }
-    }
+    install_table(d, ix, "recorded table");
 
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
@@ -1246,4 +1267,10 @@ void decoder_close(decoder_t *d)
     }
     if (d->f) storage_io_close(d->f);
     free(d);
+}
+
+bool decoder_install_index(decoder_t *d, const decoder_index_t *ix)
+{
+    if (!d) return false;
+    return install_table(d, ix, "table from the walk");
 }

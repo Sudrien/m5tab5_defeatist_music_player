@@ -65,6 +65,7 @@
 #include "heapcheck.h"
 #include "mediacache.h"
 #include "browser.h"
+#include "cbrseek.h"
 #include "decoder.h"
 #include "framewalk.h"
 #include "loudness.h"
@@ -3044,6 +3045,33 @@ static void do_art(const char *path, uint32_t gen)
  * flag LAST; the consumer writes, frees, and clears the flag LAST, so
  * neither touches the other's allocation and no lock is needed.
  */
+/*
+ * THE ADTS TABLE, WALKED INSTEAD OF LISTENED TO.
+ *
+ * 0716 had a complete uninterrupted play record the table as it went.
+ * That is one play to learn it and a second to use it, and a drag
+ * during the first throws it away -- so the person who wants to seek is
+ * the one who never gets to. Every ADTS header states its own length,
+ * though, so the table can be chained out of the headers without
+ * decoding anything: see cbr_adts_walk().
+ *
+ * It is a sequential read of the whole file, so it runs on media_task
+ * behind the music, at BACKGROUND, after the cover and the envelope.
+ * The result crosses back to the decode loop here, which is the only
+ * thread allowed to touch the decoder -- media_task fills the arrays
+ * and sets `ready` last, the decode loop reads `ready` and takes them.
+ * Same shape as s_rg_pending below and for the same reason.
+ */
+static uint32_t s_ixw_off[REPLAYGAIN_INDEX_MAX];
+static uint32_t s_ixw_frm[REPLAYGAIN_INDEX_MAX];
+static int      s_ixw_n;
+static uint32_t s_ixw_spacing;
+static uint64_t s_ixw_frames;
+static uint32_t s_ixw_rate;
+static char     s_ixw_path[512];
+static volatile bool s_ixw_want;        /* decode loop -> media_task */
+static volatile bool s_ixw_ready;       /* media_task -> decode loop */
+
 static replaygain_t *s_rg_pending;
 static char          s_rg_pending_path[512];
 static volatile bool s_rg_pending_ready;
@@ -3821,6 +3849,60 @@ static void media_task(void *arg)
                 }
             }
             snprintf(s_walked_path, sizeof(s_walked_path), "%s", path);
+        }
+
+        /*
+         * The ADTS header walk, for a stream with no other way to seek.
+         *
+         * After the cover and the envelope because those are on screen
+         * and this is not, and before the prefetch because this is the
+         * playing track's and that is the next one's. BACKGROUND, so it
+         * yields to the decode loop rather than racing it -- on the
+         * files this player sees it is a second or two of reading that
+         * nobody is waiting on.
+         *
+         * media_settle() first for the same reason the cover waits: a
+         * second reader while the ring is still filling is how a track
+         * starts late.
+         */
+        if (s_ixw_want && gen == s_track_gen && strcmp(path, s_ixw_path) == 0 &&
+            media_settle(gen, MEDIA_ART_DELAY_MS, MEDIA_MIN_RING_PCT, "index")) {
+            s_ixw_want = false;
+
+            FILE *wf = storage_io_open(path, "rb");
+            if (wf) {
+                long end = 0;
+                if (fseek(wf, 0, SEEK_END) == 0) end = ftell(wf);
+
+                int n = 0;
+                uint32_t sp = 0, rate = 0;
+                uint64_t frames = 0;
+                const uint32_t t0 = (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount());
+
+                if (end > 0 &&
+                    cbr_adts_walk(wf, 0, end, STORAGE_IO_BACKGROUND,
+                                  s_ixw_off, s_ixw_frm, REPLAYGAIN_INDEX_MAX,
+                                  REPLAYGAIN_INDEX_SPACING_SEC,
+                                  &n, &sp, &frames, &rate) &&
+                    gen == s_track_gen) {
+                    s_ixw_n = n;
+                    s_ixw_spacing = sp;
+                    s_ixw_frames = frames;
+                    s_ixw_rate = rate;
+                    s_ixw_ready = true;         /* last: this is the handoff */
+                    ESP_LOGI(TAG, "adts: walked %ld KB in %" PRIu32 " ms, "
+                                  "%d entries every %" PRIu32 " s",
+                             end / 1024,
+                             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount()) - t0,
+                             n, sp);
+                } else if (gen == s_track_gen) {
+                    /* The play is still recording one; say so rather
+                     * than leaving a silence where a table should be. */
+                    ESP_LOGW(TAG, "adts: header walk found no usable table; "
+                                  "the play is still recording one");
+                }
+                storage_io_close(wf);
+            }
         }
 
         /*
@@ -4894,7 +4976,17 @@ static track_end_t play_file(const char *path)
     /* Only when the decoder says nothing else can seek this stream. */
     bool     tbl_rec = decoder_needs_table(dec);
     if (tbl_rec) {
-        ESP_LOGI(TAG, "adts: no seek mechanism; recording a table as it plays");
+        /* The walk is asked for first and the recording stays armed
+         * behind it. If the walk lands -- and it lands within a second
+         * or two on anything that fits on this player -- the recording
+         * is disarmed with nothing lost; if it fails, or the card is
+         * too slow, or the track is skipped before it finishes, the
+         * play is still writing the table down the old way. Two paths
+         * to the same table, and the cheap one is only an accelerator. */
+        s_ixw_ready = false;
+        snprintf(s_ixw_path, sizeof(s_ixw_path), "%s", path);
+        s_ixw_want = true;
+        ESP_LOGI(TAG, "adts: no seek mechanism; walking the headers for one");
     }
 
     /*
@@ -5801,6 +5893,67 @@ static track_end_t play_file(const char *path)
              * from its start, so every later pair would be wrong by the
              * size of the jump.
              */
+            /*
+             * The walk's answer, if it landed. Taken here because this
+             * is the thread that owns the decoder, and taken once --
+             * `ready` is cleared before anything else so a second pass
+             * cannot install it twice.
+             *
+             * Everything the recording play was for arrives together:
+             * the table makes the drag work from this moment on, and
+             * the frame count is the length, which is the difference
+             * between a bar that fills mid-track and one that stays a
+             * groove until the song ends.
+             */
+            if (s_ixw_ready && strcmp(path, s_ixw_path) == 0) {
+                s_ixw_ready = false;
+
+                const decoder_index_t wix = {
+                    .count = s_ixw_n,
+                    .spacing_sec = s_ixw_spacing,
+                    .offset = s_ixw_off,
+                    .frame = s_ixw_frm,
+                };
+                if (decoder_install_index(dec, &wix)) {
+                    /* Nothing left for the play to record. */
+                    tbl_rec = false;
+                    tbl_n = 0;
+
+                    if (rg_holding(path)) {
+                        s_rg.index.present = true;
+                        s_rg.index.count = s_ixw_n;
+                        s_rg.index.spacing_sec = s_ixw_spacing;
+                        memcpy(s_rg.index.offset, s_ixw_off,
+                               (size_t)s_ixw_n * sizeof(uint32_t));
+                        memcpy(s_rg.index.sample, s_ixw_frm,
+                               (size_t)s_ixw_n * sizeof(uint32_t));
+                        s_rg_dirty = true;
+                    }
+
+                    if (!len_sec && s_ixw_rate) {
+                        len_sec = (uint32_t)((s_ixw_frames + s_ixw_rate / 2) /
+                                             s_ixw_rate);
+                        if (!visuals_pending) s_len_sec = len_sec;
+                        if (rg_holding(path) &&
+                            (!s_rg.format.present || !s_rg.format.sec)) {
+                            s_rg.format.present = true;
+                            s_rg.format.sec = len_sec;
+                            if (s_rg.waveform.present && !s_rg.waveform.sec) {
+                                s_rg.waveform.sec = len_sec;
+                            }
+                            s_rg_dirty = true;
+                        }
+                        ESP_LOGI(TAG, "duration from the header walk: %"
+                                      PRIu32 " s", len_sec);
+                    }
+
+                    /* The bar was a groove because nothing could seek;
+                     * something can now. */
+                    can_seek = decoder_can_seek(dec);
+                    if (!visuals_pending) s_can_seek = can_seek;
+                }
+            }
+
             if (tbl_rec && cur_rate) {
                 if (seeked) {
                     tbl_rec = false;
