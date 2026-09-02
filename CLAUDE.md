@@ -986,6 +986,60 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### What the board found that the host could not (0709)
+
+First flash of the whole series, against the `seektest` suite. Two
+faults, and neither was in the seeking.
+
+**A NULL dereference that had been latent for months.**
+`sidecar_prime()` calls `mediacache_art(path, NULL)` purely to ask
+whether art is cached; `mediacache_art()` wrote `*len` unconditionally.
+It only faults when the answer is *yes* -- an entry that exists and has
+art -- so it needed a file with embedded cover art already in the cache
+to reach the store. The test suite has one, and it panicked on it:
+`Store access fault` at `mediacache.c:158`, from `prefetch_next()`.
+
+Nothing to do with 0700-0708. The suite found it because a folder of
+deliberately varied files is a different thing from a folder of music
+somebody happens to own.
+
+**MP4 read one sample at a time and the board hated it.** The host said
+nothing: the samples are contiguous, `fseek()` was skipped, and the
+stdio buffer absorbed the reads. The board counted them. A sixty-second
+track logged **2585 reads for 962 KB, 1545 ms of arbiter hold, and
+`decoder_read blocked 959 ms`** -- against 43 reads for the same audio
+as Ogg. The cost is not the bytes, it is two and a half thousand lease
+acquisitions on the decode loop.
+
+`mp4_read()` now measures the run of samples that fits in the buffer,
+reads it in one call, and spreads it in place to make room for the
+headers -- safe in ascending order because each sample moves back at
+most `7*N` bytes and every earlier one moves further than the one after
+it. Same file: **126 reads instead of 2585.**
+
+The general shape, which is the third time this project has met it: a
+pattern that a buffer hides on a desktop is a pattern the arbiter
+counts on the device. `storage_io`'s per-call accounting exists to make
+that visible, and it did.
+
+##### Three things in that log that are working as intended
+
+- **`08 aac-adts` shows no duration and no bar.** ffmpeg's AAC encoder
+  writes `buffer_fullness = 0x7FF` in every ADTS header, which is the
+  stream declaring itself VBR, and `cbrseek.c` takes it at its word:
+  `adts declares VBR (buffer_fullness 0x7FF)`. No proven byte rate
+  means no derived duration, and no duration means an empty bar. The
+  refusal is the feature; the empty bar is what refusing looks like.
+- **`10 m4a-alac` would not play**, with `M4A_PARSE: Not support mdat
+  before moov`. That is the parser's restriction, and the file was
+  muxed without `+faststart`. Note which way it cuts: **09 played
+  fine** with the same layout, because 0707 reads the tables itself and
+  does not care where `moov` sits.
+- **`08`'s 1314 ms open is contention, not parsing.** Its own I/O line
+  says 12 reads, 69 KB, 11 ms held. The previous track's ReplayGain
+  sidecar was written at the same moment, on the media task. The open
+  path was waiting for the card, not working.
+
 #### What real files found that synthetic ones did not (0708)
 
 Every seek in 0700-0707 was tested against files this project generated
