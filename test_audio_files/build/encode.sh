@@ -130,4 +130,24 @@ ffmpeg -loglevel error -y -ss 20 -i landmark.wav -c:a libvorbis -q:a 4 \
 cat "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg" > "$OUT/18 ogg-vorbis-chained.ogg"
 rm -f "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg"
 
+# ---------------------------------------------------------------- 0803
+# Sample widths other than 16.
+
+# 19/20 -- 32-bit integer and 32-bit float, the same ten seconds of the
+# same audio. esp_audio_simple_dec_info_t reports a bit count and no way
+# to tell these two apart, which is the whole argument for 32 staying
+# refused while 24 is folded: there is no safe guess. Ten seconds rather
+# than sixty because they are 350 KB a second and neither is ever meant
+# to reach the speaker.
+ffmpeg -loglevel error -y -i landmark.wav -t 10 -c:a pcm_s32le \
+    "$OUT/19 wav-pcm32.wav"
+ffmpeg -loglevel error -y -i landmark.wav -t 10 -c:a pcm_f32le \
+    "$OUT/20 wav-float32.wav"
+
+# 21 -- 24-bit FLAC, which is what the fold is actually for. 02 proves
+# the arithmetic against a 16-bit twin; this proves the path works when
+# the 24 bits arrive from a real decoder rather than from a PCM chunk.
+# It is 951 KB because tones compress, not because it is short.
+$F -c:a flac -sample_fmt s32 "$OUT/21 flac-24bit.flac"
+
 echo "built into $OUT"
