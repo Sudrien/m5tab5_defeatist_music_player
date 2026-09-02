@@ -986,6 +986,55 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### Three things the fourth run showed (0712)
+
+**A three-second track under a ten-second fade is not played, it is
+passed through.** The writer clamps a fade to the outgoing tail --
+`tail was shorter` -- and nothing clamped it to the INCOMING track, so
+the board ran a 10244 ms fade into a 3 s file and the file was
+inaudible. It looked like the track had been skipped. The decode loop
+now refuses to arm a crossfade into a track shorter than twice the
+fade, so the incoming track gets at least as long at full volume as it
+spent arriving. The length comes from the sidecar, which
+`track_change_begin()` loaded a moment earlier; **a track with no
+recorded length is not refused, because unknown is not short.**
+
+**0710 stopped a fade that had not begun, and the board ran one that
+had.** Clearing `s_xfade_armed` at a rate change does nothing to a fade
+already under way: `no crossfade: the rate changes` was followed nine
+seconds later by `crossfade cut short: the outgoing ring emptied`, and
+the first sound arrived 9190 ms after the press. `s_xfade_active` is
+cleared as well now. The general lesson, which this project keeps
+paying for: **a flag that arms something is not the flag that stops
+it.**
+
+**A file that will never state its length can still be measured.** A
+raw ADTS file declaring `buffer_fullness = 0x7FF` has no duration from
+any of the four seek mechanisms, so its bar stayed a groove for ever --
+the board played one twice and read `0s` from the sidecar both times.
+But an uninterrupted play measures it exactly, which is the same trade
+the loudness and the envelope already make: one complete listen buys
+something the file would not say. Written only when the decoder had no
+answer, because a stated length is a fact and this is an observation,
+and only from a play with no seek in it -- it sits inside the
+`measuring && why == TRACK_ENDED` block for exactly that reason.
+
+##### Two things in that log that are not faults
+
+- **The title appearing "early" on track 12 happens on every track.**
+  When the decode of a track finishes there can still be twenty seconds
+  of it in the ring, and `the finished track has played out; the screen
+  is the next track's now` is the deliberate handover: the screen
+  belongs to what is coming, the ring to what is going. Track 12 is
+  simply the one with cover art big enough to notice.
+- **`.m4a` does seek; `10 m4a-alac` does not.** 0711's run has
+  `mp4: seek to 43s, landed 42s, sample 1851` on file 09. The four taps
+  in this run landed during file 10, which is ALAC -- no `mp4a` sample
+  entry, no remux, no seek, by design. Two files with the same
+  extension and different answers is confusing, and the answer is in
+  the open log either way: `mp4: aac ... seekable` or `sample entry is
+  'alac' ... leaving it to the M4A parser`.
+
 #### The seek table was right and the spacing was wrong (0711)
 
 Third run, and the first with anything actually dragged. Every
