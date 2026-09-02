@@ -2270,6 +2270,44 @@ static char s_path[512];
 static id3_tags_t s_tags;
 
 /*
+ * THE TITLE WAITS FOR THE COVER.
+ *
+ * The two arrive on different tasks: load_tags() runs on the decode
+ * loop at the track change, do_art() on media_task some way behind it.
+ * Published as they landed, the screen changed twice -- the new title
+ * against the old cover, and then the cover -- which reads as the
+ * player having got the title wrong first, or as the art being late for
+ * a track that has already started.
+ *
+ * So the text is STAGED here and shown when the art for the same track
+ * has settled. `_shown` is what the UI reads; `s_tags` and
+ * s_display_name remain what the loaders write, so nothing else in this
+ * file changes.
+ *
+ * Copied by the UI task itself rather than published by media_task,
+ * which would be a struct written by one task and read by another with
+ * no ordering -- a torn title for a frame. The UI task is the only
+ * reader, so letting it do the copy makes the question disappear rather
+ * than answering it.
+ */
+static id3_tags_t   s_tags_shown;
+static const char  *s_name_shown = "";
+static volatile bool      s_text_staged;
+static volatile bool      s_text_release;
+static volatile TickType_t s_text_staged_at;
+
+/*
+ * How long the text will wait for a cover before showing anyway.
+ *
+ * do_art() can decline entirely -- the chooser is up, the generation
+ * moved on, the file would not open -- and none of those should cost
+ * the listener a title. A second is longer than the art path takes
+ * whenever it runs at all, and short enough that the failure mode is a
+ * slightly late title rather than a missing one.
+ */
+#define TEXT_HOLD_MS    (1000)
+
+/*
  * What was actually played, newest last.
  *
  * playlist_prev() walks index-1, which is the right answer in list order
@@ -2443,6 +2481,11 @@ static void load_tags(const char *path)
             storage_io_close(af);
         }
     }
+
+    /* Staged, not shown: see s_tags_shown. */
+    s_text_staged = true;
+    s_text_release = false;
+    s_text_staged_at = xTaskGetTickCount();
 
     /* Only now, and only if there is nothing better. */
     if (!s_tags.title[0]) {
@@ -3718,6 +3761,12 @@ static void media_task(void *arg)
         do_art(path, gen);
         HEAP_CHECK("after do_art");
 
+        /* Whatever it decided -- a cover, a format card, or nothing at
+         * all because the generation moved on -- the art strip is now
+         * as settled as it is going to get for this track, so the title
+         * can go with it. */
+        s_text_release = true;
+
         /*
          * The tags the decode loop read a moment ago, stored -- by the
          * task that is allowed to store them. It cost a read either way;
@@ -3970,9 +4019,26 @@ static void ui_task(void *arg)
          * worse than one that is briefly right for the wrong reason. */
         st.has_next = playlist_has_next(browser_order());
 
-        st.title = s_tags.title[0] ? s_tags.title : s_display_name;
-        st.artist = s_tags.artist;
-        st.album = s_tags.album;
+        /*
+         * The staged text becomes the shown text when the art has
+         * settled, or when it has waited long enough that no art is
+         * coming. Done here because this task is the only reader.
+         */
+        if (s_text_staged) {
+            const bool waited =
+                (int32_t)(xTaskGetTickCount() - s_text_staged_at) >=
+                (int32_t)pdMS_TO_TICKS(TEXT_HOLD_MS);
+            if (s_text_release || waited) {
+                memcpy(&s_tags_shown, &s_tags, sizeof(s_tags_shown));
+                s_name_shown = s_display_name;
+                s_text_staged = false;
+                s_text_release = false;
+            }
+        }
+
+        st.title = s_tags_shown.title[0] ? s_tags_shown.title : s_name_shown;
+        st.artist = s_tags_shown.artist;
+        st.album = s_tags_shown.album;
         st.playing = s_playing;
         st.volume = s_volume;
         st.rg_active = s_rg_active;
@@ -6450,6 +6516,12 @@ static void clear_play_screen(void)
 
     memset(&s_tags, 0, sizeof(s_tags));
     s_display_name = "";
+    /* Nothing is playing, so there is no cover to wait for and no
+     * reason to hold an empty title back from a screen that is being
+     * cleared anyway. */
+    memset(&s_tags_shown, 0, sizeof(s_tags_shown));
+    s_name_shown = "";
+    s_text_staged = false;
     s_path[0] = '\0';
 
     /* Anything still in flight for the track that just ended belongs to
