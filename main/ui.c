@@ -618,40 +618,69 @@ static void draw_rg(const ui_state_t *st)
 #define C_BATT_CHG   RGB(0x4C, 0xC0, 0x5E)
 
 /*
- * A USB-C connector: a stadium outline with a slot in it.
+ * A USB-C PLUG, not a port.
  *
- * Drawn in the battery's place and at the battery's size, so the corner
- * of the bar that answers "how long has this got" keeps answering it --
- * the answer is just "as long as the cable is in" rather than a
+ * The distinction is the point of the icon. A port is a hole in the
+ * side of the device -- a thing that is always there, whether or not
+ * anything is in it -- and this marker means the opposite: something
+ * has been plugged in and the battery is no longer what is being
+ * answered. Drawing the receptacle said "there is a socket here",
+ * which is true of the hardware at every moment and therefore says
+ * nothing about now.
+ *
+ * So: the shell, and a lead coming out of it. The lead is the whole
+ * message; a shell on its own at this size is a lozenge.
+ *
+ * Same footprint and same centre as the battery it replaces, so the
+ * corner that answers "how long has this got" keeps answering it -- the
+ * answer becoming "as long as the cable is in" rather than a
  * percentage.
- *
- * Rounded ends from two circles and a rectangle, which is how gfx.c
- * draws anything with a curve; the inner slot is the same shape inset,
- * and the fill between them is what makes it read as an outline.
  */
+#define USB_LEAD_W  (12)    /* the cable stub */
+#define USB_LEAD_H  (10)
+#define USB_GRIP_W  (5)     /* strain relief, where lead meets shell */
+#define USB_GRIP_H  (16)    /* between the lead and the shell, so the
+                             * joint reads as a taper rather than a step */
+#define USB_GRIP_LAP (4)    /* how far the relief reaches back INTO the
+                             * shell. Without it the shell's rounded end
+                             * and the relief's square one meet at a
+                             * tangent and leave a hairline of background
+                             * between them -- two objects instead of
+                             * one. */
+
 static void draw_usb_c(int cx, int cy)
 {
     const int h = BATT_H;
     const int w = BATT_W + BATT_NUB_W;      /* same footprint as the battery */
-    const int r = h / 2;
     const int left = cx - w / 2;
 
-    /* Outer body. */
+    /* The shell: a stadium, ending where the strain relief begins. */
+    const int bw = w - USB_LEAD_W - USB_GRIP_W;
+    const int r = h / 2;
     gfx_fill_circle(left + r, cy, r, C_ICON);
-    gfx_fill_circle(left + w - r, cy, r, C_ICON);
-    gfx_fill_rect(left + r, cy - r, w - 2 * r, h, C_ICON);
+    gfx_fill_circle(left + bw - r, cy, r, C_ICON);
+    gfx_fill_rect(left + r, cy - r, bw - 2 * r, h, C_ICON);
 
-    /* Hollowed out, leaving BATT_WALL of shell. */
+    /*
+     * Hollowed, leaving BATT_WALL of shell -- the same wall the battery
+     * outline uses, so the two icons weigh the same on the row. A solid
+     * blob would read as heavier than the battery it stands in for and
+     * make the corner jump when power is connected.
+     */
     const int ir = r - BATT_WALL;
     gfx_fill_circle(left + r, cy, ir, C_BG);
-    gfx_fill_circle(left + w - r, cy, ir, C_BG);
-    gfx_fill_rect(left + r, cy - ir, w - 2 * r, 2 * ir, C_BG);
+    gfx_fill_circle(left + bw - r, cy, ir, C_BG);
+    gfx_fill_rect(left + r, cy - ir, bw - 2 * r, 2 * ir, C_BG);
 
-    /* The tongue, which is what distinguishes a C connector from a
-     * lozenge at this size. */
-    const int tw = w - 2 * (BATT_WALL + 5);
-    const int th = h - 2 * (BATT_WALL + 5);
-    gfx_fill_rect(cx - tw / 2, cy - th / 2, tw, th, C_ICON);
+    /* Strain relief: shorter than the shell and taller than the lead,
+     * so the lead reads as leaving the connector rather than as a
+     * second object beside it. */
+    gfx_fill_rect(left + bw - USB_GRIP_LAP, cy - USB_GRIP_H / 2,
+                  USB_GRIP_W + USB_GRIP_LAP, USB_GRIP_H, C_ICON);
+
+    /* The lead. */
+    gfx_fill_rect(left + bw + USB_GRIP_W, cy - USB_LEAD_H / 2,
+                  USB_LEAD_W, USB_LEAD_H, C_ICON);
 }
 
 static void draw_battery(int pct, bool charging, bool ext)
