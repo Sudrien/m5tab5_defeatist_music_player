@@ -1781,6 +1781,14 @@ static void i2s_writer_task(void *arg)
  * position. A lock would cost the decoder a blocking call per frame to
  * protect against that. */
 static volatile bool     s_playing = true;   /* declared above the writer */
+/*
+ * Bumped on every pause. Read either side of a blocking send, so a
+ * pause that arrives DURING one can be told from a genuine stall --
+ * `!s_playing` sampled before the send cannot see a press that has not
+ * happened yet, and sampled after it cannot see one that has already
+ * been undone. See the ring send warning.
+ */
+static volatile uint32_t s_pause_epoch;
 static volatile int      s_volume = 50;
 static volatile uint32_t s_pos_sec;
 static volatile uint32_t s_len_sec;
@@ -4009,6 +4017,7 @@ static void ui_task(void *arg)
                 break;
             }
             s_playing = !s_playing;
+            if (!s_playing) s_pause_epoch++;
             break;
         case UI_ACTION_VOLUME:
             /* 0503: logged because it was the tell. Seven unbidden volume
@@ -5458,6 +5467,7 @@ static track_end_t play_file(const char *path)
         const TickType_t t_send = xTaskGetTickCount();
         const bool ahead_before = (s_ring_play != s_ring_fill) ||
                                   s_tail_pending || !s_playing;
+        const uint32_t pause_epoch_before = s_pause_epoch;
         while (remain) {
             if (s_seek_pct >= 0 || s_pending_ready) break;
             const size_t sent = xStreamBufferSend(s_pcm, src, remain,
@@ -5613,7 +5623,19 @@ static track_end_t play_file(const char *path)
          * that clears these, so by the time the result is judged the
          * evidence has gone: 0403 tested them 44 ms too late and the
          * warning fired anyway. */
-        const bool running_ahead = ahead_before ||
+        /*
+         * And a pause that arrived while the send was parked.
+         *
+         * `!s_playing` is tested both before and after, and a pause that
+         * begins and ends inside one send is invisible to both: the
+         * board logged `ring send blocked 30078 ms (ring 99%)` for a
+         * thirty-second pause, reported at the moment of resuming. The
+         * epoch counter is the only thing that can see an event rather
+         * than a state -- the same lesson as 0403, one level further
+         * out.
+         */
+        const bool paused_during = (s_pause_epoch != pause_epoch_before);
+        const bool running_ahead = ahead_before || paused_during ||
                                    (s_ring_play != s_ring_fill) ||
                                    s_tail_pending || !s_playing;
         if (send_ms > LOOP_STALL_MS && !running_ahead) {
