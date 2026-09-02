@@ -19,6 +19,7 @@
 #endif
 
 #include "mp4seek.h"
+#include "duration.h"
 #include "storage_io.h"
 
 static const char *TAG = "tab5_mp4sk";
@@ -481,7 +482,7 @@ void mp4_free(mp4_t *m)
 uint32_t mp4_duration_sec(const mp4_t *m)
 {
     if (!m || !m->timescale || !m->duration) return 0;
-    return (uint32_t)(m->duration / m->timescale);
+    return (uint32_t)ROUND_DIV((uint64_t)m->duration, (uint64_t)m->timescale);
 }
 
 /* ------------------------------------------------------------------ */

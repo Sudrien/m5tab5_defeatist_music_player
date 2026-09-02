@@ -38,6 +38,27 @@ extern "C" {
  * trusted the same wrong extension would return a plausible number for a
  * mislabelled file instead of nothing.
  */
+/*
+ * A LENGTH IN SECONDS IS ROUNDED, NOT TRUNCATED.
+ *
+ * Every length here is a division: samples by rate, bytes by byte rate,
+ * ticks by timescale, granule by rate. Truncating each of them costs up
+ * to a second, and which way that lands is decided by the last frame of
+ * the file rather than by anything anybody chose.
+ *
+ * It showed up as a real CBR AAC file reading `seekable, 59 s` -- 960805
+ * bytes at 16014 B/s is 59.997, and the bar was a second short of a
+ * track that is sixty seconds long by every other measure in the
+ * player. 0712 already rounds the length measured from a complete play,
+ * `(frames_out + rate / 2) / rate`, so a file could be handed a length
+ * of 59 by its container and 60 by its own audio depending on which
+ * arrived first.
+ *
+ * Both arguments unsigned, evaluated once each -- these are macros
+ * because the widths differ at every call site.
+ */
+#define ROUND_DIV(n, d)  (((n) + (d) / 2) / (d))
+
 uint32_t duration_probe(FILE *f);
 
 #ifdef __cplusplus
