@@ -986,6 +986,35 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### A pause inside a blocking send is an event, not a state (0718)
+
+`W ring send blocked 30078 ms (ring 99%)`, logged at the instant the
+listener pressed play again after a thirty-second pause.
+
+The warning already excuses a pause -- `!s_playing` is part of
+`running_ahead`, and it is sampled both before the send and after it,
+because 0403 learned that testing only afterwards misses the state the
+handoff has just cleared. **A pause that begins and ends inside a
+single send is invisible to both samples.** Before it, playback is
+running; after it, playback is running again; in between, the decode
+loop sat in `xStreamBufferSend()` for the whole pause and reported it
+as a stall.
+
+`s_pause_epoch` counts pauses and is read either side of the send. A
+counter can see an event; a boolean can only see a state, and the event
+here is entirely contained in the gap between two reads of it.
+
+Thirty seconds of "blocked" in a log is the kind of number that sends
+somebody looking for a performance fault that does not exist -- which
+is the same reason the tail and decode-ahead cases were excused in the
+first place. **This warning has now been wrong three times in the same
+way**, and each fix has been about widening what counts as "somebody is
+waiting for this audio". It is worth asking, next time it fires
+wrongly, whether the question should be inverted: warn when the WRITER
+starved, which is one place and one fact, rather than when the decode
+loop blocked, which is a dozen legitimate reasons and a growing list of
+exceptions.
+
 #### `long` is 32 bits here, and the guard was `at <= -1` (0717)
 
 0716 recorded nothing. Fifteen complete plays of the ADTS file, each
