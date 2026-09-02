@@ -503,6 +503,7 @@ static const char *order_label(void)
     switch (s_order) {
     case PLAY_ORDER_ONE:     return "ONE";
     case PLAY_ORDER_SHUFFLE: return "RND";
+    case PLAY_ORDER_REPEAT_ONE: return "RPT";
     default:                 return "ALL";
     }
 }
@@ -785,8 +786,12 @@ browser_result_t browser_touch(bool down, int x, int y)
             }
             break;
         case 4:
+            /* ONE -> ALL -> RND -> RPT -> ONE. RPT sits after RND so
+             * the two whole-folder modes stay adjacent and the two
+             * single-track modes bookend the cycle. */
             s_order = (s_order == PLAY_ORDER_ONE)     ? PLAY_ORDER_ALL
                     : (s_order == PLAY_ORDER_ALL)     ? PLAY_ORDER_SHUFFLE
+                    : (s_order == PLAY_ORDER_SHUFFLE) ? PLAY_ORDER_REPEAT_ONE
                                                       : PLAY_ORDER_ONE;
             ESP_LOGI(TAG, "play order now %s", order_label());
             s_dirty = true;

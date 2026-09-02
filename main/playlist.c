@@ -141,6 +141,9 @@ static bool shuffle_seen(int i)
 const char *playlist_peek_next(play_order_t order)
 {
     if (s_count <= 0) return NULL;
+    if (order == PLAY_ORDER_REPEAT_ONE) {
+        return (s_current >= 0) ? s_paths[s_current] : NULL;
+    }
     if (order != PLAY_ORDER_ALL) return NULL;   /* see the header */
 
     const int n = s_current + 1;
@@ -152,6 +155,10 @@ bool playlist_has_next(play_order_t order)
 {
     if (s_count <= 0) return false;
     if (order == PLAY_ORDER_SHUFFLE) return true;   /* see the header */
+    /* Repeat-one always has a next track: itself. The skip button is
+     * mapped to ALL by the caller, so what this really answers is
+     * "would pressing next do anything", and it would. */
+    if (order == PLAY_ORDER_REPEAT_ONE) return s_current >= 0;
     return s_current >= 0 && s_current + 1 < s_count;
 }
 
@@ -160,6 +167,20 @@ const char *playlist_next(play_order_t order)
     if (s_count <= 0) return NULL;
 
     if (order == PLAY_ORDER_ONE) return NULL;
+
+    /*
+     * The same file again, without touching s_current.
+     *
+     * Returning the path rather than restarting the decoder from here
+     * keeps this function what it is -- a question about the list --
+     * and lets the player treat the repeat as an ordinary track change:
+     * the sidecar is already held, the cover already cached, and 0702's
+     * refusal to crossfade a track with itself is already in place for
+     * exactly this case.
+     */
+    if (order == PLAY_ORDER_REPEAT_ONE) {
+        return (s_current >= 0) ? s_paths[s_current] : NULL;
+    }
 
     if (order == PLAY_ORDER_SHUFFLE) {
         int remaining = 0;

@@ -24,7 +24,18 @@ typedef enum {
     PLAY_ORDER_ONE = 0,     /* stop at the end of the track */
     PLAY_ORDER_ALL,         /* on to the next, stop at the end of the folder */
     PLAY_ORDER_SHUFFLE,     /* random, without repeating until exhausted */
+    PLAY_ORDER_REPEAT_ONE,  /* this track again, until told otherwise */
 } play_order_t;
+
+/*
+ * ONE and REPEAT_ONE are both about one track and they are opposites.
+ *
+ * ONE stops when the track ends; REPEAT_ONE plays it again. Neither is
+ * about the skip button -- pressing next under either still moves to
+ * the next track, because a press is not the end of a track. The names
+ * are as close as the concepts, so both call sites map them the same
+ * way and say why.
+ */
 
 /* Replace the list with the playable files in dir, sorted case-insensitively.
  *
@@ -68,7 +79,11 @@ const char *playlist_next(play_order_t order);
 /*
  * What playlist_next() would return, without consuming anything.
  *
- * For prefetch. Returns NULL under PLAY_ORDER_ONE (nothing follows) and,
+ * For prefetch. Returns the CURRENT path under PLAY_ORDER_REPEAT_ONE,
+ * which is the honest prediction and costs nothing -- the file is
+ * already open and its sidecar already held, so priming it again is a
+ * cache hit rather than a read. Returns NULL under PLAY_ORDER_ONE
+ * (nothing follows) and,
  * deliberately, under PLAY_ORDER_SHUFFLE: shuffle's choice is made by
  * esp_random() at the moment it is asked, so there is no next track to
  * predict. Predicting one would mean fixing the choice early, which

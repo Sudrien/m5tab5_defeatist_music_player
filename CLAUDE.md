@@ -986,6 +986,34 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### RPT: the fourth play order (0713)
+
+`ONE` stops at the end of a track and there was no way to say "play
+this one again", which is the mode a test suite wants most -- and the
+one anybody debugging a single file wants. The order button now cycles
+**ONE -> ALL -> RND -> RPT**, with the two single-track modes
+bookending the two whole-folder ones.
+
+`ONE` and `REPEAT_ONE` are opposites with almost the same name, so both
+call sites say which they mean. Neither changes what the skip button
+does: pressing next under either still moves on, because **a press is
+not the end of a track**, and leaving RPT as-is would replay the track
+the listener just asked to leave.
+
+`playlist_next()` returns the current path without touching
+`s_current`, so a repeat is an ordinary track change as far as
+everything else is concerned -- and the pieces that need to know
+already do. The sidecar is still held, the cover is still cached, and
+0702's refusal to crossfade a track with itself was written for exactly
+this case, months before there was a way to ask for it.
+
+`playlist_peek_next()` returns the current path too, which makes the
+prefetch a cache hit rather than a read.
+
+One consequence worth knowing rather than fixing: the play history
+fills with the same path, so `prev` twice under RPT lands back on the
+same track. That is arguably what repeat-one means.
+
 #### Three things the fourth run showed (0712)
 
 **A three-second track under a ten-second fade is not played, it is
