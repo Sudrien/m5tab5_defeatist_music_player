@@ -986,6 +986,44 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### The title waits for the cover (0721)
+
+At a track change the screen changed twice: the new title against the
+old cover, then the cover. The two are loaded on different tasks --
+`load_tags()` on the decode loop at the change, `do_art()` on
+media_task some way behind -- and each published as it landed.
+
+Two changes read as a correction. The first frame looks like the player
+got the title wrong and fixed it, or like the art is late for a track
+that has already started; neither is what happened, and both are worse
+than one change slightly later.
+
+So the text is staged and shown when the art for the same track has
+settled. `s_tags_shown` is what the UI reads; `s_tags` and
+`s_display_name` remain what the loaders write, so every other site in
+the file is untouched.
+
+- **The UI task does the copy itself.** Publishing from media_task
+  would be a struct written by one task and read by another with no
+  ordering -- a torn title for a frame. The UI task is the only reader,
+  so having it do the copy makes the question disappear instead of
+  answering it.
+- **`s_text_release` is set after `do_art()` returns, whatever it
+  decided** -- a cover, a format card, or nothing because the
+  generation moved on. The art strip is as settled as it is going to
+  get, which is the actual condition, not "a cover was drawn".
+- **`TEXT_HOLD_MS` is the escape.** `do_art()` can decline entirely:
+  the chooser is up, the file would not open, the generation changed.
+  None of those should cost the listener a title, so after a second the
+  text shows regardless. The failure mode is a slightly late title
+  rather than a missing one.
+
+This is the third thing deferred to the moment it belongs to rather
+than the moment it was ready -- after the envelope and the position,
+which wait for the writer to arrive on this track's ring. The shape
+keeps recurring because a decode loop that runs twenty seconds ahead of
+the sound is always ready before the listener is.
+
 #### The rate-change dip: the same seconds, spent in two halves (0720)
 
 A crossfade cannot span a sample-rate change and never will here: there
