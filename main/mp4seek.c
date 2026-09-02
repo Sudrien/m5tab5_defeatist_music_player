@@ -362,6 +362,13 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
         m->stts_delta[i] = be32(e + 4);
     }
     m->stts_n = (int)entries;
+    /* The frame path has to hold one whole sample, so the caller needs
+     * to know the worst case before it allocates. */
+    m->max_size = 0;
+    for (uint32_t i = 0; i < m->count; i++) {
+        if (m->size[i] > m->max_size) m->max_size = m->size[i];
+    }
+
     return true;
 }
 
@@ -429,15 +436,64 @@ bool mp4_probe(FILE *f, mp4_t *m)
     {
         uint8_t b[16];
         if (!read_at(f, stsd + 8, b, 8)) goto out;
-        if (memcmp(b + 4, "mp4a", 4) != 0) {
-            ESP_LOGI(TAG, "sample entry is '%c%c%c%c', not mp4a; "
+        const bool is_alac = (memcmp(b + 4, "alac", 4) == 0);
+        if (!is_alac && memcmp(b + 4, "mp4a", 4) != 0) {
+            ESP_LOGI(TAG, "sample entry is '%c%c%c%c', not mp4a or alac; "
                           "leaving it to the M4A parser",
                      b[4], b[5], b[6], b[7]);
             goto out;
         }
+        if (is_alac) {
+            /*
+             * ALAC. No AudioSpecificConfig and nothing to synthesise --
+             * what the decoder needs is the magic cookie, which lives
+             * in an `alac` box inside the sample entry, after the
+             * 8-byte box header and the 28-byte audio sample entry.
+             *
+             * The whole atom is kept. Espressif's header says
+             * `codec_spec_info` is the magic cookie and stops there,
+             * and "magic cookie" means the atom in some writings and
+             * the 24-byte ALACSpecificConfig inside it in others.
+             * decoder.c tries both rather than this guessing.
+             */
+            const long entry = stsd + 8;
+            const long entry_end = entry + (long)be32(b);
+            long cookie_len = 0;
+            const long cookie = find_box(f, entry + 8 + 28, entry_end,
+                                         "alac", &cookie_len, 0);
+            /* find_box() returns the PAYLOAD, so the atom starts eight
+             * bytes earlier: four of size and the type. Both forms are
+             * wanted -- the atom to offer first, the config inside it
+             * to offer second -- so the header is read back in and the
+             * offset to the config is stated rather than assumed. */
+            if (cookie < 8 || cookie_len < 24 || cookie_len > 128) {
+                ESP_LOGI(TAG, "alac entry has no usable magic cookie; "
+                              "leaving it to the M4A parser");
+                goto out;
+            }
+            m->cookie_len = (uint32_t)cookie_len + 8;
+            m->cookie = malloc(m->cookie_len);
+            if (!m->cookie) goto out;
+            if (!read_at(f, cookie - 8, m->cookie, m->cookie_len)) goto out;
+            /* 8 of box header, 4 of version and flags, then the
+             * 24-byte ALACSpecificConfig: frame length, bit depth,
+             * channels, average bit rate, sample rate. */
+            m->cookie_cfg_off = 12;
+            m->alac = true;
+
+            /* The sample entry states these and there is no esds to
+             * read them from. Bytes 16..23 of the entry: channel count,
+             * sample size, then the 16.16 sample rate. */
+            uint8_t se[36];
+            if (read_at(f, entry, se, sizeof(se))) {
+                m->channels = se[8 + 16 + 1];
+                m->sample_rate = ((uint32_t)se[8 + 24] << 8) | se[8 + 25];
+            }
+        }
         const long entry = stsd + 8;
         const long entry_end = entry + (long)be32(b);
         long esds_len;
+        if (m->alac) goto have_config;   /* the cookie is the config */
         const long esds = find_box(f, entry + 8 + 28, entry_end, "esds",
                                    &esds_len, 0);
         if (esds < 0 || esds_len < 8 || esds_len > 512) goto out;
@@ -451,6 +507,8 @@ bool mp4_probe(FILE *f, mp4_t *m)
         }
     }
 
+have_config:
+
     if (!build_tables(f, stbl, stbl_end, m)) goto out;
     ok = true;
 
@@ -459,8 +517,9 @@ out:
     if (ok) {
         m->ok = true;
         m->pos = -1;
-        ESP_LOGI(TAG, "mp4: aac %" PRIu32 " Hz, %u ch, %" PRIu32 " samples, "
+        ESP_LOGI(TAG, "mp4: %s %" PRIu32 " Hz, %u ch, %" PRIu32 " samples, "
                       "%" PRIu32 " s, seekable",
+                 m->alac ? "alac" : "aac",
                  m->sample_rate, (unsigned)m->channels, m->count,
                  mp4_duration_sec(m));
     } else {
@@ -476,6 +535,7 @@ void mp4_free(mp4_t *m)
     free(m->size);
     free(m->stts_count);
     free(m->stts_delta);
+    free(m->cookie);
     memset(m, 0, sizeof(*m));
 }
 
@@ -611,4 +671,33 @@ size_t mp4_read(FILE *f, mp4_t *m, uint8_t *dst, size_t cap)
     }
     m->cur += n;
     return out;
+}
+
+uint32_t mp4_read_frame(FILE *f, mp4_t *m, uint8_t *dst, size_t cap)
+{
+    if (!f || !m || !m->ok || !dst) return 0;
+    if (m->cur >= m->count) return 0;
+
+    const uint32_t sz = m->size[m->cur];
+    if (!sz || sz > cap) {
+        /* Not a short read: a sample that does not fit is a buffer
+         * sized from a table that disagrees with this one, and handing
+         * over half a frame to a frame decoder is worse than stopping. */
+        if (sz > cap) {
+            ESP_LOGE(TAG, "sample %" PRIu32 " is %" PRIu32 " B, buffer is %u",
+                     m->cur, sz, (unsigned)cap);
+        }
+        return 0;
+    }
+
+    const long off = (long)m->offset[m->cur];
+    if (m->pos != off && fseek(f, off, SEEK_SET) != 0) return 0;
+    if (storage_io_fread(dst, sz, f, STORAGE_IO_PLAYBACK) != sz) {
+        m->pos = -1;
+        return 0;
+    }
+
+    m->pos = off + (long)sz;
+    m->cur++;
+    return sz;
 }

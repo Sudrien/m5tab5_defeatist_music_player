@@ -39,7 +39,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 07 opus | 0705, 48 kHz granule and pre-skip | seeks, within a page |
 | 08 aac-adts | cbrseek's ADTS refusal, then 0805's header walk | bar empty for a second or two, then fills and seeks -- on the first play |
 | 09 m4a-aac | 0707 sample table and ADTS remux | seeks, exact |
-| 10 m4a-alac | 0707's deliberate fallback | **plays, does not seek** (needs `+faststart`) |
+| 10 m4a-alac | 0808's frame-at-a-time path | plays, seeks, within a frame (93 ms) |
 | 11 ts-aac | 0706 packet lattice | seeks, within a frame |
 | 12 mp3-bigart-noxing | ID3v2 with a 600x600 cover ahead of the audio | seeks; art shows |
 | 13 flac-short-3s | a track shorter than the bar is wide | seeks without falling over |
@@ -52,7 +52,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 20 wav-float32 | 32-bit float, indistinguishable from 19 at the decoder | **refuses, identically** |
 | 21 flac-24bit | the fold on a real decoder rather than a PCM chunk | plays, seeks |
 
-## 08 seeks during the first play now, and 10 never does
+## 08 seeks during the first play now, and 10 seeks at last
 
 **08 is the file with no seek mechanism at all.** ffmpeg's AAC encoder
 writes `buffer_fullness = 0x7FF` in every ADTS header, which is the
@@ -81,21 +81,39 @@ usable, or the card is too slow, or the track is skipped before it
 finishes, a complete uninterrupted play still writes the table down the
 old way -- which is why that code stayed rather than being replaced.
 
-**10 does not seek at all.** ALAC has no ADTS framing, so 0707 cannot
-remux it and leaves it on esp_audio_codec's own M4A path -- playing,
-unseekable, exactly as before. If it seeks, something has gone wrong.
+**10 seeks since 0808, by a different route than 09.** ALAC has no ADTS
+framing, so there is nothing to remux it into, and 0707 left it on
+esp_audio_codec's M4A path -- playing, unseekable. What changed is not
+the framing but who does it: `ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC` decodes
+ALAC when handed exactly one frame per call, and the sample table 0707
+already reads says where every frame begins and ends. The table is the
+framing layer.
+
+So the samples go over as they are, one per call, and the seek is the
+same table lookup 09 uses. It lands within one frame, which for ALAC is
+4096 samples -- 93 ms, against 23 ms for 09, because a bigger frame is
+a bigger step.
+
+**Two things send it back to the old path, and both say so.** The
+decoder is opened with the magic cookie out of the `alac` box, and
+Espressif's header does not say whether it wants the whole atom or the
+24-byte config inside it, so both are offered in that order -- `alac:
+opened on the config, not the atom` means the second one won. And a
+frame decoder needs a buffer holding the largest sample in the file, so
+a failed allocation gives the file back too. Either way the fallback is
+what shipped before: plays, does not seek.
 
 ## One note on 10
 
 esp_audio_codec's M4A parser says `Not support mdat before moov` and
 refuses any MP4 that was not written with the index at the front, which
-is ffmpeg's default. This file is muxed with `-movflags +faststart` so
-it plays.
+is ffmpeg's default. This file is muxed with `-movflags +faststart`.
 
-Worth knowing which way that cuts: **09 plays either way**, because
-0707 reads the tables itself and does not care where `moov` sits. The
-restriction belongs to the parser 0707 stopped using, and 10 is the
-file that still has to live with it.
+That restriction now only bites on the fallback. **09 and 10 both play
+either way** while the table path is in use, because it reads the
+tables itself and does not care where `moov` sits -- but if 10 drops
+back to the M4A parser for either reason above, `+faststart` is what
+keeps it playing at all.
 
 ## The four added for the gaps
 

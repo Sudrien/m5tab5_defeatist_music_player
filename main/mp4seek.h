@@ -76,10 +76,34 @@ typedef struct {
     uint32_t sample_rate;
     uint8_t  channels;
 
-    /* ADTS header fields, from the AudioSpecificConfig. */
+    /* ADTS header fields, from the AudioSpecificConfig. AAC only. */
     uint8_t  profile;           /* audioObjectType - 1 */
     uint8_t  sf_index;
     uint8_t  chan_cfg;
+
+    /*
+     * ALAC instead of AAC.
+     *
+     * There is no header to synthesise for ALAC -- no ADTS equivalent
+     * exists -- so the samples go to the decoder as they are, one per
+     * call, with the table saying where each one ends. That is the
+     * framing layer ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC asks for and the
+     * reason this can be done at all.
+     *
+     * `cookie` is the whole `alac` atom out of the sample entry: four
+     * bytes of size, the type, four of version and flags, then the
+     * ALACSpecificConfig. Which part of that the decoder wants is not
+     * documented, so decoder.c tries the atom and then the config, and
+     * `cookie_cfg_off` is where the second attempt starts.
+     */
+    bool     alac;
+    uint8_t *cookie;
+    uint32_t cookie_len;
+    uint32_t cookie_cfg_off;
+
+    /* The largest sample in the file. The frame path has to be able to
+     * hold one whole sample, and this is how big to make that. */
+    uint32_t max_size;
 
     uint32_t timescale;
     uint64_t duration;          /* in timescale units */
@@ -115,8 +139,19 @@ uint32_t mp4_duration_sec(const mp4_t *m);
 uint32_t mp4_seek_sec(mp4_t *m, uint32_t sec);
 
 /*
+ * Copy exactly one sample into `dst`, for the codecs that want a frame
+ * at a time and no header in front of it. Returns its size, or 0 at the
+ * end of the table or if it will not fit.
+ *
+ * Advances `cur` the same way mp4_read() does, so a seek followed by
+ * this reads from where the seek landed.
+ */
+uint32_t mp4_read_frame(FILE *f, mp4_t *m, uint8_t *dst, size_t cap);
+
+/*
  * Fill `dst` with whole ADTS frames, header synthesised per sample.
- * Returns bytes written, 0 at the end of the table.
+ * Returns bytes written, 0 at the end of the table. AAC only -- ALAC
+ * uses mp4_read_frame().
  *
  * Whole frames only: a partial one at the end of the buffer would be
  * completed on the next call, which is fine for a decoder that

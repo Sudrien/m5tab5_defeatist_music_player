@@ -33,6 +33,7 @@
 #include "minimp3_ex.h"
 
 #include "esp_audio_dec_default.h"
+#include "esp_alac_dec.h"
 #include "esp_audio_simple_dec.h"
 #include "esp_audio_simple_dec_default.h"
 
@@ -66,6 +67,8 @@ struct decoder {
     int in_pos;         /* consumed bytes */
     bool eof;
     bool folding;       /* the stream is 24-bit and is being folded */
+    bool frame_mode;    /* the decoder wants exactly one frame per call
+                         * -- ALAC in MP4, framed by the sample table */
 
     /* Container-probed length, for the backends that cannot report one.
      * Cached rather than recomputed: it seeks the file handle around,
@@ -534,7 +537,9 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
     d->f = storage_io_open(path, "rb");
     if (!d->f) return ESP_ERR_NOT_FOUND;
 
-    d->inbuf = heap_caps_malloc(ESP_IN_BUF, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    d->in_cap = ESP_IN_BUF;
+    d->inbuf = heap_caps_malloc((size_t)d->in_cap,
+                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!d->inbuf) { storage_io_close(d->f); d->f = NULL; return ESP_ERR_NO_MEM; }
 
     /*
@@ -545,21 +550,106 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
      */
     esp_audio_simple_dec_type_t type = k_formats[fmt].type;
     if (type == ESP_AUDIO_SIMPLE_DEC_TYPE_M4A && mp4_probe(d->f, &d->mp4)) {
-        type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+        /*
+         * ALAC IS THE OTHER THING IN AN M4A, AND IT CAN SEEK NOW.
+         *
+         * The note above says _ALAC is ruled out because it wants
+         * exactly one encoded frame per call and the sliding window
+         * cannot promise that. Inside an MP4 it can: the sample table
+         * says where every frame begins and ends, which is the framing
+         * layer that was missing. So the same table that makes AAC
+         * seekable makes ALAC decodable a frame at a time, and seekable
+         * with it.
+         *
+         * No header is synthesised -- there is no ADTS for ALAC. The
+         * samples go over as they are and the decoder is told the
+         * shape of them once, in the magic cookie.
+         */
+        type = d->mp4.alac ? ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC
+                           : ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+        d->frame_mode = d->mp4.alac;
     }
+
+    /*
+     * A frame decoder is handed one whole sample, so the buffer has to
+     * fit the largest one in the file rather than a convenient window.
+     * ALAC at 4096 samples of 24-bit stereo is about 24 KB worst case
+     * and the 8 KB window would truncate it into nonsense. Failing the
+     * allocation is not fatal: the M4A parser takes the file back and
+     * plays it the way it always has.
+     */
+    if (d->frame_mode && d->mp4.max_size > (uint32_t)d->in_cap) {
+        uint8_t *bigger = heap_caps_malloc(d->mp4.max_size,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (bigger) {
+            free(d->inbuf);
+            d->inbuf = bigger;
+            d->in_cap = (int)d->mp4.max_size;
+        } else {
+            ESP_LOGW(TAG, "alac: no room for a %" PRIu32 " B frame; "
+                          "leaving it to the M4A parser", d->mp4.max_size);
+            mp4_free(&d->mp4);
+            d->frame_mode = false;
+            type = ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
+        }
+    }
+
+    esp_alac_dec_cfg_t alac_cfg = {
+        .codec_spec_info = d->mp4.cookie,
+        .spec_info_len = d->mp4.cookie_len,
+    };
 
     esp_audio_simple_dec_cfg_t cfg = {
         .dec_type = type,
-        .dec_cfg = NULL,
-        .cfg_size = 0,
-        /* false = let the decoder's own parser find frame boundaries in
-         * whatever we hand it. true would mean "this buffer is exactly
-         * one frame", which is the mode the frame-at-a-time codecs above
-         * require and which we cannot satisfy from a file stream. */
-        .use_frame_dec = false,
+        .dec_cfg = d->frame_mode ? &alac_cfg : NULL,
+        .cfg_size = d->frame_mode ? (int)sizeof(alac_cfg) : 0,
+
+        /*
+         * false lets the decoder's own parser find frame boundaries in
+         * whatever we hand it, which is what a file read as a stream
+         * needs. true means "this buffer is exactly one frame" -- the
+         * mode the frame-at-a-time codecs require, and which only the
+         * MP4 sample table can satisfy. See the ALAC note above.
+         */
+        .use_frame_dec = d->frame_mode,
     };
     d->esp_type = type;
-    if (esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
+
+    /*
+     * THE COOKIE IS TRIED BOTH WAYS ON PURPOSE.
+     *
+     * "Magic cookie" means the whole `alac` atom in some writings and
+     * the 24-byte ALACSpecificConfig inside it in others, and
+     * esp_alac_dec.h says only "Codec specified information (Magic
+     * Cookie)". Rather than guess and ship a file that opens on one
+     * version of the component and not the next, the atom is offered
+     * first and the config after it, and the log says which one the
+     * decoder accepted. If neither opens, the M4A parser gets the file
+     * back and plays it exactly as it did before -- unseekable, which
+     * is what ALAC has always been here.
+     */
+    if (d->frame_mode &&
+        esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
+        alac_cfg.codec_spec_info = d->mp4.cookie + d->mp4.cookie_cfg_off;
+        alac_cfg.spec_info_len = d->mp4.cookie_len - d->mp4.cookie_cfg_off;
+        if (esp_audio_simple_dec_open(&cfg, &d->esp_dec) == ESP_AUDIO_ERR_OK) {
+            ESP_LOGI(TAG, "alac: opened on the config, not the atom");
+        } else {
+            ESP_LOGW(TAG, "alac: the decoder took neither cookie; "
+                          "handing the file back to the M4A parser");
+            mp4_free(&d->mp4);
+            d->frame_mode = false;
+            cfg.dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_M4A;
+            cfg.dec_cfg = NULL;
+            cfg.cfg_size = 0;
+            cfg.use_frame_dec = false;
+            d->esp_type = cfg.dec_type;
+            type = cfg.dec_type;
+        }
+    }
+
+    if (!d->esp_dec &&
+        esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
         ESP_LOGE(TAG, "esp_audio_codec has no %s decoder built in",
                  k_formats[fmt].name);
         free(d->inbuf);
@@ -689,7 +779,25 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
         /* Top up. The simple decoder takes arbitrary lengths and tells
          * us how much it consumed, so this is a plain sliding window --
          * no frame alignment to get right. */
-        if (!d->eof && d->in_len - d->in_pos < ESP_IN_BUF / 2) {
+        /*
+         * Frame at a time. The window logic below cannot be reused:
+         * use_frame_dec means the buffer handed over must be one whole
+         * frame and nothing more, so the buffer is refilled only when
+         * it is empty and is filled with exactly one sample.
+         */
+        if (d->frame_mode && d->in_len - d->in_pos <= 0) {
+            d->in_pos = 0;
+            d->in_len = (int)mp4_read_frame(d->f, &d->mp4, d->inbuf,
+                                            (size_t)d->in_cap);
+            if (d->in_len <= 0) {
+                d->in_len = 0;
+                d->eof = true;
+                return 0;
+            }
+        }
+
+        if (!d->frame_mode && !d->eof &&
+            d->in_len - d->in_pos < ESP_IN_BUF / 2) {
             const int keep = d->in_len - d->in_pos;
             memmove(d->inbuf, d->inbuf + d->in_pos, (size_t)keep);
             d->in_pos = 0;
