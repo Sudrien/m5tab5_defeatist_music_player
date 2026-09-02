@@ -5473,10 +5473,45 @@ static track_end_t play_file(const char *path)
                     }
                 }
 
+                /*
+                 * THE DRAIN ASKED THE WRONG QUESTION.
+                 *
+                 * It was `s_ring_play != s_ring_fill` -- the indices
+                 * differing -- but the ring switch happens BELOW this,
+                 * after the reconfigure. At an ordinary boundary the
+                 * previous track's ring is still both `play` and
+                 * `fill`, so the test was false, the drain was skipped,
+                 * and audio_out_set_format() reconfigured the I2S clock
+                 * with up to twenty seconds of the outgoing track still
+                 * queued in the ring the writer was reading.
+                 *
+                 * That audio does not play. The board logged `tail:
+                 * 3516 KB of this track still to play` and then `the
+                 * finished track has played out` 111 ms later: twenty
+                 * seconds of Vorbis discarded at a rate change, heard
+                 * as the track jumping to its end.
+                 *
+                 * It ever worked at all by accident -- the indices
+                 * happen to differ when the PREVIOUS boundary left them
+                 * that way, which is why this only showed on some
+                 * transitions.
+                 *
+                 * The real question is whether anything is still queued
+                 * for the writer, which is one thing and is directly
+                 * observable. The dip armed above then has something to
+                 * ramp, and the reconfigure happens after silence
+                 * rather than through the middle of a track.
+                 */
+                const bool tail_queued =
+                    s_pcm &&
+                    xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0;
+
                 if ((uint32_t)info.sample_rate != audio_out_rate() &&
-                    s_ring_play != s_ring_fill) {
-                    ESP_LOGI(TAG, "rate change to %d Hz; draining first",
-                             info.sample_rate);
+                    tail_queued) {
+                    ESP_LOGI(TAG, "rate change to %d Hz; draining %u KB first",
+                             info.sample_rate,
+                             (unsigned)(xStreamBufferBytesAvailable(
+                                 s_ring[s_ring_play]) / 1024));
                     /*
                      * AND THE CROSSFADE IS OFF FOR THIS BOUNDARY.
                      *
@@ -5520,7 +5555,14 @@ static track_end_t play_file(const char *path)
                          */
                         s_xfade_active = false;
                     }
-                    while (s_ring_play != s_ring_fill) {
+                    /*
+                     * Until the ring is empty, not until the indices
+                     * agree. A press still cuts it short: a listener
+                     * who has asked for something else has already said
+                     * what the tail is worth.
+                     */
+                    while (s_pcm &&
+                           xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0) {
                         if (s_pending_ready || s_seek_pct >= 0) break;
                         vTaskDelay(pdMS_TO_TICKS(10));
                     }
