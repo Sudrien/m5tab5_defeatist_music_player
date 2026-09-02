@@ -986,6 +986,56 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### The seek table was right and the spacing was wrong (0711)
+
+Third run, and the first with anything actually dragged. Every
+mechanism landed: WAV exact, FLAC 47 -> 46, Ogg 38 -> 37 and 42 -> 41,
+MP4 43 -> 42 sample 1851, TS 44 -> 43. Each one at or before the
+target and within a frame or page, each one reporting where it landed
+rather than what was asked. `0705`'s reopen-replay-resume works on
+hardware: `+4307 B header` on Vorbis, `+137` on Opus, `+376` on TS,
+`+42` on FLAC.
+
+Two things wrong, both in 0703.
+
+**The 1705 ms was the predicted cost, arriving on schedule.** 0703 said
+a ten-second table would make a seek decode up to thirty seconds of MP3
+and that the number should be watched. Watched: `decoder_read blocked
+1705 ms`, twice. The spacing is now **two seconds**, which is six
+seconds of forward decode and about a fifth of the time. 256 entries at
+two seconds still covers eight and a half minutes before the doubling
+takes over.
+
+Readers take the spacing from the record, so this does not invalidate
+what is already written -- but nothing would ever rewrite it either,
+because an installed table is deliberately not harvested again. So the
+harvest now makes one exception: **when minimp3 has since built its own
+index on top of the installed one, the finer index wins.** That is
+exactly the comparison `num_frames > installed count`, and it means a
+sidecar written at ten seconds upgrades itself the first time anyone
+drags in that track.
+
+**And the log said the opposite of what the code did.** With
+`MP3D_DO_NOT_SCAN` and no Xing header, `ex.samples` is zero -- minimp3
+never counted the file -- and the existing line read `no index;
+duration unknown, not seekable`. Three claims, two of them false: the
+table was installed, the length came from the sidecar, and the seek
+worked. A log that contradicts what the player then does is worse than
+no log; the first board run of 0703 read as a regression when it was a
+success.
+
+##### Not a fault: the 12.9 s before track 14
+
+`first sound 12966 ms after the press` at the 44.1 -> 22.05 kHz
+boundary looks like 0710 failed. It did not: the crossfade was
+correctly disarmed (`no crossfade: the rate changes`) and what remains
+is the drain itself, waiting for 3519 KB of the previous track -- about
+twenty seconds of audio -- to play out of the ring. **Nothing is silent
+during it.** The measurement is from the press that started the track,
+and the previous track is still playing; it is the same number the
+gapless path would produce. Shortening it means a smaller ring, which
+is the thing the ring exists to be large about.
+
 #### A rate change and a crossfade cannot both happen (0710)
 
 Second run of the suite, with 0709 applied. No crash, all fourteen

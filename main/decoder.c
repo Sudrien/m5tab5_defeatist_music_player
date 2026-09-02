@@ -123,6 +123,7 @@ struct decoder {
      * than from its own scan. Only used to keep the harvest below from
      * writing back what it was just given. */
     bool indexed;
+    size_t index_count;         /* how many entries were installed */
 };
 
 #define ESP_IN_BUF  (8 * 1024)
@@ -297,6 +298,7 @@ static bool minimp3_install_index(decoder_t *d, const decoder_index_t *ix)
     d->ex.index.capacity = (size_t)ix->count;
     d->ex.indexes_built = 1;
     d->indexed = true;
+    d->index_count = (size_t)ix->count;
     return true;
 }
 
@@ -413,6 +415,20 @@ static esp_err_t minimp3_open(decoder_t *d, const char *path,
         ESP_LOGI(TAG, "mp3: index built, %" PRIu64 " samples, %" PRIu32 " s, seekable",
                  (uint64_t)d->ex.samples,
                  (uint32_t)(frames / (uint64_t)d->ex.info.hz));
+    } else if (d->indexed) {
+        /*
+         * A table was installed, so this IS seekable -- ex.samples is
+         * zero because MP3D_DO_NOT_SCAN means minimp3 never counted the
+         * file, not because nothing can seek it. The length comes from
+         * the sidecar's format section, which is where it came from
+         * when the scan produced it.
+         *
+         * The old line said "no index; duration unknown, not seekable"
+         * here, which was three claims and two of them wrong. A log
+         * that contradicts what the player then does is worse than no
+         * log: the first board run of 0703 read as a regression.
+         */
+        ESP_LOGI(TAG, "mp3: seekable from the table; length from the sidecar");
     } else {
         ESP_LOGI(TAG, "mp3: no index; duration unknown, not seekable");
     }
@@ -983,7 +999,19 @@ bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
     if (!d || !offset || !frame || max <= 0 || !count || !spacing_sec) {
         return false;
     }
-    if (d->backend != BACKEND_MINIMP3 || d->indexed) return false;
+    if (d->backend != BACKEND_MINIMP3) return false;
+
+    /*
+     * Normally an installed table is not written back -- that would
+     * rewrite the sidecar with the bytes it was read from, every play.
+     * The exception is when minimp3 has since built its own index on
+     * top: a table stored at the old ten-second spacing stays coarse
+     * for ever otherwise, and coarse is what cost 1705 ms on the board.
+     *
+     * "Has since built one" is exactly "the index is finer than what
+     * was installed", which is one comparison and needs no flag.
+     */
+    if (d->indexed && d->ex.index.num_frames <= d->index_count) return false;
     if (!d->ex.index.frames || d->ex.index.num_frames < 2) return false;
     if (!d->ex.info.hz || !d->ex.info.channels) return false;
 
