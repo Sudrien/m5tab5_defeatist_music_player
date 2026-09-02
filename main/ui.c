@@ -618,62 +618,62 @@ static void draw_rg(const ui_state_t *st)
 #define C_BATT_CHG   RGB(0x4C, 0xC0, 0x5E)
 
 /*
- * A USB-C PLUG, not a port, and not a memory stick either.
+ * EXTERNAL POWER: a bolt, a lamp, and a Type-C connector seen end on.
  *
- * The first half of that distinction is 0723's and still holds: a port
- * is a hole in the side of the device, true at every moment and
- * therefore saying nothing about now, where this marker means something
- * has been plugged in and the battery is no longer what is being
- * answered.
+ * The marker means the battery has stopped being the answer to "how
+ * long has this got" -- something is feeding the device and the reading
+ * that used to be here is no longer the interesting number.
  *
- * The second half is what this is. 0723 drew the shell as a hollow
- * stadium the full height of the battery with a short lead beside it,
- * and at 24 px that silhouette is a body with a cap on it -- which is
- * a flash drive, which is also a thing you plug into this device, so
- * the icon was not merely vague but wrong in a specific and available
- * way.
+ * Two earlier attempts drew the connector in profile. 0723 drew a
+ * hollow stadium the height of the battery with a lead beside it, which
+ * at this size is a body with a cap on it: a memory stick, which is a
+ * thing you also plug into this device, so the icon named the wrong
+ * object. 0806 flattened the shell and ran the cable to the edge, which
+ * fixed the silhouette and left the icon saying only "a cable".
  *
- * What separates the two is where the mass sits. A memory stick is
- * nearly all body. A plug is a flat shell, a collar barely taller than
- * it, and then a cable that keeps going -- so the ink is spread along
- * the length instead of pooled at one end, and the eye reads a lead
- * leaving the frame rather than an object sitting in it.
+ * A cable is not the message. THE MESSAGE IS POWER, and the thing that
+ * says power in one glance is a lightning bolt -- so the bolt is the
+ * subject, the connector underneath says which kind of power, and a
+ * green lamp beside the bolt says it is arriving. Type-C seen end on is
+ * a shape nothing else on this panel resembles: a flat stadium with a
+ * bar down the middle, which is the receptacle and its tongue. In
+ * profile it competes with every other plug ever drawn; end on it does
+ * not.
  *
- * Three parts, and the proportions between them are the whole icon:
+ * Stacked rather than side by side. The battery it replaces is an
+ * outline with digits under it, so the corner already reads top to
+ * bottom, and keeping that means the eye lands in the same place
+ * whether or not the pack is in.
  *
- *      shell   24 x 13, hollow, 2 px wall -- flatter than it is long
- *      collar  11 x 13, solid            -- a step, not a bulge
- *      cable    5 tall, running to the right edge
- *
- * The shell is hollow because a solid one at this size is a lozenge,
- * and its wall is 2 rather than the battery's 3: the battery is a
- * closed outline whose weight comes from four sides, and matching that
- * number here made a shape with a collar and a cable hanging off it
- * read heavier than the icon it replaces.
- *
- * Same footprint and same centre as that battery, so the corner that
- * answers "how long has this got" keeps answering it -- the answer
- * becoming "as long as the cable is in" rather than a percentage.
+ * The bolt is solid. An outlined one at 26 px is four strokes meeting
+ * at two acute angles, and the angles fill in.
  */
-#define USB_SHELL_W  (24)
-#define USB_SHELL_H  (13)
-#define USB_SHELL_R  (3)
-#define USB_WALL     (2)
-#define USB_COLLAR_W (11)
-#define USB_COLLAR_H (13)
-#define USB_COLLAR_R (2)
-#define USB_CABLE_H  (5)
-#define USB_LAP      (2)    /* how far the collar reaches back into the
-                             * shell, and the cable into the collar.
-                             * Without it the rounded corners of two
-                             * neighbours meet at a tangent and leave a
-                             * hairline of background between them --
-                             * three objects in a row instead of one
-                             * thing with parts. */
+#define USB_BOLT_W   (18)
+#define USB_BOLT_H   (26)
+#define USB_DOT_R    (4)
+#define USB_CONN_W   (46)   /* the battery's own width: the two icons
+                             * occupy the same column and must not make
+                             * the corner shift when power is connected */
+#define USB_CONN_H   (18)
+#define USB_CONN_WALL (3)   /* the battery's wall, for the same reason */
+#define USB_TONGUE_W (26)
+#define USB_TONGUE_H (4)
 
-/* gfx has rectangles and circles; a rounded rectangle is four of one
- * and two of the other. Corners first, then the cross, so nothing is
- * drawn over a corner that has already been placed. */
+/*
+ * The bolt, as a closed path in a USB_BOLT_W x USB_BOLT_H box.
+ *
+ * Six points: down the left face, across the notch, down to the tip,
+ * back up the right face, across the other notch. The two notches are
+ * what make it a bolt rather than a Z -- without them the strokes meet
+ * flush and it reads as a lightning-shaped arrow.
+ */
+static const int8_t k_bolt[][2] = {
+    { 13,  0 }, {  2, 14 }, {  9, 14 }, {  7, 26 }, { 18, 11 }, { 11, 11 },
+};
+
+/* gfx has rectangles and circles; a rounded rectangle is four of one and
+ * two of the other. Corners first, then the cross, so nothing lands on
+ * a corner already placed. */
 static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
 {
     if (r * 2 > w) r = w / 2;
@@ -686,29 +686,88 @@ static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
     gfx_fill_rect(x, y + r, w, h - 2 * r, c);
 }
 
+/*
+ * Scanline fill of a small closed polygon, in whole pixels.
+ *
+ * One row at a time: find where the edges cross this row, sort the
+ * crossings, fill between them in pairs. Six points means at most three
+ * pairs and the insertion sort is over a list that never exceeds a
+ * handful, so this is a loop over 26 rows and nothing more.
+ *
+ * Edges are counted half-open in y -- a vertex exactly on the row
+ * belongs to the edge below it and not the one above -- which is what
+ * stops a vertex being counted twice and leaving a row unfilled.
+ */
+#define POLY_MAX_X  8
+
+static void fill_poly(const int8_t pts[][2], int n, int ox, int oy, uint16_t c)
+{
+    int ymin = pts[0][1], ymax = pts[0][1];
+    for (int i = 1; i < n; i++) {
+        if (pts[i][1] < ymin) ymin = pts[i][1];
+        if (pts[i][1] > ymax) ymax = pts[i][1];
+    }
+
+    for (int y = ymin; y <= ymax; y++) {
+        int xs[POLY_MAX_X];
+        int nx = 0;
+
+        for (int i = 0; i < n && nx < POLY_MAX_X; i++) {
+            const int x1 = pts[i][0], y1 = pts[i][1];
+            const int j = (i + 1 == n) ? 0 : i + 1;
+            const int x2 = pts[j][0], y2 = pts[j][1];
+            if ((y1 <= y && y < y2) || (y2 <= y && y < y1)) {
+                /* Rounded rather than truncated: at this size half a
+                 * pixel of error on an edge is a visible step. */
+                const int num = (x2 - x1) * (y - y1);
+                const int den = y2 - y1;
+                xs[nx++] = x1 + (num + den / 2) / den;
+            }
+        }
+
+        for (int i = 1; i < nx; i++) {
+            const int v = xs[i];
+            int k = i - 1;
+            while (k >= 0 && xs[k] > v) { xs[k + 1] = xs[k]; k--; }
+            xs[k + 1] = v;
+        }
+
+        for (int i = 0; i + 1 < nx; i += 2) {
+            const int w = xs[i + 1] - xs[i] + 1;
+            if (w > 0) gfx_fill_rect(ox + xs[i], oy + y, w, 1, c);
+        }
+    }
+}
+
 static void draw_usb_c(int cx, int cy)
 {
-    const int w = BATT_W + BATT_NUB_W;      /* same footprint as the battery */
-    const int left = cx - w / 2;
+    /* Top of the bolt sits where the battery's outline starts, and the
+     * connector where its digits were, so the block occupies the same
+     * rows either way. */
+    const int top = cy - 30;
 
-    /* The shell, hollowed to its wall. */
-    fill_rrect(left, cy - USB_SHELL_H / 2, USB_SHELL_W, USB_SHELL_H,
-               USB_SHELL_R, C_ICON);
-    fill_rrect(left + USB_WALL, cy - USB_SHELL_H / 2 + USB_WALL,
-               USB_SHELL_W - 2 * USB_WALL, USB_SHELL_H - 2 * USB_WALL,
-               USB_SHELL_R - 1, C_BG);
+    /* Bolt left of centre, lamp to its right: the pair balances around
+     * the same axis the connector below is centred on. */
+    fill_poly(k_bolt, (int)(sizeof(k_bolt) / sizeof(k_bolt[0])),
+              cx - USB_BOLT_W + 1, top + 1, C_ICON);
 
-    /* The collar, overlapping the shell's rounded end. */
-    const int collar_x = left + USB_SHELL_W - USB_LAP;
-    fill_rrect(collar_x, cy - USB_COLLAR_H / 2, USB_COLLAR_W, USB_COLLAR_H,
-               USB_COLLAR_R, C_ICON);
+    gfx_fill_circle(cx + 16, top + 12, USB_DOT_R, C_BATT_CHG);
 
-    /* The cable, to the right edge of the footprint: it leaves the icon
-     * rather than ending inside it, which is the difference between a
-     * lead and a stub. */
-    const int cable_x = collar_x + USB_COLLAR_W - USB_LAP;
-    fill_rrect(cable_x, cy - USB_CABLE_H / 2, left + w - cable_x,
-               USB_CABLE_H, USB_CABLE_H / 2, C_ICON);
+    /* The receptacle: a stadium, hollowed to its wall. */
+    const int conn_x = cx - USB_CONN_W / 2;
+    const int conn_y = top + 35;
+    fill_rrect(conn_x, conn_y, USB_CONN_W, USB_CONN_H,
+               USB_CONN_H / 2, C_ICON);
+    fill_rrect(conn_x + USB_CONN_WALL, conn_y + USB_CONN_WALL,
+               USB_CONN_W - 2 * USB_CONN_WALL,
+               USB_CONN_H - 2 * USB_CONN_WALL,
+               (USB_CONN_H - 2 * USB_CONN_WALL) / 2, C_BG);
+
+    /* The tongue. Square ends, not rounded: rounded ones at 4 px tall
+     * turn the bar into a double-headed arrow. */
+    gfx_fill_rect(cx - USB_TONGUE_W / 2,
+                  conn_y + USB_CONN_H / 2 - USB_TONGUE_H / 2,
+                  USB_TONGUE_W, USB_TONGUE_H, C_ICON);
 }
 
 static void draw_battery(int pct, bool charging, bool ext)
