@@ -2903,11 +2903,52 @@ static void do_art(const char *path, uint32_t gen)
  * the question the seek bar's caller asks.
  */
 /*
+ * The record handed to media_task to write, and the flag that transfers
+ * ownership of it. Declared here rather than beside the writer because
+ * rg_hold() below reads them: a record still in flight is newer than
+ * the file it is on its way to.
+ *
+ * One slot, one producer (the decode loop, in rg_release()), one
+ * consumer (media_task). The producer allocates, fills, and sets the
+ * flag LAST; the consumer writes, frees, and clears the flag LAST, so
+ * neither touches the other's allocation and no lock is needed.
+ */
+static replaygain_t *s_rg_pending;
+static char          s_rg_pending_path[512];
+static volatile bool s_rg_pending_ready;
+
+/*
  * Start holding `path`'s record. One read; everything the open is about
  * to want is in memory afterwards.
  */
 static void rg_hold(const char *path)
 {
+    /*
+     * THE COPY IN FLIGHT BEATS THE ONE ON THE CARD.
+     *
+     * rg_release() hands the record to media_task and the write lands
+     * a second or so later, by which time the next open has already
+     * read the file -- so a track played twice in a row reads back the
+     * version from before the play that just ended.
+     *
+     * Invisible until repeat-one existed, and then immediately visible:
+     * `length from playback: 59 s` followed by `no duration available`
+     * on the very next open of the same file, the measurement having
+     * been overwritten by the stale copy it was about to replace.
+     *
+     * Taking the pending record when the path matches is not a cache --
+     * it is the same record, one step earlier in its journey to the
+     * same place.
+     */
+    if (s_rg_pending_ready && s_rg_pending &&
+        strcmp(s_rg_pending_path, path) == 0) {
+        memcpy(&s_rg, s_rg_pending, sizeof(s_rg));
+        snprintf(s_rg_path, sizeof(s_rg_path), "%s", path);
+        s_rg_dirty = false;
+        ESP_LOGI(TAG, "sidecar: from the record still being written");
+        return;
+    }
+
     if (!replaygain_load(path, &s_rg)) memset(&s_rg, 0, sizeof(s_rg));
     snprintf(s_rg_path, sizeof(s_rg_path), "%s", path);
     s_rg_dirty = false;
@@ -2919,18 +2960,6 @@ static void rg_hold(const char *path)
  * whether it has a cover, and those are worth keeping even though its
  * loudness is not.
  */
-/*
- * The record handed to media_task to write, and the flag that transfers
- * ownership of it.
- *
- * One slot, one producer (the decode loop, in rg_release()), one
- * consumer (media_task). The producer allocates, fills, and sets the
- * flag LAST; the consumer writes, frees, and clears the flag LAST. At
- * no point do both touch the same allocation, so this needs no lock.
- */
-static replaygain_t *s_rg_pending;
-static char          s_rg_pending_path[512];
-static volatile bool s_rg_pending_ready;
 /* When the hand-off happened, for the deadline below. 0 means the wait
  * has not started. */
 static TickType_t    s_rg_pending_since;
@@ -5731,7 +5760,16 @@ static track_end_t play_file(const char *path)
      */
     if (why == TRACK_ENDED && !seeked && cur_rate && rg_holding(path) &&
         (!s_rg.format.present || !s_rg.format.sec)) {
-        const uint32_t measured = (uint32_t)(frames_out / cur_rate);
+        /*
+         * Rounded, not truncated. The count is frames that reached the
+         * ring, which is a hair under the file's real length once the
+         * last partial block is accounted for -- and truncating that
+         * turned a 60 s file into `length from playback: 59 s`. A
+         * length is being reported to the nearest second on a bar
+         * 720 px wide; half a second of rounding is under a pixel.
+         */
+        const uint32_t measured =
+            (uint32_t)((frames_out + cur_rate / 2) / cur_rate);
         if (measured) {
             s_rg.format.present = true;
             s_rg.format.sec = measured;

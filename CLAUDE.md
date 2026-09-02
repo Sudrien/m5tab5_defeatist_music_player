@@ -986,6 +986,37 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### Repeat-one found the sidecar reading its own stale copy (0715)
+
+0714 worked: `length from playback: 59 s`. Then the very next open of
+the same file said `no duration available; seek bar will stay empty`.
+
+**The write had not landed yet.** `rg_release()` hands the record to
+media_task and the file is written a second or so later -- the log has
+`length from playback` at 71627 and `sidecar written` at 72780, with
+the next open in between at 71675. So `rg_hold()` read the version from
+before the play that had just ended, and the measurement was replaced
+by the stale copy it was on its way to replacing.
+
+This has presumably always been true and was invisible because nothing
+played the same file twice in a row until RPT existed. **A feature
+added to make a bug reproducible found a different bug first.**
+
+`rg_hold()` now takes the pending record when the path matches. That is
+not a cache: it is the same record, one step earlier on its way to the
+same place, and the file is the copy that is behind.
+
+**And 59 was rounding, not error.** The count is frames that reached
+the ring, a hair under a 60 s file once the last partial block is
+accounted for, and truncation turned that into 59. Rounded now: half a
+second on a bar 720 px wide is under a pixel, so the nearest second is
+the honest report.
+
+One ordering note for anyone moving this code: `s_rg_pending` and its
+flag are now declared above `rg_hold()` rather than beside the writer,
+because `rg_hold()` reads them. This file has been bitten by
+use-before-declaration before.
+
 #### The length was recorded in the one place it could not run (0714)
 
 0712 added "measure the duration from a complete play" for files that
