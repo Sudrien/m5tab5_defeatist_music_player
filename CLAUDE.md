@@ -986,6 +986,46 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### The rate-change dip: the same seconds, spent in two halves (0720)
+
+A crossfade cannot span a sample-rate change and never will here: there
+is no resampler, mixing 44.1 into 48 is a nine percent pitch shift for
+the length of the overlap, and reconfiguring the I2S clock disables the
+channel anyway. 0719 made the refusal visible. This makes it sound like
+something other than a cut.
+
+**Not an overlap.** A ramp down over half the configured crossfade,
+ending exactly where the outgoing ring does; then the drain and the
+reconfigure; then a ramp up over the other half. The two never coexist,
+so nothing is mixed and no rate is ever wrong. **The listener asked for
+N seconds of softening and gets N seconds of it** -- what changes is
+that the halves are sequential rather than simultaneous.
+
+- **The down ramp is armed against the OUTGOING rate.** It is measured
+  in frames of a ring still being clocked at the old rate, and using
+  the new one would make it wrong by the ratio of the two -- 9% for
+  44.1 into 48, which is the error this whole path exists because of.
+- **It starts on the same countdown `xfade_can_start()` uses:** when
+  the outgoing ring has come down to the length of the ramp. Once the
+  decode loop has moved on, that ring can only shrink, so it is a
+  countdown with a guaranteed direction rather than a race.
+- **The up ramp is not armed by a countdown**, because there is nothing
+  to count: the ring is empty, the clock has just been reconfigured,
+  and the next chunk is the first of the new track.
+- **The arming is cleared at the reconfigure whether it fired or not.**
+  If the outgoing ring was already empty there was nothing to fade, and
+  an arm left standing would ambush the incoming track: its own ring
+  passes the same threshold near its end, and it would fade out in the
+  middle of a track nobody asked to end.
+- **Linear, not equal-power.** The crossfade uses an equal-power curve
+  because two signals are summed and their powers add; a dip has one
+  signal and silence, and there is nothing to preserve power against.
+
+`FADE_OUT_MS` and its ramp are untouched. That one is for media that
+went away -- it flushes the ring and blanks the screen behind it, which
+is exactly wrong for a boundary where the next track is already
+decoding.
+
 #### It was not Ogg. It was 48 kHz (0719)
 
 Two boundaries lost their crossfade -- Vorbis into Opus, and Opus into
