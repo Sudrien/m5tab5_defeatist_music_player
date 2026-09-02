@@ -1,7 +1,8 @@
 # Seek test suite
 
-Eighteen files, one minute of the same audio, encoded to exercise every
-seek mechanism added in 0700-0717. Copy the folder to a card and drag
+Twenty-one files, one minute of the same audio, encoded to exercise
+every seek mechanism added in 0700-0717 and the sample-width handling
+added in 0803. Copy the folder to a card and drag
 the bar.
 
 The first fourteen cover the mechanisms as they shipped. 15 to 18 are
@@ -47,6 +48,9 @@ place; one that is wrong by more is obvious from the beep count.
 | 16 m4a-aac-fragmented | mp4seek with no `stbl` to read | **plays or refuses; must not seek** |
 | 17 ts-aac-spliced | tsseek's non-monotonic PTS refusal | **no seek, no duration, empty bar** |
 | 18 ogg-vorbis-chained | oggseek and duration.c where the tail is another stream | 20 s on the bar, seeks within it, clamps at the chain |
+| 19 wav-pcm32 | 32-bit integer | **refuses, and says 32-bit** |
+| 20 wav-float32 | 32-bit float, indistinguishable from 19 at the decoder | **refuses, identically** |
+| 21 flac-24bit | the fold on a real decoder rather than a PCM chunk | plays, seeks |
 
 ## 08 takes three plays, and 10 never gets there
 
@@ -132,6 +136,35 @@ gave 30 s and the right page gives 30 s, so the file certified the bug
 as passing. A test whose wrong answer coincides with its right one is
 not a test. 0802 regenerated it unequal, and the two answers are now 20
 and 40.
+
+## 24 folds, 32 does not
+
+Before 0803 file 02 did not play at all: `wav is 24-bit, this player is
+16-bit only`, zero blocks, skipped. It still probed correctly -- the
+byte rate and the seekability were right -- so the file was testing
+cbrseek's arithmetic and nothing else, and the README implied it was
+playing when it never had.
+
+The fold rounds each 24-bit sample to 16 at the one point where the
+samples exist and have not yet become the player's -- the ring, the
+gain, the crossfade, the envelope and the I2S slots are all 16-bit and
+none of them learn anything changed. 02 is the proof: it is 01's audio
+at a greater width, so folding it must reproduce 01 exactly, and on the
+host it does, for all 5292000 samples with no sample differing by so
+much as one LSB.
+
+**19 and 20 are why 32 stays refused.** They are the same ten seconds
+as integer and as float, and `esp_audio_simple_dec_info_t` reports a
+bit count with nothing to say which is which. Folding float samples as
+integers sends full-scale noise to headphones, so there is no side to
+guess on. Both must refuse and the log must name the width; if either
+one ever plays, something has started guessing.
+
+**21 is the case worth having.** 02 arrives as PCM in a chunk, where
+being 24-bit is a fact about the file. 21 arrives from the FLAC
+decoder, where it is a fact about the decoder's output, which is where
+this matters in real use -- 24-bit FLAC is most of what a bought
+download is.
 
 ## Not covered, and why
 
