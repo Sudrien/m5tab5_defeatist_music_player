@@ -1042,6 +1042,60 @@ static volatile uint32_t s_fade_pos;      /* how far through it we are */
  */
 static volatile bool     s_fade_cleanup;
 
+/*
+ * THE RATE-CHANGE DIP.
+ *
+ * A crossfade cannot span a sample-rate change -- there is no
+ * resampler, mixing 44.1 into 48 is a nine percent pitch shift for the
+ * length of the overlap, and reconfiguring the I2S clock disables the
+ * channel anyway. 0719 made that refusal visible; this makes it sound
+ * like something other than a cut.
+ *
+ * Not an overlap: a ramp DOWN over half the configured crossfade,
+ * ending exactly as the outgoing ring does, then the drain and the
+ * reconfigure, then a ramp UP over the other half. The two never
+ * coexist, so nothing is ever mixed and no rate is ever wrong. The
+ * total is the crossfade the listener asked for, spent in two halves
+ * instead of one overlap.
+ *
+ * One direction at a time, so one position and one length. `arm` is the
+ * ring occupancy at which the down ramp should start -- the same
+ * countdown xfade_can_start() uses, for the same reason: the outgoing
+ * ring can only shrink once the decode loop has moved on, so it is a
+ * countdown with a guaranteed direction rather than a race.
+ */
+static volatile int32_t  s_dip_dir;       /* -1 down, 0 none, +1 up */
+static volatile uint32_t s_dip_frames;
+static volatile uint32_t s_dip_pos;
+static volatile uint32_t s_dip_arm;       /* frames; 0 = not armed */
+/* The up half, held between the down ramp and the reconfigure that has
+ * to happen before it can be measured in the new rate's frames. */
+static volatile uint32_t s_dip_in_frames;
+
+/* Gain for frame `pos` of a ramp of `frames`, Q15. Linear, because over
+ * a second or two of a dip to actual silence there is no second signal
+ * for an equal-power curve to preserve power against. */
+static inline int32_t dip_gain_q15(uint32_t pos, uint32_t frames, bool up)
+{
+    if (!frames) return 32767;
+    if (pos >= frames) return up ? 32767 : 0;
+    const uint32_t t = (uint32_t)(((uint64_t)pos << 15) / frames);
+    return (int32_t)(up ? t : (32768u - t));
+}
+
+/* Apply the running dip to a chunk, advancing it. Writer only. */
+static void dip_apply(int16_t *pcm, size_t frames)
+{
+    const bool up = (s_dip_dir > 0);
+    for (size_t i = 0; i < frames; i++) {
+        const int32_t g = dip_gain_q15(s_dip_pos + (uint32_t)i,
+                                       s_dip_frames, up);
+        pcm[2 * i]     = (int16_t)(((int32_t)pcm[2 * i]     * g) >> 15);
+        pcm[2 * i + 1] = (int16_t)(((int32_t)pcm[2 * i + 1] * g) >> 15);
+    }
+    s_dip_pos += (uint32_t)frames;
+}
+
 /* Is anything still going to come out of the speaker because of a fade?
  * Read by the UI task's idle gate, which would otherwise cut the
  * amplifier out from under the ramp -- nothing is decoding during one,
@@ -1708,6 +1762,32 @@ static void i2s_writer_task(void *arg)
             if (s_fade_out) {
                 fade_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
                 ramp_over = (s_fade_pos >= s_fade_frames);
+            }
+
+            /*
+             * The dip. Armed by the decode loop when it finds the next
+             * track at a different rate; started here, when the ring
+             * has come down to the length of the ramp, so it ends where
+             * the audio does.
+             */
+            if (s_dip_dir == 0 && s_dip_arm) {
+                const size_t avail =
+                    xStreamBufferBytesAvailable(s_ring[s_ring_play]);
+                if (avail <= (size_t)s_dip_arm * PCM_BYTES_PER_FRAME) {
+                    s_dip_frames = (uint32_t)(avail / PCM_BYTES_PER_FRAME);
+                    if (!s_dip_frames) s_dip_frames = 1;
+                    s_dip_pos = 0;
+                    s_dip_arm = 0;
+                    s_dip_dir = -1;
+                    ESP_LOGI(TAG, "rate change: fading out over %" PRIu32 " ms",
+                             s_dip_frames * 1000u /
+                             (s_frames_rate[s_ring_play] ?
+                              s_frames_rate[s_ring_play] : 44100));
+                }
+            }
+            if (s_dip_dir != 0 && !s_fade_out) {
+                dip_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
+                if (s_dip_pos >= s_dip_frames) s_dip_dir = 0;
             }
 
             audio_out_write(buf, got);
@@ -5292,6 +5372,39 @@ static track_end_t play_file(const char *path)
                              audio_out_rate(), info.sample_rate);
                     s_xfade_armed = false;
                     s_xfade_active = false;
+
+                    /*
+                     * A DIP INSTEAD, IN TWO HALVES.
+                     *
+                     * Half the configured crossfade ramping the
+                     * outgoing track to silence, then the drain and the
+                     * reconfigure, then the other half ramping this one
+                     * up. The listener asked for N seconds of softening
+                     * and gets N seconds of it; what changes is that
+                     * the two tracks never sound at once, which is the
+                     * only thing the hardware forbids.
+                     *
+                     * The down ramp is armed against the OUTGOING rate,
+                     * because it is measured in frames of a ring that
+                     * is still being clocked at the old rate. Using the
+                     * new one would make it wrong by the ratio of the
+                     * two -- 9% for 44.1 into 48, which is what this
+                     * whole path exists because of.
+                     */
+                    const uint32_t half_ms = settings_crossfade_sec() * 500u;
+                    if (half_ms) {
+                        const uint32_t out_rate = audio_out_rate()
+                                                ? audio_out_rate() : 44100;
+                        s_dip_dir = 0;
+                        s_dip_pos = 0;
+                        s_dip_arm = (uint32_t)((uint64_t)out_rate *
+                                               half_ms / 1000u);
+                        s_dip_in_frames = (uint32_t)
+                            ((uint64_t)info.sample_rate * half_ms / 1000u);
+                        ESP_LOGI(TAG, "rate change: dipping %" PRIu32
+                                      " ms down, %" PRIu32 " ms up",
+                                 half_ms, half_ms);
+                    }
                 }
 
                 if ((uint32_t)info.sample_rate != audio_out_rate() &&
@@ -5349,6 +5462,31 @@ static track_end_t play_file(const char *path)
 
                 const esp_err_t ferr =
                     audio_out_set_format((uint32_t)info.sample_rate, 2);
+                /*
+                 * The up half, started here rather than by the writer's
+                 * countdown: there is nothing to count down: the ring
+                 * is empty, the clock has just been reconfigured, and
+                 * the very next chunk is the first of the new track.
+                 */
+                /*
+                 * And the down ramp's arming is cleared whether it ever
+                 * fired or not. If the outgoing ring was already empty
+                 * when the dip was set up there was nothing to fade,
+                 * and an arm left standing would ambush the INCOMING
+                 * track: its ring falls past the same threshold near
+                 * its own end, and it would fade out in the middle of
+                 * a track nobody asked to end.
+                 */
+                s_dip_arm = 0;
+                if (ferr == ESP_OK && s_dip_in_frames) {
+                    s_dip_frames = s_dip_in_frames;
+                    s_dip_pos = 0;
+                    s_dip_dir = 1;
+                    s_dip_in_frames = 0;
+                } else {
+                    s_dip_in_frames = 0;
+                    s_dip_dir = 0;
+                }
                 if (ferr != ESP_OK) {
                     ESP_LOGW(TAG, "cannot play %d Hz (%s); skipping",
                              info.sample_rate, esp_err_to_name(ferr));
