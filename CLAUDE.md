@@ -986,6 +986,35 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### `long` is 32 bits here, and the guard was `at <= -1` (0717)
+
+0716 recorded nothing. Fifteen complete plays of the ADTS file, each
+logging `recording a table as it plays`, each storing zero pairs, in
+silence.
+
+The bound on a recorded offset was written `at <= (long)UINT32_MAX`.
+**On this target `long` is 32 bits, so that cast is -1**, and the test
+was `at <= -1` -- false for every real offset in every file. Not one
+pair was ever appended.
+
+The habit came from `mp4seek.c`, where the same comparison guards a
+`uint64_t` chunk offset against truncation into a `uint32_t` field and
+is genuinely needed. Here the value is already a `long`, so it cannot
+exceed `UINT32_MAX` and the check was never a check.
+
+**The silence is the more important half.** A recording that produced
+zero entries failed the `> 1` test at the far end and said nothing, so
+the log showed a feature starting fifteen times and never finishing,
+with no line to say why. That case now warns. The rule, which this
+project keeps rediscovering: **a path that decides not to do something
+should say so.** `no crossfade: same file`, `adts declares VBR`, `the
+seek ran off the end` -- every one of those exists because its silent
+version wasted somebody's evening.
+
+Worth checking the siblings when reading this: the same comparison in
+`mp4seek.c` and `cbrseek.c` is against `uint64_t` values and is correct
+there. Type, not habit, decides whether the guard means anything.
+
 #### A table for the file that has nothing to build one from (0716)
 
 Raw ADTS that writes `buffer_fullness = 0x7FF` in every frame header --
