@@ -5269,6 +5269,31 @@ static track_end_t play_file(const char *path)
                  * the gapless property exactly on the boundaries where
                  * the hardware cannot have it anyway.
                  */
+                /*
+                 * THE CROSSFADE DECISION IS ABOUT THE RATE, NOT ABOUT
+                 * THE DRAIN.
+                 *
+                 * 0710 put the disarm inside the drain below, which
+                 * only runs when the rings have not yet converged --
+                 * so a rate change at a boundary where the previous
+                 * track had already finished playing out left the fade
+                 * armed and said nothing. The writer then refused it
+                 * silently, on rates that cannot be mixed, and the log
+                 * showed a crossfade that simply never happened.
+                 *
+                 * The board found it on a 44.1 kHz Vorbis file either
+                 * side of a 48 kHz Opus one: both boundaries lost their
+                 * fade, and it read as Ogg misbehaving rather than as
+                 * two files that cannot be overlapped.
+                 */
+                if ((uint32_t)info.sample_rate != audio_out_rate() &&
+                    (s_xfade_armed || s_xfade_active)) {
+                    ESP_LOGI(TAG, "no crossfade: %" PRIu32 " Hz into %d Hz",
+                             audio_out_rate(), info.sample_rate);
+                    s_xfade_armed = false;
+                    s_xfade_active = false;
+                }
+
                 if ((uint32_t)info.sample_rate != audio_out_rate() &&
                     s_ring_play != s_ring_fill) {
                     ESP_LOGI(TAG, "rate change to %d Hz; draining first",
@@ -5295,6 +5320,11 @@ static track_end_t play_file(const char *path)
                      * which is after the decision to crossfade was
                      * made.
                      */
+                    /* Belt and braces: the test above has already
+                     * disarmed on rate, so this only fires if something
+                     * armed one in between. Kept because the cost of
+                     * the fade and the drain waiting for each other is
+                     * seventeen seconds of silence. */
                     if (s_xfade_armed || s_xfade_active) {
                         ESP_LOGI(TAG, "no crossfade: the rate changes");
                         s_xfade_armed = false;
