@@ -986,6 +986,40 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### It was not Ogg. It was 48 kHz (0719)
+
+Two boundaries lost their crossfade -- Vorbis into Opus, and Opus into
+AAC -- with no line in the log to say why. It read as Ogg misbehaving.
+
+**Opus is 48 kHz and everything else in the suite is 44.1.** Both
+boundaries were rate changes, `xfade_can_start()` refuses those (there
+is no resampler, and mixing them is a pitch shift on one of the two
+tracks for the length of the overlap), and it refuses them **without
+saying anything** -- it is the writer, on the audio path, where a log
+line per attempt would be a log line every few milliseconds.
+
+0710 did add a line, but put it inside the drain branch, which only
+runs when the rings have not yet converged. At a boundary where the
+previous track had already played out there is nothing to drain, so the
+fade stayed armed, the writer refused it silently, and the log showed a
+crossfade that simply never happened.
+
+The rate test is now its own decision, taken wherever the incoming rate
+first becomes known, and it prints what it compared:
+`no crossfade: 44100 Hz into 48000 Hz`.
+
+**The pattern, third time in this series:** a refusal that is correct,
+silent, and therefore indistinguishable from a fault. 0717 was a
+recording that stored nothing; 0718 was a pause counted as a stall;
+this is a fade declined for a good reason nobody could see. The
+decision itself was right in all three. What was missing each time was
+the sentence saying so.
+
+Worth noting where such a line belongs: on the decode loop, which
+decides once per track, and not in the writer, which asks per chunk.
+That is why this fix moves the test rather than adding a log to
+`xfade_can_start()`.
+
 #### A pause inside a blocking send is an event, not a state (0718)
 
 `W ring send blocked 30078 ms (ring 99%)`, logged at the instant the
