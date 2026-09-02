@@ -81,4 +81,47 @@ rm -f "$OUT/cover.png"
 $F -t 3 -c:a flac "$OUT/13 flac-short-3s.flac"
 $F -ac 1 -ar 22050 -c:a pcm_s16le "$OUT/14 wav-mono-22k.wav"
 
+
+
+# ---------------------------------------------------------------- 0801
+# Files for the mechanisms the first fourteen never reached.
+
+# 15 -- CBR ADTS. cbrseek.c's ADTS branch has never run: 08 declares
+# itself VBR and stops the probe before it. No stock ffmpeg has a CBR
+# AAC encoder, so this one is made rather than encoded -- see
+# adts_cbr.py. 48k is not a quality choice: the probe needs four whole
+# frames inside a 4096-byte window from an arbitrary start, so the
+# padded frame length has to stay under 819 bytes.
+$F -c:a aac -b:a 48k -f adts "$OUT/tmp-vbr.aac"
+python3 adts_cbr.py "$OUT/tmp-vbr.aac" "$OUT/15 aac-adts-cbr.aac"
+rm -f "$OUT/tmp-vbr.aac"
+
+# 16 -- fragmented MP4. mp4seek.c looks for moov/trak/mdia/minf/stbl and
+# nothing else; a file whose sample tables live in moof boxes has no
+# stbl to find, so the probe should fail and the file should fall back.
+$F -c:a aac -b:a 128k -movflags frag_keyframe+empty_moov \
+    "$OUT/16 m4a-aac-fragmented.m4a"
+
+# 17 -- a transport stream spliced from two sources, so the PTS restarts
+# part way and the last timestamp is not after the first. tsseek.c
+# refuses a non-monotonic key at the probe; ffprobe reads this file as
+# 91873 seconds long, which is what searching it anyway would look like.
+ffmpeg -loglevel error -y -i landmark.wav -t 30 -c:a aac -b:a 128k \
+    -output_ts_offset 3600 -f mpegts "$OUT/tmp-a.ts"
+ffmpeg -loglevel error -y -ss 30 -i landmark.wav -c:a aac -b:a 128k \
+    -output_ts_offset 0 -f mpegts "$OUT/tmp-b.ts"
+cat "$OUT/tmp-a.ts" "$OUT/tmp-b.ts" > "$OUT/17 ts-aac-spliced.ts"
+rm -f "$OUT/tmp-a.ts" "$OUT/tmp-b.ts"
+
+# 18 -- two Ogg streams end to end, which is a legal chained file and
+# what a concatenated podcast looks like. oggseek.c filters by the first
+# stream's serial, so the interesting part is the tail window: the last
+# 64 KB holds no page belonging to the stream being played.
+ffmpeg -loglevel error -y -i landmark.wav -t 30 -c:a libvorbis -q:a 4 \
+    "$OUT/tmp-a.ogg"
+ffmpeg -loglevel error -y -ss 30 -i landmark.wav -c:a libvorbis -q:a 4 \
+    "$OUT/tmp-b.ogg"
+cat "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg" > "$OUT/18 ogg-vorbis-chained.ogg"
+rm -f "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg"
+
 echo "built into $OUT"

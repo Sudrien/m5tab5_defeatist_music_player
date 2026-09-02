@@ -1,8 +1,13 @@
 # Seek test suite
 
-Fourteen files, one minute of the same audio, encoded to exercise every
-seek mechanism added in 0700-0708. Copy the folder to a card and drag
+Eighteen files, one minute of the same audio, encoded to exercise every
+seek mechanism added in 0700-0717. Copy the folder to a card and drag
 the bar.
+
+The first fourteen cover the mechanisms as they shipped. 15 to 18 are
+the cases none of them reached: a branch with no file, and three shapes
+of input that the probes are supposed to refuse and that nothing ever
+handed them.
 
 ## What you are listening to
 
@@ -38,6 +43,10 @@ place; one that is wrong by more is obvious from the beep count.
 | 12 mp3-bigart-noxing | ID3v2 with a 600x600 cover ahead of the audio | seeks; art shows |
 | 13 flac-short-3s | a track shorter than the bar is wide | seeks without falling over |
 | 14 wav-mono-22k | mono, half rate | seeks, exact |
+| 15 aac-adts-cbr | cbrseek's ADTS branch, which 08 never reaches | seeks from the first play, within a frame |
+| 16 m4a-aac-fragmented | mp4seek with no `stbl` to read | **plays or refuses; must not seek** |
+| 17 ts-aac-spliced | tsseek's non-monotonic PTS refusal | **no seek, no duration, empty bar** |
+| 18 ogg-vorbis-chained | oggseek where the tail window is another stream | see below -- this one is a question, not an assertion |
 
 ## 08 takes three plays, and 10 never gets there
 
@@ -74,6 +83,58 @@ Worth knowing which way that cuts: **09 plays either way**, because
 0707 reads the tables itself and does not care where `moov` sits. The
 restriction belongs to the parser 0707 stopped using, and 10 is the
 file that still has to live with it.
+
+## The four added for the gaps
+
+**15 is the only positive one.** `cbrseek.c` has an ADTS branch that
+maps time to offset from a proven-constant frame length, and no file in
+the folder had ever run it -- 08 declares `buffer_fullness = 0x7FF` and
+stops the probe at the first window. No stock ffmpeg build has a CBR AAC
+encoder, so 15 is made instead: every frame zero-padded to the longest
+one and the length field rewritten to match, with the fullness set to
+something other than 0x7FF. The padding sits after the raw data block's
+terminator and ffmpeg decodes the result bit-identically to the file it
+was made from. `build/adts_cbr.py` is the tool and says the rest.
+
+The frame length is 660 bytes and that is not arbitrary. `adts_group()`
+reads a 4096-byte window and wants four whole frames inside it, from a
+start that can be up to one frame late -- so the padded length has to
+stay under 819 bytes, which is why 15 is encoded at 48k and not 128k.
+A future encoder change that pushes it over will make the probe fail
+with no obvious reason, so the number is written down here.
+
+**16 and 17 are refusals, and a refusal that stops refusing is a
+regression.** 16 keeps its sample tables in `moof` boxes, so
+`mp4_probe()` finds no `stbl` and the file falls back to
+esp_audio_codec's M4A parser, which may or may not play it -- either is
+fine, seeking is not. 17 is spliced from two sources so its PTS
+restarts part way; ffprobe reads it as 91873 seconds long, which is
+exactly what a bisection over a non-monotonic key would be searching.
+`ts_seek_probe()` should refuse it and the bar should stay empty.
+
+**18 is the one with no expected answer yet.** A chained Ogg is two
+logical streams end to end and is perfectly legal. `oggseek.c` filters
+pages by the first stream's serial, so the bisection is safe. The
+duration is not obviously safe: the last granule is read from a 64 KB
+window at the end of the *file*, and in a chained file every page there
+belongs to the second stream and is skipped, so `last_granule` stays 0
+and the clamp is gone. `duration.c` reads the same tail for the same
+number. What the player actually does with this file has not been
+watched on hardware; that is what the file is for.
+
+## Not covered, and why
+
+- **AMR.** `cbrseek.c` claims fixed-mode AMR and nothing exercises it,
+  because no stock ffmpeg has an AMR encoder -- it needs a build with
+  libopencore-amrnb. A synthetic file with valid headers and junk
+  payload would test the probe and be useless to listen to, which is
+  the wrong trade for this folder.
+- **The MP4 sample-table ceiling** (`MP4_MAX_SAMPLES`, 200000, about 77
+  minutes) and **the MP3 table's doubling past 256 entries** both need
+  files far longer than anything here. Lower the constant in a
+  throwaway build instead; that tests the same branch in one minute.
+- **Protected AAC.** Cannot be generated, and the failure it produces
+  is the decoder's, not the seek path's.
 
 ## Known imprecision, so it is not reported as a bug
 
