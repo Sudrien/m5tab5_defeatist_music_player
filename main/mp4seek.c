@@ -540,29 +540,74 @@ static void adts_header(const mp4_t *m, uint8_t *h, uint32_t payload)
     h[6] = 0xFC;
 }
 
+/*
+ * ONE READ PER CONTIGUOUS RUN, NOT ONE PER SAMPLE.
+ *
+ * The first version read each sample separately, on the reasoning that
+ * a normally-muxed file keeps them in order so the stdio buffer would
+ * absorb it. The board says otherwise: a sixty-second track logged 2585
+ * reads for 962 KB, held the arbiter for 1545 ms, and produced
+ * `decoder_read blocked 959 ms` -- against 43 reads for the same audio
+ * as Ogg. Two and a half thousand lease acquisitions is the cost, and
+ * it is paid on the decode loop.
+ *
+ * So the run of samples that will fit in `cap` is measured first, read
+ * in one call, and then spread out in place to make room for the
+ * headers. The spread is safe in ascending order because each sample's
+ * destination is at most 7*N bytes before where it was read to, and
+ * every earlier sample moves further back than the one after it.
+ */
 size_t mp4_read(FILE *f, mp4_t *m, uint8_t *dst, size_t cap)
 {
     if (!f || !m || !m->ok || !dst) return 0;
 
-    size_t out = 0;
-    while (m->cur < m->count) {
-        const uint32_t sz = m->size[m->cur];
-        if (!sz || sz > 0x20000) { m->cur++; continue; }   /* absurd; skip it */
-        if (out + ADTS_HDR + sz > cap) break;              /* whole frames only */
-
-        const long at = (long)m->offset[m->cur];
-        if (m->pos != at) {
-            if (fseek(f, at, SEEK_SET) != 0) break;
-            m->pos = at;
-        }
-        const size_t got = storage_io_fread(dst + out + ADTS_HDR, sz, f,
-                                            STORAGE_IO_PLAYBACK);
-        if (got != sz) { m->pos = -1; break; }
-        m->pos += (long)sz;
-
-        adts_header(m, dst + out, sz);
-        out += ADTS_HDR + sz;
+    /* Skip anything absurd before measuring, so the run below is made
+     * of samples that will actually be emitted. */
+    while (m->cur < m->count &&
+           (!m->size[m->cur] || m->size[m->cur] > 0x20000)) {
         m->cur++;
     }
+    if (m->cur >= m->count) return 0;
+
+    /* How many contiguous samples fit, headers included. */
+    uint32_t n = 0;
+    size_t payload = 0;
+    long expect = (long)m->offset[m->cur];
+    while (m->cur + n < m->count) {
+        const uint32_t sz = m->size[m->cur + n];
+        if (!sz || sz > 0x20000) break;
+        if ((long)m->offset[m->cur + n] != expect) break;   /* a gap */
+        if (payload + sz + (size_t)(n + 1) * ADTS_HDR > cap) break;
+        payload += sz;
+        expect += sz;
+        n++;
+    }
+    if (!n) return 0;
+
+    const long at = (long)m->offset[m->cur];
+    if (m->pos != at) {
+        if (fseek(f, at, SEEK_SET) != 0) return 0;
+        m->pos = at;
+    }
+
+    /* Read the whole run into the tail of the output, where the headers
+     * are not yet in the way. */
+    const size_t head = (size_t)n * ADTS_HDR;
+    if (storage_io_fread(dst + head, payload, f, STORAGE_IO_PLAYBACK)
+            != payload) {
+        m->pos = -1;
+        return 0;
+    }
+    m->pos += (long)payload;
+
+    size_t src = head, out = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const uint32_t sz = m->size[m->cur + i];
+        adts_header(m, dst + out, sz);
+        memmove(dst + out + ADTS_HDR, dst + src, sz);
+        out += ADTS_HDR + sz;
+        src += sz;
+    }
+    m->cur += n;
     return out;
 }

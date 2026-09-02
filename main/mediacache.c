@@ -155,7 +155,15 @@ const uint8_t *mediacache_art(const char *path, size_t *len)
     entry_t *e = find(path);
     if (!e || !e->art) { unlock(); return NULL; }
     touch(e);
-    *len = e->art_len;
+    /*
+     * `len` is optional, because sidecar_prime() calls this purely to
+     * ask whether art is cached and has nothing to do with its size.
+     * Writing through it unconditionally stored to address zero, and
+     * only when the answer was yes -- so the fault needed a file with
+     * embedded art already in the cache, which is why it survived every
+     * run until a test suite included one.
+     */
+    if (len) *len = e->art_len;
     const uint8_t *p = e->art;
     unlock();
     /* Borrowed past the lock -- media_task only. See the note above. */
