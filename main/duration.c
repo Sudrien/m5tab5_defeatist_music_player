@@ -91,7 +91,7 @@ static uint32_t probe_flac(FILE *f)
                              si[17];
 
     if (!rate || !samples) return 0;
-    return (uint32_t)(samples / rate);
+    return (uint32_t)ROUND_DIV(samples, (uint64_t)rate);
 }
 
 /* ------------------------------------------------------------------ */
@@ -139,7 +139,7 @@ static uint32_t probe_wav(FILE *f)
     }
 
     if (!byte_rate || !data_len) return 0;
-    return data_len / byte_rate;
+    return (uint32_t)ROUND_DIV((uint64_t)data_len, (uint64_t)byte_rate);
 }
 
 /* ------------------------------------------------------------------ */
@@ -266,7 +266,7 @@ static uint32_t probe_ogg(FILE *f)
     /* Opus granule includes the encoder pre-skip, which is typically
      * 6.5 ms. Not corrected for: it is under one second, and the seek
      * bar reads in seconds. */
-    return (uint32_t)(granule / rate);
+    return (uint32_t)ROUND_DIV(granule, (uint64_t)rate);
 }
 
 /* ------------------------------------------------------------------ */
@@ -320,7 +320,7 @@ static uint32_t probe_mp4(FILE *f)
                         dur = be32(m + 16);
                     }
                     if (!ts || !dur || dur == 0xFFFFFFFFu) return 0;
-                    return (uint32_t)(dur / ts);
+                    return (uint32_t)ROUND_DIV(dur, (uint64_t)ts);
                 }
                 in += isz;
             }

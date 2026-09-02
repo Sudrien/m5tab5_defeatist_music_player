@@ -12,6 +12,7 @@
 #include "esp_log.h"
 
 #include "tsseek.h"
+#include "duration.h"
 #include "storage_io.h"
 
 static const char *TAG = "tab5_tssk";
@@ -369,7 +370,11 @@ out:
 uint32_t ts_seek_duration_sec(const ts_seek_t *ts)
 {
     if (!ts || ts->last_pts <= ts->first_pts) return 0;
-    return (uint32_t)((ts->last_pts - ts->first_pts) / PTS_HZ);
+    /* The span between the first and last timestamp is one frame short
+     * of the file's length to begin with, so this one was already
+     * rounding down twice. */
+    return (uint32_t)ROUND_DIV(ts->last_pts - ts->first_pts,
+                               (uint64_t)PTS_HZ);
 }
 
 /* ------------------------------------------------------------------ */

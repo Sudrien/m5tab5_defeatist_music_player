@@ -209,9 +209,13 @@ download is.
 - **FLAC never lands on the very last frame** (93 ms), because a frame
   header is only trusted when the following header confirms it, and the
   last one has no successor.
-- **11 reports 59 s rather than 60.** A transport stream has no stated
-  duration; it is the span between the first and last presentation
-  timestamps, and the last timestamp is the *start* of the last packet.
+- **11's length is the span between timestamps, not the file.** A
+  transport stream has no stated duration, and the last presentation
+  timestamp is the *start* of the last packet, so the span is always
+  one packet short. It read 59 s until 0807 rounded the division; it
+  now reads 60, but for a reason one packet away from being a
+  coincidence, and a stream whose last packet is longer could read
+  short again.
 
 ## Generated with
 

@@ -11,6 +11,7 @@
 #include "esp_log.h"
 
 #include "cbrseek.h"
+#include "duration.h"
 #include "storage_io.h"
 
 static const char *TAG = "tab5_cbr";
@@ -531,7 +532,11 @@ bool cbr_probe(FILE *f, cbr_map_t *m)
 uint32_t cbr_duration_sec(const cbr_map_t *m)
 {
     if (!m || !m->byte_rate || m->data_end <= m->data_start) return 0;
-    return (uint32_t)((uint64_t)(m->data_end - m->data_start) / m->byte_rate);
+    /* Rounded. See the note on ROUND_DIV in duration.h: a real CBR AAC
+     * file 60.05 s long divides to 59.997 and truncated to 59, and the
+     * bar was a second short of the music. */
+    return (uint32_t)ROUND_DIV((uint64_t)(m->data_end - m->data_start),
+                               (uint64_t)m->byte_rate);
 }
 
 long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec)
