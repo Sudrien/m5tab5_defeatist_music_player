@@ -40,6 +40,7 @@ What do you mean no audio over Bluetooth
 - next track
 - screen sleep
 - drag to seek (most formats, some just don't support it)
+- play order button cycles ONE / ALL / RND / RPT - RPT repeats the track it is on
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
 - USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too! USB A port only. 

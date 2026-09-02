@@ -4071,8 +4071,13 @@ static void ui_task(void *arg)
              * than as a setting being respected.
              */
             const play_order_t ord = browser_order();
-            const char *p = playlist_next(ord == PLAY_ORDER_ONE
-                                          ? PLAY_ORDER_ALL : ord);
+            /* Repeat-one for the same reason as ONE: it is an answer
+             * about the end of a track, and this is a press. Left
+             * as-is, next would replay the track the listener just
+             * asked to leave. */
+            const char *p = playlist_next(
+                (ord == PLAY_ORDER_ONE || ord == PLAY_ORDER_REPEAT_ONE)
+                ? PLAY_ORDER_ALL : ord);
             if (p) request_track(p);
             else   ESP_LOGI(TAG, "no next track in %s", playlist_dir());
             break;
