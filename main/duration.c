@@ -16,6 +16,7 @@
 #endif
 
 #include "duration.h"
+#include "oggseek.h"
 #include "storage_io.h"
 
 static const char *TAG = "tab5_dur";
@@ -165,13 +166,25 @@ static uint32_t probe_wav(FILE *f)
  *
  * So the codec is identified from the first page and the divisor chosen
  * from that.
+ *
+ * And the last page has to belong to the stream being played. A chained
+ * file -- two Oggs concatenated, which is legal and is what `cat` makes
+ * -- ends with somebody else's pages, and the parser in the archive
+ * drops those: it compares each page's serial against the one it
+ * learned at the start. So the audible length is the FIRST stream's,
+ * and reading the granule off the last page in the file reported the
+ * second stream's instead. With a 20 second stream ahead of a 40 second
+ * one the bar said 40 and the sound stopped at 20.
  */
 #define OGG_WINDOW  (65536)
 
-static uint32_t ogg_rate_from_first_page(FILE *f, bool *is_opus)
+static uint32_t ogg_rate_from_first_page(FILE *f, bool *is_opus,
+                                         uint32_t *serial)
 {
     uint8_t b[64];
     if (!read_at(f, 0, b, sizeof(b))) return 0;
+    if (memcmp(b, "OggS", 4) != 0) return 0;
+    *serial = le32(b + 14);
 
     /* Header size is 27 + the segment table, and the first page of a
      * logical stream holds exactly one segment table entry in practice
@@ -197,8 +210,9 @@ static uint32_t ogg_rate_from_first_page(FILE *f, bool *is_opus)
 static uint32_t probe_ogg(FILE *f)
 {
     bool is_opus = false;
-    const uint32_t rate = ogg_rate_from_first_page(f, &is_opus);
-    if (!rate) return 0;
+    uint32_t serial = 0;
+    const uint32_t rate = ogg_rate_from_first_page(f, &is_opus, &serial);
+    if (!rate || !serial) return 0;
 
     const long end = file_size(f);
     if (end <= 0) return 0;
@@ -225,11 +239,24 @@ static uint32_t probe_ogg(FILE *f)
     bool found = false;
     for (long i = win - 27; i >= 0; i--) {
         if (memcmp(&buf[i], "OggS", 4) != 0) continue;
+        if (le32(&buf[i + 14]) != serial) continue;     /* another stream */
         granule = le64(&buf[i + 6]);
         found = true;
         break;
     }
     free(buf);
+
+    /* Nothing of ours within a page's length of the end: chained, so ask
+     * for the extent of the first stream. Costs a couple of dozen short
+     * reads and only happens for the files that need it. */
+    if (!found) {
+        uint64_t g = 0;
+        if (ogg_stream_extent(f, serial, 0, end, STORAGE_IO_PREFETCH, NULL, &g)
+            && g && g != UINT64_MAX) {
+            granule = g;
+            found = true;
+        }
+    }
 
     /* -1 means "no packet finishes on this page", which a final page
      * should never say -- treat it as unknown rather than as a

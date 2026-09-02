@@ -26,6 +26,15 @@ static bool read_at(FILE *f, long off, void *buf, size_t len)
     return storage_io_read_at(f, off, buf, len, STORAGE_IO_PLAYBACK);
 }
 
+/* ogg_stream_extent() is also called from the scan, which is not a
+ * moment anybody is waiting on, so that one names its own class. */
+static bool read_at_as(FILE *f, long off, void *buf, size_t len,
+                       storage_io_class_t cls)
+{
+    if (off < 0) return false;
+    return storage_io_read_at(f, off, buf, len, cls);
+}
+
 static long file_size(FILE *f)
 {
     if (fseek(f, 0, SEEK_END) != 0) return -1;
@@ -132,6 +141,149 @@ static long find_page(const uint8_t *buf, size_t avail, uint32_t serial,
 }
 
 /* ------------------------------------------------------------------ */
+/* Where a logical stream ends                                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The window has to be able to hold a page start, and a page can be
+ * 65307 bytes. Reading that much fifteen times per drag is a megabyte
+ * off the card for one press, so the ordinary window is 24 KB -- five
+ * or six typical audio pages -- and the full page size is the fallback
+ * for the probe that finds nothing, which on real files is the last
+ * round or two and not the common case.
+ */
+#define OGG_WIN      (24 * 1024)
+#define OGG_WIN_MAX  (OGG_PAGE_MAX + 1024)
+
+
+/*
+ * A chained file is streams end to end, so the pages of the one being
+ * played occupy a prefix and everything after the chain boundary
+ * belongs to somebody else. That makes "is there a page of ours at or
+ * after here" a question that is true up to the boundary and false
+ * after it, which is a question a bisection can answer.
+ *
+ * Two dozen rounds of a short read, then a walk of the last window to
+ * pick up the final page exactly. The walk is bounded: a page is at
+ * most 65307 bytes and the bisection leaves the last confirmed page
+ * within one window of the boundary, so a handful of windows is not a
+ * budget, it is slack.
+ */
+#define OGG_EXTENT_ROUNDS   24
+#define OGG_EXTENT_WINDOWS  8
+
+bool ogg_stream_extent(FILE *f, uint32_t serial, long from, long file_end,
+                       storage_io_class_t cls,
+                       long *stream_end, uint64_t *last_granule)
+{
+    if (!f || !serial || from < 0 || file_end <= from) return false;
+
+    uint8_t *buf = big_alloc(OGG_WIN_MAX);
+    if (!buf) return false;
+
+    bool found = false;
+    long seen = from;                   /* highest page start confirmed ours */
+    long lo = from, hi = file_end;
+
+    /*
+     * Stopping when the interval is one window wide, not when it is one
+     * byte wide: the walk below finishes the job from the last page the
+     * bisection confirmed, and it can cover a window without help. On a
+     * 1.2 MB Opus chain that is six rounds instead of twenty.
+     */
+    for (int round = 0; round < OGG_EXTENT_ROUNDS && lo + OGG_WIN < hi;
+         round++) {
+        long mid = lo + (hi - lo) / 2;
+        if (mid < from) mid = from;
+
+        ogg_page_t pg;
+        long at = -1;
+        for (int attempt = 0; attempt < 2 && at < 0; attempt++) {
+            const long cap = attempt ? OGG_WIN_MAX : OGG_WIN;
+            long want = file_end - mid;
+            if (want > cap) want = cap;
+            if (want < OGG_HDR) break;
+            if (!read_at_as(f, mid, buf, (size_t)want, cls)) break;
+            at = find_page(buf, (size_t)want, serial, &pg);
+
+            /*
+             * A window with somebody else's pages in it is past the
+             * boundary, and reading 65 KB to confirm that is 65 KB
+             * spent proving what the 24 KB already showed. The big
+             * window is for the other case -- no page of any stream
+             * parsed, which means the window landed inside one.
+             */
+            if (at < 0 && find_page(buf, (size_t)want, 0, &pg) >= 0) break;
+        }
+
+        if (at < 0) {
+            hi = mid;                   /* nothing of ours from here on */
+            continue;
+        }
+
+        const long off = mid + at;
+        if (off > seen) { seen = off; found = true; }
+        const long next = off + pg.size;
+        lo = next > mid ? next : mid + 1;
+    }
+
+    if (!found) { free(buf); return false; }
+
+    /*
+     * Walk forward from the last page the bisection confirmed. Its own
+     * granule is not necessarily the answer -- a final page can be a
+     * continuation carrying -1, and the bisection stops at whichever
+     * page happened to be in the last window it read.
+     */
+    long at = seen, end = seen;
+    uint64_t granule = 0;
+    bool have_granule = false;
+
+    bool big = false;                   /* one page did not fit in 24 KB */
+
+    for (int w = 0; w < OGG_EXTENT_WINDOWS; w++) {
+        long want = file_end - at;
+        const long cap = big ? OGG_WIN_MAX : OGG_WIN;
+        if (want > cap) want = cap;
+        if (want < OGG_HDR) break;
+        if (!read_at_as(f, at, buf, (size_t)want, cls)) break;
+
+        size_t p = 0;
+        bool moved = false;
+        while (p + OGG_HDR <= (size_t)want) {
+            ogg_page_t pg;
+            if (!page_at(buf + p, (size_t)want - p, &pg)) break;
+            if (pg.serial != serial) { p = (size_t)want; break; }
+            if ((size_t)pg.size > (size_t)want - p) break;   /* clipped */
+            if (pg.granule != UINT64_MAX) {
+                granule = pg.granule;
+                have_granule = true;
+            }
+            p += (size_t)pg.size;
+            end = at + (long)p;
+            moved = true;
+        }
+        if (!moved) {
+            /* Either the page here is bigger than the window, which the
+             * full page size covers, or it is not ours and this is the
+             * boundary. One retry tells the two apart. */
+            if (big) break;
+            big = true;
+            continue;
+        }
+        big = false;
+        if (end >= file_end) break;
+        at = end;
+    }
+
+    free(buf);
+
+    if (stream_end) *stream_end = end;
+    if (last_granule && have_granule) *last_granule = granule;
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* Probe                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -233,6 +385,37 @@ bool ogg_seek_probe(FILE *f, ogg_seek_t *os)
         }
     }
 
+    /*
+     * NOT FINDING ONE MEANS THE END OF THE FILE IS SOMEBODY ELSE'S.
+     *
+     * The window above is 64 KB and a page cannot exceed 65307 bytes,
+     * so a page of this stream is in there -- unless the file is
+     * chained, in which case every page in the tail carries the second
+     * stream's serial and is skipped, and this used to fall out with
+     * last_granule at 0.
+     *
+     * Zero is not "no clamp", it is a clamp that never fires: a drag
+     * past the end of the first stream sets a target no page can reach,
+     * every round moves `lo`, nothing is ever `best`, and the seek
+     * returns the first audio page. Dragging to the right-hand end of a
+     * chained file restarted the track.
+     *
+     * So find the real end of this stream and use it for both jobs --
+     * the clamp, and the far end of the bisection, which otherwise
+     * spends its first rounds proving the second stream is not us.
+     */
+    if (!os->last_granule) {
+        long stream_end = 0;
+        if (ogg_stream_extent(f, os->serial, os->first_audio, end,
+                              STORAGE_IO_PLAYBACK,
+                              &stream_end, &os->last_granule) &&
+            stream_end > os->first_audio && stream_end < end) {
+            ESP_LOGI(TAG, "chained: this stream ends at %ld of %ld bytes",
+                     stream_end, end);
+            os->file_end = stream_end;
+        }
+    }
+
     ok = true;
 
 out:
@@ -267,17 +450,6 @@ void ogg_seek_free(ogg_seek_t *os)
 /* ------------------------------------------------------------------ */
 /* Bisection                                                           */
 /* ------------------------------------------------------------------ */
-
-/*
- * The window has to be able to hold a page start, and a page can be
- * 65307 bytes. Reading that much fifteen times per drag is a megabyte
- * off the card for one press, so the ordinary window is 24 KB -- five
- * or six typical audio pages -- and the full page size is the fallback
- * for the probe that finds nothing, which on real files is the last
- * round or two and not the common case.
- */
-#define OGG_WIN      (24 * 1024)
-#define OGG_WIN_MAX  (OGG_PAGE_MAX + 1024)
 
 static uint64_t granule_of_sec(const ogg_seek_t *os, uint32_t sec)
 {

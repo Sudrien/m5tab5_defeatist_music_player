@@ -46,7 +46,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 15 aac-adts-cbr | cbrseek's ADTS branch, which 08 never reaches | seeks from the first play, within a frame |
 | 16 m4a-aac-fragmented | mp4seek with no `stbl` to read | **plays or refuses; must not seek** |
 | 17 ts-aac-spliced | tsseek's non-monotonic PTS refusal | **no seek, no duration, empty bar** |
-| 18 ogg-vorbis-chained | oggseek where the tail window is another stream | see below -- this one is a question, not an assertion |
+| 18 ogg-vorbis-chained | oggseek and duration.c where the tail is another stream | 20 s on the bar, seeks within it, clamps at the chain |
 
 ## 08 takes three plays, and 10 never gets there
 
@@ -112,15 +112,26 @@ restarts part way; ffprobe reads it as 91873 seconds long, which is
 exactly what a bisection over a non-monotonic key would be searching.
 `ts_seek_probe()` should refuse it and the bar should stay empty.
 
-**18 is the one with no expected answer yet.** A chained Ogg is two
-logical streams end to end and is perfectly legal. `oggseek.c` filters
-pages by the first stream's serial, so the bisection is safe. The
-duration is not obviously safe: the last granule is read from a 64 KB
-window at the end of the *file*, and in a chained file every page there
-belongs to the second stream and is skipped, so `last_granule` stays 0
-and the clamp is gone. `duration.c` reads the same tail for the same
-number. What the player actually does with this file has not been
-watched on hardware; that is what the file is for.
+**18 had no expected answer when it was added, and 0802 is that
+answer.** A chained Ogg is two logical streams end to end and is
+perfectly legal -- `cat a.ogg b.ogg` makes one. The parser in the
+archive compares each page's serial against the one it learned at the
+start and drops the rest, so the first stream is the audible part, and
+that is what both the bar and the drag are now bounded to.
+
+Both faults the file was made to look for were real. `oggseek.c` left
+`last_granule` at 0 because the tail window held nothing of ours, and
+zero is not "no clamp", it is a clamp that never fires -- a drag past
+20 s restarted the track. `duration.c` read the granule off the last
+page in the file without checking whose it was, and reported the second
+stream's length.
+
+**The halves are 20 and 40 seconds, and that is load-bearing.** They
+were 30 and 30, which made the duration bug invisible: the wrong page
+gave 30 s and the right page gives 30 s, so the file certified the bug
+as passing. A test whose wrong answer coincides with its right one is
+not a test. 0802 regenerated it unequal, and the two answers are now 20
+and 40.
 
 ## Not covered, and why
 
