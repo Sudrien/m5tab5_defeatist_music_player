@@ -103,6 +103,18 @@ struct decoder {
     mp4_t mp4;
 
     /*
+     * A table somebody recorded during a previous play, for the stream
+     * that has no other way -- see decoder_needs_table(). Owned here:
+     * the caller's copy lives in a record that is written and reloaded
+     * around us.
+     */
+    uint32_t *tbl_off;
+    uint32_t *tbl_frm;
+    int       tbl_count;
+    bool      tbl_ok;
+    bool      tbl_wanted;       /* nothing else can seek this stream */
+
+    /*
      * Bytes that must reach the parser before the file's own do.
      *
      * WAV and AMR resume behind a preamble of tens of bytes, which fits
@@ -461,7 +473,8 @@ static int minimp3_read(decoder_t *d, int16_t *out, int max_int16)
 
 static bool s_esp_codec_registered;
 
-static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
+static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
+                                const decoder_index_t *ix)
 {
     if (!s_esp_codec_registered) {
         /* Registers every decoder the component was built with, which
@@ -549,6 +562,41 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt)
     }
     if (!d->mp4.ok && !d->cbr_ok && !d->flac.ok && !d->ogg.ok) {
         (void)ts_seek_probe(d->f, &d->ts);
+    }
+
+    /*
+     * Last, and only for raw ADTS: a stream that got this far has been
+     * offered a proven byte rate, three bisections and a sample table
+     * and matched none of them. Its frames are self-syncing, so the
+     * only missing half is where a second lives -- which a previous
+     * play can have written down.
+     */
+    d->tbl_wanted = !d->mp4.ok && !d->cbr_ok && !d->flac.ok &&
+                    !d->ogg.ok && !d->ts.ok &&
+                    d->esp_type == ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
+
+    if (d->tbl_wanted && ix && ix->count > 1 && ix->offset && ix->frame) {
+        bool sane = true;
+        for (int k = 1; k < ix->count; k++) {
+            if (ix->offset[k] <= ix->offset[k - 1] ||
+                ix->frame[k]  <= ix->frame[k - 1]) { sane = false; break; }
+        }
+        if (sane) {
+            d->tbl_off = malloc((size_t)ix->count * sizeof(uint32_t));
+            d->tbl_frm = malloc((size_t)ix->count * sizeof(uint32_t));
+            if (d->tbl_off && d->tbl_frm) {
+                memcpy(d->tbl_off, ix->offset,
+                       (size_t)ix->count * sizeof(uint32_t));
+                memcpy(d->tbl_frm, ix->frame,
+                       (size_t)ix->count * sizeof(uint32_t));
+                d->tbl_count = ix->count;
+                d->tbl_ok = true;
+                ESP_LOGI(TAG, "adts: recorded table, %d entries every %"
+                              PRIu32 " s", ix->count, ix->spacing_sec);
+            }
+        } else {
+            ESP_LOGW(TAG, "adts: recorded table is not increasing; ignoring");
+        }
     }
 
     /* Rate and channels are not known until the first frame comes out;
@@ -715,6 +763,26 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         off = ogg_seek_find(d->f, &d->ogg, sec, &at_sec);
     } else if (d->ts.ok) {
         off = ts_seek_find(d->f, &d->ts, sec, &at_sec);
+    } else if (d->tbl_ok) {
+        /*
+         * The recorded table. Entries are where the decoder's next byte
+         * was when a given frame count had come out, so the offset is
+         * at or before the frame that contains the target -- and then
+         * resynced forward, because a byte offset is not a frame start
+         * and handing the parser the middle of one wastes a frame at
+         * best.
+         */
+        const uint32_t rate = (uint32_t)(d->info.sample_rate
+                                         ? d->info.sample_rate : 44100);
+        const uint64_t want = (uint64_t)sec * rate;
+        int i = 0;
+        for (int k = 0; k < d->tbl_count; k++) {
+            if ((uint64_t)d->tbl_frm[k] <= want) i = k; else break;
+        }
+        long end = 0;
+        if (fseek(d->f, 0, SEEK_END) == 0) end = ftell(d->f);
+        off = cbr_adts_resync(d->f, (long)d->tbl_off[i], end);
+        if (off >= 0) at_sec = (uint32_t)(d->tbl_frm[i] / rate);
     } else if (d->mp4.ok) {
         /*
          * The one seek here that is a lookup rather than a search, and
@@ -799,8 +867,12 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
          * 376 bytes, but both are borrowed rather than copied and both
          * go through the same path -- one queueing mechanism beats two,
          * and the window fills from it on the next read. */
+        /* ADTS is the one case with nothing to replay: every frame
+         * carries its own header, which is the whole reason a bare
+         * offset is enough for it. */
         d->pre = d->ogg.ok ? ogg_seek_preamble(&d->ogg, &d->pre_len)
-                           : ts_seek_preamble(&d->ts, &d->pre_len);
+               : d->ts.ok  ? ts_seek_preamble(&d->ts, &d->pre_len)
+                           : NULL;
         plen = d->pre_len;
         d->in_len = 0;
     }
@@ -809,7 +881,9 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
     ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
                   "s (+%u B header)",
              d->cbr_ok ? d->cbr.what
-                       : (d->flac.ok ? "flac" : (d->ogg.ok ? "ogg" : "ts")),
+                       : d->flac.ok ? "flac"
+                       : d->ogg.ok  ? "ogg"
+                       : d->ts.ok   ? "ts" : "adts table",
              sec, off, at_sec,
              (unsigned)plen);
     return ESP_OK;
@@ -838,7 +912,7 @@ decoder_t *decoder_open_indexed(const char *path, const decoder_index_t *ix)
 
     const esp_err_t ret = (d->backend == BACKEND_MINIMP3)
                         ? minimp3_open(d, path, ix)
-                        : esp_codec_open(d, path, fmt);
+                        : esp_codec_open(d, path, fmt, ix);
     if (ret != ESP_OK) {
         free(d);
         return NULL;
@@ -924,7 +998,8 @@ bool decoder_can_seek(decoder_t *d)
      * unseekable: FLAC would want its SEEKTABLE and Ogg a bisection over
      * page granulepos, and neither is written.
      */
-    return d->cbr_ok || d->flac.ok || d->ogg.ok || d->ts.ok || d->mp4.ok;
+    return d->cbr_ok || d->flac.ok || d->ogg.ok || d->ts.ok || d->mp4.ok ||
+           d->tbl_ok;
 }
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
@@ -992,6 +1067,30 @@ esp_err_t decoder_seek_sec_at(decoder_t *d, uint32_t sec, uint32_t *landed)
  * would rewrite the sidecar with the bytes it was just read from,
  * every play, and the dirty flag would be decoration.
  */
+bool decoder_needs_table(decoder_t *d)
+{
+    return d && d->tbl_wanted && !d->tbl_ok;
+}
+
+long decoder_stream_pos(decoder_t *d)
+{
+    if (!d || !d->f) return -1;
+    const long at = ftell(d->f);
+    if (at < 0) return -1;
+    /* Minus the window's unread tail: what has been READ is ahead of
+     * what has been DECODED, and the pair being recorded is about the
+     * latter. */
+    const long unread = (long)(d->in_len - d->in_pos);
+    long pos = at - (unread > 0 ? unread : 0);
+    /* And minus the preamble still queued, which is not file bytes at
+     * all and would otherwise push the offset backwards past the audio.
+     */
+    if (d->pre && d->pre_pos < d->pre_len) {
+        pos = at;                       /* the window is preamble, not file */
+    }
+    return pos < 0 ? 0 : pos;
+}
+
 bool decoder_index_extract(decoder_t *d, uint32_t *offset, uint32_t *frame,
                            int max, uint32_t want_spacing_sec,
                            int *count, uint32_t *spacing_sec)
@@ -1067,6 +1166,8 @@ void decoder_close(decoder_t *d)
         if (d->esp_dec) esp_audio_simple_dec_close(d->esp_dec);
         ogg_seek_free(&d->ogg);
         mp4_free(&d->mp4);
+        free(d->tbl_off);
+        free(d->tbl_frm);
         free(d->inbuf);
     }
     if (d->f) storage_io_close(d->f);

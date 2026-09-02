@@ -4720,6 +4720,28 @@ static track_end_t play_file(const char *path)
     bool     seeked = false;
 
     /*
+     * A time-to-offset table being recorded as this track plays, for
+     * the one kind of stream that has no other source of one: raw ADTS
+     * that declares itself VBR. See decoder_needs_table().
+     *
+     * The pair is (where the decoder's next byte is, how many frames
+     * have come out), sampled every REPLAYGAIN_INDEX_SPACING_SEC, and
+     * it costs an ftell() at that rate. Nothing is read, nothing is
+     * scanned: the play was happening anyway, which is the same bargain
+     * as the loudness, the envelope and 0703's MP3 table.
+     */
+    uint32_t tbl_off[REPLAYGAIN_INDEX_MAX];
+    uint32_t tbl_frm[REPLAYGAIN_INDEX_MAX];
+    int      tbl_n = 0;
+    uint32_t tbl_spacing = REPLAYGAIN_INDEX_SPACING_SEC;
+    uint64_t tbl_next = 0;
+    /* Only when the decoder says nothing else can seek this stream. */
+    bool     tbl_rec = decoder_needs_table(dec);
+    if (tbl_rec) {
+        ESP_LOGI(TAG, "adts: no seek mechanism; recording a table as it plays");
+    }
+
+    /*
      * The screen changes when the sound does, not when the decode does.
      *
      * With the drain gone, up to a ring of the previous track is still
@@ -5463,6 +5485,46 @@ static track_end_t play_file(const char *path)
              * was actually queued rather than the whole block.
              */
             frames_out += sent / PCM_BYTES_PER_FRAME;
+
+            /*
+             * One pair every `tbl_spacing` seconds of OUTPUT, not of
+             * wall clock -- the decode runs ahead of the audio and a
+             * table keyed to when the sampling happened would be keyed
+             * to nothing.
+             *
+             * A seek ends the recording rather than corrupting it: from
+             * that point the frame count no longer counts this file
+             * from its start, so every later pair would be wrong by the
+             * size of the jump.
+             */
+            if (tbl_rec && cur_rate) {
+                if (seeked) {
+                    tbl_rec = false;
+                    tbl_n = 0;
+                } else if (frames_out >= tbl_next) {
+                    if (tbl_n >= REPLAYGAIN_INDEX_MAX) {
+                        /* Full: keep every other pair and double the
+                         * spacing, the same way the envelope's columns
+                         * merge. A long file ends up coarser rather
+                         * than truncated half way through. */
+                        for (int k = 1; k * 2 < tbl_n; k++) {
+                            tbl_off[k] = tbl_off[k * 2];
+                            tbl_frm[k] = tbl_frm[k * 2];
+                        }
+                        tbl_n = (tbl_n + 1) / 2;
+                        tbl_spacing *= 2;
+                    }
+                    const long at = decoder_stream_pos(dec);
+                    if (at >= 0 && at <= (long)UINT32_MAX &&
+                        (tbl_n == 0 || (uint32_t)at > tbl_off[tbl_n - 1]) &&
+                        tbl_n < REPLAYGAIN_INDEX_MAX) {
+                        tbl_off[tbl_n] = (uint32_t)at;
+                        tbl_frm[tbl_n] = (uint32_t)frames_out;
+                        tbl_n++;
+                    }
+                    tbl_next = frames_out + (uint64_t)tbl_spacing * cur_rate;
+                }
+            }
             s_frames_rate[s_ring_fill] = cur_rate;
             s_frames_out[s_ring_fill] = frames_out;
             /* Alongside the rate, and for the same reason: it describes
@@ -5782,6 +5844,24 @@ static track_end_t play_file(const char *path)
             s_rg_dirty = true;
             ESP_LOGI(TAG, "length from playback: %" PRIu32 " s", measured);
         }
+    }
+
+    /*
+     * And the recorded table, on the same terms as the length: played
+     * to the end, no seek in it. A partial table is worse than none --
+     * a drag past where the recording stopped would land on the last
+     * pair and read as the bar having ignored the press.
+     */
+    if (why == TRACK_ENDED && !seeked && tbl_rec && tbl_n > 1 &&
+        rg_holding(path)) {
+        s_rg.index.present = true;
+        s_rg.index.count = tbl_n;
+        s_rg.index.spacing_sec = tbl_spacing;
+        memcpy(s_rg.index.offset, tbl_off, (size_t)tbl_n * sizeof(uint32_t));
+        memcpy(s_rg.index.sample, tbl_frm, (size_t)tbl_n * sizeof(uint32_t));
+        s_rg_dirty = true;
+        ESP_LOGI(TAG, "adts: table recorded, %d entries every %" PRIu32 " s",
+                 tbl_n, tbl_spacing);
     }
 
     s_prev_ended_clean = clean;

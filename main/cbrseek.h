@@ -139,6 +139,18 @@ long cbr_offset_for_sec(FILE *f, const cbr_map_t *m, uint32_t sec);
  */
 size_t cbr_resume_preamble(const cbr_map_t *m, long off, uint8_t *buf, size_t cap);
 
+/*
+ * First ADTS frame header at or after `off`, or -1.
+ *
+ * Exported for the recorded-table seek in 0716, which knows roughly
+ * where a second lives but not where a frame starts. The validation is
+ * the same one probe_adts() uses -- a candidate is only accepted when
+ * the length it declares lands on another valid header -- because a raw
+ * AAC payload contains FF F1 constantly and one sync pattern proves
+ * nothing.
+ */
+long cbr_adts_resync(FILE *f, long off, long end);
+
 #ifdef __cplusplus
 }
 #endif
