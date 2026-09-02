@@ -5514,8 +5514,27 @@ static track_end_t play_file(const char *path)
                         tbl_n = (tbl_n + 1) / 2;
                         tbl_spacing *= 2;
                     }
+                    /*
+                     * NO UINT32_MAX BOUND HERE, BECAUSE `long` IS 32
+                     * BITS ON THIS TARGET.
+                     *
+                     * The check was `at <= (long)UINT32_MAX`, and that
+                     * cast is -1 on a 32-bit long -- so the test was
+                     * `at <= -1`, false for every real offset, and not
+                     * one pair was ever recorded. Fifteen complete
+                     * plays of the file logged `recording a table as it
+                     * plays` and stored nothing, silently, because a
+                     * table of zero entries fails the `> 1` test at the
+                     * other end and says nothing about why.
+                     *
+                     * A `long` cannot exceed UINT32_MAX here, so the
+                     * bound was never a check on this target; it was a
+                     * habit from writing the same guard in mp4seek.c,
+                     * where the value really is 64-bit and the
+                     * comparison really is needed.
+                     */
                     const long at = decoder_stream_pos(dec);
-                    if (at >= 0 && at <= (long)UINT32_MAX &&
+                    if (at >= 0 &&
                         (tbl_n == 0 || (uint32_t)at > tbl_off[tbl_n - 1]) &&
                         tbl_n < REPLAYGAIN_INDEX_MAX) {
                         tbl_off[tbl_n] = (uint32_t)at;
@@ -5852,6 +5871,14 @@ static track_end_t play_file(const char *path)
      * a drag past where the recording stopped would land on the last
      * pair and read as the bar having ignored the press.
      */
+    if (tbl_rec && why == TRACK_ENDED && !seeked && tbl_n <= 1) {
+        /* Loud, because the silent version of this cost fifteen plays.
+         * A recording that reaches the end of a track with nothing in
+         * it is a fault in the recording, not a property of the file. */
+        ESP_LOGW(TAG, "adts: table recording produced %d entries; not stored",
+                 tbl_n);
+    }
+
     if (why == TRACK_ENDED && !seeked && tbl_rec && tbl_n > 1 &&
         rg_holding(path)) {
         s_rg.index.present = true;
