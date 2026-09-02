@@ -986,6 +986,52 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### A rate change and a crossfade cannot both happen (0710)
+
+Second run of the suite, with 0709 applied. No crash, all fourteen
+files handled, MP4 down from 2585 reads to 240. Two things left, and
+one of them is the worst number in any log this project has taken.
+
+**17.8 seconds from press to sound**, at the boundary from a 44.1 kHz
+track to a 22.05 kHz one, ending in `crossfade cut short: the outgoing
+ring emptied`.
+
+The two mechanisms wait for each other. A rate change cannot happen
+while the previous track is still playing out of the other ring -- the
+reconfigure disables the I2S channel -- so the decode loop waits for
+the rings to converge. A crossfade *keeps them from converging*: the
+writer is mixing the outgoing ring against an incoming one that the
+decode loop cannot fill, because the decode loop is in that wait. The
+fade runs its full twelve seconds against silence, the outgoing ring
+drains, and only then does anything play.
+
+Neither is wrong on its own, and mixing two rings at different sample
+rates is meaningless anyway, so the crossfade loses. It is disarmed at
+the drain rather than at the arming block because **that is the
+earliest the incoming rate is known** -- it comes from the first
+decoded frame, which happens after the decision to crossfade was
+already made.
+
+**And the TS probe got 0709's treatment before it was measured rather
+than after.** It walked packets one 188-byte read at a time, which is
+the same shape as the MP4 reader and the same shape the arbiter
+punishes: the board logged `60 reads, 69 KB in 1349 ms held`. Reading a
+window of 64 packets at a time takes the real file's probe from 60
+reads to 18, and a seek costs about eight.
+
+That is now three separate places where a sequential small-read pattern
+looked free on a host and cost real time on the device. The rule worth
+keeping: **if a walk reads one record at a time, it is wrong before it
+is measured.**
+
+##### Still true after this run
+
+`08`'s empty bar (ffmpeg declares VBR), `02` skipped (24-bit), `11`
+reporting 59 s of 60, and the two mp3 opens at ~1.5 s -- which are
+0703's first-play scans, and the one thing in the log that a second
+play of the same file should fix. Nothing in this run replayed one, so
+that is still unmeasured.
+
 #### What the board found that the host could not (0709)
 
 First flash of the whole series, against the `seektest` suite. Two

@@ -91,13 +91,50 @@ static bool pes_pts(const uint8_t *p, int len, uint64_t *pts)
     return true;
 }
 
-/* PTS of the packet at `off`, if it starts a PES packet on the audio
- * PID. Reads one packet. */
-static bool pts_at(FILE *f, const ts_seek_t *ts, long off, uint64_t *pts)
+/*
+ * A window of packets, so a walk is one read per window rather than one
+ * per packet.
+ *
+ * 0709 is the reason this exists. MP4 read one sample at a time and the
+ * host never noticed, because the reads were sequential and the stdio
+ * buffer absorbed them; the board counted 2585 lease acquisitions on
+ * the decode loop and blocked for a second. This walk has exactly the
+ * same shape -- 188 bytes at a time, in order -- so it gets the same
+ * treatment before it is measured rather than after.
+ */
+#define TS_WIN_PACKETS  64
+
+typedef struct {
+    uint8_t *buf;
+    long     at;                /* file offset of buf[0], -1 when empty */
+    long     len;
+} ts_win_t;
+
+/* The packet at `off`, from the window, refilling it if need be. NULL
+ * at the end of the file or on a read error. */
+static const uint8_t *win_packet(FILE *f, const ts_seek_t *ts, ts_win_t *w,
+                                 long off)
 {
-    uint8_t p[TS_PKT];
-    if (off + TS_PKT > ts->file_end) return false;
-    if (!read_at(f, off, p, TS_PKT)) return false;
+    if (off < 0 || off + TS_PKT > ts->file_end) return NULL;
+
+    if (w->at < 0 || off < w->at || off + TS_PKT > w->at + w->len) {
+        long want = (long)TS_WIN_PACKETS * ts->stride;
+        if (off + want > ts->file_end) want = ts->file_end - off;
+        if (want < TS_PKT) return NULL;
+        if (!read_at(f, off, w->buf, (size_t)want)) { w->at = -1; return NULL; }
+        w->at = off;
+        w->len = want;
+    }
+    return w->buf + (off - w->at);
+}
+
+/* PTS of the packet at `off`, if it starts a PES packet on the audio
+ * PID. */
+static bool pts_at(FILE *f, const ts_seek_t *ts, ts_win_t *w, long off,
+                   uint64_t *pts)
+{
+    const uint8_t *p = win_packet(f, ts, w, off);
+    if (!p) return false;
     if (p[0] != 0x47) return false;
     if (pkt_pid(p) != ts->audio_pid) return false;
     if (!pkt_unit_start(p)) return false;
@@ -115,11 +152,11 @@ static bool pts_at(FILE *f, const ts_seek_t *ts, long off, uint64_t *pts)
  * KB -- bounded, and the bisection only does this a handful of times
  * per drag.
  */
-static long scan_pts(FILE *f, const ts_seek_t *ts, long n, long limit,
-                     uint64_t *pts)
+static long scan_pts(FILE *f, const ts_seek_t *ts, ts_win_t *w, long n,
+                     long limit, uint64_t *pts)
 {
     for (long i = n; i < limit; i++) {
-        if (pts_at(f, ts, ts->base + i * ts->stride, pts)) return i;
+        if (pts_at(f, ts, w, ts->base + i * ts->stride, pts)) return i;
     }
     return -1;
 }
@@ -199,6 +236,7 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts)
     const long saved = ftell(f);
     memset(ts, 0, sizeof(*ts));
     bool ok = false;
+    ts_win_t win = { NULL, -1, 0 };
 
     const long end = file_size(f);
     if (end < TS_PKT) goto out;
@@ -219,10 +257,14 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts)
      */
     long limit = packets < 512 ? packets : 512;
     uint16_t pmt_pid = 0xFFFF;
-    uint8_t pkt[TS_PKT];
+
+    win.buf = malloc((size_t)TS_WIN_PACKETS * 204);
+    if (!win.buf) goto out;
+    win.at = -1;
 
     for (long i = 0; i < limit && pmt_pid == 0xFFFF; i++) {
-        if (!read_at(f, ts->base + i * ts->stride, pkt, TS_PKT)) goto out;
+        const uint8_t *pkt = win_packet(f, ts, &win, ts->base + i * ts->stride);
+        if (!pkt) goto out;
         if (pkt[0] != 0x47 || pkt_pid(pkt) != 0) continue;
         int len;
         const uint8_t *sec = psi_section(pkt, &len);
@@ -245,7 +287,8 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts)
     if (pmt_pid == 0xFFFF || !ts->preamble_len) goto out;
 
     for (long i = 0; i < limit && !ts->audio_pid; i++) {
-        if (!read_at(f, ts->base + i * ts->stride, pkt, TS_PKT)) goto out;
+        const uint8_t *pkt = win_packet(f, ts, &win, ts->base + i * ts->stride);
+        if (!pkt) goto out;
         if (pkt[0] != 0x47 || pkt_pid(pkt) != pmt_pid) continue;
         int len;
         const uint8_t *sec = psi_section(pkt, &len);
@@ -288,10 +331,10 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts)
     /* The ends of the timestamp range. The first is near the front; the
      * last is found by walking back from the end, which is bounded
      * because an audio PES header appears every few frames. */
-    if (scan_pts(f, ts, 0, limit, &ts->first_pts) < 0) goto out;
+    if (scan_pts(f, ts, &win, 0, limit, &ts->first_pts) < 0) goto out;
 
     for (long i = packets - 1; i >= 0 && i > packets - 4096; i--) {
-        if (pts_at(f, ts, ts->base + i * ts->stride, &ts->last_pts)) break;
+        if (pts_at(f, ts, &win, ts->base + i * ts->stride, &ts->last_pts)) break;
     }
 
     /*
@@ -310,6 +353,7 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts)
     ok = true;
 
 out:
+    free(win.buf);
     if (saved >= 0) fseek(f, saved, SEEK_SET);
     if (ok) {
         ts->ok = true;
@@ -352,6 +396,9 @@ long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
     uint64_t target = ts->first_pts + (uint64_t)sec * PTS_HZ;
     if (target >= ts->last_pts) target = ts->last_pts;
 
+    ts_win_t win = { malloc((size_t)TS_WIN_PACKETS * 204), -1, 0 };
+    if (!win.buf) return -1;
+
     long lo = 0, hi = packets;
     long best = -1;
     uint64_t best_pts = ts->first_pts;
@@ -365,7 +412,7 @@ long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
         uint64_t pts = 0;
         long scan_to = mid + TS_SCAN_PACKETS;
         if (scan_to > hi) scan_to = hi;
-        const long at = scan_pts(f, ts, mid, scan_to, &pts);
+        const long at = scan_pts(f, ts, &win, mid, scan_to, &pts);
 
         if (at < 0) {
             /* Nothing timestamped in the upper half within reach. */
@@ -387,11 +434,13 @@ long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
          * fell the other side. The start of the audio is the honest
          * answer and the clock is anchored to it, so the two agree. */
         uint64_t pts = 0;
-        best = scan_pts(f, ts, 0, packets < TS_SCAN_PACKETS
-                                  ? packets : TS_SCAN_PACKETS, &pts);
-        if (best < 0) return -1;
+        best = scan_pts(f, ts, &win, 0, packets < TS_SCAN_PACKETS
+                                       ? packets : TS_SCAN_PACKETS, &pts);
+        if (best < 0) { free(win.buf); return -1; }
         best_pts = pts;
     }
+
+    free(win.buf);
 
     if (landed_sec) {
         *landed_sec = (best_pts > ts->first_pts)

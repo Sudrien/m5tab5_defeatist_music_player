@@ -5182,6 +5182,32 @@ static track_end_t play_file(const char *path)
                     s_ring_play != s_ring_fill) {
                     ESP_LOGI(TAG, "rate change to %d Hz; draining first",
                              info.sample_rate);
+                    /*
+                     * AND THE CROSSFADE IS OFF FOR THIS BOUNDARY.
+                     *
+                     * The two cannot both happen. A crossfade mixes the
+                     * two rings, which only means anything if they hold
+                     * the same sample rate; the drain below waits for
+                     * the outgoing ring to empty, and the writer's fade
+                     * is what keeps it from emptying.
+                     *
+                     * Left armed, they wait for each other: the board
+                     * logged a rate change into a 12 s fade taking
+                     * 17.8 s to make a sound, ending in `crossfade cut
+                     * short: the outgoing ring emptied`. The fade was
+                     * mixing against a ring the decode loop could not
+                     * fill, because the decode loop was in this wait.
+                     *
+                     * Disarming here rather than at the arming block
+                     * because that is the earliest the incoming rate is
+                     * known: it comes from the first decoded frame,
+                     * which is after the decision to crossfade was
+                     * made.
+                     */
+                    if (s_xfade_armed) {
+                        ESP_LOGI(TAG, "no crossfade: the rate changes");
+                        s_xfade_armed = false;
+                    }
                     while (s_ring_play != s_ring_fill) {
                         if (s_pending_ready || s_seek_pct >= 0) break;
                         vTaskDelay(pdMS_TO_TICKS(10));
