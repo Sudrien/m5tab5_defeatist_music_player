@@ -155,6 +155,17 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
                  * struct. */
                 if (got < (size_t)n) n = (int)got;
             }
+            /*
+             * One column is not an envelope. 0804 stopped writing them;
+             * this stops the ones already on cards from being drawn.
+             * The player renders whatever width the record declares, so
+             * a single column became a full-height block across a whole
+             * track -- which is not a damaged waveform, it is a
+             * measurement of a decode that failed after one block.
+             */
+            if (n == 1) {
+                n = 0;
+            }
             if (n > 0) {
                 out->waveform.present = true;
                 out->waveform.columns = n;
@@ -174,8 +185,14 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
         /* A different LOUDNESS_VERSION is not corruption -- it is a
          * number measured by different rules. Dropped so the next full
          * play recomputes it, while the waveform above survives. */
+        /* And blocks: a loudness the gate never opened for is not a
+         * quiet track, it is arithmetic over nothing. -46 LUFS asks for
+         * about +32 dB of gain, which is what makes this worth refusing
+         * on the way in as well as on the way out. */
+        const bool gated_something = !cJSON_IsNumber(bl) || bl->valueint > 0;
+
         if (cJSON_IsNumber(ver) && ver->valueint == LOUDNESS_VERSION &&
-            cJSON_IsNumber(lu)) {
+            cJSON_IsNumber(lu) && gated_something) {
             out->loudness.present = true;
             out->loudness.integrated_lufs = (float)lu->valuedouble;
             out->loudness.sample_peak_dbfs = cJSON_IsNumber(pk)

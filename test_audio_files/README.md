@@ -44,7 +44,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 12 mp3-bigart-noxing | ID3v2 with a 600x600 cover ahead of the audio | seeks; art shows |
 | 13 flac-short-3s | a track shorter than the bar is wide | seeks without falling over |
 | 14 wav-mono-22k | mono, half rate | seeks, exact |
-| 15 aac-adts-cbr | cbrseek's ADTS branch, which 08 never reaches | seeks from the first play, within a frame |
+| 15 aac-adts-cbr | cbrseek's ADTS branch, which 08 never reaches; fdk-aac, not ffmpeg | seeks from the first play, within a frame |
 | 16 m4a-aac-fragmented | mp4seek with no `stbl` to read | **plays or refuses; must not seek** |
 | 17 ts-aac-spliced | tsseek's non-monotonic PTS refusal | **no seek, no duration, empty bar** |
 | 18 ogg-vorbis-chained | oggseek and duration.c where the tail is another stream | 20 s on the bar, seeks within it, clamps at the chain |
@@ -64,13 +64,15 @@ mechanism a table recorded from a play that reached the end without a
 seek in it, and 0717 fixed the guard that stopped any pair from ever
 being appended.
 
-So the file needs three complete, uninterrupted plays: one for the
-loudness, one for the length, one for the table. Drag before that and
-the press is correctly ignored. The log says which stage it is at --
-`adts declares VBR`, then `no seek mechanism; recording a table as it
-plays`, then `table recorded, N entries every 2 s`. A drag during any
-of those three plays throws that play's measurement away and it starts
-again next time, which is easy to do by accident when testing.
+So the file needs two complete, uninterrupted plays, not three: the
+loudness, the length and the table are all harvested from the same
+pass, and the second play is the one that uses them. Drag before that and
+the press is correctly ignored. The log says which stage it is at -- `adts declares VBR` and `no seek
+mechanism; recording a table as it plays` on the first, then `table
+recorded, N entries every 2 s` when it ends, and `adts: recorded table,
+N entries every 2 s` at the open of every play after. A drag during the
+recording play throws that play's measurement away and it starts again
+next time, which is easy to do by accident when testing.
 
 **10 does not seek at all.** ALAC has no ADTS framing, so 0707 cannot
 remux it and leaves it on esp_audio_codec's own M4A path -- playing,
@@ -90,22 +92,33 @@ file that still has to live with it.
 
 ## The four added for the gaps
 
-**15 is the only positive one.** `cbrseek.c` has an ADTS branch that
-maps time to offset from a proven-constant frame length, and no file in
-the folder had ever run it -- 08 declares `buffer_fullness = 0x7FF` and
-stops the probe at the first window. No stock ffmpeg build has a CBR AAC
-encoder, so 15 is made instead: every frame zero-padded to the longest
-one and the length field rewritten to match, with the fullness set to
-something other than 0x7FF. The padding sits after the raw data block's
-terminator and ffmpeg decodes the result bit-identically to the file it
-was made from. `build/adts_cbr.py` is the tool and says the rest.
+**15 is the only positive one, and it took two attempts.** `cbrseek.c`
+has an ADTS branch that maps time to offset from a steady frame rate,
+and no file in the folder had ever run it -- 08 declares
+`buffer_fullness = 0x7FF` and stops the probe at the first window,
+which is 08's entire purpose and cannot also be this one's.
 
-The frame length is 660 bytes and that is not arbitrary. `adts_group()`
-reads a 4096-byte window and wants four whole frames inside it, from a
-start that can be up to one frame late -- so the padded length has to
-stay under 819 bytes, which is why 15 is encoded at 48k and not 128k.
-A future encoder change that pushes it over will make the probe fail
-with no obvious reason, so the number is written down here.
+0801 built 15 by padding every frame of an ffmpeg encode to a constant
+length. On the board it decoded one block and died: `Failed to decode
+aac frame, error:30`. The padding is zero bytes sitting after the raw
+data block's terminator, and to an AAC decoder a zero byte is not
+padding, it is `ID_SCE` -- a single channel element. ffmpeg stops at
+the terminator and never sees them, which is how the file passed a
+byte-for-byte decode check on the host and failed on the only decoder
+that mattered.
+
+15 is now fdk-aac output: a real CBR encode with real fullness values.
+It needs a two-minute build from source, which `build/encode.sh`
+documents and skips gracefully without.
+
+**And the file it replaced was hiding a second fault.** A genuine CBR
+encoder holds a constant *average* rate and borrows bits between
+frames, so the real file spread 3.42% across five 4 KB windows and
+`cbrseek.c` refused it -- meaning the branch would have turned away
+every real CBR AAC file ever handed to it, while passing the synthetic
+one whose frames were all the same size by construction. 0804 widened
+the probe window to 16 KB, where the same file spreads 0.28%. The
+resync windows stayed at 4 KB; they only need to find one header.
 
 **16 and 17 are refusals, and a refusal that stops refusing is a
 regression.** 16 keeps its sample tables in `moof` boxes, so
