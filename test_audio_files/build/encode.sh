@@ -114,12 +114,18 @@ cat "$OUT/tmp-a.ts" "$OUT/tmp-b.ts" > "$OUT/17 ts-aac-spliced.ts"
 rm -f "$OUT/tmp-a.ts" "$OUT/tmp-b.ts"
 
 # 18 -- two Ogg streams end to end, which is a legal chained file and
-# what a concatenated podcast looks like. oggseek.c filters by the first
-# stream's serial, so the interesting part is the tail window: the last
-# 64 KB holds no page belonging to the stream being played.
-ffmpeg -loglevel error -y -i landmark.wav -t 30 -c:a libvorbis -q:a 4 \
+# what a concatenated podcast looks like. The tail window holds no page
+# of the stream being played, which is what 0802 fixed.
+#
+# THE HALVES ARE 20 AND 40 SECONDS AND MUST NOT BE EQUAL. They were 30
+# and 30, and duration.c read the granule off the last page in the file
+# without checking whose it was -- which gave 30, the right answer for
+# the wrong reason, and the file certified a bug as passing. Unequal
+# halves make the two answers 20 and 40, and only one of them can be
+# printed.
+ffmpeg -loglevel error -y -i landmark.wav -t 20 -c:a libvorbis -q:a 4 \
     "$OUT/tmp-a.ogg"
-ffmpeg -loglevel error -y -ss 30 -i landmark.wav -c:a libvorbis -q:a 4 \
+ffmpeg -loglevel error -y -ss 20 -i landmark.wav -c:a libvorbis -q:a 4 \
     "$OUT/tmp-b.ogg"
 cat "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg" > "$OUT/18 ogg-vorbis-chained.ogg"
 rm -f "$OUT/tmp-a.ogg" "$OUT/tmp-b.ogg"

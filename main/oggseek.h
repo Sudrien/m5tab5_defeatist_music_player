@@ -52,6 +52,16 @@
  * the start of the file with a granule position of zero are headers,
  * and the first page with a nonzero granule is audio.
  *
+ * CHAINED FILES ARE ONE STREAM AS FAR AS THIS GOES
+ *
+ * An Ogg file may hold several logical streams end to end -- two
+ * podcasts concatenated with `cat` is a legal Ogg. The parser in the
+ * archive compares every page's serial number against the one it
+ * learned at the start and drops the rest, so the player hears the
+ * first stream and then silence. Everything here is bounded to that
+ * same first stream: the extent it occupies is what the bar shows and
+ * what a drag can address.
+ *
  * SPDX-License-Identifier: MIT
  */
 #pragma once
@@ -59,6 +69,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+
+#include "storage_io.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -80,8 +92,9 @@ typedef struct {
     uint32_t rate;              /* granule divisor: 48000 for Opus */
     uint32_t pre_skip;          /* Opus only; 0 for Vorbis */
     long     first_audio;       /* byte offset of the first audio page */
-    long     file_end;
-    uint64_t last_granule;      /* 0 when the tail could not be read */
+    long     file_end;          /* end of THIS logical stream, which is
+                                 * the end of the file unless chained */
+    uint64_t last_granule;      /* 0 when it could not be established */
 
     uint8_t *header;            /* the header pages, verbatim */
     size_t   header_len;
@@ -111,6 +124,23 @@ void ogg_seek_free(ogg_seek_t *os);
  */
 long ogg_seek_find(FILE *f, const ogg_seek_t *os, uint32_t sec,
                    uint32_t *landed_sec);
+
+/*
+ * Where the logical stream carrying `serial` stops, for a file where
+ * the tail does not belong to it.
+ *
+ * `*stream_end` is the offset just past its last page and
+ * `*last_granule` that page's granule position, either of which may be
+ * left alone if it could not be established. Bisects, then walks the
+ * last few pages, so it costs a couple of dozen short reads and is only
+ * worth calling once the cheap tail window has come back foreign.
+ *
+ * duration.c calls this for the same reason ogg_seek_probe() does, with
+ * its own I/O class, which is why it is here rather than static.
+ */
+bool ogg_stream_extent(FILE *f, uint32_t serial, long from, long file_end,
+                       storage_io_class_t cls,
+                       long *stream_end, uint64_t *last_granule);
 
 /* The header pages, for replay after a seek. Returns a pointer into the
  * probe's own storage -- borrowed, valid until ogg_seek_free(). */
