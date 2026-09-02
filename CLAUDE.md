@@ -986,6 +986,52 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### The rate-change drain asked the wrong question (0722)
+
+Reported as Ogg jumping to the end of the track at a mixed-rate
+boundary. The log says it plainly once you know to look:
+
+```
+tail: 3516 KB of this track still to play; holding the screen
+...
+the finished track has played out    <- 111 ms later
+```
+
+**Twenty seconds of audio, discarded.** No `draining first` line
+anywhere near it.
+
+The drain was conditional on `s_ring_play != s_ring_fill`. The ring
+switch happens BELOW that test, after the reconfigure -- so at an
+ordinary boundary the previous track's ring is still both `play` and
+`fill`, the test is false, and `audio_out_set_format()` reconfigures
+the I2S clock with the outgoing track still queued in the ring the
+writer is reading. Reconfiguring disables the channel; that audio never
+sounds.
+
+It has presumably been wrong since the drain was written, and worked
+whenever the indices happened to differ -- which is when the PREVIOUS
+boundary left them that way. That is why it appeared on some
+transitions and not others, and why 0710 and 0712 both found the drain
+behaving as documented when they looked at it.
+
+**The right question is whether anything is still queued for the
+writer**, which is one thing and directly observable:
+`xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0`. Same test for
+entering the drain and for staying in it.
+
+Two things fall out of the fix. 0720's dip now has something to ramp --
+it was arming against a ring that was about to be thrown away, which is
+why the board reported it starting 25 ms after arming instead of
+counting down for fourteen seconds. And the reconfigure now happens
+after silence rather than through the middle of a track, which is what
+the drain was for.
+
+**The pattern worth naming: a condition that is a proxy for the thing
+you mean.** `play != fill` was standing in for "the previous track is
+still sounding", and the two agree often enough to look correct and
+diverge exactly at the boundary being handled. 0718's `!s_playing` for
+"a pause happened" was the same mistake one patch earlier.
+
 #### The title waits for the cover (0721)
 
 At a track change the screen changed twice: the new title against the
