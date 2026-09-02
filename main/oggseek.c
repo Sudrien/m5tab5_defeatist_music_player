@@ -342,14 +342,32 @@ long ogg_seek_find(FILE *f, const ogg_seek_t *os, uint32_t sec,
         const bool usable = !pg.continued && pg.granule != UINT64_MAX;
 
         if (pg.granule != UINT64_MAX && pg.granule <= target) {
+            if (off <= lo) break;
+            lo = off + 1;
+        } else {
+            /*
+             * THE PAGE TO RESUME FROM IS THE ONE THAT CONTAINS THE
+             * TARGET, WHICH IS THE FIRST ONE PAST IT.
+             *
+             * This originally kept the last page at or before the
+             * target, which is wrong by a page and then wrong by
+             * another: a granule is where a page ENDS, so the last page
+             * ending before the target starts two pages back, and the
+             * audio resumes there. On synthetic files with small pages
+             * that was invisible. On real ones it is not -- ffmpeg
+             * writes Vorbis and Opus pages of roughly a second, and
+             * every seek landed two seconds early.
+             *
+             * Taking the first page ending AFTER the target instead
+             * means the audio resumes where the page before it ended,
+             * which is at or before the target and within one page of
+             * it. Half the error, and on the correct side.
+             */
             if (usable) {
                 best = off;
                 best_granule = pg.granule;
                 have_best = true;
             }
-            if (off <= lo) break;
-            lo = off + 1;
-        } else {
             hi = mid;
         }
     }

@@ -192,7 +192,25 @@ static long find_frame(const uint8_t *buf, size_t avail, const flac_seek_t *fs,
         flac_frame_t fr;
         if (!frame_at(buf + i, avail - i, fs, &fr)) continue;
 
-        bool confirmed = true;
+        /*
+         * CONFIRMATION IS REQUIRED, NOT PREFERRED.
+         *
+         * This started as "confirmed unless the next header disagrees",
+         * which quietly accepted any candidate with no following header
+         * in the window -- and the tail of a real file is exactly where
+         * that happens. A 445-byte run of audio data at the end of an
+         * ffmpeg-encoded FLAC passed the CRC-8, had nothing after it to
+         * contradict it, and reported a sample number 45 seconds out;
+         * a drag to the end of the track landed at 13 s.
+         *
+         * So a candidate must be followed by a header whose sample
+         * number is exactly this one's plus its block size. The cost is
+         * that the genuinely last frame in the file can never be
+         * confirmed and is therefore never landed on -- one frame,
+         * 93 ms, at the very end of a track, in the direction of
+         * playing slightly more rather than less.
+         */
+        bool confirmed = false;
         for (size_t j = i + (size_t)fr.len; j + 5 <= avail; j++) {
             if (buf[j] != 0xFF) continue;
             flac_frame_t nx;
