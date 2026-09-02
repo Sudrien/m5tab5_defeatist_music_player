@@ -5710,6 +5710,42 @@ static track_end_t play_file(const char *path)
         ESP_LOGI(TAG, "the seek ran off the end; not a clean boundary");
         clean = false;
     }
+    /*
+     * THE LENGTH, WHEN NOTHING ELSE COULD SAY.
+     *
+     * A raw ADTS file that declares itself VBR has no duration from any
+     * of the four seek mechanisms, so its bar stays a groove for ever.
+     * An uninterrupted play measures it exactly, which is the same
+     * trade the loudness and the envelope make.
+     *
+     * 0712 put this inside the loudness block, which was wrong in a way
+     * that only showed on the SECOND play: `measuring` is false once
+     * the sidecar already holds a loudness, so the file whose length
+     * was still missing was exactly the file that no longer measured
+     * anything. The board played 08 start to finish and logged nothing.
+     *
+     * A length is not a measurement of the audio, it is a count of what
+     * came out, so it belongs here with the other facts about how the
+     * track ended and depends on nothing but that: played to the end,
+     * with no seek in it, on a rate that was known.
+     */
+    if (why == TRACK_ENDED && !seeked && cur_rate && rg_holding(path) &&
+        (!s_rg.format.present || !s_rg.format.sec)) {
+        const uint32_t measured = (uint32_t)(frames_out / cur_rate);
+        if (measured) {
+            s_rg.format.present = true;
+            s_rg.format.sec = measured;
+            /* And the envelope's own span, which took its length from
+             * the same missing number and would otherwise draw 375
+             * columns across `0s`. */
+            if (s_rg.waveform.present && !s_rg.waveform.sec) {
+                s_rg.waveform.sec = measured;
+            }
+            s_rg_dirty = true;
+            ESP_LOGI(TAG, "length from playback: %" PRIu32 " s", measured);
+        }
+    }
+
     s_prev_ended_clean = clean;
 
     /*
@@ -5845,46 +5881,18 @@ static track_end_t play_file(const char *path)
             loudness_envelope(&s_loud, env, &cols);
             if (cols > 0 && rg_holding(path)) {
                 s_rg.waveform.present = true;
-                s_rg.waveform.sec = len_sec;
+                /* len_sec, or the length just measured from this very
+                 * play when the file never stated one -- otherwise the
+                 * envelope written on the first complete play of an
+                 * ADTS file spans `0s` and the record disagrees with
+                 * itself. */
+                s_rg.waveform.sec = len_sec ? len_sec : s_rg.format.sec;
                 s_rg.waveform.columns =
                     (cols > REPLAYGAIN_COLUMNS) ? REPLAYGAIN_COLUMNS : cols;
                 memcpy(s_rg.waveform.level, env,
                        (size_t)s_rg.waveform.columns);
                 s_rg_dirty = true;
                 ESP_LOGI(TAG, "envelope from playback: %d columns", cols);
-            }
-
-            /*
-             * AND THE LENGTH, WHEN NOTHING ELSE COULD SAY.
-             *
-             * A raw ADTS file that declares itself VBR has no duration
-             * from any of the four mechanisms, so its bar stays a
-             * groove for ever -- the board played one twice and read
-             * `0s` from the sidecar both times.
-             *
-             * But an uninterrupted play measured it exactly. This is
-             * the same trade as the loudness and the envelope: one
-             * complete listen buys something the file would not say,
-             * and the record is where it goes. Only when the decoder
-             * had no answer, because a stated length is a fact and this
-             * is an observation.
-             */
-            if (rg_holding(path) && cur_rate &&
-                (!s_rg.format.present || !s_rg.format.sec)) {
-                const uint32_t measured = (uint32_t)(frames_out / cur_rate);
-                if (measured) {
-                    s_rg.format.present = true;
-                    s_rg.format.sec = measured;
-                    /* And the envelope written moments ago, which took
-                     * its span from the same missing number and would
-                     * otherwise draw 375 columns across `0s`. */
-                    if (s_rg.waveform.present && !s_rg.waveform.sec) {
-                        s_rg.waveform.sec = measured;
-                    }
-                    s_rg_dirty = true;
-                    ESP_LOGI(TAG, "length from playback: %" PRIu32 " s",
-                             measured);
-                }
             }
         }
     }

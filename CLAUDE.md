@@ -986,6 +986,38 @@ free on a path already dropping seconds of queued audio -- and it buys
 the property that every seek starts the parser exactly where a fresh
 open would.
 
+#### The length was recorded in the one place it could not run (0714)
+
+0712 added "measure the duration from a complete play" for files that
+never state one, and put it inside the loudness block. That block is
+gated on `measuring`, which is `!known` -- false once the sidecar
+already holds a loudness and an envelope.
+
+So the file whose length was still missing was **exactly the file that
+no longer measured anything.** The board played `08 aac-adts.aac` from
+start to finish with no seek, and logged no `length from playback` line
+at all, because its loudness had been recorded two runs earlier. It
+would have worked precisely once, on a card where that file had never
+been played -- which is not a state anybody debugging it was ever going
+to be in.
+
+A length is not a measurement of the audio. It is a count of what came
+out, so it belongs with the other facts about how the track ended and
+depends on nothing but those: played to the end, no seek in it, a known
+rate. It now sits next to `s_prev_ended_clean`, outside every
+measurement gate.
+
+The envelope's own span is filled from the same number in the same
+pass, so the first complete play of such a file cannot write a waveform
+spanning `0s` next to a format section that knows better.
+
+**The general fault, worth naming because it is subtle:** a conditional
+that is *usually* true is not a place to put something that only
+matters when it is false. `measuring` and "has no duration" look
+correlated -- both are about a file nothing has learned yet -- and they
+are opposites in the case that matters, because one is cleared by
+learning anything at all.
+
 #### RPT: the fourth play order (0713)
 
 `ONE` stops at the end of a track and there was no way to say "play
