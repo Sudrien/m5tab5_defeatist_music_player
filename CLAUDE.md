@@ -4282,6 +4282,17 @@ compiles cleanly against and gets wrong.** 0809 renamed
 `decoder_seek_sec_at()` to `decoder_seek_sec_at_cs()` and
 `mp4_seek_sec()` to `mp4_seek_cs()` for that reason alone.
 
+**A comment is stale from the moment the code under it moves.** 0812
+found `player.c` still telling the reader that seek "is not implemented
+yet -- see README", four patches after 0808 removed the last format that
+could not do it, and pointing at a README that had never described the
+mechanisms it was deferring to. It had also drifted three declarations
+away from `s_seek_pct`, so nothing about its position said what it
+described. 0811 struck three finished entries out of a list; this is the
+same failure in a place no list looks -- and it is worse there, because a
+list is read as a claim about the past while a comment is read as a claim
+about the line beneath it.
+
 ### Still open, and deliberately
 
 - **`mp4_probe()` fails silently.** A dozen `goto out` and one of them

@@ -1968,9 +1968,6 @@ static volatile bool     s_open_chooser;
  * to happen at the top of the next one. */
 static volatile bool     s_open_panel;
 
-/* Set by the UI, consumed by the decode loop. -1 = nothing pending. Seek
- * is not implemented yet -- see README -- so the decode loop currently
- * logs and clears it. */
 /*
  * The gain in effect for the track playing now, and whether there is
  * one. Published rather than fetched: the UI task cannot ask play_file()
@@ -1980,6 +1977,10 @@ static volatile bool     s_rg_measuring = false;
 static volatile bool     s_rg_active = false;
 static volatile float    s_rg_gain_db = 0.0f;
 
+/* Set by the UI, consumed by the decode loop. -1 = nothing pending, and
+ * a percentage otherwise -- the loop turns it into a time and hands that
+ * to whichever mechanism the format has. Every format has one as of
+ * 0808; see the seek section of CLAUDE.md for which five. */
 static volatile int      s_seek_pct = -1;
 
 /*
