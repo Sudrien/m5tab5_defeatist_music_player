@@ -82,6 +82,22 @@ typedef struct {
     uint8_t  chan_cfg;
 
     /*
+     * The sample entry was an encryption wrapper -- 'drms' (FairPlay),
+     * 'enca' (ISO Common Encryption) or 'aavd' (Audible).
+     *
+     * SET WHEN THE PROBE FAILS, AND SURVIVES mp4_free(). Everything
+     * else in this struct describes a file that can be seeked; this one
+     * describes why the file cannot even be played, and the caller
+     * needs it precisely on the path where the rest is torn down. A
+     * successful probe always leaves it false.
+     *
+     * Nothing here decrypts anything. The flag exists so the refusal
+     * can be one clear line at open rather than a decoder error on the
+     * first frame, which is what a listener used to get.
+     */
+    bool     encrypted;
+
+    /*
      * ALAC instead of AAC.
      *
      * There is no header to synthesise for ALAC -- no ADTS equivalent
