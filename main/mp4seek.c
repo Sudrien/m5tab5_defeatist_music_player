@@ -437,7 +437,8 @@ bool mp4_probe(FILE *f, mp4_t *m)
     memset(m, 0, sizeof(*m));
     bool ok = false;
     const char *why = NULL;
-    char whybuf[48];
+    char whybuf[56];
+    bool enc = false;
 
 #define FAIL(r) do { why = (r); goto out; } while (0)
 
@@ -497,10 +498,27 @@ bool mp4_probe(FILE *f, mp4_t *m)
         if (!read_at(f, stsd + 8, b, 8)) FAIL("stsd sample entry would not read");
         const bool is_alac = (memcmp(b + 4, "alac", 4) == 0);
         if (!is_alac && memcmp(b + 4, "mp4a", 4) != 0) {
-            /* The one reason worth its own formatting: 'drms' and
-             * 'enca' here are protected AAC, which is a different
-             * conversation from a container this code does not read,
-             * and the fourcc is what tells them apart. */
+            /*
+             * An encryption wrapper is not "a container this code does
+             * not read". The file will not play by any route, and the
+             * caller is told so here rather than finding out one frame
+             * into the decode.
+             *
+             * 'drms' is FairPlay, 'enca' is ISO Common Encryption, and
+             * 'aavd' is Audible's. All three replace the sample entry
+             * rather than sitting inside it, which is why this is the
+             * check that catches them and why the fourcc is worth
+             * printing for the ones that are none of the above.
+             */
+            if (memcmp(b + 4, "drms", 4) == 0 ||
+                memcmp(b + 4, "enca", 4) == 0 ||
+                memcmp(b + 4, "aavd", 4) == 0) {
+                enc = true;
+                snprintf(whybuf, sizeof(whybuf),
+                         "sample entry is '%c%c%c%c'; the audio is encrypted",
+                         b[4], b[5], b[6], b[7]);
+                FAIL(whybuf);
+            }
             snprintf(whybuf, sizeof(whybuf),
                      "sample entry is '%c%c%c%c', not mp4a or alac",
                      b[4], b[5], b[6], b[7]);
@@ -593,6 +611,9 @@ out:
         ESP_LOGI(TAG, "no sample table: %s; leaving it to the M4A parser",
                  why ? why : "no reason recorded");
         mp4_free(m);
+        /* After the free, because it zeroes the struct and this is the
+         * one field whose whole purpose is to outlive the failure. */
+        m->encrypted = enc;
     }
     return ok;
 }

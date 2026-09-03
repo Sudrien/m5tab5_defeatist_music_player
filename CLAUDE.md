@@ -3031,8 +3031,13 @@ rather than against a board.
   moon button; the panel and the decoder stay up.
 - **exFAT is still a script, not a default.** Both volumes report the same
   "no mountable filesystem" and point at `tools/enable_exfat.sh`.
-- **`.m4a` is a container.** AAC and ALAC inside it work; Apple's
-  protected AAC opens and then fails on the first frame.
+- **`.m4a` is a container.** AAC and ALAC inside it work; encrypted
+  audio does not and cannot. As of 0814 it is refused at open with a
+  line saying so, rather than opening and failing on the first frame:
+  `mp4_probe()` recognises `drms`, `enca` and `aavd` in the sample
+  entry and sets `mp4_t.encrypted`, which is the one field there that
+  survives `mp4_free()`. This is a better error message and nothing
+  more -- there is no key here and there is not going to be one.
 - **Nothing is peak-limited.** The `peaking?` item is still open — note
   that FLAC and WAV arrive at full scale where MP3 rarely did, so
   whatever the ES8388 output stage does on clipping is now easier to

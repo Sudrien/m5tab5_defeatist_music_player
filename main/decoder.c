@@ -570,6 +570,30 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
         type = d->mp4.alac ? ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC
                            : ESP_AUDIO_SIMPLE_DEC_TYPE_AAC;
         d->frame_mode = d->mp4.alac;
+    } else if (d->mp4.encrypted) {
+        /*
+         * REFUSED HERE, NOT ONE FRAME LATER.
+         *
+         * The probe found an encryption wrapper in the sample entry --
+         * FairPlay, Common Encryption or Audible. Nothing downstream
+         * can decrypt it, so the M4A parser would open the file
+         * cleanly, hand over a sample of ciphertext and fail on it,
+         * which reaches the listener as a track that starts and dies.
+         * Every other probe failure falls through to that parser
+         * because the file plays; this one cannot.
+         *
+         * ESP_ERR_NOT_SUPPORTED rather than a decode error, because it
+         * is a fact about the file and not about a frame: retrying,
+         * reseeking or reopening will all do the same thing.
+         */
+        ESP_LOGE(TAG, "%s is encrypted; there is no key here and nothing "
+                      "downstream can play it", k_formats[fmt].name);
+        free(d->inbuf);
+        d->inbuf = NULL;
+        storage_io_close(d->f);
+        d->f = NULL;
+        mp4_free(&d->mp4);
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     /*
