@@ -69,6 +69,8 @@ struct decoder {
     bool folding;       /* the stream is 24-bit and is being folded */
     bool frame_mode;    /* the decoder wants exactly one frame per call
                          * -- ALAC in MP4, framed by the sample table */
+    int  in_cap;        /* allocated size of inbuf: ESP_IN_BUF, or one
+                         * whole sample when framing needs more */
 
     /* Container-probed length, for the backends that cannot report one.
      * Cached rather than recomputed: it seeks the file handle around,
