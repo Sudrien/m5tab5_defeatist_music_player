@@ -204,27 +204,32 @@ static bool parse_asc(const uint8_t *p, size_t n, mp4_t *m)
  * against, so each is checked against what the box can actually hold
  * before anything is reserved.
  */
-static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
+static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m,
+                         const char **why)
 {
     long len;
     uint8_t hdr[16];
 
+/* Every refusal names itself. See the note above mp4_probe(). */
+#define TFAIL(r) do { *why = (r); return false; } while (0)
+
     /* --- stsz --------------------------------------------------- */
     long stsz = find_box(f, stbl, stbl_end, "stsz", &len, 0);
-    if (stsz < 0 || len < 12) return false;
-    if (!read_at(f, stsz, hdr, 12)) return false;
+    if (stsz < 0 || len < 12) TFAIL("no usable stsz box");
+    if (!read_at(f, stsz, hdr, 12)) TFAIL("stsz header would not read");
     const uint32_t uniform = be32(hdr + 4);
     const uint32_t count = be32(hdr + 8);
     if (!count || count > MP4_MAX_SAMPLES) {
-        ESP_LOGI(TAG, "%u samples is outside what is held here", (unsigned)count);
-        return false;
+        TFAIL("sample count is outside what is held here");
     }
-    if (!uniform && (long)(12 + 4 * (uint64_t)count) > len) return false;
+    if (!uniform && (long)(12 + 4 * (uint64_t)count) > len) {
+        TFAIL("stsz is too short for the sample count it states");
+    }
 
     m->count = count;
     m->offset = big_alloc((size_t)count * sizeof(uint32_t));
     m->size = big_alloc((size_t)count * sizeof(uint32_t));
-    if (!m->offset || !m->size) return false;
+    if (!m->offset || !m->size) TFAIL("no memory for the sample table");
 
     if (uniform) {
         for (uint32_t i = 0; i < count; i++) m->size[i] = uniform;
@@ -236,7 +241,7 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
         while (done < count) {
             const uint32_t n = (count - done > 256) ? 256 : (count - done);
             if (!read_at(f, stsz + 12 + 4 * (long)done, buf, (size_t)n * 4)) {
-                return false;
+                TFAIL("stsz entries would not read");
             }
             for (uint32_t i = 0; i < n; i++) m->size[done + i] = be32(buf + 4 * i);
             done += n;
@@ -250,15 +255,15 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
         stco = find_box(f, stbl, stbl_end, "co64", &len, 0);
         co64 = true;
     }
-    if (stco < 0 || len < 8) return false;
-    if (!read_at(f, stco, hdr, 8)) return false;
+    if (stco < 0 || len < 8) TFAIL("no usable stco or co64 box");
+    if (!read_at(f, stco, hdr, 8)) TFAIL("chunk offset header would not read");
     const uint32_t chunks = be32(hdr + 4);
     if (!chunks || (long)(8 + (co64 ? 8 : 4) * (uint64_t)chunks) > len) {
-        return false;
+        TFAIL("chunk offset box is too short for the count it states");
     }
 
     uint32_t *chunk_off = big_alloc((size_t)chunks * sizeof(uint32_t));
-    if (!chunk_off) return false;
+    if (!chunk_off) TFAIL("no memory for the chunk offsets");
     bool ok = true;
     {
         uint8_t buf[1024];
@@ -267,6 +272,7 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
         while (done < chunks && ok) {
             const uint32_t n = (chunks - done > 128) ? 128 : (chunks - done);
             if (!read_at(f, stco + 8 + (long)done * w, buf, (size_t)n * w)) {
+                *why = "chunk offsets would not read";
                 ok = false;
                 break;
             }
@@ -275,7 +281,11 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
                 /* A FAT volume cannot hold a file this large, and a
                  * truncated offset is a read of the wrong bytes rather
                  * than a failure. */
-                if (v > UINT32_MAX) { ok = false; break; }
+                if (v > UINT32_MAX) {
+                    *why = "a chunk offset is past 4 GB";
+                    ok = false;
+                    break;
+                }
                 chunk_off[done + i] = (uint32_t)v;
             }
             done += n;
@@ -284,13 +294,21 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
 
     /* --- stsc, expanded ----------------------------------------- */
     long stsc = ok ? find_box(f, stbl, stbl_end, "stsc", &len, 0) : -1;
-    if (stsc < 0 || len < 8) ok = false;
+    if (ok && (stsc < 0 || len < 8)) {
+        *why = "no usable stsc box";
+        ok = false;
+    }
     uint32_t runs = 0;
     if (ok) {
-        if (!read_at(f, stsc, hdr, 8)) ok = false;
-        else {
+        if (!read_at(f, stsc, hdr, 8)) {
+            *why = "stsc header would not read";
+            ok = false;
+        } else {
             runs = be32(hdr + 4);
-            if (!runs || (long)(8 + 12 * (uint64_t)runs) > len) ok = false;
+            if (!runs || (long)(8 + 12 * (uint64_t)runs) > len) {
+                *why = "stsc is too short for the run count it states";
+                ok = false;
+            }
         }
     }
 
@@ -301,10 +319,18 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
 
         for (uint32_t r = 0; r < runs && ok; r++) {
             uint8_t e[12];
-            if (!read_at(f, stsc + 8 + 12 * (long)r, e, 12)) { ok = false; break; }
+            if (!read_at(f, stsc + 8 + 12 * (long)r, e, 12)) {
+                *why = "an stsc run would not read";
+                ok = false;
+                break;
+            }
             const uint32_t nfirst = be32(e);          /* 1-based chunk */
             const uint32_t nper = be32(e + 4);
-            if (!nfirst || nfirst > chunks || !nper) { ok = false; break; }
+            if (!nfirst || nfirst > chunks || !nper) {
+                *why = "an stsc run names a chunk that is not there";
+                ok = false;
+                break;
+            }
 
             if (have) {
                 for (uint32_t c = first; c < nfirst && sample < m->count; c++) {
@@ -335,29 +361,35 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
         if (sample != m->count) {
             ESP_LOGI(TAG, "sample tables disagree: %u placed of %u",
                      (unsigned)sample, (unsigned)m->count);
+            *why = "the sample tables disagree with each other";
             ok = false;
         }
     }
 
     free(chunk_off);
-    if (!ok) return false;
+    if (!ok) {
+        /* Every path that cleared ok set a reason first, so this stays
+         * NULL only if a new one is added without one. */
+        if (!*why) *why = "the chunk and run tables would not expand";
+        return false;
+    }
 
     /* --- stts --------------------------------------------------- */
     long stts = find_box(f, stbl, stbl_end, "stts", &len, 0);
-    if (stts < 0 || len < 8) return false;
-    if (!read_at(f, stts, hdr, 8)) return false;
+    if (stts < 0 || len < 8) TFAIL("no usable stts box");
+    if (!read_at(f, stts, hdr, 8)) TFAIL("stts header would not read");
     const uint32_t entries = be32(hdr + 4);
     if (!entries || entries > 4096 ||
         (long)(8 + 8 * (uint64_t)entries) > len) {
-        return false;
+        TFAIL("stts run count is outside what is held here");
     }
 
     m->stts_count = malloc((size_t)entries * sizeof(uint32_t));
     m->stts_delta = malloc((size_t)entries * sizeof(uint32_t));
-    if (!m->stts_count || !m->stts_delta) return false;
+    if (!m->stts_count || !m->stts_delta) TFAIL("no memory for the stts runs");
     for (uint32_t i = 0; i < entries; i++) {
         uint8_t e[8];
-        if (!read_at(f, stts + 8 + 8 * (long)i, e, 8)) return false;
+        if (!read_at(f, stts + 8 + 8 * (long)i, e, 8)) TFAIL("an stts run would not read");
         m->stts_count[i] = be32(e);
         m->stts_delta[i] = be32(e + 4);
     }
@@ -370,12 +402,33 @@ static bool build_tables(FILE *f, long stbl, long stbl_end, mp4_t *m)
     }
 
     return true;
+
+#undef TFAIL
 }
 
 /* ------------------------------------------------------------------ */
 /* Probe                                                               */
 /* ------------------------------------------------------------------ */
 
+/*
+ * EVERY REFUSAL NAMES ITSELF.
+ *
+ * A dozen paths out of here used to be a bare `goto out`, and one of
+ * them logged. The failure is not an error -- an unseekable MP4 falls
+ * back to the M4A parser and plays -- but it is the difference between
+ * a file that cannot be seeked and a file this code has a bug about,
+ * and nothing on the outside could tell those apart. File 16, the
+ * fragmented MP4, printed "0 samples is outside what is held here" and
+ * looked diagnosed; it was the one path that happened to log, and it
+ * was not even the reason (a fragmented file has its tables in moof
+ * boxes, so the empty stsz is a symptom).
+ *
+ * One string, set at the point of refusal and logged once at the
+ * bottom, rather than a log call at each site: the sites are in the
+ * middle of a parse where the interesting thing is which check failed,
+ * not what was in the buffer, and a single format string is a lot less
+ * flash than fourteen.
+ */
 bool mp4_probe(FILE *f, mp4_t *m)
 {
     if (!f || !m) return false;
@@ -383,34 +436,40 @@ bool mp4_probe(FILE *f, mp4_t *m)
     const long saved = ftell(f);
     memset(m, 0, sizeof(*m));
     bool ok = false;
+    const char *why = NULL;
+    char whybuf[48];
+
+#define FAIL(r) do { why = (r); goto out; } while (0)
 
     const long end = file_size(f);
-    if (end < 16) goto out;
+    if (end < 16) FAIL("file is too short to hold a box");
 
     long len;
     const long moov = find_box(f, 0, end, "moov", &len, 0);
-    if (moov < 0) goto out;
+    if (moov < 0) FAIL("no moov box");
     const long moov_end = moov + len;
 
     /* One audio track, which is every .m4a. A file with several is a
      * video container and the fallback path can have it. */
     const long trak = find_box(f, moov, moov_end, "trak", &len, 0);
-    if (trak < 0) goto out;
+    if (trak < 0) FAIL("no trak box in moov");
     const long trak_end = trak + len;
 
     const long mdia = find_box(f, trak, trak_end, "mdia", &len, 0);
-    if (mdia < 0) goto out;
+    if (mdia < 0) FAIL("no mdia box in trak");
     const long mdia_end = mdia + len;
 
     const long mdhd = find_box(f, mdia, mdia_end, "mdhd", &len, 0);
-    if (mdhd < 0 || len < 24) goto out;
+    if (mdhd < 0 || len < 24) FAIL("no usable mdhd box");
     {
         uint8_t b[32];
-        if (!read_at(f, mdhd, b, (len < 32 ? (size_t)len : 32))) goto out;
+        if (!read_at(f, mdhd, b, (len < 32 ? (size_t)len : 32))) {
+            FAIL("mdhd would not read");
+        }
         if (b[0] == 1) {
-            if (len < 36) goto out;
+            if (len < 36) FAIL("v1 mdhd is too short");
             uint8_t b1[36];
-            if (!read_at(f, mdhd, b1, 36)) goto out;
+            if (!read_at(f, mdhd, b1, 36)) FAIL("v1 mdhd would not read");
             m->timescale = be32(b1 + 20);
             m->duration = be64(b1 + 24);
         } else {
@@ -418,13 +477,13 @@ bool mp4_probe(FILE *f, mp4_t *m)
             m->duration = be32(b + 16);
         }
     }
-    if (!m->timescale) goto out;
+    if (!m->timescale) FAIL("mdhd states a zero timescale");
 
     const long minf = find_box(f, mdia, mdia_end, "minf", &len, 0);
-    if (minf < 0) goto out;
+    if (minf < 0) FAIL("no minf box in mdia");
     const long minf_end = minf + len;
     const long stbl = find_box(f, minf, minf_end, "stbl", &len, 0);
-    if (stbl < 0) goto out;
+    if (stbl < 0) FAIL("no stbl box in minf");
     const long stbl_end = stbl + len;
 
     /* stsd: four bytes of version/flags, four of entry count, then the
@@ -432,16 +491,20 @@ bool mp4_probe(FILE *f, mp4_t *m)
      * is found by walking from a fixed offset into it: 8 bytes of box
      * header plus 28 of audio sample entry. */
     const long stsd = find_box(f, stbl, stbl_end, "stsd", &len, 0);
-    if (stsd < 0 || len < 16) goto out;
+    if (stsd < 0 || len < 16) FAIL("no usable stsd box");
     {
         uint8_t b[16];
-        if (!read_at(f, stsd + 8, b, 8)) goto out;
+        if (!read_at(f, stsd + 8, b, 8)) FAIL("stsd sample entry would not read");
         const bool is_alac = (memcmp(b + 4, "alac", 4) == 0);
         if (!is_alac && memcmp(b + 4, "mp4a", 4) != 0) {
-            ESP_LOGI(TAG, "sample entry is '%c%c%c%c', not mp4a or alac; "
-                          "leaving it to the M4A parser",
+            /* The one reason worth its own formatting: 'drms' and
+             * 'enca' here are protected AAC, which is a different
+             * conversation from a container this code does not read,
+             * and the fourcc is what tells them apart. */
+            snprintf(whybuf, sizeof(whybuf),
+                     "sample entry is '%c%c%c%c', not mp4a or alac",
                      b[4], b[5], b[6], b[7]);
-            goto out;
+            FAIL(whybuf);
         }
         if (is_alac) {
             /*
@@ -467,14 +530,14 @@ bool mp4_probe(FILE *f, mp4_t *m)
              * to offer second -- so the header is read back in and the
              * offset to the config is stated rather than assumed. */
             if (cookie < 8 || cookie_len < 24 || cookie_len > 128) {
-                ESP_LOGI(TAG, "alac entry has no usable magic cookie; "
-                              "leaving it to the M4A parser");
-                goto out;
+                FAIL("alac entry has no usable magic cookie");
             }
             m->cookie_len = (uint32_t)cookie_len + 8;
             m->cookie = malloc(m->cookie_len);
-            if (!m->cookie) goto out;
-            if (!read_at(f, cookie - 8, m->cookie, m->cookie_len)) goto out;
+            if (!m->cookie) FAIL("no memory for the alac magic cookie");
+            if (!read_at(f, cookie - 8, m->cookie, m->cookie_len)) {
+                FAIL("alac magic cookie would not read");
+            }
             /* 8 of box header, 4 of version and flags, then the
              * 24-byte ALACSpecificConfig: frame length, bit depth,
              * channels, average bit rate, sample rate. */
@@ -496,23 +559,24 @@ bool mp4_probe(FILE *f, mp4_t *m)
         if (m->alac) goto have_config;   /* the cookie is the config */
         const long esds = find_box(f, entry + 8 + 28, entry_end, "esds",
                                    &esds_len, 0);
-        if (esds < 0 || esds_len < 8 || esds_len > 512) goto out;
+        if (esds < 0 || esds_len < 8 || esds_len > 512) {
+            FAIL("no usable esds box in the mp4a entry");
+        }
 
         uint8_t desc[512];
-        if (!read_at(f, esds, desc, (size_t)esds_len)) goto out;
+        if (!read_at(f, esds, desc, (size_t)esds_len)) FAIL("esds would not read");
         if (!parse_asc(desc, (size_t)esds_len, m)) {
-            ESP_LOGI(TAG, "no usable AudioSpecificConfig; "
-                          "leaving it to the M4A parser");
-            goto out;
+            FAIL("no usable AudioSpecificConfig in esds");
         }
     }
 
 have_config:
 
-    if (!build_tables(f, stbl, stbl_end, m)) goto out;
+    if (!build_tables(f, stbl, stbl_end, m, &why)) goto out;
     ok = true;
 
 out:
+#undef FAIL
     if (saved >= 0) fseek(f, saved, SEEK_SET);
     if (ok) {
         m->ok = true;
@@ -523,6 +587,11 @@ out:
                  m->sample_rate, (unsigned)m->channels, m->count,
                  mp4_duration_sec(m));
     } else {
+        /* INFO, not a warning. Landing here is the ordinary outcome for
+         * every MP4 this path is not for, and the caller has a fallback
+         * that plays the file. */
+        ESP_LOGI(TAG, "no sample table: %s; leaving it to the M4A parser",
+                 why ? why : "no reason recorded");
         mp4_free(m);
     }
     return ok;

@@ -4295,9 +4295,14 @@ about the line beneath it.
 
 ### Still open, and deliberately
 
-- **`mp4_probe()` fails silently.** A dozen `goto out` and one of them
-  logs a reason. File 16 (fragmented MP4) prints `0 samples is outside
-  what is held here` by luck rather than design.
+- ~~**`mp4_probe()` fails silently.**~~ Closed by 0813. Every refusal
+  sets a reason string and one line at the bottom prints it. The old
+  behaviour was a dozen bare `goto out` and one logging path, so file
+  16 (fragmented MP4) printed `0 samples is outside what is held here`
+  by luck rather than design -- and that was not even the reason, since
+  a fragmented file keeps its tables in `moof` boxes and the empty
+  `stsz` is downstream of that. It now says `no usable stco or co64
+  box`, which is the check that actually refused it.
 - **The MP3 sidecar index never re-harvests at a finer spacing**, where
   the in-memory one does.
 - **AMR has neither a test file nor a walk.** No stock ffmpeg can
