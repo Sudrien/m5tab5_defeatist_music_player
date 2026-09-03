@@ -76,10 +76,17 @@ resolves:
 
 The header divides esp_audio_codec's decoders into those that "support
 input data of any size" and those that "only support input data with a
-size of one encoded frame". Only the first group works here, because
-`esp_codec_read()` feeds a sliding window from the file rather than
-pre-split frames. That excludes `_RAW_OPUS`, `_ALAC`, `_VORBIS`,
-`_ADPCM`, `_LC3`, `_SBC` and `_G722`.
+size of one encoded frame". The sliding window `esp_codec_read()` feeds
+from the file cannot promise a frame, so the second group is excluded
+from the streamed path: `_RAW_OPUS`, `_ALAC`, `_VORBIS`, `_ADPCM`,
+`_LC3`, `_SBC` and `_G722`.
+
+**`_ALAC` is the exception, since 0808.** The restriction is about
+reading a file as a stream, and an MP4 is not read as a stream here: the
+sample table says where every frame begins and ends, so the frames can
+be handed over one at a time exactly as the decoder asks. The framing
+layer that group is missing is the table. Nothing else in the list has
+one, which is why nothing else moved.
 
 `.opus` and `.ogg` therefore both route to `_OGG`, the container parser,
 which does take arbitrary lengths. That is also the better mapping in
@@ -1627,12 +1634,19 @@ from a different sample.
 
 ##### What it declines, and why that is the design
 
-ALAC, and anything else in an MP4 that is not AAC. There is no ADTS
-framing for ALAC, so those files stay on esp_audio_codec's M4A path
-exactly as they are today: unseekable, working, unchanged. Every reason
-`mp4_probe()` can fail lands there -- a sample entry that is not
-`mp4a`, a missing or unusable `esds`, an escape-coded sample rate ADTS
-cannot express, more than `MP4_MAX_SAMPLES`, an offset past 4 GB.
+Anything in an MP4 that is not AAC or ALAC. Every reason `mp4_probe()`
+can fail lands on esp_audio_codec's M4A path, working and unseekable --
+a sample entry that is neither `mp4a` nor `alac`, a missing or unusable
+`esds`, an escape-coded sample rate ADTS cannot express, more than
+`MP4_MAX_SAMPLES`, an offset past 4 GB.
+
+**ALAC was on that list until 0808 and is not any more.** It has no ADTS
+framing and never will, so it is not remuxed: it is handed to
+`_ALAC` a frame at a time, which that decoder accepts and which only
+the sample table can supply. Same table, same lookup, different decoder
+-- and two further ways back to the fallback, both logged: the magic
+cookie refused, or no room for a buffer the size of the largest
+sample.
 
 Putting the decision in a probe rather than in the extension table is
 what makes that fallback free. The format table still says `.m4a` is
@@ -2969,12 +2983,13 @@ rather than against a board.
 
 - **Seek on non-MP3 works only where the byte rate is provably
   constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  Every format this player decodes is seekable as of 0707, by four
+  Every format this player decodes is seekable as of 0808, by five
   mechanisms: a proven-constant byte rate (WAV, CBR ADTS, AMR), a
   bisection over frame headers, page granules or PES timestamps (FLAC,
-  Ogg, TS), and a sample table read directly with the audio remuxed to
-  ADTS (MP4). The one exception is ALAC in an MP4, which cannot be
-  remuxed and keeps the old unseekable path.
+  Ogg, TS), a sample table with the audio remuxed to ADTS (AAC in MP4),
+  the same table feeding frames straight to the decoder (ALAC in MP4),
+  and a table walked out of the frame headers for a stream that has
+  none of the above (VBR ADTS, 0805). There is no longer an exception.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
@@ -3008,9 +3023,10 @@ rather than against a board.
 
 ### Open, matching the TODO list above
 
-- **Cover art is ID3v2-only.** `albumart_extract()` finds nothing in a
-  FLAC (`PICTURE` metadata block) or an M4A (`covr` atom). Separate
-  parser each; not written.
+- ~~**Cover art is ID3v2-only.**~~ Closed. `covertag.c` dispatches on
+  magic bytes and reads FLAC `METADATA_BLOCK_PICTURE` and M4A `covr` as
+  well. This entry outlived the work by several patches, which is the
+  ordinary failure mode of a list like this one.
 - **Screen sleep** from the TODO list is still just the backlight and the
   moon button; the panel and the decoder stay up.
 - **exFAT is still a script, not a default.** Both volumes report the same
@@ -4175,3 +4191,111 @@ rather than `?` because `?` reads as a character the file actually
 contained. `U+00A0` draws as a space and `U+00AD` is skipped; both are
 handled in `gfx.c`, not baked into the table, because they are rendering
 behaviour rather than glyphs.
+
+## The 0800 series: the seek corpus, and what it found
+
+0800-0810 started as documentation for `test_audio_files/` and turned
+into six real fixes, every one of them found by a file that had never
+been played rather than by reading the code. That is the point of the
+folder and it is the reason this section exists.
+
+### What the corpus is now
+
+Twenty-one files, one minute of the same landmark audio, plus
+`build/encode.sh`, which is the commands that made them. Before 0800
+those commands existed only as the sentence "generated with ffmpeg
+6.1.1" and could not be re-run. Every file rebuilds byte-identical
+except the two Ogg ones, which carry a random serial, file 12, whose
+cover image was not kept, and file 15, which needs an encoder ffmpeg
+does not ship.
+
+### The findings, shortest first
+
+- **A chained Ogg is one stream (0802).** `oggseek.c` read the last
+  granule from a 64 KB window at the end of the FILE, and in a chained
+  file every page there belongs to the second stream. `last_granule`
+  fell out as 0, which is not "no clamp" but a clamp that never fires:
+  a drag past the end set a target no page could reach, so nothing was
+  ever recorded as best and the seek returned the first audio page.
+  Dragging to the right of a chained file restarted the track.
+  `duration.c` had the same window and did not check the serial at all.
+- **24-bit folds, 32-bit does not (0803).** The samples are already in
+  a buffer of ours one call before they belong to anything else, so
+  rounding them to 16 there costs a pass over the frame and changes
+  nothing downstream. 32 stays refused because
+  `esp_audio_simple_dec_info_t` reports a bit count and no way to tell
+  an integer stream from a float one, and folding float as integer is
+  full-scale noise into headphones.
+- **A failed decode is not the end of a track (0804).** `if (n <= 0)
+  break` made an error indistinguishable from end of file, so a stream
+  that died on its first frame counted as a complete uninterrupted
+  play: -46.16 LUFS off zero gated blocks, and a one-column envelope
+  for a sixty second track, written to a sidecar and loaded back on the
+  next run to be drawn as a full-height block. -46 LUFS asks for about
+  +32 dB. Everything written to the card now hangs off ENDED AND
+  DECODED rather than off `why`, which still answers only what to play
+  next.
+- **The ADTS table is walked, not listened to (0805).** Every ADTS
+  header states its own frame length, so the table can be chained out
+  of the headers without decoding anything -- 979 KB in 180 ms on the
+  board, at BACKGROUND, behind the music. It replaces a design that
+  cost one play to learn the table and a second to use it, and that a
+  single drag would throw away. The recording path stays armed
+  underneath as a fallback.
+- **ALAC seeks (0808).** See the MP4 section above. The note that ruled
+  `_ALAC` out was true of a file read as a stream and false of one read
+  through a sample table.
+- **A landing is reported in hundredths (0809).** Every seek report
+  truncated: a landing at 35.94 s printed as 35, and `player.c`
+  re-anchors its position counter from that number, so the truncation
+  was up to a second of error handed to a clock that never corrects
+  itself. Measured over the corpus, MP4 lands within 0.09 s, TS within
+  0.13, Ogg within 0.99. The mechanisms had always been that close.
+
+### Four lessons that cost something
+
+**Verify against the decoder that will run it.** 0801 built a CBR ADTS
+file by padding every frame to a constant length and checked it by
+decoding with ffmpeg, byte for byte, against the source. That check
+passed and meant nothing: the padding is zero bytes after the raw data
+block's terminator, ffmpeg stops at the terminator, and Espressif's
+decoder reads on to the declared frame length and finds `ID_SCE` -- a
+channel element built out of zeros. One block, `error:30`.
+
+**A test whose wrong answer equals its right one is not a test.** File
+18 was two 30-second Ogg streams. The duration bug read the second
+stream's granule, which was also 30, so the file certified the bug as
+passing. Rebuilt as 20 + 40 the two answers became 20 and 40 and only
+one of them could be printed.
+
+**A file built to a probe's assumptions proves nothing about the
+probe.** The padded file passed `cbrseek.c`'s ADTS branch because its
+frames were identical by construction. A real fdk-aac CBR file spread
+3.42% across the 4 KB sample windows and was refused -- so that branch
+would have turned away every genuine CBR AAC file ever handed to it,
+and looked correct while doing it. The window is 16 KB now, where the
+same file spreads 0.28%, because a CBR encoder holds a constant AVERAGE
+rate and borrows bits between frames.
+
+**A change of units that leaves the name alone is a change every caller
+compiles cleanly against and gets wrong.** 0809 renamed
+`decoder_seek_sec_at()` to `decoder_seek_sec_at_cs()` and
+`mp4_seek_sec()` to `mp4_seek_cs()` for that reason alone.
+
+### Still open, and deliberately
+
+- **`mp4_probe()` fails silently.** A dozen `goto out` and one of them
+  logs a reason. File 16 (fragmented MP4) prints `0 samples is outside
+  what is held here` by luck rather than design.
+- **The MP3 sidecar index never re-harvests at a finer spacing**, where
+  the in-memory one does.
+- **AMR has neither a test file nor a walk.** No stock ffmpeg can
+  encode it, and a synthetic file with valid headers and junk payload
+  would test the probe and be useless to listen to, which is the wrong
+  trade for a corpus judged by ear.
+- **`ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC` logs `Not find default parser`**
+  at every open. That is `ALAC` byte-swapped: the layer looks for a
+  parser for the type, there is not one because ALAC has no
+  self-framing format to parse, and with `use_frame_dec` we do not need
+  one. The open succeeds. It is noise from a layer that does not know
+  why we do not need it.
