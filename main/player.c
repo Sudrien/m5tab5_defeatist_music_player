@@ -5278,11 +5278,12 @@ static track_end_t play_file(const char *path)
                 /* See SEEK_NOOP. Everything below runs as if the seek
                  * had succeeded; the decoder is simply never asked. */
                 const esp_err_t sr = ESP_OK;
-                uint32_t landed = target;
+                uint32_t landed_cs = target * 100;
                 ESP_LOGW(TAG, "SEEK_NOOP: not seeking to %" PRIu32 "s", target);
 #else
-                uint32_t landed = target;
-                const esp_err_t sr = decoder_seek_sec_at(dec, target, &landed);
+                uint32_t landed_cs = target * 100;
+                const esp_err_t sr = decoder_seek_sec_at_cs(dec, target,
+                                                            &landed_cs);
 #endif
                 if (sr == ESP_ERR_NOT_SUPPORTED) {
                     ESP_LOGI(TAG, "seek ignored: %s cannot seek", "this backend");
@@ -5334,14 +5335,25 @@ static track_end_t play_file(const char *path)
                      * which is a small error that never corrects
                      * itself.
                      */
-                    frames_out = (uint64_t)landed * (cur_rate ? cur_rate : 1);
+                    /*
+                     * In hundredths, so the anchor is the landing and
+                     * not the second the landing happens to be inside.
+                     * A frame is 23 to 93 ms; a second of rounding here
+                     * is between ten and forty frames of error handed
+                     * to a clock that never corrects itself.
+                     */
+                    frames_out = ((uint64_t)landed_cs
+                                  * (cur_rate ? cur_rate : 1)) / 100;
                     s_frames_out[s_ring_fill] = frames_out;
                     frames_at_seek = frames_out;
                     seeked = true;
-                    s_pos_sec = landed;
-                    if (landed != target) {
-                        ESP_LOGI(TAG, "seek to %" PRIu32 "s (landed %" PRIu32 "s)",
-                                 target, landed);
+                    /* The display is in seconds and rounds to the
+                     * nearest, rather than showing 35 for 35.91. */
+                    s_pos_sec = (landed_cs + 50) / 100;
+                    if (landed_cs != target * 100) {
+                        ESP_LOGI(TAG, "seek to %" PRIu32 "s (landed %" PRIu32
+                                      ".%02" PRIu32 "s)",
+                                 target, landed_cs / 100, landed_cs % 100);
                     } else {
                         ESP_LOGI(TAG, "seek to %" PRIu32 "s", target);
                     }

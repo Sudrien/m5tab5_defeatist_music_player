@@ -89,13 +89,13 @@ bool ts_seek_probe(FILE *f, ts_seek_t *ts);
 uint32_t ts_seek_duration_sec(const ts_seek_t *ts);
 
 /*
- * Offset of the packet to resume from, or -1. `landed_sec` is where
+ * Offset of the packet to resume from, or -1. `landed_cs` is where
  * that packet actually starts, which is at or before the target: the
  * caller anchors its clock to this rather than to the request, for the
- * reason decoder_seek_sec_at() gives.
+ * reason decoder_seek_sec_at_cs() gives.
  */
 long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
-                  uint32_t *landed_sec);
+                  uint32_t *landed_cs);
 
 /* PAT and PMT, for replay after a seek. */
 const uint8_t *ts_seek_preamble(const ts_seek_t *ts, size_t *len);

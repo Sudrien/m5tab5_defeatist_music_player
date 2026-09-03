@@ -255,20 +255,36 @@ uint32_t decoder_duration_sec(decoder_t *d);
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec);
 
 /*
- * As decoder_seek_sec(), but reports where it actually landed.
+ * As decoder_seek_sec(), but reports where it actually landed, in
+ * HUNDREDTHS of a second.
  *
  * Not every mechanism lands on the second asked for. minimp3 decodes
  * forward to the exact sample and always does; the FLAC bisection lands
  * on the frame CONTAINING the target, which starts at or before it; the
- * CBR path lands on the first frame at or after. The differences are
- * small -- a FLAC frame is 93 ms at 4096 samples -- and they are not
- * zero, and the caller re-anchors its position counter from this.
+ * CBR path lands on the first frame at or after. The caller re-anchors
+ * its position counter from this, and anchoring to what was asked for
+ * rather than to what was reached is how a clock comes to disagree with
+ * the audio by the width of a frame and stay that way.
  *
- * Anchoring to what was asked for rather than to what was reached is
- * how a clock comes to disagree with the audio by the width of a frame
- * and stay that way for the rest of the track. `landed` may be NULL.
+ * WHY HUNDREDTHS AND NOT SECONDS.
+ *
+ * A frame is not a second. AAC in MP4 is 23 ms, ALAC 93 ms, FLAC 93 ms
+ * at 4096 samples. Reported in whole seconds, a landing at 35.91 s is
+ * reported as 35 -- so every one of the five ALAC seeks in the 0808
+ * run read a full second early, and the clock was re-anchored a second
+ * behind the audio each time. The error was in the units, not in any
+ * of the mechanisms: they were all landing within a frame of the ask.
+ *
+ * Hundredths rather than milliseconds because a hundredth is finer than
+ * any frame here is long, and it stays exact in a float if this ever
+ * has to cross into one -- 0.01 is not representable, but hundredths of
+ * a second as a COUNT are integers, and a count that small survives
+ * every conversion this player can do to it.
+ *
+ * `landed_cs` may be NULL.
  */
-esp_err_t decoder_seek_sec_at(decoder_t *d, uint32_t sec, uint32_t *landed);
+esp_err_t decoder_seek_sec_at_cs(decoder_t *d, uint32_t sec,
+                                 uint32_t *landed_cs);
 
 /*
  * Can this backend seek at all?

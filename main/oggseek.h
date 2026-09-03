@@ -112,18 +112,18 @@ void ogg_seek_free(ogg_seek_t *os);
 /*
  * Byte offset of the page to resume from, or -1.
  *
- * `landed_sec` is filled with the position that page actually
+ * `landed_cs` is filled with the position that page actually
  * represents, which is at or before the target: a seek lands on a page
  * boundary and pages are tens of milliseconds. The caller anchors its
  * clock to this rather than to what it asked for, for the reason
- * decoder_seek_sec_at() gives.
+ * decoder_seek_sec_at_cs() gives.
  *
  * Only pages that do NOT continue a packet from the previous page are
  * candidates. Landing on a continuation hands the parser the tail of a
  * packet whose head it has never seen.
  */
 long ogg_seek_find(FILE *f, const ogg_seek_t *os, uint32_t sec,
-                   uint32_t *landed_sec);
+                   uint32_t *landed_cs);
 
 /*
  * Where the logical stream carrying `serial` stops, for a file where

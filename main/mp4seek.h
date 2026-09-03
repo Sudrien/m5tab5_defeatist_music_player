@@ -132,11 +132,15 @@ void mp4_free(mp4_t *m);
 uint32_t mp4_duration_sec(const mp4_t *m);
 
 /*
- * Point the reader at a time. Returns the position actually landed on,
- * which is the start of the sample containing `sec` -- exact, because
- * the table says where every sample begins.
+ * Point the reader at a time. Returns where it actually landed, in
+ * HUNDREDTHS of a second -- the start of the sample containing `sec`,
+ * exact, because the table says where every sample begins.
+ *
+ * Hundredths because a sample is not a second: 23 ms for AAC and 93 ms
+ * for ALAC, and a landing reported in whole seconds is a landing
+ * reported as up to a second early. See decoder_seek_sec_at_cs().
  */
-uint32_t mp4_seek_sec(mp4_t *m, uint32_t sec);
+uint32_t mp4_seek_cs(mp4_t *m, uint32_t sec);
 
 /*
  * Copy exactly one sample into `dst`, for the codecs that want a frame

@@ -220,6 +220,12 @@ download is.
 
 ## Known imprecision, so it is not reported as a bug
 
+Since 0809 the log says where a seek landed in hundredths of a second,
+which is what makes the rest of this list checkable rather than folk
+knowledge. Measured on the host over this corpus: MP4 lands within
+0.09 s of the ask, TS within 0.13, and Ogg within 0.99 -- and the
+mechanisms had always been that close. Whole seconds were hiding it.
+
 - **Ogg lands within one page.** ffmpeg writes Vorbis and Opus pages of
   roughly a second, and a page is the smallest thing a granule position
   can address. Early in 06 there is one page covering about two
