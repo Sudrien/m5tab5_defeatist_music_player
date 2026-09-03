@@ -105,9 +105,11 @@ brings the link collision back for whoever clones next but not for you.
 `tools/fetch_vendored.sh` carries the same pins for offline use.
 
 This is the opposite call from `components/fatfs/`, which
-`tools/enable_exfat.sh` writes and which is also not committed -- but
-that one has no pin, because it is patched from whatever IDF you have
-installed.
+`cmake/exfat.cmake` writes -- by running `tools/enable_exfat.sh` at
+configure time, the same way this file fetches -- and which is also not
+committed. But that one has no pin, because it is patched from whatever
+IDF you have installed, which is the thing a pin would have to name and
+cannot.
 
 ## On-screen controls
 
@@ -3021,16 +3023,36 @@ rather than against a board.
   This is the one obligation the project did not previously have. font8x8
   was public domain and nothing had to travel with it.
 
-### Open, matching the TODO list above
+### Open, and things that only look open
+
+The README no longer carries the TODO list this section used to mirror,
+so this is the list. Entries are struck through rather than deleted:
+which of these turned out to be finished, and which turned out never to
+have been a task, is the useful part of a list like this one.
 
 - ~~**Cover art is ID3v2-only.**~~ Closed. `covertag.c` dispatches on
   magic bytes and reads FLAC `METADATA_BLOCK_PICTURE` and M4A `covr` as
   well. This entry outlived the work by several patches, which is the
   ordinary failure mode of a list like this one.
-- **Screen sleep** from the TODO list is still just the backlight and the
-  moon button; the panel and the decoder stay up.
-- **exFAT is still a script, not a default.** Both volumes report the same
-  "no mountable filesystem" and point at `tools/enable_exfat.sh`.
+- ~~**Screen sleep** is still just the backlight.~~ Not open, and not
+  closable either. **The backlight is the ceiling, because touch is the
+  only way back.** `TP_RST` is expander 1 P5 -- the same pin, driven by
+  the same `PI4IOE1_OUT_SET` write, that releases `LCD_RST`. Touch and
+  panel come up together and there is no way to hold one down and keep
+  the other alive. Take the panel down and the wake tap has nothing left
+  to read it, so the device is off rather than asleep. Taking the decoder
+  down is a separate and available thing, but it is called stopping the
+  music, and a listener who wanted that pressed pause. Listing this as
+  pending implied a design nobody had found yet; the wiring is the
+  answer.
+- ~~**exFAT is still a script, not a default.**~~ Closed, and closed some
+  time ago. `cmake/exfat.cmake` runs `tools/enable_exfat.sh --no-clean`
+  at configure time, included from the top-level `CMakeLists.txt` before
+  `project()` so the component exists by the time IDF scans for Kconfig.
+  A fresh clone gets exFAT without knowing the script is there;
+  `TAB5_NO_EXFAT` is the opt-out and `--revert` is the undo. The file
+  that documents that behaviour is the header comment of
+  `cmake/exfat.cmake`, which this list contradicted for several patches.
 - **`.m4a` is a container.** AAC and ALAC inside it work; encrypted
   audio does not and cannot. As of 0814 it is refused at open with a
   line saying so, rather than opening and failing on the first frame:
@@ -3042,6 +3064,17 @@ rather than against a board.
   that FLAC and WAV arrive at full scale where MP3 rarely did, so
   whatever the ES8388 output stage does on clipping is now easier to
   reach.
+
+  **This is not the same as FLAC and WAV missing ReplayGain.** They do
+  not miss it. `loudness.c` measures the decoded int16 block on its way
+  to the ring, which is downstream of every backend, so the measurement
+  never sees a container or an extension and cannot have a per-format
+  gap. `measuring` in `player.c` is `!known` -- whether a sidecar already
+  holds an answer -- and nothing else. A lossless track that plays at a
+  level a lossy one did not is the format being louder, correctly
+  measured, and arriving at an output stage with no limiter after it.
+  Those are two facts about the same track and only the second one is a
+  missing feature.
 
 ### The ffmpeg vs python-script item
 
