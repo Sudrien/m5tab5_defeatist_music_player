@@ -39,7 +39,7 @@ What do you mean no audio over Bluetooth
 - start of track/previous
 - next track
 - screen sleep
-- drag to seek (most formats, some just don't support it)
+- drag to seek. Every format in the list above, by one of five mechanisms depending on what the file gives us to work with.
 - play order button cycles ONE / ALL / RND / RPT - RPT repeats the track it is on
 - screen backlight sleep/wake
 - volume levels on the seek bar. I thought it was cool.
@@ -63,7 +63,6 @@ What do you mean no audio over Bluetooth
 - m3u/m3u8 - playlists are significant potential UI
 - Sleep timer
 - gapless playback is supposedly set up, but I need to get behavior nailed down
-- seek for files that don't have as much provision for it
 
 ## What could not happen with current published code
 - classic BT dongle support
