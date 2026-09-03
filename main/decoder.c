@@ -947,25 +947,31 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
  * frame for. That is one frame -- 23 ms at 44.1 kHz -- and is what
  * seeking into a lossy stream sounds like everywhere.
  */
-static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
+static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
 {
     long off;
     uint8_t preamble[FLAC_PREAMBLE_BYTES];
     size_t plen = 0;
-    uint32_t at_sec = sec;
+    uint32_t at_cs = sec * 100;
 
     if (d->cbr_ok) {
         off = cbr_offset_for_sec(d->f, &d->cbr, sec);
+        /* A byte offset in a constant-rate stream IS a time, so this
+         * one can be read straight back off the answer. */
+        if (off >= 0 && d->cbr.byte_rate && off >= d->cbr.data_start) {
+            at_cs = (uint32_t)((((uint64_t)off - (uint64_t)d->cbr.data_start)
+                                * 100) / d->cbr.byte_rate);
+        }
     } else if (d->flac.ok) {
         uint64_t landed_sample = 0;
         off = flac_seek_find(d->f, &d->flac, sec, &landed_sample);
         if (off >= 0 && d->flac.sample_rate) {
-            at_sec = (uint32_t)(landed_sample / d->flac.sample_rate);
+            at_cs = (uint32_t)((landed_sample * 100) / d->flac.sample_rate);
         }
     } else if (d->ogg.ok) {
-        off = ogg_seek_find(d->f, &d->ogg, sec, &at_sec);
+        off = ogg_seek_find(d->f, &d->ogg, sec, &at_cs);
     } else if (d->ts.ok) {
-        off = ts_seek_find(d->f, &d->ts, sec, &at_sec);
+        off = ts_seek_find(d->f, &d->ts, sec, &at_cs);
     } else if (d->tbl_ok) {
         /*
          * The recorded table. Entries are where the decoder's next byte
@@ -985,7 +991,7 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         long end = 0;
         if (fseek(d->f, 0, SEEK_END) == 0) end = ftell(d->f);
         off = cbr_adts_resync(d->f, (long)d->tbl_off[i], end);
-        if (off >= 0) at_sec = (uint32_t)(d->tbl_frm[i] / rate);
+        if (off >= 0) at_cs = (uint32_t)(((uint64_t)d->tbl_frm[i] * 100) / rate);
     } else if (d->mp4.ok) {
         /*
          * The one seek here that is a lookup rather than a search, and
@@ -996,7 +1002,7 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
          * not from the file position -- so it only has to be a value
          * that is not an error.
          */
-        at_sec = mp4_seek_sec(&d->mp4, sec);
+        at_cs = mp4_seek_cs(&d->mp4, sec);
         off = 0;
     } else {
         return ESP_ERR_NOT_SUPPORTED;
@@ -1023,10 +1029,10 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
      * state to restore and no half-assembled packet to discard.
      */
     if (d->mp4.ok) {
-        if (landed) *landed = at_sec;
-        ESP_LOGI(TAG, "mp4: seek to %" PRIu32 "s, landed %" PRIu32 "s, "
-                      "sample %" PRIu32,
-                 sec, at_sec, d->mp4.cur);
+        if (landed_cs) *landed_cs = at_cs;
+        ESP_LOGI(TAG, "mp4: seek to %" PRIu32 "s, landed %" PRIu32 ".%02" PRIu32
+                      "s, sample %" PRIu32,
+                 sec, at_cs / 100, at_cs % 100, d->mp4.cur);
         return ESP_OK;
     }
 
@@ -1080,14 +1086,14 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed)
         d->in_len = 0;
     }
 
-    if (landed) *landed = at_sec;
+    if (landed_cs) *landed_cs = at_cs;
     ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
-                  "s (+%u B header)",
+                  ".%02" PRIu32 "s (+%u B header)",
              d->cbr_ok ? d->cbr.what
                        : d->flac.ok ? "flac"
                        : d->ogg.ok  ? "ogg"
                        : d->ts.ok   ? "ts" : "adts table",
-             sec, off, at_sec,
+             sec, off, at_cs / 100, at_cs % 100,
              (unsigned)plen);
     return ESP_OK;
 }
@@ -1207,15 +1213,15 @@ bool decoder_can_seek(decoder_t *d)
 
 esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
 {
-    return decoder_seek_sec_at(d, sec, NULL);
+    return decoder_seek_sec_at_cs(d, sec, NULL);
 }
 
-esp_err_t decoder_seek_sec_at(decoder_t *d, uint32_t sec, uint32_t *landed)
+esp_err_t decoder_seek_sec_at_cs(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
 {
     if (!d) return ESP_ERR_NOT_SUPPORTED;
-    if (landed) *landed = sec;
+    if (landed_cs) *landed_cs = sec * 100;
 
-    if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec, landed);
+    if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec, landed_cs);
 
     if (!d->ex.info.hz || !d->ex.info.channels) return ESP_ERR_INVALID_STATE;
 

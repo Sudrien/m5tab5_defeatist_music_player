@@ -549,7 +549,7 @@ uint32_t mp4_duration_sec(const mp4_t *m)
 /* Position                                                            */
 /* ------------------------------------------------------------------ */
 
-uint32_t mp4_seek_sec(mp4_t *m, uint32_t sec)
+uint32_t mp4_seek_cs(mp4_t *m, uint32_t sec)
 {
     if (!m || !m->ok) return 0;
 
@@ -575,7 +575,7 @@ uint32_t mp4_seek_sec(mp4_t *m, uint32_t sec)
      * seeks. Without this a seek backwards would be read as a
      * contiguous run and simply carry on from where it was. */
     m->pos = -1;
-    return (uint32_t)(t / m->timescale);
+    return (uint32_t)((t * 100) / m->timescale);
 }
 
 /* ------------------------------------------------------------------ */

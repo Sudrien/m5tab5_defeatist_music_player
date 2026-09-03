@@ -393,7 +393,7 @@ uint32_t ts_seek_duration_sec(const ts_seek_t *ts)
 #define TS_SCAN_PACKETS  2048
 
 long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
-                  uint32_t *landed_sec)
+                  uint32_t *landed_cs)
 {
     if (!f || !ts || !ts->ok) return -1;
 
@@ -447,9 +447,9 @@ long ts_seek_find(FILE *f, const ts_seek_t *ts, uint32_t sec,
 
     free(win.buf);
 
-    if (landed_sec) {
-        *landed_sec = (best_pts > ts->first_pts)
-                    ? (uint32_t)((best_pts - ts->first_pts) / PTS_HZ) : 0;
+    if (landed_cs) {
+        *landed_cs = (best_pts > ts->first_pts)
+                   ? (uint32_t)(((best_pts - ts->first_pts) * 100) / PTS_HZ) : 0;
     }
     return ts->base + best * ts->stride;
 }

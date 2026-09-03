@@ -456,14 +456,14 @@ static uint64_t granule_of_sec(const ogg_seek_t *os, uint32_t sec)
     return (uint64_t)sec * os->rate + os->pre_skip;
 }
 
-static uint32_t sec_of_granule(const ogg_seek_t *os, uint64_t g)
+static uint32_t cs_of_granule(const ogg_seek_t *os, uint64_t g)
 {
     if (g <= os->pre_skip) return 0;
-    return (uint32_t)((g - os->pre_skip) / os->rate);
+    return (uint32_t)(((g - os->pre_skip) * 100) / os->rate);
 }
 
 long ogg_seek_find(FILE *f, const ogg_seek_t *os, uint32_t sec,
-                   uint32_t *landed_sec)
+                   uint32_t *landed_cs)
 {
     if (!f || !os || !os->ok) return -1;
 
@@ -589,8 +589,8 @@ long ogg_seek_find(FILE *f, const ogg_seek_t *os, uint32_t sec,
      * is visibly wrong on the bar and is not a wrong POSITION -- the
      * clock is anchored to where it landed, so the two agree.
      */
-    if (landed_sec) {
-        *landed_sec = have_best ? sec_of_granule(os, best_granule) : 0;
+    if (landed_cs) {
+        *landed_cs = have_best ? cs_of_granule(os, best_granule) : 0;
     }
     return best;
 }
