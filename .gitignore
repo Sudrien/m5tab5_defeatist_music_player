@@ -24,3 +24,11 @@
 .idea/
 *.swp
 .DS_Store
+
+# texttest host build artefacts
+texttest/texttest
+texttest/*.dSYM/
+
+# python bytecode from tools/
+__pycache__/
+*.pyc

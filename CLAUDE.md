@@ -274,20 +274,34 @@ because the controller needs a moment once reset is released.
 
 ### Sizes are set for 294 PPI
 
-720x1280 on a 5" panel is about 294 PPI, so a 10 px font glyph is 1.7 mm
+720x1280 on a 5" panel is about 294 PPI, so a 12 px font glyph is 1.0 mm
 tall -- unreadable at arm's length. Everything is scaled for that rather
 than left at values that looked right in a 96 PPI mockup: the title is
-ark10 at scale 4 (about 3.4 mm, roughly a phone's body text), album and
-artist at scale 3, the MM:SS digits 20x38, the slider thumbs 16 px radius,
-and the bar itself 560 px.
+ark12 at scale 3 (36 px, about 3.1 mm, roughly a phone's body text),
+album and artist at scale 3, the MM:SS digits 20x38, the slider thumbs
+16 px radius, and the bar itself 560 px.
 
-The font change moved both of those numbers. font8x8 was a 9 px advance
-per glyph and 8 px tall; ark10 is 6 and 10. So text at a given scale is a
-third narrower and a quarter taller than it was: scale 4 now fits
-twenty-nine characters across the panel rather than nineteen, and fewer
-titles bounce. The vertical growth is why `GFX_GLYPH_H(scale)` exists --
-`browser.c` was centring rows with a literal `8 * scale`, which was right
-for the old font and silently four pixels off for this one.
+Two font changes have moved these numbers. font8x8 was a 9 px advance per
+glyph and 8 px tall; ark10 was 6 and 10; ark12 is 7 and 12 for halfwidth
+glyphs and 13 and 12 for fullwidth ones. The vertical growth is why
+`GFX_GLYPH_H(scale)` exists -- `browser.c` was centring rows with a
+literal `8 * scale`, which was right for font8x8 and silently wrong for
+both successors.
+
+**The scale numbers dropped when the cell grew, to hold physical size.**
+The title was ark10 at scale 4 (40 px); it is ark12 at scale 3 (36 px).
+The album-art headline went 6 to 5 (60 px either way, exactly). That is
+the trade the 12 px cut buys: nearly the same millimetres on the panel,
+but each drawn pixel is a 3x3 block rather than 4x4, over a glyph with
+more detail drawn into it in the first place. Everything else already fit
+its box at the taller cell and was left alone -- checked against `ROW_H`
+(88), `PATH_H` (60) and `TAB_H` (96) rather than assumed.
+
+One trap worth naming, because it was live for a few minutes: the marquee
+measures with `gfx_text_w(title, N)` and draws with `gfx_draw_text_clipped(
+..., N, ...)`, and **N has to be the same in both**. Changing the draw
+scale alone leaves the bounce distance computed for a width the string no
+longer has.
 
 If the layout is ever moved again, two things are load-bearing rather than
 aesthetic:
@@ -320,18 +334,122 @@ the frame walker it needs is the one `albumart_extract()` already has --
 version-dependent frame sizes, the padding check, the tag-end bound. A
 second copy is the thing that drifts.
 
-The font is **Ark Pixel Font**, 10px monospaced, as `components/ark10` --
-Basic Latin, Latin-1 Supplement and Latin Extended-A, 351 glyphs. It
-replaced `font8x8`, which was ASCII-only and made every accented artist
-name a row of question marks.
+The font is **Ark Pixel Font**, 12px, as `components/ark12` -- 20,669
+glyphs across Basic Latin, Latin-1 Supplement, Latin Extended-A, Cyrillic,
+Hiragana, Katakana, CJK Symbols and Punctuation, both CJK Unified
+Ideograph blocks in range, and Halfwidth and Fullwidth Forms. It replaced
+`font8x8`, which was ASCII-only and made every accented artist name a row
+of question marks.
 
 It is not vendored the way minimp3 and pngle are, because it cannot be:
 Ark ships one PNG per glyph and builds its font files at release time, so
 there is no single file for `cmake/vendored.cmake` to pin a SHA256
-against. `tools/gen_ark10.py` converts the PNGs to a C table, is run by
+against. `tools/gen_ark12.py` converts the PNGs to a C table, is run by
 hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
+
+### The font is 12px now, and glyphs have their own widths (0900)
+
+Two changes that had to happen together. The table gained fullwidth
+glyphs, and the renderer stopped assuming every glyph was one cell wide.
+
+**Why the pixel size moved at all.** ark10 covered Latin and stopped, and
+the obvious fix -- add Cyrillic and CJK to `RANGES` and regenerate -- does
+not work, for a reason that only shows up if you look at the source. Ark
+ships glyphs in three cuts. `monospaced` is a fixed cell. `common` is the
+same height but double width, which is how CJK is drawn. `proportional`
+has per-glyph widths *and* per-glyph heights. `gen_ark10.py` silently
+dropped anything that was not exactly 5x10, and said so only in a
+diagnostic nobody reads:
+
+    if (w, h) != (GLYPH_W, GLYPH_H):
+        skipped_width.append((cp, w, h))
+        continue
+
+So adding CJK ranges to ark10 would have produced a clean build, a
+correct-looking diff, and zero new glyphs. That filter is also why `©`,
+`®`, `¼`, `½` and `¾` were missing from Latin-1 -- the same problem in
+miniature, already shipping, already written off in a comment.
+
+**Cyrillic is why the size moved and not just the width model.** At 10px
+Ark has no monospaced Cyrillic at all; it exists only in `proportional`,
+16 rows tall with real ascenders and descenders. Cropping that to 10 rows
+was measured rather than guessed: ink spans rows 2..13, and the
+best-placed 10-row window still clips 25 of 153 glyphs. Not padding --
+actual letters. Downscaling is worse, because at 4-6 px stroke widths
+there is no antialiasing to degrade into; a hand-drawn pixel font resists
+resampling by construction.
+
+Ark ships 10, 12 and 16. Counted from the archive rather than assumed:
+
+| | 10px | 12px | 16px |
+| --- | --- | --- | --- |
+| CJK Unified (unique) | 1,076 | 18,299 | 97 |
+| Cyrillic (monospaced) | 0 | 151 | 151 |
+
+12px is simply where this font is finished. 16px regresses hard on CJK --
+crowd-drawn fonts get contributor effort unevenly across sizes, and 16px
+kanji are mostly undrawn. So: 6x12 halfwidth, 12x12 fullwidth.
+
+**The scale numbers came down to compensate**, and the physical size is
+roughly unchanged -- see "Sizes are set for 294 PPI". The win is fidelity,
+not size: 3x3 blocks instead of 4x4, over a glyph with more detail in it.
+
+**What changed in `gfx.c`.** Every function that computed a string width
+as `count * GFX_GLYPH_W(scale)` now sums each glyph's own advance.
+`glyph_for()` returns a `{bits, w}` pair, rows widened from `uint8_t` to
+`uint16_t` to hold 12 columns, and there are two notdef boxes rather than
+one because a narrow box inside a run of fullwidth glyphs misaligns
+everything after it.
+
+`gfx_draw_text_tail()` needed the most work. It used to find its starting
+byte with `tail_at()`, walking the string twice by cell count -- which
+cannot work when cells have different widths. It now decodes once into a
+bounded ring of the last `TAIL_MAX_GLYPHS` (96) glyphs and walks backward
+accumulating real advances. 96 because the narrowest advance in this UI is
+12 px at `LABEL_SCALE` against a 720 px panel, so 60 cells is the ceiling;
+the bound matters because `browser.c` passes paths out of 512-byte
+buffers.
+
+**Nothing outside `gfx.c` needed to change**, which was checked rather
+than hoped: all four uses of `GFX_GLYPH_W` were already inside `gfx.c`,
+and every external caller asks `gfx_text_w()` for a total instead of
+striding.
+
+**Two bugs the work found, both in things that already looked done.**
+`cp_is_wide()` treats `FF00-FFEF` as fullwidth, but `RANGES` never
+included that block -- so fullwidth parentheses, which Japanese taggers
+use constantly, drew a double-wide notdef box in space the renderer had
+correctly reserved. Found by rendering a sampler sheet and looking at it.
+And the marquee measured at scale 4 while the draw moved to 3, which would
+have left the bounce distance computed for a width the string no longer
+had.
+
+**`護` (U+8B77) and `郎` (U+90CE) are still boxes.** They have no glyph in Ark at any size.
+That is a gap in the font, not the table, and there is nothing to
+generate. Expect a few boxes in CJK text rather than none.
+
+**Verification: `texttest/`.** Host-side, ASan + UBSan, compiling the real
+`gfx.c` and the real generated table -- not a reimplementation, for the
+reason `seektest/` exists. 2,265 checks: measured width agrees with drawn
+extent, `max_w` is never overrun, the clip window holds across the whole
+marquee sweep, the tail walk keeps the tail past the ring bound, and
+degenerate input is a no-op. The corpus is real-shaped strings plus
+malformed UTF-8, because a tag can contain anything.
+
+A green suite proves nothing on its own, so four bugs were deliberately
+introduced and each confirmed caught: halfwidth-only `gfx_text_w()` (67
+failures), an off-by-one in the ring index (UBSan null deref), a removed
+clip edge (468), and a dropped advance in the budget check (90). The first
+run also failed for a fifth reason -- a *test* bug, where a hand-picked
+budget was larger than the suffix it asserted on, so the code correctly
+kept more than the test expected. Budgets are derived from the suffix now.
+
+**This is not a flash.** `texttest/` covers layout arithmetic and nothing
+else -- not the DSI panel, not PSRAM, not how any of it looks at 294 PPI.
+Every previous entry in this file that trusted host testing past its reach
+was wrong to.
 
 `id3_text_to_utf8()` replaced `id3_text_to_ascii()`. All four ID3 text
 encodings now convert properly rather than being flattened -- in
@@ -2995,11 +3113,11 @@ rather than against a board.
 - **The marquee is pixel-stepped, not eased.** It starts and stops at full
   speed. Easing needs a curve and a frame counter for a 3 px/frame slide,
   which is more state than the effect is worth.
-- **Non-Latin still shows as boxes**, marquee or not. ark10 stops at
-  Latin Extended-A; a Cyrillic or Japanese title bounces just as legibly
-  and says just as little. Upstream has both, and `RANGES` in
-  `tools/gen_ark10.py` is where they would go -- CJK would be the thing
-  that stops being 4 KB.
+- ~~**Non-Latin still shows as boxes**, marquee or not. ark10 stops at
+  Latin Extended-A.~~ Fixed by the move to ark12; see "The font is 12px
+  now" below. Cyrillic, kana and CJK all render. A few individual CJK
+  codepoints are still boxes because Ark has no glyph for them at any
+  size, which is a gap in the font rather than in the table.
 
 ### Licensing, since you already care about this for exFAT
 
@@ -3009,16 +3127,16 @@ rather than against a board.
   licence. Free, but the grant is limited to Espressif silicon. Fine
   here; worth knowing before this code gets copied somewhere it is not.
 - pngle and miniz are MIT.
-- **Ark Pixel Font is SIL OFL-1.1, and `components/ark10` is therefore
+- **Ark Pixel Font is SIL OFL-1.1, and `components/ark12` is therefore
   OFL-1.1 too, not MIT.** Converting the glyph PNGs into C arrays makes
   those files a Modified Version under OFL section 5, and section 5
   requires Modified Versions to stay under the OFL. This is not a problem
   -- the OFL explicitly allows bundling with software under any licence,
-  and only the font files are bound -- but `components/ark10/LICENSE-OFL`
+  and only the font files are bound -- but `components/ark12/LICENSE-OFL`
   has to ship with any redistribution, including a firmware image, and
   the tables must not be sold on their own. Ark declares no Reserved Font
   Name, so the derivative did not have to be renamed; it is called
-  `ark10` anyway, because it is not the Original Version.
+  `ark12` anyway, because it is not the Original Version.
 
   This is the one obligation the project did not previously have. font8x8
   was public domain and nothing had to travel with it.
@@ -3087,10 +3205,10 @@ get fixed in `decoder.c`.
 
 ## Licensing: the font is not MIT
 
-**`components/ark10/` is SIL OFL-1.1. Everything else in this repository
+**`components/ark12/` is SIL OFL-1.1. Everything else in this repository
 is MIT.**
 
-`components/ark10/ark10.c` and `ark10.h` are generated from
+`components/ark12/ark12.c` and `ark12.h` are generated from
 [Ark Pixel Font](https://github.com/TakWolf/ark-pixel-font) — copyright
 (c) 2021, TakWolf, licensed under the SIL Open Font License, Version 1.1.
 Converting glyph PNGs into C arrays is a format change, not a rewrite, so
@@ -3101,7 +3219,7 @@ do not "clean up" the OFL-1.1 line that is there.
 
 What this actually obliges:
 
-- **`components/ark10/LICENSE-OFL` ships with any redistribution** of
+- **`components/ark12/LICENSE-OFL` ships with any redistribution** of
   those files or of a binary built from them. A flashed firmware image
   counts as distribution. If this project ever grows a release artifact,
   the licence text goes in it.
@@ -3109,10 +3227,10 @@ What this actually obliges:
   explicitly permits bundling with software under any licence, including
   commercial and including MIT, so the rest of the project is unaffected.
 - **No renaming required.** Ark Pixel declares no Reserved Font Name.
-  The component is called `ark10` rather than `ark-pixel-font` anyway,
+  The component is called `ark12` rather than `ark-pixel-font` anyway,
   because it is a subset in a different format and should not be mistaken
   for the Original Version.
-- **Attribution stays in the generated headers.** `tools/gen_ark10.py`
+- **Attribution stays in the generated headers.** `tools/gen_ark12.py`
   writes the copyright and licence notice into every file it emits. If
   you change the templates in that script, keep those blocks.
 
@@ -3131,20 +3249,23 @@ checks a SHA256 per file. The font does not go through that path and
 cannot: Ark ships one PNG per glyph and builds its font files at release
 time, so there is no single file to pin.
 
-So `components/ark10/ark10.{c,h}` are **committed**, and regenerated by
+So `components/ark12/ark12.{c,h}` are **committed**, and regenerated by
 hand with:
 
-    ./tools/gen_ark10.py
+    ./tools/gen_ark12.py
 
 Standard library only, no Pillow. `ARK_COMMIT` at the top of that script
-is the pin; set it to a real commit sha before committing regenerated
-output, and the generated files will record which one they came from.
-Never hand-edit the generated files — the next regeneration silently
-discards the edit.
+is the pin, and it is a real commit sha — the committed table reproduces
+byte for byte from it, which is the only thing that makes committing
+generated output honest. Never hand-edit the generated files; the next
+regeneration silently discards the edit.
 
-To add coverage (Cyrillic, Greek, Vietnamese, CJK), add the block to
-`RANGES` and rerun. Latin-only is currently ~3.7 KB of flash; CJK is the
-range that stops that being true.
+To add coverage, add the block to `RANGES` and rerun — but **read the
+per-range counts the script prints**. A range the font does not draw at
+this pixel size contributes zero glyphs and still produces a clean build,
+which is this script's real failure mode and how the 10px attempt at CJK
+would have gone. The table is currently ~545 KB, nearly all of it CJK
+Unified; dropping `(0x4E00, 0x9FFF)` takes it to about 62 KB.
 
 ## Text is UTF-8 end to end
 
@@ -3158,21 +3279,29 @@ Three things have to agree, and did not before the font swap:
    encodings. Encoding 0 is **Latin-1, not ASCII**: byte 0xE9 must be
    widened to a two-byte `é`, not copied. Copying it is the classic
    silent ID3 bug.
-3. **`gfx.c` decodes UTF-8 to codepoints** and looks them up in ark10.
+3. **`gfx.c` decodes UTF-8 to codepoints** and looks them up in ark12.
    Invalid bytes cost one notdef box each and do not desync the decoder.
 
 If you add a new source of display strings, it has to produce UTF-8.
 
 ## Glyph metrics changed with the font
 
-`font8x8` was 8×8 with a 9 px advance. `ark10` is 5×10 with a 6 px
-advance. Text at a given scale is now **narrower and taller**.
+`font8x8` was 8×8 with a 9 px advance. `ark10` was 5×10 with a 6 px
+advance. **`ark12` has two cells**: 6×12 halfwidth with a 7 px advance,
+and 12×12 fullwidth with a 13 px advance.
 
 - Use `GFX_GLYPH_W(scale)` and `GFX_GLYPH_H(scale)`. A literal `8 *
-  scale` for vertical centring was correct for the old font and is four
-  pixels off for this one.
-- `gfx_text_w()` counts **glyph cells, not bytes**. Do not substitute
-  `strlen()` for it — `"Rós"` is four bytes and three cells.
+  scale` for vertical centring was correct for `font8x8` and is wrong for
+  everything since.
+- **`GFX_GLYPH_W(scale)` is the *halfwidth* advance, not "the width of a
+  glyph".** It is still correct for tab labels, digits and static UI
+  strings, which are Latin by construction. It is *not* correct for
+  anything that can hold a tag or a filename, because those can contain
+  fullwidth glyphs that advance by `GFX_GLYPH_W_FULL(scale)` instead.
+- `gfx_text_w()` sums **per-glyph advances**, not bytes and not a cell
+  count. Do not substitute `strlen()` for it — `"Rós"` is four bytes and
+  three cells — and do not substitute `count * GFX_GLYPH_W(scale)` for it
+  either, which is the newer version of the same mistake.
 - `gfx_draw_char()` takes a `uint32_t` codepoint, not a `char`.
 - `ui.c`'s marquee compares `strlen()` as a change-detection token only.
   That is still fine: it is a token, not a width.

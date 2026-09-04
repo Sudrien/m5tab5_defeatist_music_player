@@ -50,6 +50,9 @@ What do you mean no audio over Bluetooth
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
   - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn off calculation.
+- Titles in your actual alphabet. Latin with all the accents, Cyrillic, Japanese kana, and about 18,000 CJK characters. If your library is tagged in Japanese or Russian it now says so instead of drawing a row of boxes.
+  - A handful of CJK characters still box out. The font just doesn't have them drawn - nothing to fix on this end.
+  - Korean does not work. The font has the letters but not the composed syllables Korean is actually written in, and half of Hangul is worse than none.
 - Reopen last played song on start. Not autoplay.
 - 3 second fade on media pull
 - configurable crossfade
@@ -85,16 +88,16 @@ What do you mean no audio over Bluetooth
   licence. Free, but the grant is limited to Espressif silicon. Fine
   here; worth knowing before this code gets copied somewhere it is not.
 - pngle and miniz are MIT.
-- **Ark Pixel Font is SIL OFL-1.1, and `components/ark10` is therefore
+- **Ark Pixel Font is SIL OFL-1.1, and `components/ark12` is therefore
   OFL-1.1 too, not MIT.** Converting the glyph PNGs into C arrays makes
   those files a Modified Version under OFL section 5, and section 5
   requires Modified Versions to stay under the OFL. This is not a problem
   -- the OFL explicitly allows bundling with software under any licence,
-  and only the font files are bound -- but `components/ark10/LICENSE-OFL`
+  and only the font files are bound -- but `components/ark12/LICENSE-OFL`
   has to ship with any redistribution, including a firmware image, and
   the tables must not be sold on their own. Ark declares no Reserved Font
   Name, so the derivative did not have to be renamed; it is called
-  `ark10` anyway, because it is not the Original Version.
+  `ark12` anyway, because it is not the Original Version.
 
 ## One last insult
 

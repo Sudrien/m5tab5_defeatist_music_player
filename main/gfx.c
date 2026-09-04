@@ -16,7 +16,7 @@
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 
-#include "ark10.h"
+#include "ark12.h"
 
 #include "gfx.h"
 
@@ -346,10 +346,14 @@ void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c)
 
 /*
  * This section used to index font8x8_basic[] with a byte and return
- * early for anything above 127. It now decodes UTF-8 to a codepoint and
- * looks it up in ark10, which covers Latin-1 Supplement and Latin
- * Extended-A -- so "Björk", "Sigur Rós", "Łódź" and "Beyoncé" render as
- * themselves rather than as a row of question marks.
+ * early for anything above 127. It then decoded UTF-8 to a codepoint and
+ * looked it up in ark12 for Latin-1 Supplement and Latin Extended-A, so
+ * "Björk", "Sigur Rós", "Łódź" and "Beyoncé" rendered as themselves
+ * rather than as a row of question marks. ark12 now also carries
+ * Hiragana, Katakana, CJK Symbols and Punctuation and a size-appropriate
+ * subset of CJK Unified Ideographs, at double the cell width -- so a
+ * Japanese or Chinese title stops being a row of identical boxes the
+ * same way an accented one stopped being a row of question marks.
  *
  * The strings arriving here are UTF-8 by construction: albumart.c
  * converts every ID3 text encoding to it, and FatFs is configured to
@@ -357,14 +361,85 @@ void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c)
  * still possible -- a tag can contain anything -- and decodes to one
  * replacement glyph per bad byte rather than being allowed to desync the
  * decoder and eat the rest of the string.
+ *
+ * EVERY GLYPH HAS ITS OWN WIDTH NOW, NOT A CONSTANT ONE.
+ *
+ * Before this, a string's pixel width was glyph_count(s) * a compile-time
+ * constant -- true as long as every glyph in the subset was the same 5px
+ * cell, and it was, because the subset was Latin. It stopped being true
+ * the moment ark12 gained fullwidth glyphs: a title mixing "Vol. 2" and
+ * a kanji is not N cells of one size, it is some cells of one size and
+ * some of another, and no single constant describes it.
+ *
+ * So every function below that used to multiply a glyph count by
+ * GFX_GLYPH_W(scale) now sums each glyph's own advance instead, via
+ * glyph_for()'s w field. That is the entire shape of this change --
+ * nothing outside this file had to move, because nothing outside this
+ * file did its own per-glyph layout math; everything else only ever
+ * asked gfx_text_w() for a total (checked by grepping every caller of
+ * GFX_GLYPH_W before touching this file: all four uses were already
+ * inside gfx.c, and every external caller wanted a sum, not a stride).
  */
 
-/* Drawn for anything the table does not have. A hollow box is the
- * conventional notdef and, unlike '?', does not read as a character the
- * file actually contained. */
-static const uint8_t NOTDEF[ARK10_H] = {
-    0x00, 0x00, 0x0F, 0x09, 0x09, 0x09, 0x09, 0x09, 0x0F, 0x00
+/*
+ * A glyph's bitmap and its width together, because from ark12_glyph()
+ * onward nothing here can assume one without the other any more. bits is
+ * NULL for a character that occupies no cell at all (soft hyphen); w is
+ * meaningless in that case and the caller must not read it, matching
+ * ark12_glyph()'s own contract for a failed lookup.
+ */
+typedef struct {
+    const uint16_t *bits;
+    int w;
+} glyph_t;
+
+/*
+ * Drawn for anything the table does not have. Two of them, not one --
+ * the box has to claim a width, and a narrow box in the middle of a run
+ * of fullwidth glyphs would misalign everything after it as badly as
+ * drawing no box at all. Which one is chosen is decided by cp_is_wide()
+ * below, from the codepoint alone, since a glyph that failed the lookup
+ * has by definition no bitmap of its own to measure.
+ */
+static const uint16_t NOTDEF_HALF[ARK12_H] = {
+    0x000, 0x000, 0x01F, 0x011, 0x011, 0x011, 0x011, 0x011, 0x011, 0x01F,
+    0x000, 0x000
 };
+static const uint16_t NOTDEF_FULL[ARK12_H] = {
+    0x000, 0x000, 0x7FF, 0x401, 0x401, 0x401, 0x401, 0x401, 0x401, 0x7FF,
+    0x000, 0x000
+};
+
+/*
+ * Is a codepoint the kind of thing this font draws fullwidth, for a
+ * codepoint that is NOT in the table -- ark12_glyph() already answers
+ * this correctly for one that is, from the width it was generated with.
+ *
+ * This is not the Unicode East Asian Width property in full, which has
+ * categories this player has no use for (Ambiguous, in particular, is a
+ * whole table of its own and a policy decision, not a fact). It is the
+ * blocks a music library's tags can plausibly contain and that ark12's
+ * RANGES draws fullwidth when it draws them at all: Hangul (in case a
+ * Korean title arrives despite the font having no glyphs for it -- see
+ * tools/gen_ark12.py), Hiragana through CJK Compatibility, the two CJK
+ * Unified Ideograph blocks in range, CJK Compatibility Ideographs, and
+ * the Fullwidth Forms taggers use for fullwidth Latin and punctuation.
+ * Getting this wrong for a codepoint outside ark12's subset costs one
+ * misjudged notdef box, not a crash and not a misdecoded string.
+ */
+static bool cp_is_wide(uint32_t cp)
+{
+    return (cp >= 0x1100  && cp <= 0x115F)  ||  /* Hangul Jamo */
+           (cp >= 0x2E80  && cp <= 0x303E)  ||  /* CJK radicals, symbols & punctuation */
+           (cp >= 0x3041  && cp <= 0x33FF)  ||  /* Hiragana .. CJK Compatibility */
+           (cp >= 0x3400  && cp <= 0x4DBF)  ||  /* CJK Unified Ext-A */
+           (cp >= 0x4E00  && cp <= 0x9FFF)  ||  /* CJK Unified Ideographs */
+           (cp >= 0xA960  && cp <= 0xA97F)  ||  /* Hangul Jamo Extended-A */
+           (cp >= 0xAC00  && cp <= 0xD7A3)  ||  /* Hangul Syllables */
+           (cp >= 0xF900  && cp <= 0xFAFF)  ||  /* CJK Compatibility Ideographs */
+           (cp >= 0xFF00  && cp <= 0xFF60)  ||  /* Fullwidth Forms */
+           (cp >= 0xFFE0  && cp <= 0xFFE6);     /* Fullwidth Signs */
+}
 
 /*
  * Decode one codepoint, advancing *p past it. Returns 0 at end of
@@ -415,48 +490,25 @@ static uint32_t utf8_next(const char **p)
  * Returns NULL for a character that occupies no cell at all (soft
  * hyphen), which the callers skip without advancing x.
  */
-static const uint8_t *glyph_for(uint32_t cp)
+static glyph_t glyph_for(uint32_t cp)
 {
     if (cp == 0x00A0) cp = 0x0020;      /* no-break space draws as space */
-    if (cp == 0x00AD) return NULL;      /* soft hyphen: not a line break here */
+    if (cp == 0x00AD) return (glyph_t){ NULL, 0 };  /* soft hyphen: not a line break here */
 
-    const uint8_t *g = ark10_glyph(cp);
-    return g ? g : NOTDEF;
+    int w;
+    const uint16_t *bits = ark12_glyph(cp, &w);
+    if (bits) return (glyph_t){ bits, w };
+
+    return (glyph_t){ cp_is_wide(cp) ? NOTDEF_FULL : NOTDEF_HALF,
+                       cp_is_wide(cp) ? ARK12_FULL_W : ARK12_HALF_W };
 }
 
-/* Number of glyph cells a UTF-8 string occupies. Not strlen: "Rós" is
- * four bytes and three cells, and every width and truncation decision
- * below wants the second number. */
-static int glyph_count(const char *s)
+static void blit_glyph(const uint16_t *g, int w, int x, int y, int scale, uint16_t c)
 {
-    int n = 0;
-    while (*s) {
-        if (glyph_for(utf8_next(&s))) n++;
-    }
-    return n;
-}
-
-/* Byte offset of the glyph_count()-th cell from the end -- what
- * gfx_draw_text_tail() needs to start drawing partway into a string it
- * cannot index by character. */
-static const char *tail_at(const char *s, int cells_from_end)
-{
-    const char *p = s;
-    const int total = glyph_count(s);
-    int skip = total - cells_from_end;
-    if (skip <= 0) return s;
-    while (skip > 0 && *p) {
-        if (glyph_for(utf8_next(&p))) skip--;
-    }
-    return p;
-}
-
-static void blit_glyph(const uint8_t *g, int x, int y, int scale, uint16_t c)
-{
-    for (int row = 0; row < ARK10_H; row++) {
-        const uint8_t bits = g[row];
-        for (int col = 0; col < ARK10_W; col++) {
-            if (!(bits & (1 << col))) continue;
+    for (int row = 0; row < ARK12_H; row++) {
+        const uint16_t bits = g[row];
+        for (int col = 0; col < w; col++) {
+            if (!(bits & (1u << col))) continue;
             gfx_fill_rect(x + col * scale, y + row * scale, scale, scale, c);
         }
     }
@@ -464,37 +516,37 @@ static void blit_glyph(const uint8_t *g, int x, int y, int scale, uint16_t c)
 
 void gfx_draw_char(int x, int y, uint32_t cp, int scale, uint16_t c)
 {
-    const uint8_t *g = glyph_for(cp);
-    if (g) blit_glyph(g, x, y, scale, c);
+    glyph_t g = glyph_for(cp);
+    if (g.bits) blit_glyph(g.bits, g.w, x, y, scale, c);
 }
 
 void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
                            const char *s, int scale, uint16_t c)
 {
     if (!s || !*s || win_w <= 0) return;
-    const int gw = GFX_GLYPH_W(scale);
     const int win_x1 = win_x + win_w;
 
-    int i = 0;
+    int cx = x;
     uint32_t cp;
     while ((cp = utf8_next(&s)) != 0) {
-        const uint8_t *g = glyph_for(cp);
-        if (!g) continue;
+        glyph_t g = glyph_for(cp);
+        if (!g.bits) continue;
 
-        const int gx = x + i * gw;
-        i++;
+        const int adv = (g.w + 1) * scale;
+        const int gx = cx;
+        cx += adv;
 
         /* Wholly left of the window: keep going, the string runs
          * rightward. Wholly right of it: nothing after this can be
          * visible either, so stop -- a 200 character title otherwise
          * costs 200 glyph draws to show forty. */
-        if (gx + gw <= win_x) continue;
+        if (gx + adv <= win_x) continue;
         if (gx >= win_x1) break;
 
-        for (int row = 0; row < ARK10_H; row++) {
-            const uint8_t bits = g[row];
-            for (int col = 0; col < ARK10_W; col++) {
-                if (!(bits & (1 << col))) continue;
+        for (int row = 0; row < ARK12_H; row++) {
+            const uint16_t bits = g.bits[row];
+            for (int col = 0; col < g.w; col++) {
+                if (!(bits & (1u << col))) continue;
                 int px = gx + col * scale;
                 int pw = scale;
                 /* Clip the run rather than the glyph. A glyph half out of
@@ -512,69 +564,139 @@ void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
 int gfx_text_w(const char *s, int scale)
 {
     if (!s) return 0;
-    return glyph_count(s) * GFX_GLYPH_W(scale);
+    int w = 0;
+    uint32_t cp;
+    while ((cp = utf8_next(&s)) != 0) {
+        glyph_t g = glyph_for(cp);
+        if (!g.bits) continue;
+        w += (g.w + 1) * scale;
+    }
+    return w;
 }
 
 void gfx_draw_text(int x, int y, const char *s, int scale, int max_w, uint16_t c)
 {
-    if (!s || !*s) return;
-    const int gw = GFX_GLYPH_W(scale);
-    const int room = max_w / gw;
-    const int len = glyph_count(s);
+    if (!s || !*s || max_w <= 0) return;
 
-    if (len <= room) {
-        int i = 0;
+    if (gfx_text_w(s, scale) <= max_w) {
+        int cx = x;
         uint32_t cp;
         while ((cp = utf8_next(&s)) != 0) {
-            const uint8_t *g = glyph_for(cp);
-            if (!g) continue;
-            blit_glyph(g, x + i * gw, y, scale, c);
-            i++;
+            glyph_t g = glyph_for(cp);
+            if (!g.bits) continue;
+            blit_glyph(g.bits, g.w, cx, y, scale, c);
+            cx += (g.w + 1) * scale;
         }
         return;
     }
-    if (room < 4) return;
 
-    int i = 0;
+    /* Doesn't fit as-is: draw what fits ahead of a three-dot ellipsis.
+     * The dots are always Latin regardless of the string's own script,
+     * so their width is the narrow advance -- GFX_GLYPH_W, not a
+     * per-glyph one -- and that does not change with what surrounds
+     * them.
+     *
+     * The bail-out below is checked against that same narrow advance,
+     * same as the original "room < 4" guard was: it is a check that
+     * *something* plus the dots can fit, not a guarantee that the
+     * specific next glyph will, because a fullwidth glyph can still lose
+     * that comparison once real widths are walked below. That leaves the
+     * ellipsis drawn on its own in the rare case where budget admits a
+     * narrow glyph but the string's last-fitting candidate is fullwidth
+     * -- three dots and nothing else is still a more honest answer than
+     * silently dropping the ellipsis or overrunning max_w. */
+    const int dot_adv = GFX_GLYPH_W(scale);
+    const int dots_w = 3 * dot_adv;
+    if (max_w < dots_w + dot_adv) return;
+
+    const int budget = max_w - dots_w;
+    int cx = x, used = 0;
     uint32_t cp;
-    while (i < room - 3 && (cp = utf8_next(&s)) != 0) {
-        const uint8_t *g = glyph_for(cp);
-        if (!g) continue;
-        blit_glyph(g, x + i * gw, y, scale, c);
-        i++;
+    while ((cp = utf8_next(&s)) != 0) {
+        glyph_t g = glyph_for(cp);
+        if (!g.bits) continue;
+        const int adv = (g.w + 1) * scale;
+        if (used + adv > budget) break;
+        blit_glyph(g.bits, g.w, cx, y, scale, c);
+        cx += adv;
+        used += adv;
     }
-    for (; i < room; i++) gfx_draw_char(x + i * gw, y, '.', scale, c);
+    for (int i = 0; i < 3; i++) {
+        gfx_draw_char(cx, y, '.', scale, c);
+        cx += dot_adv;
+    }
 }
+
+/* How many glyphs gfx_draw_text_tail() ever needs to remember at once --
+ * bounded independent of the string's length, which matters because the
+ * caller here includes browser.c's path row and a path can run to
+ * hundreds of bytes (storage_join_path()'s buffers are 512).
+ *
+ * The bound: the narrowest advance anywhere in this UI is GFX_GLYPH_W at
+ * LABEL_SCALE (2), 12 px, and the panel is 720 px, so at most 60 cells
+ * could ever be visible regardless of scale or script. 96 leaves margin
+ * without being tuned to one caller's constants. Nothing above this
+ * count is ever held -- see the ring buffer below -- so a long path
+ * costs one pass over its bytes and a fixed 96-entry stack array, not
+ * memory proportional to its length. */
+#define TAIL_MAX_GLYPHS  (96)
 
 /* Keeps the tail. A truncated path with the head kept reads "/sd/Music/Th"
  * for every directory on the card; with the tail kept it reads
  * "...st Album", which is the part that says where you are. */
 void gfx_draw_text_tail(int x, int y, const char *s, int scale, int max_w, uint16_t c)
 {
-    if (!s || !*s) return;
-    const int gw = GFX_GLYPH_W(scale);
-    const int room = max_w / gw;
-    const int len = glyph_count(s);
+    if (!s || !*s || max_w <= 0) return;
 
-    if (len <= room) {
+    if (gfx_text_w(s, scale) <= max_w) {
         gfx_draw_text(x, y, s, scale, max_w, c);
         return;
     }
-    if (room < 4) return;
 
-    for (int i = 0; i < 3; i++) gfx_draw_char(x + i * gw, y, '.', scale, c);
+    const int dot_adv = GFX_GLYPH_W(scale);
+    const int dots_w = 3 * dot_adv;
+    if (max_w < dots_w + dot_adv) return;
+    const int budget = max_w - dots_w;
 
-    /* Starting partway into a UTF-8 string means finding the boundary
-     * first; s + len - n is a byte offset and would land in the middle
-     * of a multibyte sequence, which is how a truncated path acquires a
-     * replacement box at its left edge. */
-    const char *p = tail_at(s, room - 3);
-    int i = 3;
+    /* UTF-8 has no shortcut for walking a string backward, so it is
+     * decoded once, forward, into a ring of the last TAIL_MAX_GLYPHS
+     * glyphs seen -- a safe superset of any tail that could actually fit
+     * in budget, per the constant's own comment. head is the index the
+     * *next* write would land on, which after at least one wrap is also
+     * the oldest surviving entry -- ordinary ring-buffer bookkeeping. */
+    struct { glyph_t g; int adv; } ring[TAIL_MAX_GLYPHS];
+    int n = 0, head = 0;
     uint32_t cp;
-    while (i < room && (cp = utf8_next(&p)) != 0) {
-        const uint8_t *g = glyph_for(cp);
-        if (!g) continue;
-        blit_glyph(g, x + i * gw, y, scale, c);
-        i++;
+    while ((cp = utf8_next(&s)) != 0) {
+        glyph_t g = glyph_for(cp);
+        if (!g.bits) continue;
+        ring[head].g = g;
+        ring[head].adv = (g.w + 1) * scale;
+        head = (head + 1) % TAIL_MAX_GLYPHS;
+        if (n < TAIL_MAX_GLYPHS) n++;
+    }
+
+    /* Walk newest-to-oldest accumulating width until the next entry
+     * would exceed budget; keep counts how many trailing glyphs survive
+     * that walk, which is exactly the tail this function exists to
+     * draw. */
+    int acc = 0, keep = 0;
+    for (int i = 0; i < n; i++) {
+        const int idx = (head - 1 - i + TAIL_MAX_GLYPHS) % TAIL_MAX_GLYPHS;
+        if (acc + ring[idx].adv > budget) break;
+        acc += ring[idx].adv;
+        keep++;
+    }
+
+    int cx = x;
+    for (int i = 0; i < 3; i++) { gfx_draw_char(cx, y, '.', scale, c); cx += dot_adv; }
+
+    /* keep-1 is the oldest of the retained glyphs (leftmost once drawn)
+     * and 0 is the newest (the string's actual last character), so
+     * walking that direction draws left to right. */
+    for (int i = keep - 1; i >= 0; i--) {
+        const int idx = (head - 1 - i + TAIL_MAX_GLYPHS) % TAIL_MAX_GLYPHS;
+        blit_glyph(ring[idx].g.bits, ring[idx].g.w, cx, y, scale, c);
+        cx += ring[idx].adv;
     }
 }

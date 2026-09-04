@@ -845,7 +845,7 @@ void ui_clear_art(void)
  * block that grows downward from a fixed top drifts off centre as it
  * does.
  */
-#define ART_INFO_HEAD_SCALE (6)
+#define ART_INFO_HEAD_SCALE (5)
 #define ART_INFO_BODY_SCALE (3)
 #define ART_INFO_GAP        (18)
 
@@ -1108,7 +1108,7 @@ void ui_draw(const ui_state_t *st)
      * track, the record it is on, the person who made the record.
      */
     const char *title = st->title ? st->title : "";
-    const int title_w = gfx_text_w(title, 4);
+    const int title_w = gfx_text_w(title, 3);
     const int win_w = s_w - 2 * TEXT_X;
     const int over = title_w - win_w;
     const int len = (int)strlen(title);
@@ -1126,7 +1126,7 @@ void ui_draw(const ui_state_t *st)
     marquee_step(title, over);
 
     gfx_draw_text_clipped(TEXT_X - s_marq_off, s_bar_top + TITLE_Y,
-                          TEXT_X, win_w, title, 4, C_THUMB);
+                          TEXT_X, win_w, title, 3, C_THUMB);
 
     if (st->album && *st->album) {
         gfx_draw_text(TEXT_X, s_bar_top + ALBUM_Y, st->album, 3, win_w, C_ALBUM);

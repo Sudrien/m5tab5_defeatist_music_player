@@ -24,7 +24,7 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
 
-#include "ark10.h"
+#include "ark12.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -104,21 +104,39 @@ void gfx_draw_time_dashes(int x, int y, uint16_t c);
 void gfx_draw_pct_centred(int cx, int y, int pct, uint16_t c);
 
 /*
- * ark10, integer-scaled. One column of gap per glyph, as font8x8 had.
+ * ark12, integer-scaled. One column of gap per glyph, as font8x8 had --
+ * and, since the font gained fullwidth glyphs, one column of gap after
+ * those too, not two. A CJK glyph is already visually denser than a
+ * Latin one at the same cell width; doubling its gap as well would make
+ * mixed-script text read as unevenly spaced rather than just wider where
+ * it needs to be.
  *
- * Ark's monospaced halfwidth advance is 5, not 6 -- the glyphs are drawn
- * with their own right bearing inside the cell. The extra column is here
- * anyway because a handful of them do not have it: the tilde on U+00F1
- * and the ogonek on U+0118 reach the fifth column, and at scale 3 a
- * n-tilde touching the next letter is exactly the kind of thing that
- * reads as a rendering bug rather than as a typeface.
+ * Ark's monospaced halfwidth cell is 6 wide at this size and the glyphs
+ * are drawn with their own right bearing inside it, so most of them do
+ * not need the gap column. It is here anyway because a handful reach the
+ * full cell -- the tilde on U+00F1 and the ogonek on U+0118 among them --
+ * and at scale 3 an n-tilde touching the next letter is exactly the kind
+ * of thing that reads as a rendering bug rather than as a typeface.
+ *
+ * GFX_GLYPH_W is the narrow advance -- what it always meant, and still
+ * what every current caller wants, because every current caller (tab
+ * labels, digits, static UI strings) is Latin-only. It is not a safe
+ * stand-in for "the width of one glyph" any more: a title drawn through
+ * gfx_draw_text() or gfx_draw_text_clipped() can now contain fullwidth
+ * glyphs, which advance by GFX_GLYPH_W_FULL instead, and gfx_text_w()
+ * accounts for the mix correctly. Nothing outside gfx.c currently does
+ * its own per-glyph layout math -- it only asks gfx_text_w() for a
+ * total -- and that is what keeps this a one-file change.
  *
  * GFX_GLYPH_H exists because callers were centring text with a literal
- * `8 * scale`. The glyph is 10 tall now. Anything vertical that still
- * says 8 is a layout bug waiting for a European filename.
+ * `8 * scale`. The glyph is 12 tall now, both widths. Anything vertical
+ * that still says 8 -- or 10, from the previous font size -- is a layout
+ * bug waiting for a European filename; anything that assumes a fixed
+ * width per character is one waiting for a Japanese one.
  */
-#define GFX_GLYPH_W(scale)  (ARK10_W * (scale) + (scale))
-#define GFX_GLYPH_H(scale)  (ARK10_H * (scale))
+#define GFX_GLYPH_W(scale)       (ARK12_HALF_W * (scale) + (scale))
+#define GFX_GLYPH_W_FULL(scale)  (ARK12_FULL_W * (scale) + (scale))
+#define GFX_GLYPH_H(scale)       (ARK12_H * (scale))
 
 /* Takes a Unicode codepoint, not a byte -- the strings the other
  * functions here walk are UTF-8, and a char cannot name 'ł'. */
@@ -145,8 +163,11 @@ void gfx_draw_text_tail(int x, int y, const char *s, int scale, int max_w, uint1
 void gfx_draw_text_clipped(int x, int y, int win_x, int win_w,
                            const char *s, int scale, uint16_t c);
 
-/* Pixel width the string would occupy unclipped. Counts glyph cells,
- * not bytes: a UTF-8 string is narrower than strlen() suggests. */
+/* Pixel width the string would occupy unclipped. Sums each glyph's own
+ * advance, not bytes and not a fixed cell count: a UTF-8 string is
+ * narrower than strlen() suggests, and a string mixing Latin and CJK-
+ * adjacent glyphs is not uniform cells even once decoded -- a fullwidth
+ * glyph costs roughly twice what a halfwidth one does. */
 int gfx_text_w(const char *s, int scale);
 
 #ifdef __cplusplus
