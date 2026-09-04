@@ -23,8 +23,8 @@
 set(MINIMP3_COMMIT ea99364f61c14656440e8d77e9c233ccf3124633)
 set(PNGLE_COMMIT   b1c68193f1d3f8642b3e0e095d457a828038e6fb)
 
-# The font is no longer fetched here. components/ark10 is generated from
-# Ark Pixel Font by tools/gen_ark10.py and committed, because Ark ships
+# The font is no longer fetched here. components/ark12 is generated from
+# Ark Pixel Font by tools/gen_ark12.py and committed, because Ark ships
 # one PNG per glyph rather than a header -- there is no single file to
 # pin, and pulling a 17 MB archive on every fresh configure to extract
 # 350 of them is a worse trade than 4 KB in git. The generated header

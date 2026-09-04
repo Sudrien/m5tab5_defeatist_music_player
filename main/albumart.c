@@ -216,7 +216,7 @@ static size_t utf8_put(char *out, size_t o, size_t out_len, uint32_t cp)
  * The first byte is the encoding: 0 latin1, 1 UTF-16 with BOM, 2 UTF-16BE,
  * 3 UTF-8. This used to flatten all four to ASCII and replace everything
  * above 0x7F with '?', because the font was ASCII. The font is now
- * ark10, which has Latin-1 Supplement and Latin Extended-A, so the
+ * ark12, which has Latin-1 Supplement and Latin Extended-A, so the
  * flattening is gone and each encoding is converted properly instead.
  *
  * Note that encoding 0 is Latin-1, not ASCII and not UTF-8: byte 0xE9 in

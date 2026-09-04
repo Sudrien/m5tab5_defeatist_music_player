@@ -42,6 +42,13 @@ jobs:
         id: ver
         run: echo "name=${{ github.event.inputs.git_ref || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
+      # Before the firmware build, not after: this needs no ESP-IDF and
+      # takes seconds, so a layout regression should fail here rather
+      # than fifteen minutes later. It does not replace a flash -- see
+      # texttest/README.md -- it only covers arithmetic.
+      - name: Host text-layout tests
+        run: make -C texttest
+
       - name: Install ESP-IDF
         uses: espressif/install-esp-idf-action@v1
         with:
