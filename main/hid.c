@@ -454,25 +454,82 @@ static void hid_poll_task(void *arg)
 /*
  * Ask the interface for its report descriptor and say what is in it.
  *
- * Synchronous, on a control transfer of our own, at claim time -- before
- * the polling task exists, so nothing is racing it and a device that
- * takes its time costs a slow enumeration and nothing else.
+ * Synchronous from the caller's point of view, on a control transfer of
+ * our own, at claim time -- before the polling task exists, so nothing
+ * is racing it and a device that takes its time costs a slow enumeration
+ * and nothing else.
  *
  * Returns false when the descriptor cannot be had, which is not an error
  * and is the case the fallback exists for: the headset remote stalls EP0
  * for exactly this request. The caller then classifies by protocol
  * alone.
+ *
+ * THE CONTEXT IS ON THE HEAP AND HAS TWO OWNERS. It used to be a local,
+ * with the transfer freed and the semaphore deleted on the way out of
+ * this function, and that was a boot loop waiting for a slow device.
+ *
+ * A stall is not the only way this request fails. The device can also
+ * simply never answer, and then the wait below times out with the URB
+ * still in flight -- at which point the old code deleted the semaphore,
+ * freed the transfer, and returned, leaving `t->context` pointing at a
+ * dead stack frame. When the transfer finally completed, the host
+ * dispatched ctrl_cb() from usb_host_client_handle_events() and it gave
+ * a deleted semaphore:
+ *
+ *   assert failed: xQueueGenericSend queue.c:936 (pxQueue)
+ *   #4 usb_host_client_handle_events
+ *   #5 client_task at hid.c
+ *
+ * It reproduced only with the device already plugged in at boot, where
+ * enumeration lands on top of the SD mount and the first cover prefetch
+ * and EP0 does not answer inside a second -- so it was a boot loop on
+ * exactly the setup somebody would call normal use, and a clean run on
+ * the setup somebody would call testing.
+ *
+ * Freeing an in-flight transfer is its own violation, and would be wrong
+ * here even if nothing read the context afterwards.
+ *
+ * So: whoever finishes last cleans up. The abandoned flag is set under a
+ * critical section and read under one, because the completion arrives on
+ * the client task and the timeout happens on whichever task is claiming.
  */
 #define HID_DESC_TYPE_REPORT    (0x22)
 #define HID_REPORT_DESC_MAX     (512)
 
 typedef struct {
     SemaphoreHandle_t done;
+    usb_transfer_t   *transfer;
+    bool              abandoned;   /* the waiter gave up; cb owns the free */
 } ctrl_ctx_t;
+
+static portMUX_TYPE s_ctrl_lock = portMUX_INITIALIZER_UNLOCKED;
+
+/* Everything the pair allocates, released in one place so neither owner
+ * has to remember the list. */
+static void ctrl_ctx_free(ctrl_ctx_t *c)
+{
+    if (c->transfer) usb_host_transfer_free(c->transfer);
+    if (c->done)     vSemaphoreDelete(c->done);
+    free(c);
+}
 
 static void ctrl_cb(usb_transfer_t *t)
 {
     ctrl_ctx_t *c = (ctrl_ctx_t *)t->context;
+
+    bool mine;
+    portENTER_CRITICAL(&s_ctrl_lock);
+    mine = c->abandoned;
+    portEXIT_CRITICAL(&s_ctrl_lock);
+
+    if (mine) {
+        /* The waiter is long gone and nothing is looking at this. The URB
+         * has completed, so the transfer is no longer in flight and
+         * freeing it here is the one moment when that is true. */
+        ctrl_ctx_free(c);
+        return;
+    }
+
     xSemaphoreGive(c->done);
 }
 
@@ -482,17 +539,22 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
     *has_consumer = false;
     *report_ids = false;
 
-    usb_transfer_t *t = NULL;
+    ctrl_ctx_t *c = calloc(1, sizeof(*c));
+    if (!c) return false;
+
     if (usb_host_transfer_alloc(sizeof(usb_setup_packet_t) + HID_REPORT_DESC_MAX,
-                                0, &t) != ESP_OK) {
+                                0, &c->transfer) != ESP_OK) {
+        free(c);
         return false;
     }
 
-    ctrl_ctx_t c = { .done = xSemaphoreCreateBinary() };
-    if (!c.done) {
-        usb_host_transfer_free(t);
+    c->done = xSemaphoreCreateBinary();
+    if (!c->done) {
+        ctrl_ctx_free(c);
         return false;
     }
+
+    usb_transfer_t *t = c->transfer;
 
     usb_setup_packet_t *setup = (usb_setup_packet_t *)t->data_buffer;
     setup->bmRequestType = USB_BM_REQUEST_TYPE_DIR_IN |
@@ -507,12 +569,49 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
     t->bEndpointAddress = 0;
     t->num_bytes = sizeof(usb_setup_packet_t) + HID_REPORT_DESC_MAX;
     t->callback = ctrl_cb;
-    t->context = &c;
+    t->context = c;
+
+    /* A failed submit never enqueued anything, so no callback is coming
+     * and this side still owns everything. Distinguished from the
+     * timeout below precisely because of that. */
+    if (usb_host_transfer_submit_control(s_client, t) != ESP_OK) {
+        ctrl_ctx_free(c);
+        return false;
+    }
+
+    if (xSemaphoreTake(c->done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        /*
+         * Still in flight. Hand ownership to ctrl_cb() and leave without
+         * touching anything it will read.
+         *
+         * The endpoint is halted and flushed first so the URB is retired
+         * now rather than landing at an arbitrary later moment -- that
+         * turns "the callback runs eventually, on a context that is
+         * still valid" into "the callback runs shortly, and then this is
+         * over". The clear puts EP0 back in a usable state for whatever
+         * asks next, since a halted control endpoint would fail every
+         * subsequent request on this device.
+         *
+         * If any of the three fail there is nothing useful to do: the
+         * context stays alive and owned by the callback, which is the
+         * safe direction to fail in -- a leaked 550 bytes rather than a
+         * panic.
+         */
+        portENTER_CRITICAL(&s_ctrl_lock);
+        c->abandoned = true;
+        portEXIT_CRITICAL(&s_ctrl_lock);
+
+        ESP_LOGD(TAG, "itf %u report descriptor timed out; abandoning the URB",
+                 itf_num);
+
+        usb_host_endpoint_halt(dev, 0);
+        usb_host_endpoint_flush(dev, 0);
+        usb_host_endpoint_clear(dev, 0);
+        return false;
+    }
 
     bool ok = false;
-    if (usb_host_transfer_submit_control(s_client, t) == ESP_OK &&
-        xSemaphoreTake(c.done, pdMS_TO_TICKS(1000)) == pdTRUE &&
-        t->status == USB_TRANSFER_STATUS_COMPLETED) {
+    if (t->status == USB_TRANSFER_STATUS_COMPLETED) {
 
         const uint8_t *d = t->data_buffer + sizeof(usb_setup_packet_t);
         int n = t->actual_num_bytes - (int)sizeof(usb_setup_packet_t);
@@ -558,8 +657,9 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
         ok = true;
     }
 
-    vSemaphoreDelete(c.done);
-    usb_host_transfer_free(t);
+    /* The completion has already run and was not abandoned, so this side
+     * is the sole owner and frees. */
+    ctrl_ctx_free(c);
     return ok;
 }
 
@@ -687,23 +787,68 @@ static void inspect(usb_device_handle_t dev)
  * ordering that does not require this callback to know how many of them
  * there are.
  */
+/*
+ * Open handles, one slot per device this client has opened.
+ *
+ * This was a single `static usb_device_handle_t s_open` and that is one
+ * device's worth of state for a bus that routinely has two things on it
+ * -- a mass storage stick and a headset, which is the ordinary case here
+ * and is in every log. The second NEW_DEV overwrote the first handle,
+ * leaking it, and the next DEV_GONE closed whichever happened to be
+ * current rather than the one that actually left. Closing a device out
+ * from under a live interface claim is the same class of fault as the
+ * one in report_desc_scan() above, arrived at from the other direction.
+ *
+ * DEV_GONE carries the handle that left, so the close does not have to
+ * guess. Four slots: this client only ever opens devices to look at
+ * their interfaces, and a hub full of them is a case the port cannot
+ * power anyway (see the README on hubs).
+ */
+#define HID_MAX_OPEN_DEVS   (4)
+
+static usb_device_handle_t s_open[HID_MAX_OPEN_DEVS];
+
+static void open_remember(usb_device_handle_t dev)
+{
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (!s_open[i]) { s_open[i] = dev; return; }
+    }
+    /* Nothing to do but say so. The device stays open and its interfaces
+     * keep working; it is the close on unplug that will be missed. */
+    ESP_LOGW(TAG, "more than %d open devices; not tracking this one",
+             HID_MAX_OPEN_DEVS);
+}
+
+static void open_forget_and_close(usb_device_handle_t dev)
+{
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (s_open[i] == dev) {
+            usb_host_device_close(s_client, dev);
+            s_open[i] = NULL;
+            return;
+        }
+    }
+    /* Not found. DEV_GONE only reaches clients that opened the device,
+     * so this means the open failed earlier or the slot table was full
+     * when it was opened -- both already logged where they happened. */
+}
+
 static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg)
 {
     (void)arg;
-    static usb_device_handle_t s_open;
 
     switch (msg->event) {
-    case USB_HOST_CLIENT_EVENT_NEW_DEV:
-        if (usb_host_device_open(s_client, msg->new_dev.address, &s_open) == ESP_OK) {
-            inspect(s_open);
+    case USB_HOST_CLIENT_EVENT_NEW_DEV: {
+        usb_device_handle_t dev = NULL;
+        if (usb_host_device_open(s_client, msg->new_dev.address, &dev) == ESP_OK) {
+            open_remember(dev);
+            inspect(dev);
         }
         break;
+    }
 
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
-        if (s_open) {
-            usb_host_device_close(s_client, s_open);
-            s_open = NULL;
-        }
+        open_forget_and_close(msg->dev_gone.dev_hdl);
         break;
 
     default:

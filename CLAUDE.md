@@ -349,6 +349,97 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The boot loop was a control transfer that came back late (0902)
+
+`assert failed: xQueueGenericSend queue.c:936 (pxQueue)`, three reboots
+in a row, backtrace through `usb_host_client_handle_events` into
+`client_task`. The report:
+
+    #3 xQueueGenericSend at queue.c:936
+    #4 usb_host_client_handle_events at usb_host.c:948
+    #5 client_task at main/hid.c:718
+
+`pxQueue` is NULL, so something gave a semaphore that no longer existed.
+
+**What it was.** `report_desc_scan()` put its completion context on the
+stack and waited a second for the URB:
+
+    ctrl_ctx_t c = { .done = xSemaphoreCreateBinary() };
+    t->context = &c;
+    ... xSemaphoreTake(c.done, pdMS_TO_TICKS(1000)) ...
+    vSemaphoreDelete(c.done);
+    usb_host_transfer_free(t);
+
+On the timeout path that deletes the semaphore, frees the transfer, and
+returns -- **with the URB still in flight**. When it eventually completed
+the host dispatched `ctrl_cb()` on the client task, which read
+`t->context` (a stack frame that had gone) and gave a deleted semaphore.
+Freeing an in-flight transfer is separately forbidden; the IDF docs are
+explicit that a transfer must not be in flight when freed.
+
+**The comment above the function had the fact and missed the
+consequence:** "the headset remote stalls EP0 for exactly this request."
+A stall is handled -- it completes, with a status. The case that was not
+handled is the device that never answers at all.
+
+**Why it looked intermittent.** It is a race with enumeration timing,
+and the loser is the ordinary setup. Device already plugged in at boot:
+enumeration at ~2 s lands on top of the SD mount, the playlist scan and
+the first cover prefetch, EP0 does not answer within the second, boot
+loop. Device plugged in later, on a quiet bus: answers, or fails in a way
+that leaves the log line and no crash. The log confirms the mechanism
+without ambiguity -- 998 ms between "USB audio output attached" and
+"remote on itf 3", which is the timeout expiring, and the panic
+immediately after when the abandoned URB landed.
+
+`E (1940) HUB: Root port reset failed` in the third cycle is the loop
+making the bus worse, not a separate fault.
+
+**The fix: two owners, and whoever finishes last frees.** The context is
+heap allocated and holds an `abandoned` flag set and read under a
+critical section, because the timeout happens on the claiming task and
+the completion arrives on the client task. The timeout path sets the
+flag, halts, flushes and clears EP0 -- so the URB is retired now rather
+than landing at an arbitrary later moment -- and returns without touching
+anything the callback will read. `ctrl_cb()` checks the flag: abandoned
+means it owns the wreckage and frees it, and the completion having
+arrived is exactly the moment when freeing the transfer is legal.
+
+The halt/flush/clear ordering is the one the IDF docs give, and the clear
+matters on its own: a halted control endpoint fails every later request
+on that device.
+
+Failing directions were chosen deliberately. A failed *submit* never
+enqueued anything, so no callback is coming and the caller still owns
+everything -- distinguished from the timeout for that reason. If the
+flush calls fail, the context stays alive and owned by the callback,
+which leaks ~550 bytes instead of panicking.
+
+**A second bug in the same file, found while reading it.** The client
+event callback kept one `static usb_device_handle_t s_open` for every
+device on the bus. This device routinely has two -- a stick and the
+headset, which is in every log -- so the second `NEW_DEV` overwrote the
+first handle and leaked it, and the next `DEV_GONE` closed whichever was
+current rather than the one that left. Closing a device out from under a
+live interface claim is the same class of fault as the first, reached
+from the other side. Now a four-slot table, closing the handle
+`msg->dev_gone.dev_hdl` names. Four because this client opens devices
+only to inspect their interfaces, and a hub full of them is a case the
+port cannot power anyway.
+
+**Verified in `texttest/ctrltest.c`,** under ASan, against a fake host
+whose completion delay is a knob: completion inside the timeout, long
+after it, and 400 runs landing right on the deadline. It reproduces the
+logic rather than compiling `hid.c` -- the real function is welded to the
+USB host API -- which is a real weakness worth naming, since the two can
+drift. Confirmed to catch the original: reverting to the stack context
+gives `heap-use-after-free`, freed by the waiter, written by the
+completion thread. That is the panic, on a host, with a stack trace.
+
+**Not flashed.** The USB host underneath is a fake, so what is verified
+is the ownership shape and not the driver's real timing. The device that
+crashes is the one to try it on.
+
 ### The speaker icon was lying (0901)
 
 The left margin of the volume row has drawn a speaker since the first
