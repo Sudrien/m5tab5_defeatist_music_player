@@ -349,6 +349,64 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The ALAC warning was about a component that path does not use (0907)
+
+Every ALAC track logged this at open, then played perfectly:
+
+    W AUD_SDEC: Not find default parser for 1128352833
+
+1128352833 is 0x41434C41 -- 'ALAC', read the other way up. The library
+is looking for a default *parser*, the component that finds frame
+boundaries in a stream, and there is not one for ALAC. There does not
+need to be. `use_frame_dec` is true on this path precisely because the
+MP4 sample table does the framing and every buffer handed over is
+already exactly one frame. The warning reports the absence of a thing
+this path deliberately does without.
+
+Left alone it is worse than untidy. A log that cries wolf once per file
+of a whole format is a log people stop reading, and the last several
+patches were found by reading logs closely -- the 998 ms constant sat in
+plain sight through three builds because the surrounding noise was
+normal.
+
+`AUD_SDEC` is inside the precompiled esp_audio_codec archive, so there is
+nothing to patch at source. The tag's threshold is raised to
+`ESP_LOG_ERROR` across the two ALAC opens and put back after.
+
+Narrow deliberately, in three ways:
+
+- **Only that tag.** Everything else logs as before.
+- **Only those calls.** The M4A fallback open below is an ordinary open
+  with every reason to be heard, and the restore is above it. There is no
+  early return between the set and the restore, so the suppression cannot
+  leak out of this function.
+- **Only below ERROR.** A genuine AUD_SDEC failure still prints. What is
+  hidden is one warning that is false on this path.
+
+The previous level is read with `esp_log_level_get()` and restored,
+rather than assuming `ESP_LOG_INFO`, so this stays correct under a build
+with a different `CONFIG_LOG_DEFAULT_LEVEL`.
+
+`SDEC_TAG` is spelled out in this file because it is not ours and no
+header declares it -- it is a string inside the archive, recovered from
+the log line. If a future component renames the tag the suppression
+stops working and the warning comes back, which is the right direction
+for this to fail: noisy rather than silent.
+
+**Checked, having got this wrong recently.** 0902 called
+`usb_host_endpoint_halt()` on EP0 on the strength of the call order being
+documented, without checking the argument was valid, and it was refused
+at runtime. So `esp_log_level_get()` was confirmed to exist in the IDF
+5.x API reference before being used, rather than assumed from the shape
+of `esp_log_level_set()`.
+
+**Not flashed,** and only partly compiled: `decoder.c` pulls in
+`minimp3_ex.h`, which `cmake/vendored.cmake` fetches at build time and is
+not in the tree, so the host stubs cannot reach it. The added pattern was
+compiled in isolation and the surrounding control flow read by eye. What
+to look for: an ALAC track opening with no AUD_SDEC line, and an M4A AAC
+track still logging normally.
+
 ### The eight-second wait was for a ring nobody was filling (0906)
 
 Two warnings appear in every log this program has ever produced, at
