@@ -85,6 +85,11 @@ ownership handoff -- heap context, an `abandoned` flag set under a lock,
 and whichever side finishes last doing the free -- and the shape is what
 was wrong.
 
+A fourth case covers the ordering fix in 0903: a single-threaded event
+loop, a wait that runs *inside* the dispatch (never completes -- this is
+the deadlock that made the timeout universal) and a wait that runs after
+it returns (always completes).
+
 The fake host's completion delay is a knob, so the three cases are the
 three orderings: completion inside the timeout (waiter frees), completion
 long after (callback frees), and completion right at the deadline, run

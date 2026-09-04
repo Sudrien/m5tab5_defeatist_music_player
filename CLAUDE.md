@@ -349,6 +349,86 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The descriptor request had never once worked (0903)
+
+0902 stopped the boot loop and the log from the fixed build showed two
+things it had not fixed.
+
+**Three red lines on every boot.**
+
+    E USB HOST: Get EP handle error: ESP_ERR_INVALID_ARG   (x3)
+
+That is 0902's `usb_host_endpoint_halt/_flush/_clear(dev, 0)` being
+refused. The default control endpoint is not owned by a claimed
+interface, so there is no endpoint handle for the library to resolve. The
+docs describe those calls in the context of tearing down a claimed
+interface's endpoints, which is the case that does not include EP0 -- I
+checked that the call order was right and never checked that the argument
+was valid.
+
+**And the port wedged.** With the flush refused, the abandoned URB stayed
+outstanding; `DEV_GONE` then closed the device with a transfer live
+against it, the address was never released, and a VBUS off/on produced no
+enumeration at all -- not a failed enumeration, silence, until a reboot.
+0902 turned a boot loop into a wedge. The comment predicting "a leaked
+550 bytes rather than a panic" was wrong about which direction was safe.
+
+**The real bug, which 0902 had only papered over.** Every log of this,
+across three builds, showed the same gap between the device attaching and
+the remote being classified:
+
+    2079 -> 3077 = 998 ms
+    2078 -> 3076 = 998 ms
+    2076 -> 3076 = 1000 ms
+
+Always the timeout, to the millisecond, never anything else. A device
+that genuinely stalls sometimes does not produce that. `report_desc_scan()`
+was reached from `client_event_cb()`, and the docs are explicit:
+
+    "This function is called from within usb_host_client_handle_events().
+     Do not block and try to keep it short."
+
+The completion of the control transfer is delivered *by*
+`usb_host_client_handle_events()`. Waiting for it inside the callback is
+waiting for a call that cannot happen until the wait ends. It deadlocked
+against itself on every device, every time, and the timeout was the only
+thing that ever ended it.
+
+So the descriptor request has never once succeeded in this program, and
+the "the headset remote stalls EP0 for exactly this request" comment --
+which is where the whole line of reasoning in 0902 started -- was an
+invention. The device was never asked in a way it could answer.
+
+**The fix is the shape Espressif's own class_driver.c uses.** The
+callback records the address in a small pending list and returns.
+`client_task()` calls `usb_host_client_handle_events()` with a 100 ms
+timeout, and then, with the event loop free to dispatch, drains the list:
+open, inspect, claim. The blocking work is on the far side of the call
+that delivers what it blocks on.
+
+The timeout moved off `portMAX_DELAY` because the loop now has work to
+perform on its own return, and a device arriving during an otherwise
+quiet bus would sit in the list until some unrelated event woke it.
+
+0902's abandoned-URB handoff stays. It stops being the path every device
+takes and goes back to being what it was meant to be: the rare case where
+a device really does not answer.
+
+**What the button table survives on.** `hid_report()`'s bit mapping was
+inferred when no descriptor was available, and then confirmed by pressing
+each key and reading the hex out of the log. That is observation, not
+inference from the descriptor, which is why it should still hold once the
+descriptor actually arrives and possibly reclassifies the interface. It
+is the thing to watch on the first flash of this.
+
+**Verified in ctrltest.c**, which gained a fourth case: a single-threaded
+event loop, a wait that runs inside the dispatch (never completes) and a
+wait that runs after it returns (always completes). Modelled rather than
+compiled from `hid.c`, same caveat as the rest of that file -- what is
+checked is the ordering, and the ordering was the bug.
+
+**Not flashed.** The thing to look for is the absence of a 998 ms gap.
+
 ### The boot loop was a control transfer that came back late (0902)
 
 `assert failed: xQueueGenericSend queue.c:936 (pxQueue)`, three reboots

@@ -166,6 +166,65 @@ static bool scan(int timeout_ms, int completion_delay_ms)
     return ok;
 }
 
+/* ---- the ordering the 0903 restructure is about ------------------- */
+
+/*
+ * A single-threaded event loop, like usb_host_client_handle_events():
+ * completions are delivered only while it is running. The bug was that
+ * the descriptor wait ran INSIDE a callback dispatched by this loop, so
+ * the completion it waited for could not be delivered until it returned.
+ *
+ * Modelled rather than mocked from the host API, same caveat as the rest
+ * of this file: what is checked is that "wait inside the callback" times
+ * out and "wait after the callback returns" does not.
+ */
+static bool g_loop_running;
+static transfer_t *g_loop_pending;
+
+static void loop_submit(transfer_t *t) { g_loop_pending = t; }
+
+/* Deliver whatever is queued -- only callable from the loop. */
+static void loop_run_once(void)
+{
+    g_loop_running = true;
+    if (g_loop_pending) {
+        transfer_t *t = g_loop_pending;
+        g_loop_pending = NULL;
+        t->status = STATUS_COMPLETED;
+        t->callback(t);
+    }
+    g_loop_running = false;
+}
+
+static bool g_completed;
+static void loop_cb(transfer_t *t) { (void)t; g_completed = true; }
+
+/* The old shape: submit and wait without ever returning to the loop. */
+static bool scan_inside_callback(void)
+{
+    transfer_t t = { .callback = loop_cb };
+    g_completed = false;
+    loop_submit(&t);
+
+    /* "Waiting", i.e. spinning without letting the loop run, because we
+     * ARE the loop. Bounded so the test terminates; on the device this
+     * is the one-second timeout. */
+    for (int i = 0; i < 1000 && !g_completed; i++) { /* no loop_run_once */ }
+    return g_completed;
+}
+
+/* The new shape: the callback records, the loop returns, then we wait
+ * while the loop is free to dispatch. */
+static bool scan_after_callback(void)
+{
+    transfer_t t = { .callback = loop_cb };
+    g_completed = false;
+    loop_submit(&t);
+
+    for (int i = 0; i < 1000 && !g_completed; i++) loop_run_once();
+    return g_completed;
+}
+
 int main(void)
 {
     /* 1. Completes well inside the timeout: the waiter owns and frees. */
@@ -183,6 +242,14 @@ int main(void)
      *    handoff that is only usually right shows up as a flake. */
     printf("completion at the deadline...\n");
     for (int i = 0; i < 400; i++) (void)scan(20, 20);
+
+    /* 4. The ordering. Waiting inside the dispatching loop can never
+     *    see its own completion; waiting outside it always does. This is
+     *    what made the timeout universal rather than rare. */
+    printf("wait inside the event callback...\n");
+    assert(!scan_inside_callback());        /* deadlocks -> times out */
+    printf("wait after the callback returns...\n");
+    assert(scan_after_callback());          /* completes */
 
     printf("\nno leaks or use-after-free reported\n");
     return 0;

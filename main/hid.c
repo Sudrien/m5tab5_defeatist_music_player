@@ -37,9 +37,10 @@ static hid_button_cb_t          s_cb;
 /*
  * Which bit of report byte 0 is which button.
  *
- * The bit numbers started as an inference -- the device stalls EP0 for
- * its report descriptor, so there was nothing to derive them from -- and
- * the logging added alongside them has confirmed the mapping:
+ * The bit numbers started as an inference -- the report descriptor was
+ * not available, so there was nothing to derive them from -- and the
+ * logging added alongside them has confirmed the mapping by observation,
+ * which is why the table survives the descriptor request being fixed:
  *
  *   remote: 02 00 00 00 -> +Vol-      press
  *   remote: 00 00 00 00 -> -Vol-      release
@@ -460,9 +461,16 @@ static void hid_poll_task(void *arg)
  * and nothing else.
  *
  * Returns false when the descriptor cannot be had, which is not an error
- * and is the case the fallback exists for: the headset remote stalls EP0
- * for exactly this request. The caller then classifies by protocol
- * alone.
+ * and is the case the fallback exists for: the caller then classifies by
+ * protocol alone.
+ *
+ * This used to say the headset remote stalls EP0 for exactly this
+ * request. That was never established -- the request had never actually
+ * reached a device that could answer it, because the wait ran inside the
+ * client event callback and deadlocked against its own event loop. Every
+ * log showed the gap from attach to classification as 998-1000 ms: the
+ * timeout, never a stall. The device may well stall this request; that
+ * is now something the log can say rather than something assumed.
  *
  * THE CONTEXT IS ON THE HEAP AND HAS TWO OWNERS. It used to be a local,
  * with the transfer freed and the semaphore deleted on the way out of
@@ -584,18 +592,27 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
          * Still in flight. Hand ownership to ctrl_cb() and leave without
          * touching anything it will read.
          *
-         * The endpoint is halted and flushed first so the URB is retired
-         * now rather than landing at an arbitrary later moment -- that
-         * turns "the callback runs eventually, on a context that is
-         * still valid" into "the callback runs shortly, and then this is
-         * over". The clear puts EP0 back in a usable state for whatever
-         * asks next, since a halted control endpoint would fail every
-         * subsequent request on this device.
+         * There is deliberately no attempt to retire the URB here. An
+         * earlier version called usb_host_endpoint_halt(), _flush() and
+         * _clear() on endpoint 0, on the reasoning that the URB should
+         * be brought back now rather than landing later. The host
+         * library refuses all three -- the default control endpoint is
+         * not owned by a claimed interface, so there is no endpoint
+         * handle to resolve -- and they came back as three red lines on
+         * every boot:
          *
-         * If any of the three fail there is nothing useful to do: the
-         * context stays alive and owned by the callback, which is the
-         * safe direction to fail in -- a leaked 550 bytes rather than a
-         * panic.
+         *   E USB HOST: Get EP handle error: ESP_ERR_INVALID_ARG
+         *
+         * They were also worse than useless. The URB stayed outstanding
+         * either way, and the device could then be closed on DEV_GONE
+         * with a transfer still live against it, which wedged the host
+         * stack: the address was never released and replugging produced
+         * no enumeration at all until a reboot.
+         *
+         * So the URB is left alone. It completes when the device answers
+         * or when the device goes, and ctrl_cb() frees on either. With
+         * the scan no longer deadlocking against its own event loop (see
+         * s_pending) this path should now be rare rather than universal.
          */
         portENTER_CRITICAL(&s_ctrl_lock);
         c->abandoned = true;
@@ -603,10 +620,6 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
 
         ESP_LOGD(TAG, "itf %u report descriptor timed out; abandoning the URB",
                  itf_num);
-
-        usb_host_endpoint_halt(dev, 0);
-        usb_host_endpoint_flush(dev, 0);
-        usb_host_endpoint_clear(dev, 0);
         return false;
     }
 
@@ -786,7 +799,14 @@ static void inspect(usb_device_handle_t dev)
  * their own completion status rather than being told, which is the one
  * ordering that does not require this callback to know how many of them
  * there are.
+ *
+ * NOTHING BLOCKING HAPPENS IN THE CALLBACK. It records an address and
+ * returns; client_task() does the opening and claiming afterwards. That
+ * split is not tidiness, it is the difference between the descriptor
+ * request working and not working at all -- see the comment on
+ * pending_take() below.
  */
+
 /*
  * Open handles, one slot per device this client has opened.
  *
@@ -833,21 +853,82 @@ static void open_forget_and_close(usb_device_handle_t dev)
      * when it was opened -- both already logged where they happened. */
 }
 
+/*
+ * Addresses seen by the callback and not yet opened.
+ *
+ * The callback used to open the device and run inspect() inline, and
+ * inspect() reaches report_desc_scan(), which submits a control transfer
+ * and waits for it. The docs are explicit about why that cannot work:
+ *
+ *   "This function is called from within usb_host_client_handle_events().
+ *    Do not block and try to keep it short."
+ *
+ * The completion of that control transfer is delivered BY
+ * usb_host_client_handle_events(). Waiting for it inside the callback
+ * means waiting for a call that cannot be made until the callback
+ * returns, so it deadlocks against itself and is broken by the one
+ * second timeout, every time, on every device.
+ *
+ * That is not a theory. Across every log of this, the gap between the
+ * device attaching and the remote line is 998, 998 and 1000 ms -- the
+ * timeout, to the millisecond, never anything else. The comment that
+ * used to be on report_desc_scan() blamed the device for stalling EP0.
+ * The device never got the chance to answer.
+ *
+ * So the callback records and returns, and the work happens on
+ * client_task() after usb_host_client_handle_events() comes back, which
+ * is the shape Espressif's own class_driver.c example uses.
+ */
+#define HID_MAX_PENDING     (4)
+
+static uint8_t          s_pending[HID_MAX_PENDING];
+static int              s_pending_n;
+static portMUX_TYPE     s_pending_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static void pending_put(uint8_t addr)
+{
+    bool full = false;
+    portENTER_CRITICAL(&s_pending_lock);
+    if (s_pending_n < HID_MAX_PENDING) {
+        s_pending[s_pending_n++] = addr;
+    } else {
+        full = true;
+    }
+    portEXIT_CRITICAL(&s_pending_lock);
+
+    /* Outside the critical section: ESP_LOGW takes a lock of its own. */
+    if (full) ESP_LOGW(TAG, "pending list full; ignoring device %u", addr);
+}
+
+/* Oldest first, so devices are inspected in the order they arrived.
+ * Returns false when there is nothing waiting. */
+static bool pending_take(uint8_t *addr)
+{
+    bool got = false;
+    portENTER_CRITICAL(&s_pending_lock);
+    if (s_pending_n > 0) {
+        *addr = s_pending[0];
+        for (int i = 1; i < s_pending_n; i++) s_pending[i - 1] = s_pending[i];
+        s_pending_n--;
+        got = true;
+    }
+    portEXIT_CRITICAL(&s_pending_lock);
+    return got;
+}
+
 static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg)
 {
     (void)arg;
 
     switch (msg->event) {
-    case USB_HOST_CLIENT_EVENT_NEW_DEV: {
-        usb_device_handle_t dev = NULL;
-        if (usb_host_device_open(s_client, msg->new_dev.address, &dev) == ESP_OK) {
-            open_remember(dev);
-            inspect(dev);
-        }
+    case USB_HOST_CLIENT_EVENT_NEW_DEV:
+        /* Record only. See the comment above s_pending. */
+        pending_put(msg->new_dev.address);
         break;
-    }
 
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
+        /* This one is safe here: closing does not wait on a transfer
+         * completion, so it does not need the event loop to be free. */
         open_forget_and_close(msg->dev_gone.dev_hdl);
         break;
 
@@ -860,7 +941,36 @@ static void client_task(void *arg)
 {
     (void)arg;
     while (1) {
-        usb_host_client_handle_events(s_client, portMAX_DELAY);
+        /*
+         * Not portMAX_DELAY any more. The callback queues work that this
+         * loop performs, so the loop has to get back here to perform it
+         * -- and a device that arrives while nothing else is happening
+         * would otherwise sit in the pending list until the next
+         * unrelated event woke the loop up. 100 ms is a bound on that,
+         * and is idle the rest of the time.
+         *
+         * ESP_ERR_TIMEOUT is the ordinary case, not a fault.
+         */
+        usb_host_client_handle_events(s_client, pdMS_TO_TICKS(100));
+
+        /*
+         * Now, with the event loop free to dispatch, the blocking work.
+         * report_desc_scan() waits for a control transfer completion
+         * that arrives via the call above -- which is why this cannot be
+         * where it used to be.
+         */
+        uint8_t addr;
+        while (pending_take(&addr)) {
+            usb_device_handle_t dev = NULL;
+            if (usb_host_device_open(s_client, addr, &dev) != ESP_OK) {
+                /* Ordinary: the device may already be gone, or another
+                 * client may have it in a state this one cannot open. */
+                ESP_LOGD(TAG, "device %u would not open", addr);
+                continue;
+            }
+            open_remember(dev);
+            inspect(dev);
+        }
     }
 }
 
