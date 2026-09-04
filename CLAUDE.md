@@ -349,6 +349,45 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The USB route says UAC (0905)
+
+0901 drew the A receptacle end on and argued for it on two grounds: it
+extends the vocabulary `draw_usb_c()` already established for the C port,
+and it is honest about which socket carries audio. Both still true, and
+it is still the wrong answer.
+
+A rectangle with a bar in it has to be learned before it says anything.
+What it says once learned is "the USB port" -- and that is *less* than
+what is known at the moment it is drawn. The route is not a port. It is a
+UAC device that enumerated, offered a format this player can clock, and
+won the arbitration in `audio_out.c`. Three letters say that, to anyone
+who would know what a USB audio dongle is, which is everyone who has
+plugged one into this thing.
+
+It also stops the corner carrying two silhouettes to tell apart. A
+rounded stadium for C and a squared rectangle for A are distinguishable
+side by side, which is not the same as being distinguishable at a glance
+next to a battery.
+
+Scale 2 is forced rather than chosen: three glyphs at ark12's 7 px
+halfwidth advance is 42 px, so 20 px either side of centre, inside
+`SPK_HALF` (26). Scale 3 would be 30 px either side -- outside the hit
+box shared with the mute button and into the slider's padded box at 82.
+Measured from the real drawing code rather than the arithmetic alone:
+ink lands at -20..+17.
+
+The centring subtracts one scale from `gfx_text_w()`, which counts the
+gap column after the last glyph that nothing draws into. Without that the
+run sits a pixel right of the speaker and headphones it alternates with,
+and they swap in place often enough for that to read as a twitch.
+
+That is three answers for one icon -- trident, receptacle, letters --
+which is worth recording as a pattern rather than as three separate
+decisions. At this size a picture has to be *recognised*, and the budget
+for recognition is much smaller than the budget for legibility. The
+speaker and headphones survive because their silhouettes are already
+known. Nothing about USB is.
+
 ### The same 998 ms, a third time (0904)
 
 0903 moved the descriptor request out of the client event callback and
@@ -607,9 +646,8 @@ icon just never asked. Three shapes now, chosen by route:
   column at a time off the circle equation, because `gfx` has no arc
   primitive and this needs no line one. The cups are deeper than the
   band is thick; without that the silhouette reads as a croquet hoop.
-- **USB audio** -- the A receptacle seen end on, square-cornered, tongue
-  held high rather than centred. That offset is the whole difference
-  between the icon and a small empty box.
+- **USB audio** -- ~~the A receptacle seen end on~~ the letters `UAC`.
+  See 0905; the receptacle shipped first and was replaced.
 
 **Why the A receptacle and not the trident.** The trident is the logo
 everybody reads as USB, and it was tried first. At 30 px a stem, two

@@ -542,23 +542,31 @@ static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c);
 #define HP_CUP_H    (17)
 
 /*
- * USB audio: the A receptacle seen end on, square-cornered.
+ * USB audio: the letters, not a picture.
  *
- * Deliberately the same idea as the Type-C icon draw_usb_c() uses for
- * external power, and deliberately not the same shape. Type-C is a
- * stadium; A is a rectangle with the tongue held high instead of
- * centred. Two ports on this device, two silhouettes, and the one that
- * carries audio is the one drawn here.
+ * Two silhouettes were tried and are in the history -- the trident,
+ * which collapses into a smudge at this size, and the A receptacle seen
+ * end on, which does not. The receptacle is a perfectly good shape and
+ * is still the wrong answer, for a reason that has nothing to do with
+ * how it draws: a rectangle with a bar in it has to be learned before it
+ * says anything, and what it says once learned is less than what is
+ * actually known here. The route is not "the USB port". It is a UAC
+ * device that enumerated, offered a format this player can clock, and
+ * won the arbitration in audio_out.c. "UAC" says that, to anyone who
+ * would know what a USB audio dongle is -- which is everyone who has
+ * plugged one into this thing.
  *
- * The USB trident was tried first and abandoned. At 30 px the stem, two
- * branches, arrowhead and three differently-shaped feet collapse into a
- * smudge -- it is a logo drawn for print, and it needs more pixels than
- * this margin has.
+ * It also stops competing with draw_usb_c(). A rounded stadium for the C
+ * port and a squared rectangle for the A port are distinguishable side
+ * by side, but they are two silhouettes to tell apart in a corner that
+ * already asks the eye to read a battery.
+ *
+ * Scale 2 is forced, not chosen. Three glyphs at ark12's 7 px halfwidth
+ * advance is 42 px, so 20 px either side of the centre, inside SPK_HALF
+ * (26). Scale 3 would be 30 px either side: outside the hit box this
+ * shares with the mute button, and into the slider's padded box at 82.
  */
-#define USBA_W      (30)
-#define USBA_H      (17)
-#define USBA_WALL   (3)
-#define USBA_TONGUE_H (5)
+#define UAC_SCALE   (2)
 
 static void draw_out_speaker(int cx, int cy, uint16_t c)
 {
@@ -587,18 +595,15 @@ static void draw_out_headphones(int cx, int cy, uint16_t c)
 
 static void draw_out_usb(int cx, int cy, uint16_t c)
 {
-    const int x = cx - USBA_W / 2;
-    const int y = cy - USBA_H / 2;
+    /* gfx_text_w() includes the gap column after the last glyph, which
+     * nothing draws into. Centring on the measured width would sit the
+     * run a pixel right of the speaker and headphones it alternates
+     * with, and the three swap in place often enough for that to read as
+     * a twitch. */
+    const int run = gfx_text_w("UAC", UAC_SCALE) - UAC_SCALE;
 
-    gfx_fill_rect(x, y, USBA_W, USBA_WALL, c);
-    gfx_fill_rect(x, y + USBA_H - USBA_WALL, USBA_W, USBA_WALL, c);
-    gfx_fill_rect(x, y, USBA_WALL, USBA_H, c);
-    gfx_fill_rect(x + USBA_W - USBA_WALL, y, USBA_WALL, USBA_H, c);
-
-    /* The tongue, held high rather than centred. That offset is the
-     * whole difference between this and a small empty box. */
-    gfx_fill_rect(x + USBA_WALL + 2, y + USBA_WALL + 2,
-                  USBA_W - 2 * USBA_WALL - 4, USBA_TONGUE_H, c);
+    gfx_draw_text(cx - run / 2, cy - GFX_GLYPH_H(UAC_SCALE) / 2,
+                  "UAC", UAC_SCALE, run + UAC_SCALE, c);
 }
 
 /*
