@@ -349,6 +349,76 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The same 998 ms, a third time (0904)
+
+0903 moved the descriptor request out of the client event callback and
+into `client_task`, on the reasoning that the callback must not block
+because it runs inside `usb_host_client_handle_events()`. The reasoning
+was right and the fix did not follow it far enough. The log from the
+0903 build:
+
+    I (7252) tab5_uac: ... alt 1: 2 ch, 16-bit, 48000 44100 Hz
+    I (8250) tab5_hid: remote on itf 3: ...
+
+998 ms. The same constant, for the fourth build running.
+
+**Why it did not help.** `client_task` is the task that calls
+`usb_host_client_handle_events()`. Moving the wait from the callback into
+the drain loop moved it from *inside* that call to *between* two of them,
+and the loop is still not running while the wait runs. The completion is
+delivered by that call and by nothing else, so the wait was still waiting
+for something only it could cause.
+
+The 0903 comment said the drain loop was "where the event loop is free to
+dispatch". The event loop is that task. It is not free while it is here.
+
+**The rule, stated so the next person does not have to derive it:** on
+this client, a blocking wait for a transfer completion is only correct if
+the wait itself runs `usb_host_client_handle_events()`. Not "outside the
+callback" -- *running the loop*. `report_desc_scan()` now pumps it in
+10 ms turns for up to a second, checking the semaphore with a zero
+timeout between turns.
+
+Being out of the callback is still worth keeping. The host API contract
+says the callback must return promptly, and opening devices and claiming
+interfaces from it was outside that contract with or without the
+deadlock.
+
+**And the replug wedge, which was a separate bug wearing the same
+symptom.** `DEV_GONE` arrives on `client_task` and closed the device
+immediately. The interface release happens on whichever `hid_poll_task`
+owned it, when its transfer completes with `NO_DEVICE`. Nothing ordered
+those, so the close routinely beat the release -- and closing a device
+that still has an interface claimed leaves the host library holding one
+it cannot finish tearing down. The address is never released and a
+replug, or even a VBUS off/on, produces no enumeration at all:
+
+    I (194120) tab5_panel: USB bus power off
+    I (195119) tab5_panel: USB bus power on
+    (nothing)
+
+Each open device now carries a claim count and a gone flag. The close is
+performed by whoever brings the count to zero after the flag is set --
+`client_task` if the polling tasks have already finished, the last
+polling task if they had not. Both paths do the close outside the
+critical section, since it is a host call that may block.
+
+This is the third patch in a row on this file and the second time the
+diagnosis was right and the fix landed short of it. Both times the log
+had already said so: the 998 ms constant was in the first log of the
+series, unchanged through three builds, and it was read as "the device is
+slow" twice before it was read as "this number is a timeout and nothing
+else."
+
+**Verified in ctrltest.c**, which gains the ordering case: a claim count
+and a gone flag exercised from two tasks with randomised delays, 600
+runs, asserting the close happens exactly once and never while a claim is
+live. Confirmed to fail on the old shape -- closing immediately on
+DEV_GONE trips `g_close_with_claim == 0`.
+
+**Not flashed.** Two things to look for: the attach-to-classification gap
+being something other than 998 ms, and a replug enumerating.
+
 ### The descriptor request had never once worked (0903)
 
 0902 stopped the boot loop and the log from the fixed build showed two

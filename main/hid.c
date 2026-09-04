@@ -394,12 +394,30 @@ static void hid_transfer_cb(usb_transfer_t *transfer)
     xSemaphoreGive(ctx->done);
 }
 
+/* Declared here because hid_free() needs it and the open table lives
+ * further down with the client callback it mostly serves. */
+static bool open_released(usb_device_handle_t dev);
+static void open_claimed(usb_device_handle_t dev);
+
 static void hid_free(hid_ctx_t *ctx)
 {
+    usb_device_handle_t dev = ctx->dev;
+
     usb_host_transfer_free(ctx->transfer);
-    usb_host_interface_release(s_client, ctx->dev, ctx->itf_num);
+    usb_host_interface_release(s_client, dev, ctx->itf_num);
     vSemaphoreDelete(ctx->done);
     free(ctx);
+
+    /* If the device is already gone and this was its last claim, the
+     * close is ours to do -- client_task could not do it when DEV_GONE
+     * arrived, because this interface was still claimed. Ordering the
+     * close after the release is the whole point; the other way round
+     * leaves the host library unable to finish tearing the device down
+     * and the address never comes back. */
+    if (open_released(dev)) {
+        usb_host_device_close(s_client, dev);
+        ESP_LOGD(TAG, "closed device after the last interface was released");
+    }
 }
 
 /*
@@ -587,7 +605,47 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
         return false;
     }
 
-    if (xSemaphoreTake(c->done, pdMS_TO_TICKS(1000)) != pdTRUE) {
+    /*
+     * THE WAIT HAS TO PUMP THE EVENT LOOP, because the task that waits
+     * is the task that dispatches.
+     *
+     * usb_host_transfer_submit_control()'s completion is delivered from
+     * inside usb_host_client_handle_events(), and only that call
+     * delivers it. This function runs on client_task, which is the task
+     * that makes that call. So any wait here that does not itself run
+     * the event loop is waiting for something only it can cause, and
+     * deadlocks until the timeout.
+     *
+     * 0903 moved this out of the client event callback and into
+     * client_task on exactly that reasoning, and did not go far enough:
+     * the callback was no longer the problem, but the drain loop calls
+     * inspect() *between* calls to usb_host_client_handle_events(), so
+     * the loop was still not running while this waited. The evidence was
+     * unchanged and unambiguous -- the attach-to-classification gap
+     * stayed at 998 ms, the same constant it had been for three builds.
+     *
+     * The rule that matters: on this client, a blocking wait for a
+     * transfer completion is only correct if the wait runs
+     * usb_host_client_handle_events() itself. Any future code here that
+     * waits on a URB needs the same shape.
+     *
+     * Ten milliseconds a turn, up to a second in total. The timeout is
+     * now a real timeout -- a device that genuinely will not answer --
+     * rather than a self-inflicted one that fired every time.
+     */
+#define SCAN_PUMP_MS        (10)
+#define SCAN_PUMP_TURNS     (100)
+
+    bool got = false;
+    for (int i = 0; i < SCAN_PUMP_TURNS; i++) {
+        /* Delivers our completion, and anything else pending on this
+         * client. ESP_ERR_TIMEOUT is the ordinary quiet case. */
+        usb_host_client_handle_events(s_client, pdMS_TO_TICKS(SCAN_PUMP_MS));
+
+        if (xSemaphoreTake(c->done, 0) == pdTRUE) { got = true; break; }
+    }
+
+    if (!got) {
         /*
          * Still in flight. Hand ownership to ctrl_cb() and leave without
          * touching anything it will read.
@@ -763,6 +821,12 @@ static esp_err_t hid_claim(usb_device_handle_t dev, const usb_intf_desc_t *intf,
     }
 
     static const char *const KIND_NAME[] = { "bitmask", "boot keyboard", "consumer" };
+    /* Counted only once the polling task exists and owns the teardown,
+     * so every increment has exactly one hid_free() that will decrement
+     * it. Recorded before the log line for no reason other than that the
+     * log line is the last thing this function does. */
+    open_claimed(dev);
+
     ESP_LOGI(TAG, "remote on itf %u: EP 0x%02X, %u byte reports, %u ms, %s%s",
              intf->bInterfaceNumber, ep->bEndpointAddress, mps, ep->bInterval,
              KIND_NAME[ctx->kind], ctx->report_ids ? ", report IDs" : "");
@@ -826,31 +890,116 @@ static void inspect(usb_device_handle_t dev)
  */
 #define HID_MAX_OPEN_DEVS   (4)
 
-static usb_device_handle_t s_open[HID_MAX_OPEN_DEVS];
+/*
+ * THE CLOSE HAS TO COME AFTER THE RELEASE, and the two happen on
+ * different tasks.
+ *
+ * DEV_GONE arrives on client_task. The interface release happens on
+ * whichever hid_poll_task owned that interface, when its transfer
+ * completes with NO_DEVICE. Those are not ordered with respect to each
+ * other, and closing a device that still has an interface claimed
+ * leaves the host library holding a device it cannot finish tearing
+ * down -- the address is never released, and replugging produces no
+ * enumeration at all until a reboot.
+ *
+ * That is the wedge that survived 0902 and 0903. So each open device
+ * carries a count of the interfaces this client has claimed on it, and
+ * a flag saying the device has gone. The close is performed by whoever
+ * brings the count to zero after the flag is set -- client_task if the
+ * polling tasks have already finished, or the last polling task if they
+ * had not.
+ */
+typedef struct {
+    usb_device_handle_t dev;
+    int  claims;
+    bool gone;
+} open_dev_t;
+
+static open_dev_t   s_open[HID_MAX_OPEN_DEVS];
+static portMUX_TYPE s_open_lock = portMUX_INITIALIZER_UNLOCKED;
 
 static void open_remember(usb_device_handle_t dev)
 {
+    bool full = true;
+    portENTER_CRITICAL(&s_open_lock);
     for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
-        if (!s_open[i]) { s_open[i] = dev; return; }
-    }
-    /* Nothing to do but say so. The device stays open and its interfaces
-     * keep working; it is the close on unplug that will be missed. */
-    ESP_LOGW(TAG, "more than %d open devices; not tracking this one",
-             HID_MAX_OPEN_DEVS);
-}
-
-static void open_forget_and_close(usb_device_handle_t dev)
-{
-    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
-        if (s_open[i] == dev) {
-            usb_host_device_close(s_client, dev);
-            s_open[i] = NULL;
-            return;
+        if (!s_open[i].dev) {
+            s_open[i].dev = dev;
+            s_open[i].claims = 0;
+            s_open[i].gone = false;
+            full = false;
+            break;
         }
     }
-    /* Not found. DEV_GONE only reaches clients that opened the device,
-     * so this means the open failed earlier or the slot table was full
-     * when it was opened -- both already logged where they happened. */
+    portEXIT_CRITICAL(&s_open_lock);
+
+    /* Nothing to do but say so. The device stays open and its interfaces
+     * keep working; it is the close on unplug that will be missed. */
+    if (full) ESP_LOGW(TAG, "more than %d open devices; not tracking this one",
+                       HID_MAX_OPEN_DEVS);
+}
+
+/* A claim succeeded on this device. Called from client_task, before any
+ * polling task for it exists. */
+static void open_claimed(usb_device_handle_t dev)
+{
+    portENTER_CRITICAL(&s_open_lock);
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (s_open[i].dev == dev) { s_open[i].claims++; break; }
+    }
+    portEXIT_CRITICAL(&s_open_lock);
+}
+
+/*
+ * An interface has been released. Returns true if this was the last one
+ * on a device that has gone, meaning the caller must close it.
+ *
+ * Deciding and acting are split because the close must not happen inside
+ * the critical section: it is a host API call and may block.
+ */
+static bool open_released(usb_device_handle_t dev)
+{
+    bool close_now = false;
+    portENTER_CRITICAL(&s_open_lock);
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (s_open[i].dev != dev) continue;
+        if (s_open[i].claims > 0) s_open[i].claims--;
+        if (s_open[i].gone && s_open[i].claims == 0) {
+            s_open[i].dev = NULL;
+            close_now = true;
+        }
+        break;
+    }
+    portEXIT_CRITICAL(&s_open_lock);
+    return close_now;
+}
+
+/*
+ * The device has gone. Close it only if nothing is claimed on it; if a
+ * polling task still holds an interface, mark it and let that task's
+ * release do the close.
+ */
+static void open_gone(usb_device_handle_t dev)
+{
+    bool close_now = false;
+    portENTER_CRITICAL(&s_open_lock);
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (s_open[i].dev != dev) continue;
+        s_open[i].gone = true;
+        if (s_open[i].claims == 0) {
+            s_open[i].dev = NULL;
+            close_now = true;
+        }
+        break;
+    }
+    portEXIT_CRITICAL(&s_open_lock);
+
+    /* Outside the critical section: a host API call, and it may block. */
+    if (close_now) usb_host_device_close(s_client, dev);
+
+    /* Not found is ordinary: DEV_GONE only reaches clients that opened
+     * the device, so it means the open failed or the table was full,
+     * both already logged where they happened. */
 }
 
 /*
@@ -929,7 +1078,7 @@ static void client_event_cb(const usb_host_client_event_msg_t *msg, void *arg)
     case USB_HOST_CLIENT_EVENT_DEV_GONE:
         /* This one is safe here: closing does not wait on a transfer
          * completion, so it does not need the event loop to be free. */
-        open_forget_and_close(msg->dev_gone.dev_hdl);
+        open_gone(msg->dev_gone.dev_hdl);
         break;
 
     default:
@@ -954,10 +1103,16 @@ static void client_task(void *arg)
         usb_host_client_handle_events(s_client, pdMS_TO_TICKS(100));
 
         /*
-         * Now, with the event loop free to dispatch, the blocking work.
-         * report_desc_scan() waits for a control transfer completion
-         * that arrives via the call above -- which is why this cannot be
-         * where it used to be.
+         * The work that can block. Note what this is NOT: it is not
+         * "somewhere the event loop is free to dispatch" -- the loop is
+         * this task, and it is not running while this runs. 0903 claimed
+         * otherwise and was wrong. report_desc_scan() pumps the loop
+         * itself for that reason; see the comment on its wait.
+         *
+         * Being out of the callback is still worth having. The callback
+         * must return promptly per the host API contract, and opening
+         * and claiming interfaces from it was outside that contract even
+         * setting the deadlock aside.
          */
         uint8_t addr;
         while (pending_take(&addr)) {
