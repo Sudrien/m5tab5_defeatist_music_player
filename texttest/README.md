@@ -90,6 +90,11 @@ loop, a wait that runs *inside* the dispatch (never completes -- this is
 the deadlock that made the timeout universal) and a wait that runs after
 it returns (always completes).
 
+A fifth covers the close-after-release ordering in 0904: a claim count
+and a gone flag driven from two tasks with randomised delays, asserting
+the device is closed exactly once and never while an interface is still
+claimed. Closing immediately on DEV_GONE -- the old shape -- fails it.
+
 The fake host's completion delay is a knob, so the three cases are the
 three orderings: completion inside the timeout (waiter frees), completion
 long after (callback frees), and completion right at the deadline, run

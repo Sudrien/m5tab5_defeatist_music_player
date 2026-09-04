@@ -225,6 +225,109 @@ static bool scan_after_callback(void)
     return g_completed;
 }
 
+/* ---- close-after-release ordering (0904) --------------------------- */
+
+/*
+ * The wedge that survived 0902 and 0903: DEV_GONE arrives on one task
+ * and the interface release happens on another, and closing a device
+ * that still has a claim leaves the host library unable to finish
+ * tearing it down -- address never released, no enumeration on replug.
+ *
+ * Modelled: a claim count and a gone flag, with the close performed by
+ * whoever brings the count to zero after the flag is set. What is
+ * asserted is that the close happens exactly once and never while a
+ * claim is outstanding, in both orderings and under contention.
+ */
+#define MAX_DEVS 4
+typedef struct { void *dev; int claims; bool gone; } open_dev_t;
+static open_dev_t g_open[MAX_DEVS];
+static pthread_mutex_t g_open_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static int  g_closes;           /* how many times close was performed */
+static int  g_close_with_claim; /* closes that happened with a claim live */
+
+static void od_remember(void *dev)
+{
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < MAX_DEVS; i++)
+        if (!g_open[i].dev) { g_open[i] = (open_dev_t){ dev, 0, false }; break; }
+    pthread_mutex_unlock(&g_open_lock);
+}
+static void od_claimed(void *dev)
+{
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < MAX_DEVS; i++) if (g_open[i].dev == dev) { g_open[i].claims++; break; }
+    pthread_mutex_unlock(&g_open_lock);
+}
+static bool od_released(void *dev)
+{
+    bool close_now = false;
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < MAX_DEVS; i++) {
+        if (g_open[i].dev != dev) continue;
+        if (g_open[i].claims > 0) g_open[i].claims--;
+        if (g_open[i].gone && g_open[i].claims == 0) { g_open[i].dev = NULL; close_now = true; }
+        break;
+    }
+    pthread_mutex_unlock(&g_open_lock);
+    return close_now;
+}
+static bool od_gone(void *dev)
+{
+    bool close_now = false;
+    pthread_mutex_lock(&g_open_lock);
+    for (int i = 0; i < MAX_DEVS; i++) {
+        if (g_open[i].dev != dev) continue;
+        g_open[i].gone = true;
+        if (g_open[i].claims == 0) { g_open[i].dev = NULL; close_now = true; }
+        break;
+    }
+    pthread_mutex_unlock(&g_open_lock);
+    return close_now;
+}
+
+/* Records a close and whether any claim was still live when it happened. */
+static int g_live_claims;
+static void do_close(void)
+{
+    pthread_mutex_lock(&g_open_lock);
+    g_closes++;
+    if (g_live_claims > 0) g_close_with_claim++;
+    pthread_mutex_unlock(&g_open_lock);
+}
+
+static void *releaser(void *arg)
+{
+    void *dev = arg;
+    usleep((unsigned)(rand() % 200));
+    pthread_mutex_lock(&g_open_lock); g_live_claims--; pthread_mutex_unlock(&g_open_lock);
+    if (od_released(dev)) do_close();
+    return NULL;
+}
+
+static void ordering_case(int n_claims)
+{
+    void *dev = (void *)0xD00D;
+    g_closes = 0; g_close_with_claim = 0; g_live_claims = 0;
+    memset(g_open, 0, sizeof(g_open));
+
+    od_remember(dev);
+    pthread_t th[3];
+    for (int i = 0; i < n_claims; i++) {
+        od_claimed(dev);
+        pthread_mutex_lock(&g_open_lock); g_live_claims++; pthread_mutex_unlock(&g_open_lock);
+    }
+    for (int i = 0; i < n_claims; i++) pthread_create(&th[i], NULL, releaser, dev);
+
+    usleep((unsigned)(rand() % 200));
+    if (od_gone(dev)) do_close();
+
+    for (int i = 0; i < n_claims; i++) pthread_join(th[i], NULL);
+
+    assert(g_closes == 1);              /* exactly once, never zero */
+    assert(g_close_with_claim == 0);    /* and never while claimed */
+}
+
 int main(void)
 {
     /* 1. Completes well inside the timeout: the waiter owns and frees. */
@@ -250,6 +353,12 @@ int main(void)
     assert(!scan_inside_callback());        /* deadlocks -> times out */
     printf("wait after the callback returns...\n");
     assert(scan_after_callback());          /* completes */
+
+    /* 5. close-after-release, both orderings, under contention. */
+    printf("close waits for the last release...\n");
+    srand(1234);
+    for (int i = 0; i < 300; i++) ordering_case(1);
+    for (int i = 0; i < 300; i++) ordering_case(3);
 
     printf("\nno leaks or use-after-free reported\n");
     return 0;
