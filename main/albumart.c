@@ -72,7 +72,8 @@ bool albumart_is_supported_image(const uint8_t *p, size_t len)
     return false;
 }
 
-esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len)
+esp_err_t albumart_extract_at(FILE *f, storage_io_class_t cls, long base,
+                              uint8_t **out, size_t *out_len)
 {
     uint8_t hdr[10];
 
@@ -120,7 +121,7 @@ esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len
          * front of the decoder's next refill. The ten-byte header reads
          * around it are left alone: a lease costs two semaphore
          * operations and those reads are shorter than that. */
-        if (storage_io_fread(frame, fsz, f, STORAGE_IO_PREFETCH) != fsz) {
+        if (storage_io_fread(frame, fsz, f, cls) != fsz) {
             free(frame);
             return ESP_ERR_INVALID_SIZE;
         }
@@ -172,9 +173,10 @@ esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len
 }
 
 /* An ID3v2 tag at the front of the file, which is where an MP3 keeps it. */
-esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len)
+esp_err_t albumart_extract(FILE *f, storage_io_class_t cls,
+                           uint8_t **out, size_t *out_len)
 {
-    return albumart_extract_at(f, 0, out, out_len);
+    return albumart_extract_at(f, cls, 0, out, out_len);
 }
 
 /*

@@ -2459,7 +2459,7 @@ static void load_tags(const char *path)
     } else {
         FILE *af = storage_io_open(path, "rb");
         if (af) {
-            if (covertag_read_tags(af, &s_tags) == ESP_OK) {
+            if (covertag_read_tags(af, STORAGE_IO_PLAYBACK, &s_tags) == ESP_OK) {
                 ESP_LOGI(TAG, "tags: \"%s\" / \"%s\" / \"%s\"",
                          s_tags.title, s_tags.artist, s_tags.album);
                 /* Into the held record, not to the card: the write
@@ -2920,7 +2920,7 @@ static void do_art(const char *path, uint32_t gen)
         storage_io_close(af);
         ESP_LOGI(TAG, "cover from cache (%u bytes)", (unsigned)jpg_len);
     } else {
-        xerr = covertag_extract_art(af, &jpg, &jpg_len);
+        xerr = covertag_extract_art(af, STORAGE_IO_PLAYBACK, &jpg, &jpg_len);
         storage_io_close(af);
         owned = true;
     }
@@ -3573,6 +3573,30 @@ static void ring_publish(void)
  * all. After MEDIA_WAIT_MAX_MS it proceeds anyway and says so, because a
  * late cover beats no cover, and the log line is how that gets noticed
  * rather than being silently lived with.
+ *
+ * IT ALSO RETURNS AT ONCE WHEN NOTHING IS PLAYING, which is a case the
+ * bound above was carrying and should not have been.
+ *
+ * The ring only fills while a decode loop is running. With nothing
+ * chosen -- the chooser open at boot, a track resumed but not started --
+ * there is no producer, the level sits at 0 and cannot rise, and this
+ * waited the full eight seconds for it every single time. Every log of
+ * this program has both warnings in it at boot, and they were read as
+ * storage contention for a long while; they are not, and in a boot log
+ * there is nothing for the reads to contend with.
+ *
+ * s_ring_pct's own -1 does not catch it. That means "no ring yet", and
+ * the writer task loops on a 100 ms receive whether anything is playing
+ * or not, so ring_publish() has long since published a real 0.
+ *
+ * The predicate is the one the amplifier already idles on -- see the
+ * audio_out_set_idle() call in player_loop(). Both halves are needed and
+ * for different reasons: s_decoding covers a running decode, and
+ * s_track_changing covers the gap before one, which is not short.
+ * decoder_open() on a Xing-less MP3 scans the whole file, 1263 ms in the
+ * logs against MEDIA_ART_DELAY_MS of 700 -- so testing s_decoding alone
+ * would release the cover read into the middle of an index scan, which
+ * is precisely the contention this function exists to avoid.
  */
 static bool media_settle(uint32_t gen, int delay_ms, int floor_pct,
                          const char *what)
@@ -3586,6 +3610,10 @@ static bool media_settle(uint32_t gen, int delay_ms, int floor_pct,
     }
 
     while (waited < MEDIA_WAIT_MAX_MS) {
+        /* Nothing is producing and nothing is about to be. Waiting for a
+         * level is waiting for a task that does not exist. */
+        if (!s_decoding && !s_track_changing) return true;
+
         const int pct = ring_headroom_pct();
         if (pct < 0 || pct >= floor_pct) return true;
         vTaskDelay(pdMS_TO_TICKS(MEDIA_WAIT_SLICE_MS));
@@ -3655,7 +3683,7 @@ static void prefetch_next(void)
         if (f) {
             id3_tags_t t;
             memset(&t, 0, sizeof(t));
-            if (covertag_read_tags(f, &t) == ESP_OK) {
+            if (covertag_read_tags(f, STORAGE_IO_PREFETCH, &t) == ESP_OK) {
                 mediacache_put_tags(next, &t);
                 ESP_LOGI(TAG, "prefetched tags: \"%s\"", t.title);
             }
@@ -3679,7 +3707,7 @@ static void prefetch_next(void)
 
         uint8_t *img = NULL;
         size_t len = 0;
-        const esp_err_t err = covertag_extract_art(f, &img, &len);
+        const esp_err_t err = covertag_extract_art(f, STORAGE_IO_PREFETCH, &img, &len);
         storage_io_close(f);
 
         if (err != ESP_OK) {
@@ -3808,7 +3836,7 @@ static void media_task(void *arg)
             if (tf) {
                 id3_tags_t t;
                 memset(&t, 0, sizeof(t));
-                if (covertag_read_tags(tf, &t) == ESP_OK) {
+                if (covertag_read_tags(tf, STORAGE_IO_PREFETCH, &t) == ESP_OK) {
                     mediacache_put_tags(path, &t);
                 }
                 storage_io_close(tf);
