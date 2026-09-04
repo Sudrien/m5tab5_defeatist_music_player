@@ -488,6 +488,15 @@ static void draw_moon(void)
  * A 52 px target is 4.5 mm at 294 PPI, which is smaller than the
  * transport buttons and larger than a fingertip needs for an icon that
  * sits alone in a margin.
+ *
+ * The icon SHOWS the output route and the tap MUTES. Those are two
+ * different things and it is worth being deliberate that they share a
+ * control: the route is not a user choice on this device -- audio_out.c
+ * arbitrates it and says why -- so there is nothing here for a tap to
+ * cycle through. If a manual override is ever added it does not belong
+ * on this tap, which already has a meaning people rely on; it belongs in
+ * the settings panel's AUDIO tab, next to a note about the cases where
+ * the override cannot be honoured.
  */
 #define SPK_HALF    (26)
 
@@ -500,23 +509,116 @@ static void spk_centre(int *cx, int *cy)
 }
 
 /*
- * Muted draws a slash through the cone, not a greyed icon.
+ * The icon in the volume row's left margin is the OUTPUT, not the
+ * speaker.
+ *
+ * It used to be a speaker unconditionally, which was a picture of the
+ * output only when the output happened to be the speaker. With
+ * headphones in -- the common case -- the panel was drawing a device
+ * that was deliberately silent. audio_out.c already arbitrates between
+ * three of them and logs which one won; this draws the same answer.
+ *
+ * One icon, three shapes, rather than a speaker plus a badge saying what
+ * it really is. Same argument draw_battery() makes for not drawing a
+ * connector next to an outline: one icon, saying one thing.
+ *
+ * They share a centre and a colour, so mute keeps working as a slash
+ * over whatever is current, and draw_rg() keeps hanging its badge
+ * underneath without knowing which shape it is under.
+ */
+
+/* Defined with the battery's icons further down, because that is where
+ * the other user of it is; declared here because C compiles top to
+ * bottom and this file has shipped a build failure for exactly this
+ * before. */
+static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c);
+
+/* Headphones: a band and two cups. The cups hang below the band's ends
+ * and are deeper than the band is thick, which is what stops the
+ * silhouette reading as a croquet hoop. */
+#define HP_R        (15)    /* band radius */
+#define HP_BAND_T   (4)     /* band thickness */
+#define HP_CUP_W    (8)
+#define HP_CUP_H    (17)
+
+/*
+ * USB audio: the A receptacle seen end on, square-cornered.
+ *
+ * Deliberately the same idea as the Type-C icon draw_usb_c() uses for
+ * external power, and deliberately not the same shape. Type-C is a
+ * stadium; A is a rectangle with the tongue held high instead of
+ * centred. Two ports on this device, two silhouettes, and the one that
+ * carries audio is the one drawn here.
+ *
+ * The USB trident was tried first and abandoned. At 30 px the stem, two
+ * branches, arrowhead and three differently-shaped feet collapse into a
+ * smudge -- it is a logo drawn for print, and it needs more pixels than
+ * this margin has.
+ */
+#define USBA_W      (30)
+#define USBA_H      (17)
+#define USBA_WALL   (3)
+#define USBA_TONGUE_H (5)
+
+static void draw_out_speaker(int cx, int cy, uint16_t c)
+{
+    gfx_fill_rect(cx - 13, cy - 6, 9, 13, c);       /* body */
+    for (int dx = 0; dx <= 15; dx++) {              /* cone, flaring right */
+        const int half = 4 + dx;
+        gfx_fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, c);
+    }
+}
+
+static void draw_out_headphones(int cx, int cy, uint16_t c)
+{
+    const int top = cy - 12;
+
+    /* The band, one column at a time off the circle equation -- gfx has
+     * no arc primitive and this needs no line one. Upper half only: the
+     * lower half is where a head would be. */
+    for (int dx = -HP_R; dx <= HP_R; dx++) {
+        const int dy = (int)(0.5f + __builtin_sqrtf((float)(HP_R * HP_R - dx * dx)));
+        gfx_fill_rect(cx + dx, top + HP_R - dy, 1, HP_BAND_T, c);
+    }
+
+    fill_rrect(cx - HP_R - 1, top + HP_R - 2, HP_CUP_W, HP_CUP_H, 3, c);
+    fill_rrect(cx + HP_R - HP_CUP_W + 2, top + HP_R - 2, HP_CUP_W, HP_CUP_H, 3, c);
+}
+
+static void draw_out_usb(int cx, int cy, uint16_t c)
+{
+    const int x = cx - USBA_W / 2;
+    const int y = cy - USBA_H / 2;
+
+    gfx_fill_rect(x, y, USBA_W, USBA_WALL, c);
+    gfx_fill_rect(x, y + USBA_H - USBA_WALL, USBA_W, USBA_WALL, c);
+    gfx_fill_rect(x, y, USBA_WALL, USBA_H, c);
+    gfx_fill_rect(x + USBA_W - USBA_WALL, y, USBA_WALL, USBA_H, c);
+
+    /* The tongue, held high rather than centred. That offset is the
+     * whole difference between this and a small empty box. */
+    gfx_fill_rect(x + USBA_WALL + 2, y + USBA_WALL + 2,
+                  USBA_W - 2 * USBA_WALL - 4, USBA_TONGUE_H, c);
+}
+
+/*
+ * Muted draws a slash through the icon, not a greyed one.
  *
  * Grey is what this file uses for "this button does nothing" -- next at
  * the end of a folder, the battery outline with no reading. Mute is the
  * opposite: the control is working and is the reason there is no sound.
- * A greyed speaker would say the mute button is unavailable.
+ * A greyed icon would say the mute button is unavailable.
  */
-static void draw_speaker(bool muted)
+static void draw_speaker(bool muted, audio_out_route_t route)
 {
     int cx, cy;
     spk_centre(&cx, &cy);
     const uint16_t c = muted ? C_FILL : C_ICON;
 
-    gfx_fill_rect(cx - 13, cy - 6, 9, 13, c);       /* body */
-    for (int dx = 0; dx <= 15; dx++) {              /* cone, flaring right */
-        const int half = 4 + dx;
-        gfx_fill_rect(cx - 4 + dx, cy - half, 1, 2 * half + 1, c);
+    switch (route) {
+    case AUDIO_OUT_USB:        draw_out_usb(cx, cy, c);        break;
+    case AUDIO_OUT_HEADPHONES: draw_out_headphones(cx, cy, c); break;
+    default:                   draw_out_speaker(cx, cy, c);    break;
     }
 
     if (!muted) return;
@@ -1149,7 +1251,7 @@ void ui_draw(const ui_state_t *st)
     draw_slider_c(x0, x1, y, s_drag == 1 ? s_drag_pct : st->volume,
                   st->muted ? C_ICON_OFF : C_FILL);
 
-    draw_speaker(st->muted);
+    draw_speaker(st->muted, st->route);
     draw_rg(st);
     draw_battery(st->battery_pct, st->battery_charging, st->ext_power);
     draw_folder();

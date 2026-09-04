@@ -4128,6 +4128,7 @@ static void ui_task(void *arg)
         st.rg_measuring = s_rg_measuring;
         st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
+        st.route = audio_out_route();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;
@@ -4377,6 +4378,7 @@ static void ui_task(void *arg)
         st.rg_measuring = s_rg_measuring;
         st.rg_gain_db = s_rg_gain_db;
         st.muted = audio_out_muted();
+        st.route = audio_out_route();
         st.pos_sec = s_pos_sec;
         st.len_sec = s_len_sec;
         st.can_seek = s_can_seek;

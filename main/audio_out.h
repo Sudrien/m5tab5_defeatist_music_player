@@ -117,7 +117,29 @@ bool audio_out_muted(void);
  */
 void audio_out_set_idle(bool idle);
 
-/* "speaker", "headphones" -- for the log. Never NULL. */
+/*
+ * Where the sound is going, right now.
+ *
+ * Public because the UI draws it. The panel used to show a speaker
+ * unconditionally in the left margin of the volume row, which was a
+ * picture of the output only when the output happened to be the
+ * speaker -- with headphones in, it was drawing the wrong device.
+ *
+ * The ordering is the arbitration order, lowest to highest: USB
+ * outranks the jack, which outranks the speaker. Nothing depends on the
+ * numeric values, but keeping them in that order means a `>` reads the
+ * way the rule is stated in audio_out.c.
+ */
+typedef enum {
+    AUDIO_OUT_SPEAKER = 0,
+    AUDIO_OUT_HEADPHONES,
+    AUDIO_OUT_USB,
+} audio_out_route_t;
+
+/* Which of the three has the route. Safe from any task. */
+audio_out_route_t audio_out_route(void);
+
+/* "speaker", "headphones", "USB audio" -- for the log. Never NULL. */
 const char *audio_out_route_name(void);
 
 #ifdef __cplusplus
