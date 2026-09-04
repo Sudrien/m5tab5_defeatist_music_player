@@ -3184,6 +3184,9 @@ static void rg_release(void)
  *   I (344801) tab5_rg: sidecar written: ... (984 bytes)
  *   I (344881) tab5_mp3: first sound 1464 ms after the press
  *
+ * (That excerpt predates 0908, which reworded the line to
+ * "ms to sound". Left as it was logged.)
+ *
  * Same silence, one step later. A write is only free when playback has
  * something banked, so it waits for the ring.
  *
@@ -4532,6 +4535,13 @@ static track_end_t play_file(const char *path)
      * only once this track is the audible one. */
     uint32_t seed_len = 0;
 
+    /* How long this track waited for the previous one's tail to finish
+     * before the I2S clock could be reconfigured. Zero unless the rate
+     * changed at this boundary. Reported at first sound, because that is
+     * where it would otherwise look like this track was slow to start.
+     */
+    uint32_t drain_ms = 0;
+
     /* Before the open, not after. decoder_open() on a Xing-less MP3 scans
      * the whole file to build a seek index, and until it returns the
      * screen would otherwise still be showing the track that just
@@ -5714,11 +5724,34 @@ static track_end_t play_file(const char *path)
                      * who has asked for something else has already said
                      * what the tail is worth.
                      */
+                    const int64_t drain_start = esp_timer_get_time();
                     while (s_pcm &&
                            xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0) {
                         if (s_pending_ready || s_seek_pct >= 0) break;
                         vTaskDelay(pdMS_TO_TICKS(10));
                     }
+                    drain_ms = (uint32_t)((esp_timer_get_time() - drain_start)
+                                          / 1000);
+
+                    /*
+                     * Said in seconds of audio, because bytes are not
+                     * the unit anyone reading this cares about and the
+                     * conversion is not obvious: the ring always holds
+                     * 16-bit stereo -- mono is duplicated before it gets
+                     * here -- so it empties at the OUTGOING rate times
+                     * four, which for a 22 kHz track is half what the
+                     * KB figure suggests at a glance.
+                     *
+                     * Worth the second line because the first one, on
+                     * its own, reads like a stall. It is not. Every one
+                     * of those milliseconds is the previous track being
+                     * heard, which is the whole reason the drain exists
+                     * -- see the note above about twenty seconds of
+                     * Vorbis being discarded before it did.
+                     */
+                    ESP_LOGI(TAG, "drained in %" PRIu32 " ms of audio, "
+                                  "not silence: that was the previous "
+                                  "track finishing", drain_ms);
                 }
 
                 const esp_err_t ferr =
@@ -6143,8 +6176,29 @@ static track_end_t play_file(const char *path)
         /*
          * The number the listener actually experiences: press to sound,
          * not open to sound. It spans track_change_begin(), the open and
-         * the first decode, because that is the span during which the
-         * screen is blank and nothing is playing.
+         * the first decode.
+         *
+         * "During which nothing is playing" is what this comment used to
+         * say, and at a rate change it is false: the drain above is the
+         * PREVIOUS track being heard, and it can be most of the number.
+         * A log reading
+         *
+         *   rate change to 22050 Hz; draining 1416 KB first
+         *   first sound 8326 ms after the press
+         *
+         * looks like an eight-second stall and is an eight-second track
+         * ending normally. The drain is subtracted out and stated
+         * separately so the headline figure keeps meaning what it says.
+         *
+         * The arithmetic was checked against the board rather than
+         * assumed: 1416 KB at 44.1 kHz stereo predicts 8220 ms against
+         * 8326 observed, and 500 KB at 22.05 kHz predicts 5805 against
+         * 5911. Both inside 2%, so the wait is exactly the queued audio
+         * playing out and there is nothing else hiding in it.
+         *
+         * "after the press" is also a small lie on an automatic
+         * boundary, where nobody pressed anything. Said as "to sound"
+         * instead, which is true either way.
          *
          * Logged once per track, on the first block only.
          */
@@ -6156,10 +6210,18 @@ static track_end_t play_file(const char *path)
              * shape a gapless prefetch has to fit into, and the reason
              * this is worth a line rather than being inferred later from
              * the absence of an underrun. */
-            ESP_LOGI(TAG, "first sound %" PRIu32 " ms after the press "
-                     "(open was %" PRIu32 " ms of it), ring %d%%",
-                     (uint32_t)((esp_timer_get_time() - t_start) / 1000),
-                     open_ms, ring_headroom_pct());
+            const uint32_t to_sound =
+                (uint32_t)((esp_timer_get_time() - t_start) / 1000);
+            if (drain_ms) {
+                ESP_LOGI(TAG, "first sound %" PRIu32 " ms to sound "
+                         "(open was %" PRIu32 " ms of it, and %" PRIu32
+                         " ms was the previous track playing out), ring %d%%",
+                         to_sound, open_ms, drain_ms, ring_headroom_pct());
+            } else {
+                ESP_LOGI(TAG, "first sound %" PRIu32 " ms to sound "
+                         "(open was %" PRIu32 " ms of it), ring %d%%",
+                         to_sound, open_ms, ring_headroom_pct());
+            }
         }
 
         blocks++;
