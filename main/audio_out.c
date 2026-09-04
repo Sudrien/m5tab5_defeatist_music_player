@@ -103,11 +103,14 @@ static const char *TAG = "tab5_audio";
  * 4 KB matches PCM_CHUNK_BYTES; a larger block is split. */
 #define GAIN_SCRATCH_BYTES      (4 * 1024)
 
-typedef enum {
-    ROUTE_SPEAKER = 0,
-    ROUTE_HEADPHONES,
-    ROUTE_USB,
-} route_t;
+/* The enum lives in audio_out.h now, because the UI draws the route. The
+ * short names stay as aliases: arbitrate() and analog_set() read better
+ * with them, and renaming every use inside this file would bury the one
+ * thing that actually changed under fifty lines of noise. */
+typedef audio_out_route_t route_t;
+#define ROUTE_SPEAKER     AUDIO_OUT_SPEAKER
+#define ROUTE_HEADPHONES  AUDIO_OUT_HEADPHONES
+#define ROUTE_USB         AUDIO_OUT_USB
 
 static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_exp1;
@@ -381,6 +384,11 @@ static void headphone_task(void *arg)
 
         vTaskDelay(pdMS_TO_TICKS(HP_POLL_MS));
     }
+}
+
+audio_out_route_t audio_out_route(void)
+{
+    return s_route;
 }
 
 const char *audio_out_route_name(void)

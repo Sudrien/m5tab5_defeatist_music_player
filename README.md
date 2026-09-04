@@ -31,6 +31,8 @@ What do you mean no audio over Bluetooth
 - exFAT support
   - SDHC & SDXC cards have been tested (even if the latter died after week, not the software's fault). SDUC has not. Will Blu-ray size audio files play? Hell if I know.
 - Auto switching from headset to built in speaker on unplug and vice versa
+  - The icon by the volume slider shows which one is actually playing - speaker, headphones, or the USB port. It used to draw a speaker no matter what, which was a lie whenever you had headphones in.
+  - It is still the mute button. Tapping it mutes; it does not cycle outputs, because the device picks the output and you plugging something in is how you tell it.
 - Support for all (as far as I can tell) mp3 formats. This thing has fallback library after fallback library. Flac, ogg, wav, the standard are in here.
 - Album art display
 - Battery status (supposedly)

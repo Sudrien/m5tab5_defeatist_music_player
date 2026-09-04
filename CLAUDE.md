@@ -349,6 +349,70 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The speaker icon was lying (0901)
+
+The left margin of the volume row has drawn a speaker since the first
+version. It is also the mute button, so it had to be *something* -- but
+what it drew was a speaker regardless of where the sound was actually
+going. With headphones in, which is most of the time, the panel was
+drawing the one output that was deliberately silent.
+
+So this is not a new indicator. `audio_out.c` already arbitrates three
+outputs, already keeps the answer in `s_route`, and already logs it; the
+icon just never asked. Three shapes now, chosen by route:
+
+- **speaker** -- the existing cone, unchanged.
+- **headphones** -- a band and two cups. The band is an arc drawn one
+  column at a time off the circle equation, because `gfx` has no arc
+  primitive and this needs no line one. The cups are deeper than the
+  band is thick; without that the silhouette reads as a croquet hoop.
+- **USB audio** -- the A receptacle seen end on, square-cornered, tongue
+  held high rather than centred. That offset is the whole difference
+  between the icon and a small empty box.
+
+**Why the A receptacle and not the trident.** The trident is the logo
+everybody reads as USB, and it was tried first. At 30 px a stem, two
+branches, an arrowhead and three differently-shaped feet collapse into a
+smudge -- it is drawn for print and wants more pixels than this margin
+has. Rendered it, looked at it, threw it away. The receptacle also
+extends a vocabulary this panel already has rather than inventing one:
+`draw_usb_c()` draws the Type-C port as a rounded stadium for external
+power, so a square rectangle for the A port is the same idea about the
+other socket, and the two are unmistakable side by side. It is honest
+about the hardware too -- audio really does come off the A port and power
+really does come in on C.
+
+**What did not change, deliberately.** The tap still means mute. The
+route is not a user choice on this device -- `arbitrate()` decides it and
+the comment above it argues why -- so there is nothing for a tap to cycle
+through, and stealing a control people already rely on to add one would
+be a bad trade. If an override is ever wanted it belongs in the settings
+panel's AUDIO tab, next to a note about the case where it cannot be
+honoured: a device that cannot take the format already falls back to
+analog per track, so a pinned "USB" would sometimes be visibly ignored,
+and that needs explaining in a place with room to explain it.
+
+**Not in the battery corner**, which was the first instinct. That column
+is full: the moon sits at `s_w - 64` with its padded hit box reaching
+y436, the battery icon starts at y460, and its digits end 40 px off the
+bottom of the bar. Anything inserted there either collides with a touch
+target or hangs off the panel -- and the layout section above already
+warns against putting something back into that gap.
+
+**Checked rather than eyeballed.** The three icons were rendered from the
+real drawing code against the real `gfx` primitives (`/tmp` harness, same
+shim `texttest/` uses) and their ink measured: speaker -13..+11 x,
+headphones -16..+16, USB -15..+14, all inside `SPK_HALF` (26), so the hit
+box is unchanged and none of them reaches the slider's padded box at 82.
+`ui_draw()` clears the whole bar to `C_BG` before drawing, so the
+differing footprints cannot leave residue when the route changes
+mid-track -- which it does, on unplug, since `arbitrate()` re-runs from
+`audio_out_write()` when the generation moves.
+
+One ordering trap caught on the way: `fill_rrect()` is defined down with
+the battery icons and the headphone cups need it, so it is forward
+declared. This file has shipped a build failure for exactly that before.
+
 ### The font is 12px now, and glyphs have their own widths (0900)
 
 Two changes that had to happen together. The table gained fullwidth
@@ -2576,10 +2640,11 @@ silence.
 
 ### What this does not do yet
 
-- **Nothing on screen says which output is playing.**
-  `audio_out_route_name()` exists and only the log reads it. The transport
-  bar has no room for a ninth row and the honest place is probably next to
-  the volume slider.
+- ~~**Nothing on screen says which output is playing.**~~ Fixed in 0901.
+  The guess in this entry was right about the place and wrong about the
+  method: no new indicator was needed, because the icon already next to
+  the volume slider was a picture of the output that only happened to be
+  correct one third of the time. See "The speaker icon was lying" below.
 - **No resampling**, per above, so a 44.1 kHz-only device and a 48 kHz
   file fall back to the speaker rather than converting.
 - **UAC 2.0 is untested.** The driver claims it; the device this was

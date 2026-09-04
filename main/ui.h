@@ -16,6 +16,8 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
 
+#include "audio_out.h"   /* audio_out_route_t, drawn in the volume row */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -29,6 +31,11 @@ typedef struct {
     int      volume;        /* 0..100 */
     bool     muted;         /* the slider still shows the level it will
                              * return to -- see the note in ui.c */
+
+    /* Where the sound is going. The icon in the volume row's left margin
+     * draws this rather than always drawing a speaker, so the panel says
+     * which device is playing instead of only which one exists. */
+    audio_out_route_t route;
     uint32_t pos_sec;
     uint32_t len_sec;       /* 0 when unknown -- seek bar renders empty */
 
