@@ -76,6 +76,7 @@ What do you mean no audio over Bluetooth
   
 ## Fixed since v0.2.0
 
+- USB port going dead until a reboot after a headset was unplugged, and the boot loop before that. Both came from asking the remote for its report descriptor from a place where the answer could never arrive - so it always timed out, and the abandoned request then jammed the port on the way out. Asked from the right place now.
 - Boot loop when a USB headset was already plugged in at power-up. The remote's report-descriptor request never got an answer, and the code gave up after a second while the request was still outstanding - then crashed when the answer finally arrived. It only bit if the thing was plugged in *before* you turned the player on, which is of course how anyone actually uses it.
 
 ## Potential issues
