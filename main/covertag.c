@@ -51,10 +51,26 @@ static inline uint32_t syncsafe32(const uint8_t *p)
  * player.c and would have put the starvation straight back -- a single
  * lease held across a 512 KB cover is the uninterruptible read this is
  * meant to break up. storage_io.c logs that mistake if it is ever made.
+ *
+ * The priority is a parameter and not a constant, which it used to be:
+ * every read here was STORAGE_IO_PREFETCH. That is right for the next
+ * track and wrong for the current one, and both go through this file.
+ * load_tags() runs on the decode loop at the track change and do_art()
+ * on media_task behind it -- both about the song being listened to --
+ * while prefetch_next() and its neighbours are about a song nobody has
+ * heard yet. Filing the first two as prefetch queued the playing track's
+ * own tags and cover behind, and at equal standing with, work for a
+ * track that might never be reached.
+ *
+ * Threaded through every parser rather than kept in a file-scope
+ * variable, because those two callers are on different tasks and can be
+ * in here at the same time. A shared "current priority" would be read by
+ * whichever one happened to look after the other one set it.
  */
-static bool read_at(FILE *f, long off, void *buf, size_t len)
+static bool read_at(FILE *f, storage_io_class_t prio,
+                    long off, void *buf, size_t len)
 {
-    return storage_io_read_at(f, off, buf, len, STORAGE_IO_PREFETCH);
+    return storage_io_read_at(f, off, buf, len, prio);
 }
 
 static long file_size(FILE *f)
@@ -291,11 +307,11 @@ static void vorbis_comment_walk(uint8_t *b, size_t len,
  * showing the back of the sleeve when the front is right there is the
  * kind of wrong that looks like a bug.
  */
-static esp_err_t flac_read(FILE *f, long base, id3_tags_t *tags,
+static esp_err_t flac_read(FILE *f, storage_io_class_t prio, long base, id3_tags_t *tags,
                            uint8_t **out, size_t *out_len)
 {
     uint8_t magic[4];
-    if (!read_at(f, base, magic, 4) || memcmp(magic, "fLaC", 4) != 0) {
+    if (!read_at(f, prio, base, magic, 4) || memcmp(magic, "fLaC", 4) != 0) {
         return ESP_ERR_NOT_FOUND;
     }
 
@@ -306,7 +322,7 @@ static esp_err_t flac_read(FILE *f, long base, id3_tags_t *tags,
 
     while (pos + 4 <= end) {
         uint8_t bh[4];
-        if (!read_at(f, pos, bh, 4)) break;
+        if (!read_at(f, prio, pos, bh, 4)) break;
 
         const bool last = (bh[0] & 0x80) != 0;
         const uint8_t type = bh[0] & 0x7F;
@@ -321,7 +337,7 @@ static esp_err_t flac_read(FILE *f, long base, id3_tags_t *tags,
         if ((want_pic || want_cmt) && blen > 0 && blen <= COVERTAG_MAX_IMAGE) {
             uint8_t *b = malloc(blen);
             if (!b) return ESP_ERR_NO_MEM;
-            if (!read_at(f, pos, b, blen)) { free(b); break; }
+            if (!read_at(f, prio, pos, b, blen)) { free(b); break; }
 
             if (want_cmt) {
                 vorbis_comment_walk(b, blen, tags, NULL, NULL);
@@ -376,17 +392,17 @@ static esp_err_t flac_read(FILE *f, long base, id3_tags_t *tags,
  * does. Walking it like a plain container puts you four bytes out and
  * every child type reads as garbage.
  */
-static bool atom_next(FILE *f, long pos, long end, char type[4], long *body, long *next)
+static bool atom_next(FILE *f, storage_io_class_t prio, long pos, long end, char type[4], long *body, long *next)
 {
     uint8_t h[8];
-    if (pos + 8 > end || !read_at(f, pos, h, 8)) return false;
+    if (pos + 8 > end || !read_at(f, prio, pos, h, 8)) return false;
 
     uint64_t sz = be32(h);
     long hdr = 8;
 
     if (sz == 1) {
         uint8_t ext[8];
-        if (pos + 16 > end || !read_at(f, pos + 8, ext, 8)) return false;
+        if (pos + 16 > end || !read_at(f, prio, pos + 8, ext, 8)) return false;
         sz = ((uint64_t)be32(ext) << 32) | be32(ext + 4);
         hdr = 16;
     } else if (sz == 0) {
@@ -403,13 +419,13 @@ static bool atom_next(FILE *f, long pos, long end, char type[4], long *body, lon
 
 /* Find a direct child of [pos, end) by type. `skip` is the version and
  * flags word that `meta` has and the others do not. */
-static bool atom_find(FILE *f, long pos, long end, const char *want, long skip,
+static bool atom_find(FILE *f, storage_io_class_t prio, long pos, long end, const char *want, long skip,
                       long *body, long *body_end)
 {
     pos += skip;
     char type[4];
     long b, next;
-    while (atom_next(f, pos, end, type, &b, &next)) {
+    while (atom_next(f, prio, pos, end, type, &b, &next)) {
         if (memcmp(type, want, 4) == 0) {
             *body = b;
             *body_end = next;
@@ -425,52 +441,52 @@ static bool atom_find(FILE *f, long pos, long end, const char *want, long skip,
  * type indicator -- 1 UTF-8, 13 JPEG, 14 PNG -- then four bytes of
  * locale, then the value.
  */
-static uint8_t *ilst_data(FILE *f, long pos, long end, size_t *len, uint32_t *kind)
+static uint8_t *ilst_data(FILE *f, storage_io_class_t prio, long pos, long end, size_t *len, uint32_t *kind)
 {
     long b, be;
-    if (!atom_find(f, pos, end, "data", 0, &b, &be)) return NULL;
+    if (!atom_find(f, prio, pos, end, "data", 0, &b, &be)) return NULL;
     if (be - b < 8) return NULL;
 
     uint8_t hdr[8];
-    if (!read_at(f, b, hdr, 8)) return NULL;
+    if (!read_at(f, prio, b, hdr, 8)) return NULL;
 
     const size_t n = (size_t)(be - b - 8);
     if (n == 0 || n > COVERTAG_MAX_IMAGE) return NULL;
 
     uint8_t *v = malloc(n);
     if (!v) return NULL;
-    if (!read_at(f, b + 8, v, n)) { free(v); return NULL; }
+    if (!read_at(f, prio, b + 8, v, n)) { free(v); return NULL; }
 
     *len = n;
     *kind = be32(hdr) & 0xFFFFFF;
     return v;
 }
 
-static esp_err_t mp4_read(FILE *f, id3_tags_t *tags,
+static esp_err_t mp4_read(FILE *f, storage_io_class_t prio, id3_tags_t *tags,
                           uint8_t **out, size_t *out_len)
 {
     const long end = file_size(f);
     if (end < 8) return ESP_ERR_NOT_FOUND;
 
     long moov, moov_end;
-    if (!atom_find(f, 0, end, "moov", 0, &moov, &moov_end)) return ESP_ERR_NOT_FOUND;
+    if (!atom_find(f, prio, 0, end, "moov", 0, &moov, &moov_end)) return ESP_ERR_NOT_FOUND;
 
     long udta, udta_end;
-    if (!atom_find(f, moov, moov_end, "udta", 0, &udta, &udta_end)) return ESP_ERR_NOT_FOUND;
+    if (!atom_find(f, prio, moov, moov_end, "udta", 0, &udta, &udta_end)) return ESP_ERR_NOT_FOUND;
 
     long meta, meta_end;
-    if (!atom_find(f, udta, udta_end, "meta", 0, &meta, &meta_end)) return ESP_ERR_NOT_FOUND;
+    if (!atom_find(f, prio, udta, udta_end, "meta", 0, &meta, &meta_end)) return ESP_ERR_NOT_FOUND;
 
     /* The four bytes that make `meta` different from everything above. */
     long ilst, ilst_end;
-    if (!atom_find(f, meta, meta_end, "ilst", 4, &ilst, &ilst_end)) return ESP_ERR_NOT_FOUND;
+    if (!atom_find(f, prio, meta, meta_end, "ilst", 4, &ilst, &ilst_end)) return ESP_ERR_NOT_FOUND;
 
     int found = 0;
     long pos = ilst;
     char type[4];
     long b, next;
 
-    while (atom_next(f, pos, ilst_end, type, &b, &next)) {
+    while (atom_next(f, prio, pos, ilst_end, type, &b, &next)) {
         char *dst = NULL;
         size_t dst_len = 0;
 
@@ -490,7 +506,7 @@ static esp_err_t mp4_read(FILE *f, id3_tags_t *tags,
         if (dst) {
             size_t n = 0;
             uint32_t kind = 0;
-            uint8_t *v = ilst_data(f, b, next, &n, &kind);
+            uint8_t *v = ilst_data(f, prio, b, next, &n, &kind);
             if (v) {
                 tag_copy_utf8(dst, dst_len, v, n);
                 free(v);
@@ -499,7 +515,7 @@ static esp_err_t mp4_read(FILE *f, id3_tags_t *tags,
         } else if (!memcmp(type, "covr", 4) && out && !*out) {
             size_t n = 0;
             uint32_t kind = 0;
-            uint8_t *v = ilst_data(f, b, next, &n, &kind);
+            uint8_t *v = ilst_data(f, prio, b, next, &n, &kind);
             if (v) {
                 /* Trusting the bytes over the type indicator: taggers
                  * write 13 for a PNG often enough that the indicator is
@@ -545,7 +561,7 @@ static esp_err_t mp4_read(FILE *f, id3_tags_t *tags,
  */
 #define OGG_MAX_PACKET  (COVERTAG_MAX_IMAGE + COVERTAG_MAX_IMAGE / 2)
 
-static esp_err_t ogg_read(FILE *f, id3_tags_t *tags,
+static esp_err_t ogg_read(FILE *f, storage_io_class_t prio, id3_tags_t *tags,
                           uint8_t **out, size_t *out_len)
 {
     const long end = file_size(f);
@@ -562,13 +578,13 @@ static esp_err_t ogg_read(FILE *f, id3_tags_t *tags,
 
     while (pos + 27 <= end) {
         uint8_t ph[27];
-        if (!read_at(f, pos, ph, 27) || memcmp(ph, "OggS", 4) != 0) break;
+        if (!read_at(f, prio, pos, ph, 27) || memcmp(ph, "OggS", 4) != 0) break;
 
         const uint32_t this_serial = le32(&ph[14]);
         const int nsegs = ph[26];
 
         uint8_t segs[255];
-        if (!read_at(f, pos + 27, segs, (size_t)nsegs)) break;
+        if (!read_at(f, prio, pos + 27, segs, (size_t)nsegs)) break;
 
         const long body = pos + 27 + nsegs;
         long body_len = 0;
@@ -607,7 +623,7 @@ static esp_err_t ogg_read(FILE *f, id3_tags_t *tags,
                     pkt = grown;
                     pkt_cap = want;
                 }
-                if (slen && !read_at(f, seg_off, pkt + pkt_len, slen)) {
+                if (slen && !read_at(f, prio, seg_off, pkt + pkt_len, slen)) {
                     free(pkt);
                     return ESP_ERR_INVALID_SIZE;
                 }
@@ -676,17 +692,17 @@ complete:
  * is not read: the three strings it could supply are the three the
  * filename already supplies.
  */
-static bool wav_find_id3(FILE *f, long *off)
+static bool wav_find_id3(FILE *f, storage_io_class_t prio, long *off)
 {
     const long end = file_size(f);
     uint8_t hdr[12];
-    if (!read_at(f, 0, hdr, 12)) return false;
+    if (!read_at(f, prio, 0, hdr, 12)) return false;
     if (memcmp(hdr, "RIFF", 4) != 0 || memcmp(hdr + 8, "WAVE", 4) != 0) return false;
 
     long pos = 12;
     while (pos + 8 <= end) {
         uint8_t ch[8];
-        if (!read_at(f, pos, ch, 8)) break;
+        if (!read_at(f, prio, pos, ch, 8)) break;
         const uint32_t sz = le32(&ch[4]);
         if (pos + 8 + (long)sz > end) break;
 
@@ -708,10 +724,10 @@ static bool wav_find_id3(FILE *f, long *off)
  * either, and taggers do it anyway; skipping past it costs one read and
  * turns "unrecognised container" into a working file.
  */
-static long skip_leading_id3(FILE *f)
+static long skip_leading_id3(FILE *f, storage_io_class_t prio)
 {
     uint8_t h[10];
-    if (!read_at(f, 0, h, 10) || memcmp(h, "ID3", 3) != 0) return 0;
+    if (!read_at(f, prio, 0, h, 10) || memcmp(h, "ID3", 3) != 0) return 0;
     long off = 10 + (long)syncsafe32(&h[6]);
     if (h[5] & 0x10) off += 10;                 /* footer */
     return off;
@@ -726,12 +742,12 @@ typedef enum {
     FMT_WAV,
 } fmt_t;
 
-static fmt_t sniff(FILE *f, long *base)
+static fmt_t sniff(FILE *f, storage_io_class_t prio, long *base)
 {
     uint8_t m[12];
 
     *base = 0;
-    if (!read_at(f, 0, m, sizeof(m))) return FMT_UNKNOWN;
+    if (!read_at(f, prio, 0, m, sizeof(m))) return FMT_UNKNOWN;
 
     if (memcmp(m, "fLaC", 4) == 0) return FMT_FLAC;
     if (memcmp(m, "OggS", 4) == 0) return FMT_OGG;
@@ -741,9 +757,9 @@ static fmt_t sniff(FILE *f, long *base)
     if (memcmp(m, "ID3", 3) == 0) {
         /* Could be an MP3, or could be a tagger's ID3 bolted onto a FLAC
          * or an Ogg. Look past it before deciding. */
-        const long off = skip_leading_id3(f);
+        const long off = skip_leading_id3(f, prio);
         uint8_t n[4];
-        if (read_at(f, off, n, 4)) {
+        if (read_at(f, prio, off, n, 4)) {
             if (memcmp(n, "fLaC", 4) == 0) { *base = off; return FMT_FLAC; }
             if (memcmp(n, "OggS", 4) == 0) { *base = off; return FMT_OGG;  }
         }
@@ -753,38 +769,39 @@ static fmt_t sniff(FILE *f, long *base)
     return FMT_UNKNOWN;
 }
 
-esp_err_t covertag_extract_art(FILE *f, uint8_t **out, size_t *out_len)
+esp_err_t covertag_extract_art(FILE *f, storage_io_class_t prio,
+                               uint8_t **out, size_t *out_len)
 {
     long base = 0;
 
     *out = NULL;
     *out_len = 0;
 
-    switch (sniff(f, &base)) {
+    switch (sniff(f, prio, &base)) {
     case FMT_ID3:
-        return albumart_extract_at(f, 0, out, out_len);
+        return albumart_extract_at(f, prio, 0, out, out_len);
 
     case FMT_FLAC: {
-        const esp_err_t err = flac_read(f, base, NULL, out, out_len);
+        const esp_err_t err = flac_read(f, prio, base, NULL, out, out_len);
         return (err == ESP_OK && *out) ? ESP_OK : ESP_ERR_NOT_FOUND;
     }
 
     case FMT_OGG: {
         /* base is ignored: ogg_read() scans for the capture pattern from
          * zero, and a leading ID3 has no "OggS" in it to trip on. */
-        const esp_err_t err = ogg_read(f, NULL, out, out_len);
+        const esp_err_t err = ogg_read(f, prio, NULL, out, out_len);
         return (err == ESP_OK && *out) ? ESP_OK : ESP_ERR_NOT_FOUND;
     }
 
     case FMT_MP4: {
-        const esp_err_t err = mp4_read(f, NULL, out, out_len);
+        const esp_err_t err = mp4_read(f, prio, NULL, out, out_len);
         return (err == ESP_OK && *out) ? ESP_OK : ESP_ERR_NOT_FOUND;
     }
 
     case FMT_WAV: {
         long off;
-        if (!wav_find_id3(f, &off)) return ESP_ERR_NOT_FOUND;
-        return albumart_extract_at(f, off, out, out_len);
+        if (!wav_find_id3(f, prio, &off)) return ESP_ERR_NOT_FOUND;
+        return albumart_extract_at(f, prio, off, out, out_len);
     }
 
     default:
@@ -792,28 +809,28 @@ esp_err_t covertag_extract_art(FILE *f, uint8_t **out, size_t *out_len)
     }
 }
 
-esp_err_t covertag_read_tags(FILE *f, id3_tags_t *out)
+esp_err_t covertag_read_tags(FILE *f, storage_io_class_t prio, id3_tags_t *out)
 {
     long base = 0;
 
     memset(out, 0, sizeof(*out));
 
-    switch (sniff(f, &base)) {
+    switch (sniff(f, prio, &base)) {
     case FMT_ID3:
         return id3_read_tags_at(f, 0, out);
 
     case FMT_FLAC:
-        return flac_read(f, base, out, NULL, NULL);
+        return flac_read(f, prio, base, out, NULL, NULL);
 
     case FMT_OGG:
-        return ogg_read(f, out, NULL, NULL);
+        return ogg_read(f, prio, out, NULL, NULL);
 
     case FMT_MP4:
-        return mp4_read(f, out, NULL, NULL);
+        return mp4_read(f, prio, out, NULL, NULL);
 
     case FMT_WAV: {
         long off;
-        if (!wav_find_id3(f, &off)) return ESP_ERR_NOT_FOUND;
+        if (!wav_find_id3(f, prio, &off)) return ESP_ERR_NOT_FOUND;
         return id3_read_tags_at(f, off, out);
     }
 

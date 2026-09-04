@@ -6,6 +6,8 @@
 #include <stddef.h>
 
 #include "esp_err.h"
+
+#include "storage_io.h"   /* storage_io_class_t */
 #include "esp_lcd_panel_ops.h"
 
 #ifdef __cplusplus
@@ -36,8 +38,13 @@ esp_err_t id3_read_tags_at(FILE *f, long base, id3_tags_t *out);
 /* Pull the first JPEG APIC frame out of an MP3's ID3v2 tag.
  * Returns ESP_ERR_NOT_FOUND when there is no tag or no picture frame.
  * On success the caller owns *out and must free() it. */
-esp_err_t albumart_extract(FILE *f, uint8_t **out, size_t *out_len);
-esp_err_t albumart_extract_at(FILE *f, long base, uint8_t **out, size_t *out_len);
+/* cls says which read this is -- the playing track's cover is PLAYBACK,
+ * the next track's is PREFETCH. It used to be PREFETCH unconditionally,
+ * which filed the current track's own cover behind speculative work. */
+esp_err_t albumart_extract(FILE *f, storage_io_class_t cls,
+                           uint8_t **out, size_t *out_len);
+esp_err_t albumart_extract_at(FILE *f, storage_io_class_t cls, long base,
+                              uint8_t **out, size_t *out_len);
 
 /* JPEG or PNG by magic bytes -- the two things albumart_show() can
  * decode. Every container's picture block ends in this question, and

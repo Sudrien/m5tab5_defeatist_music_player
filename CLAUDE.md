@@ -349,6 +349,78 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The eight-second wait was for a ring nobody was filling (0906)
+
+Two warnings appear in every log this program has ever produced, at
+boot, before anything is playing:
+
+    W cover:    ring never reached 60% in 8000 ms; going ahead anyway
+    W prefetch: ring never reached 75% in 8000 ms; going ahead anyway
+
+They were read as storage contention for a long time, including by me,
+one patch ago. They are not. In a boot log there is nothing for the
+reads to contend with -- and in the log that finally made it obvious,
+both fired at 10008 and 18699 while playback did not start until 26506.
+
+`media_settle()` waits for the ring to reach a floor. The ring is filled
+by a decode loop. With nothing chosen -- the chooser open, a track
+resumed but not started -- there is no decode loop, the level sits at 0
+and cannot rise, and the wait ran its full eight seconds every time.
+
+`s_ring_pct`'s own -1 escape does not catch it, which is why this
+survived: -1 means "no ring yet", and `i2s_writer_task` loops on a 100 ms
+receive whether anything is playing or not, so `ring_publish()` has long
+since published a real 0.
+
+**The predicate is `!s_decoding && !s_track_changing`,** which is the one
+`player_loop()` already idles the amplifier on. Both halves are load
+bearing and for different reasons. `s_decoding` covers a running decode.
+`s_track_changing` covers the gap *before* one -- and that gap is not
+small: `s_decoding` is set only after `decoder_open()` returns, and
+`decoder_open()` on a Xing-less MP3 scans the whole file. 1263 ms in the
+logs, against a `MEDIA_ART_DELAY_MS` of 700. Testing `s_decoding` alone
+would have released the cover read into the middle of an index scan --
+the exact contention `media_settle()` exists to prevent, reintroduced by
+the fix for it.
+
+The bounded wait keeps its original job. Its comment listed "a slow
+device, a very high bitrate" as the cases it was carrying; "nothing is
+playing" was not on that list and should never have been on it.
+
+### And the priority the reads were filed under (0906)
+
+`covertag.c` read everything as `STORAGE_IO_PREFETCH`. Right for the
+next track, wrong for the current one, and both go through that file:
+`load_tags()` runs on the decode loop at the track change and `do_art()`
+on media_task behind it -- both about the song being listened to --
+while `prefetch_next()` and its neighbours are about a song nobody has
+heard yet. The playing track's own tags and cover were queued behind, and
+at equal standing with, work for a track that might never be reached.
+
+Worth fixing in the same patch as the wait above rather than after it:
+removing the eight seconds makes these reads start sooner, so the
+priority they are filed under starts mattering more, not less.
+
+**Threaded as a parameter, not held in a file-scope variable,** because
+those two callers are on different tasks and can both be inside
+`covertag.c` at once -- the file says so itself, at the top of
+`load_tags()`. A shared "current priority" would be read by whichever one
+happened to look after the other one set it. Eleven static functions
+gained the parameter and fifteen `read_at()` sites now pass it.
+
+**`albumart.c` had the same constant, on the path that matters most.**
+`covertag_extract_art()` delegates plain ID3 to `albumart_extract_at()`,
+which is every MP3 in an ordinary library, and it read at
+`STORAGE_IO_PREFETCH` too. Fixing only `covertag.c` would have left the
+common case exactly as it was, which is the kind of half-fix this file
+has recorded twice in the last week.
+
+**Not flashed.** `covertag.c` compiles clean; `albumart.c` and
+`player.c` were checked by prototype agreement and by eye, since the host
+stubs do not reach the JPEG and stream-buffer headers those files pull
+in. What to look for: the two warnings absent from a boot log, and
+`open playback` holding a larger share of its window on the first track.
+
 ### The USB route says UAC (0905)
 
 0901 drew the A receptacle end on and argued for it on two grounds: it

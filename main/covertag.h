@@ -38,6 +38,7 @@
 #include "esp_err.h"
 
 #include "albumart.h"
+#include "storage_io.h"   /* storage_io_class_t: callers state which read this is */
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,14 +64,15 @@ extern "C" {
  * Leaves the file position undefined; callers sharing a handle with a
  * decoder must open their own, as they already had to.
  */
-esp_err_t covertag_extract_art(FILE *f, uint8_t **out, size_t *out_len);
+esp_err_t covertag_extract_art(FILE *f, storage_io_class_t prio,
+                               uint8_t **out, size_t *out_len);
 
 /*
  * Title, artist and album from any supported container. Same contract as
  * id3_read_tags(): fields are empty strings when absent, and the caller
  * falls back to the filename.
  */
-esp_err_t covertag_read_tags(FILE *f, id3_tags_t *out);
+esp_err_t covertag_read_tags(FILE *f, storage_io_class_t prio, id3_tags_t *out);
 
 #ifdef __cplusplus
 }
