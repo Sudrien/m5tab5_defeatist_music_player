@@ -46,7 +46,7 @@ jobs:
       # takes seconds, so a layout regression should fail here rather
       # than fifteen minutes later. It does not replace a flash -- see
       # texttest/README.md -- it only covers arithmetic.
-      - name: Host text-layout tests
+      - name: Host tests (text layout, USB control handoff)
         run: make -C texttest
 
       - name: Install ESP-IDF

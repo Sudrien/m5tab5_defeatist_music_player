@@ -62,6 +62,39 @@ introduced into `gfx.c` and the suite was confirmed to catch each:
 | right-edge clip removed from `gfx_draw_text_clipped()` | 468 failures |
 | ellipsis budget check drops the next glyph's advance | 90 failures |
 
+## ctrltest: the USB control-transfer handoff
+
+`make` also builds and runs `ctrltest`, which covers a different bug in a
+different file: `hid.c`'s report-descriptor request freed its transfer
+and its completion semaphore when the 1 s wait timed out, while the URB
+was still in flight. The completion then ran against a dead stack frame
+and gave a deleted semaphore, which is a panic inside
+`usb_host_client_handle_events`:
+
+    assert failed: xQueueGenericSend queue.c:936 (pxQueue)
+
+It only reproduced with the device already plugged in at boot, where
+enumeration lands on top of the SD mount and the first cover prefetch --
+so it was a boot loop on ordinary use and a clean run on a bench test.
+
+Unlike the text tests, this one **reproduces** the logic rather than
+compiling `hid.c`, because the real function is welded to the USB host
+API and the interesting part is twenty lines. That is a genuine weakness:
+the file and the test can drift. What it verifies is the *shape* of the
+ownership handoff -- heap context, an `abandoned` flag set under a lock,
+and whichever side finishes last doing the free -- and the shape is what
+was wrong.
+
+The fake host's completion delay is a knob, so the three cases are the
+three orderings: completion inside the timeout (waiter frees), completion
+long after (callback frees), and completion right at the deadline, run
+400 times because a handoff that is only usually right is a flake.
+
+Confirmed to fail on the old shape: reverting to the stack context and
+freeing on timeout gives
+`AddressSanitizer: heap-use-after-free ... WRITE of size 4`, freed by the
+waiter, written by the completion thread.
+
 ## What it does *not* verify
 
 Everything `CLAUDE.md` says host testing cannot see, which has been right

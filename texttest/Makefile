@@ -25,7 +25,11 @@ LDFLAGS := -fsanitize=address,undefined -lm
 SRCS := main.c shim.c ../main/gfx.c ../components/ark12/ark12.c
 BIN  := texttest
 
-all: run
+# The USB control-transfer ownership handoff, which needs threads and its
+# own main(). Separate binary rather than another file in BIN.
+CTRL_BIN := ctrltest
+
+all: run run-ctrl
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -33,8 +37,14 @@ $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 run: $(BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BIN)
 
-clean:
-	rm -f $(BIN)
-	rm -rf $(BIN).dSYM
+$(CTRL_BIN): ctrltest.c
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -pthread -o $@ ctrltest.c $(LDFLAGS) -pthread
 
-.PHONY: all run clean
+run-ctrl: $(CTRL_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CTRL_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM
+
+.PHONY: all run run-ctrl clean
