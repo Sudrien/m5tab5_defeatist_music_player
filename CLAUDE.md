@@ -349,6 +349,59 @@ hand, and its output is committed. The generated header names the
 upstream commit, which is the same guarantee moved somewhere that can
 hold it.
 
+### The rate-change drain was never the bug; the log line was (0908)
+
+A board run showed four of these and they look alarming:
+
+    rate change to 22050 Hz; draining 1416 KB first
+    first sound 8326 ms after the press (open was 12 ms of it)
+
+Eight seconds to start a track whose open took twelve milliseconds. I
+read it as a stall worth fixing and said so. It is not, and this file
+already knew: see "Not a fault: the 12.9 s before track 14" above, which
+has been correct since 0710.
+
+**Checked rather than argued, because the first argument was wrong.** I
+claimed the cost was not proportional to the queued bytes -- 500 KB
+costing two thirds of what 1416 KB cost -- which assumed both drained at
+44.1 kHz. They did not. The 500 KB case drained after a 22.05 kHz track,
+so its byte rate was half. The ring always holds 16-bit stereo, mono
+duplicated before it arrives, so it empties at the outgoing rate times
+four:
+
+    1416 KB at 44.1 kHz -> 8220 ms predicted, 8326 observed  (1.3%)
+     500 KB at 22.05 kHz -> 5805 ms predicted, 5911 observed  (1.8%)
+
+Both inside 2%. The wait is exactly the queued audio playing out, with no
+fixed overhead hiding in it, and every millisecond is the previous track
+being heard. Capping it would reintroduce the bug the drain was written
+to fix -- twenty seconds of Vorbis discarded at a boundary, heard as the
+track jumping to its end.
+
+**So the change is to the logging and nothing else.** The rate-change
+path now times its own drain and says what it was worth, and the first
+sound line subtracts it out and states it separately:
+
+    drained in 8220 ms of audio, not silence: that was the previous
+      track finishing
+    first sound 8326 ms to sound (open was 12 ms of it, and 8220 ms was
+      the previous track playing out), ring 0%
+
+"after the press" is gone too. On an automatic boundary nobody pressed
+anything; "to sound" is true either way.
+
+**The lesson is about where the explanation lives.** The analysis above
+was right, written down, and five patches old, and the question still got
+asked again from a fresh log -- by me -- because the log line did not
+carry what the document knew. A document that answers a question nobody
+thinks to look up has not answered it. This is the second time this
+session that a misleading line cost real time: the 998 ms constant sat in
+plain sight through three builds for the same reason.
+
+Two historical excerpts elsewhere in player.c still quote the old
+wording. They are marked as predating this patch rather than rewritten,
+because they are evidence of what was logged at the time.
+
 ### The ALAC warning was about a component that path does not use (0907)
 
 Every ALAC track logged this at open, then played perfectly:
@@ -779,8 +832,11 @@ icon just never asked. Three shapes now, chosen by route:
 - **USB audio** -- ~~the A receptacle seen end on~~ the letters `UAC`.
   See 0905; the receptacle shipped first and was replaced.
 
-**Why the A receptacle and not the trident.** The trident is the logo
-everybody reads as USB, and it was tried first. At 30 px a stem, two
+**Why the A receptacle and not the trident.** *(Superseded by 0905, which
+replaced the receptacle with the letters `UAC`. Kept because the reasoning
+about the trident still holds and because the receptacle's defeat is the
+useful part -- a good silhouette that was still the wrong answer.)* The
+trident is the logo everybody reads as USB, and it was tried first. At 30 px a stem, two
 branches, an arrowhead and three differently-shaped feet collapse into a
 smudge -- it is drawn for print and wants more pixels than this margin
 has. Rendered it, looked at it, threw it away. The receptacle also
@@ -2032,6 +2088,11 @@ no log; the first board run of 0703 read as a regression when it was a
 success.
 
 ##### Not a fault: the 12.9 s before track 14
+
+*(0908 made the log say this itself. The section below stayed correct
+for five patches and the question was asked again anyway, from a fresh
+log, because the log line did not carry what this section knows. That is
+the argument for fixing the line rather than the document.)*
 
 `first sound 12966 ms after the press` at the 44.1 -> 22.05 kHz
 boundary looks like 0710 failed. It did not: the crossfade was
@@ -4001,10 +4062,15 @@ has the data.
 Three additions, all aimed at the gap between a press and a sound:
 
 - **`open took N ms`**, timed around `decoder_open()` alone.
-- **`first sound N ms after the press`**, spanning
-  `track_change_begin()`, the open and the first decoded block -- the
-  whole interval during which the screen is blank and nothing plays.
-  Logged on the first block only.
+- **`first sound N ms to sound`**, spanning `track_change_begin()`, the
+  open and the first decoded block. Logged on the first block only.
+  Reworded in 0908: it used to say "after the press", which is a small
+  lie on an automatic boundary where nobody pressed anything, and it
+  used to be described here as "the interval during which the screen is
+  blank and nothing plays", which is false at a rate change -- the drain
+  is the previous track being heard. When a drain happened the line now
+  states it separately, so the headline figure keeps meaning what it
+  says.
 - **`storage_io_report(phase)`** at three points: after the open, after a
   failed open, and at the end of the track. The phase label is what makes
   the numbers mean anything, because the counters reset on read: the
