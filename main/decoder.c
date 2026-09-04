@@ -46,6 +46,16 @@
 
 static const char *TAG = "tab5_dec";
 
+/*
+ * esp_audio_codec's own log tag, spelled here because it is not ours and
+ * there is no header that declares it -- it is a string inside the
+ * precompiled archive, recovered from the log line it prints. If a
+ * future component renames it, the suppression below silently stops
+ * working and the warning comes back, which is the right way for this to
+ * fail: noisy, not silent.
+ */
+#define SDEC_TAG    "AUD_SDEC"
+
 /* ------------------------------------------------------------------ */
 
 typedef enum { BACKEND_MINIMP3, BACKEND_ESP_CODEC } backend_t;
@@ -654,6 +664,35 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
      * back and plays it exactly as it did before -- unseekable, which
      * is what ALAC has always been here.
      */
+    /*
+     * The vendored decoder grumbles on every ALAC open:
+     *
+     *   W AUD_SDEC: Not find default parser for 1128352833
+     *
+     * 1128352833 is 0x41434C41, which is 'ALAC' read the other way up.
+     * It is looking for a default *parser* -- the thing that finds frame
+     * boundaries in a stream -- and there is not one for ALAC. There
+     * does not need to be: `use_frame_dec` is true here precisely
+     * because the MP4 sample table does the framing and each buffer
+     * handed over is already exactly one frame. The library is reporting
+     * the absence of a component this path does not use.
+     *
+     * It is a warning about nothing, printed once per ALAC track, on a
+     * path that then works -- and a log that cries wolf on every file of
+     * a format is a log people stop reading. AUD_SDEC lives inside the
+     * precompiled esp_audio_codec archive, so there is nothing to patch
+     * at source; the tag's threshold is raised across the calls that
+     * provoke it and put back afterwards.
+     *
+     * Narrow on purpose, in both senses. Only this tag, and only around
+     * the ALAC opens -- a genuine AUD_SDEC error from anywhere else, or
+     * from these calls at ESP_LOG_ERROR, still prints. Restoring the
+     * previous level rather than assuming ESP_LOG_INFO means this stays
+     * correct under a build with a different default.
+     */
+    const esp_log_level_t sdec_was = esp_log_level_get(SDEC_TAG);
+    if (d->frame_mode) esp_log_level_set(SDEC_TAG, ESP_LOG_ERROR);
+
     if (d->frame_mode &&
         esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
         alac_cfg.codec_spec_info = d->mp4.cookie + d->mp4.cookie_cfg_off;
@@ -673,6 +712,10 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
             type = cfg.dec_type;
         }
     }
+
+    /* Back to normal before the fallback open below, which is an
+     * ordinary M4A open and has every reason to be heard. */
+    esp_log_level_set(SDEC_TAG, sdec_was);
 
     if (!d->esp_dec &&
         esp_audio_simple_dec_open(&cfg, &d->esp_dec) != ESP_AUDIO_ERR_OK) {
