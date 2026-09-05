@@ -549,9 +549,82 @@ behind the music, which is the behaviour the constant was accidentally
 giving every caller.
 
 **Not flashed.** `duration.c` compiles clean under
-`gcc -Wall -Wextra -Wformat=2` against the host stubs. What to look for:
-`open playback` in `storage_io_report()` accounting for the probe's
-reads rather than `open prefetch`, on a FLAC, Ogg, WAV or MP4 track.
+`gcc -Wall -Wextra -Wformat=2` against the host stubs.
+
+**And the check this entry gave was wrong -- see 1001.** It said to look
+for the probe's reads in the `open` window. They cannot be there:
+`storage_io_report("open")` closes immediately after `decoder_open()`,
+and `decoder_duration_sec()` runs some hundreds of lines later. The
+right window is `track`, and the board confirmed the fix from it.
+
+### 1000's own falsification condition was in the wrong window (1001)
+
+1000 said to look for the probe's reads under `open playback` rather
+than `open prefetch`. That check could never have fired either way.
+`storage_io_report("open")` is called at the top of `play_file()`, right
+after `open took N ms`; `decoder_duration_sec()` -- the only caller of
+`duration_probe()` -- runs much further down the same function. The
+board says so plainly, 13 ms apart:
+
+    open took 28 ms
+    open playback: 22 reads, 128 KB in 18 ms held of 28 ms (64%)
+    tab5_dur: container says 60s
+
+The probe's reads land in the **`track`** window, which is reported when
+the track ends.
+
+**Read from the right window, the fix is confirmed.** An Ogg track's own
+report, over a window that opens at the probe:
+
+    track playback: 58 reads, 181 KB in 36 ms held of 263151 ms
+    track prefetch: 36 reads,   0 KB in 10 ms held, 39 KB/s
+
+`probe_ogg()` reads a 64 KB tail window (`OGG_WINDOW`). PREFETCH
+accounts for 0 KB across the whole track -- 10 ms at 39 KB/s is about
+390 bytes, which is the sidecar and the tag reads. A 64 KB read is not
+in there; PLAYBACK's 181 KB is where it went. Had 1000 not landed, that
+line would read about 64 KB, so the Ogg probe turns out to be the one
+path in this file big enough to be visible in the counters at all -- the
+FLAC, WAV and MP4 probes are a few hundred bytes and would have proved
+nothing.
+
+**The pattern, which this file has recorded before and produced again.**
+0902 called `usb_host_endpoint_halt()` on EP0 on the strength of the
+call order being documented, without checking the argument was valid.
+1000 named a window on the strength of the class being right, without
+checking where the call sits relative to the report that closes it. Both
+are the same move: reasoning about *what* the code does and asserting
+something about *when* it runs. **A falsification condition is only
+worth writing if it names a place the thing can actually be observed** --
+and an untestable check is worse than none, because it reads as
+verification and reports nothing.
+
+### And the dead-field entry was wrong in both directions (1001)
+
+The open list said `framewalk_t` still carries `frames` and `has_levels`,
+"which nothing fills any more". Field by field:
+
+| Field | Listed as | Actually |
+| --- | --- | --- |
+| `frames` | dead | dead -- never written, never read |
+| `rate` | not listed | **dead** -- never written, never read |
+| `has_levels` | dead | **live** -- written at two sites, read by `waveform.c` |
+
+So the entry named a live field, missed a dead one, and was right about
+exactly one of the three. `frames` and `rate` are removed. `has_levels`
+stays: both writers set it `true` unconditionally, so it is vestigial
+rather than filled, but `waveform.c` still tests it and dropping it means
+dropping that guard too. That is a behaviour change -- a NULL or
+zero-column envelope would be one test nearer being drawn -- and it does
+not belong in a patch whose subject is deleting fields nobody writes.
+
+**A list that is read but not checked decays into a claim about the
+past.** This is the third time in two patches: 1000 struck out a
+`covertag.c` entry closed by 0906, and now the entry beside it turns out
+to have been describing a struct that had moved underneath it. 0811 and
+0812 both name this failure. Neither stopped it, because what they
+recorded was the lesson and not a habit of re-reading the list against
+the code.
 
 **Threaded as a parameter, not held in a file-scope variable,** because
 those two callers are on different tasks and can both be inside
@@ -4290,7 +4363,9 @@ was wrong.
   open at the v0.3.0 review -- the same failure 0811 and 0812 both
   record, in the list that documents it.
 - ~~`duration.c` is `PREFETCH` for every read.~~ Closed by 1000, which
-  is the same fix from the other side. See below.
+  is the same fix from the other side, and confirmed on the board by
+  1001 -- the Ogg probe's 64 KB window is absent from PREFETCH's
+  per-track total. See below.
 - One lease covers the SD card and the USB port together.
 - ~~Raw ADTS and AMR have no duration on a track that has never been
   played through.~~ Fixed: `cbrseek.c` derives it from a proven-constant
@@ -4309,10 +4384,12 @@ was wrong.
   see -- it compiles function bodies, not the file they sit in. Type
   checks against the real headers catch the first; a use-before-definition
   scan catches the second; neither substitutes for a build.
-- `waveform_draw_flat()` and `draw_slider()` were removed as dead in 0206;
-  `framewalk_t` still carries `frames` and `has_levels`, which nothing
-  fills any more. Trimming the struct touches `mediacache`, `waveform.c`
-  and both remaining call sites for no behaviour change.
+- ~~`waveform_draw_flat()` and `draw_slider()` were removed as dead in
+  0206; `framewalk_t` still carries `frames` and `has_levels`, which
+  nothing fills any more.~~ Closed by 1001, which found the entry wrong
+  in both directions: `has_levels` is live, `rate` was dead and unlisted.
+  `frames` and `rate` are gone; `has_levels` stays and says why in
+  `framewalk.h`.
 
 ### The method that actually worked
 
