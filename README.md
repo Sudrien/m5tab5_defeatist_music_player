@@ -73,18 +73,13 @@ What do you mean no audio over Bluetooth
 - classic BT dongle support
 - per file resume
 - usb hubs - Can it tell you have plugged one in? yes. Can it use things plugged into them? Probably not. Will one save you if your device requires enough power to brownout the Tab5? Uh. Define save.
-  
-## Fixed since v0.2.0
-
-- USB port going dead until a reboot after a headset was unplugged, and the boot loop before that. Both came from asking the remote for its report descriptor from a place where the answer could never arrive - so it always timed out, and the abandoned request then jammed the port on the way out. Asked from the right place now.
-- Boot loop when a USB headset was already plugged in at power-up. The remote's report-descriptor request never got an answer, and the code gave up after a second while the request was still outstanding - then crashed when the answer finally arrived. It only bit if the thing was plugged in *before* you turned the player on, which is of course how anyone actually uses it.
+- ALAC, Vorbis and DRM'd files are no-go. 
 
 ## Potential issues
 
 - Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n.
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
-- I can never tell if the peaking I'm hearing is a buffer underun of record needle noise encoded in the music, personally. ReplayGain fixes some of that. 
 
 ## Licensing
 
@@ -105,6 +100,8 @@ What do you mean no audio over Bluetooth
   the tables must not be sold on their own. Ark declares no Reserved Font
   Name, so the derivative did not have to be renamed; it is called
   `ark12` anyway, because it is not the Original Version.
+- MurmurHash2 is public domain.
+- TJpgDec may be used for the bigger cover jpegs, not there yet
 
 ## One last insult
 
