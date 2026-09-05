@@ -20,7 +20,6 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
-#include "esp_rom_md5.h"
 
 #include "pngle.h"
 
@@ -33,6 +32,41 @@ static const char *TAG = "tab5_art";
 /* ------------------------------------------------------------------ */
 /* ID3v2 APIC                                                          */
 /* ------------------------------------------------------------------ */
+
+/*
+ * MurmurHash2, 32-bit, public domain. Identity for a blob of bytes: two
+ * covers that hash the same and are the same length are the same image
+ * for every purpose this program has.
+ *
+ * The 4-byte load goes through memcpy() rather than a cast. The input is
+ * a DMA-reachable buffer whose alignment nothing here promises, and an
+ * unaligned 32-bit load is a fault on some targets and a silent
+ * slow path on others; the compiler turns this back into one load where
+ * it is allowed to.
+ */
+static uint32_t cover_hash(const void *key, size_t len)
+{
+    const uint32_t m = 0x5bd1e995u;
+    const int r = 24;
+    uint32_t h = 0x9747b28cu ^ (uint32_t)len;
+    const unsigned char *d = (const unsigned char *)key;
+
+    while (len >= 4) {
+        uint32_t k;
+        memcpy(&k, d, 4);
+        k *= m; k ^= k >> r; k *= m;
+        h *= m; h ^= k;
+        d += 4; len -= 4;
+    }
+    switch (len) {
+        case 3: h ^= (uint32_t)d[2] << 16; /* fall through */
+        case 2: h ^= (uint32_t)d[1] << 8;  /* fall through */
+        case 1: h ^= (uint32_t)d[0]; h *= m; break;
+        default: break;
+    }
+    h ^= h >> 13; h *= m; h ^= h >> 15;
+    return h;
+}
 
 static uint32_t be32(const uint8_t *p)
 {
@@ -521,21 +555,24 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
      * the ID3 extraction, the read off the card AND the memcpy above.
      * Hashing the source would leave the last of those untested.
      *
-     * MD5 from ROM: no code size, no dependency, and collision
-     * resistance is irrelevant when the question is "are these the same
-     * bytes twice".
+     * MurmurHash2 rather than MD5 as of 1011. The question here has
+     * always been "are these the same bytes twice", which needs
+     * distribution and not cryptographic strength -- the old comment
+     * said so while paying for the strength anyway. MD5 ran ungated over
+     * every cover: 1.8 MB of ROM MD5 per track, for a log line.
+     *
+     * The 32-bit variant on purpose. MurmurHash64A is the better hash
+     * and it leans on 64-bit multiplies, which on this RV32 target are
+     * calls into __muldi3 -- the same trap 1005 hit with __moddi3 and
+     * 1007 wrote down. A hash is exactly the shape of loop that turns
+     * that into real time.
+     *
+     * Public domain (Austin Appleby), so unlike TJpgDec it adds no
+     * licence obligation.
      */
-    {
-        md5_context_t md5;
-        uint8_t digest[16];
-        esp_rom_md5_init(&md5);
-        esp_rom_md5_update(&md5, in, (uint32_t)jpeg_len);
-        esp_rom_md5_final(digest, &md5);
-
-        char hex[33];
-        for (int i = 0; i < 16; i++) snprintf(hex + i * 2, 3, "%02x", digest[i]);
-        ESP_LOGI(TAG, "jpeg in: %u bytes, md5 %s", (unsigned)jpeg_len, hex);
-    }
+    const uint32_t sum = cover_hash(in, jpeg_len);
+    ESP_LOGI(TAG, "jpeg in: %u bytes, hash %08x",
+             (unsigned)jpeg_len, (unsigned)sum);
 
     const jpeg_decode_memory_alloc_cfg_t out_cfg = {
         .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
