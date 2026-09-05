@@ -3049,6 +3049,79 @@ itself as the library gets played rather than needing an experiment.
 **`clamp_hits` has still never appeared**, which is the prediction that
 matters most: it is the one that would mean the headroom cap is wrong.
 
+##### And it answered itself two patches later (1006)
+
+A game soundtrack, 320 kbps MP3, first play:
+
+    loudness: -5.53 LUFS, peak 0.00 dBFS, 2282 gated blocks
+    output peak 32768/32768 (0.00 dBFS) -- at the rail
+
+**So real music does reach full scale**, and the reason the corpus and
+the classical track did not is now clear: the corpus is one master at
+-6 dBFS, and chamber classical is the genre least likely to be limited.
+A modern loudness-war master is pinned at 0.00, which is exactly the
+case neither earlier sample could contain.
+
+**And it still does not clip.** The rail is only reached on the *unity*
+pass, which is the first play, while measuring -- and 0 dBFS is full
+scale, not past it. Every play after that has a sidecar, and the track
+above measures -6.04 LUFS at -0.07 dBFS peak and gets **-11.96 dB**:
+its output peak came out at 7824, or -12.44 dBFS, which is the gain
+applied exactly as designed.
+
+So the entry closes as **reached, never exceeded**. A limiter would have
+had nothing to do on either pass: at unity there is no gain to overshoot
+with, and once a gain exists it is negative and large. What made this
+answerable was one log line added instead of a feature.
+
+### The cover cache is ninety times its documented size (1006)
+
+`mediacache.h` states the budget:
+
+    cover, compressed    80-120 KB stored
+
+The board, on an album whose cover is a 3.7 MB PNG:
+
+    prefetch done: cache 3 entries, 10935 KB
+
+**Three slots, three copies of the same 3.7 MB image, 10.9 MB of
+PSRAM** -- next to the 1.8 MB shadow buffer and a decode ring with audio
+running through it. Nothing is leaking and nothing is wrong with the
+cache: `COVERTAG_MAX_IMAGE` is 4 MB, three slots of that is 12 MB, and
+the design permits every byte of it. **The stated figure was an
+assumption about cover art, not a bound on anything.**
+
+**It has a measured cost, and it is the first real contention the
+arbiter has ever seen.** The same track change:
+
+    track playback: 20 reads, 5119 KB ... worst hold 387 ms, worst wait 234 ms
+    track prefetch: 240 reads, 3644 KB in 326 ms held
+
+Every earlier log in this file reports `worst wait 0 ms` or 1 ms. The
+arbiter worked -- it broke the prefetch into chunks and let playback in
+-- but `worst hold 387 ms` is the floor on control latency by the
+argument in "Bytes over wall-clock is not a throughput", so a button
+pressed behind that read waits a third of a second. The prediction in
+"The card is arbitrated, not throttled" was that PLAYBACK's worst wait
+should be roughly one chunk of the current device. 234 ms is not that.
+
+Deliberately **not** fixed here, because every available fix is a
+behaviour change and they are not equivalent:
+
+- **Cap the cached size** and large covers stop being cached at all,
+  which costs the prefetch on exactly the albums where the decode is
+  most expensive.
+- **Downscale before caching** and the cache stops holding what the file
+  contained, which is a different thing from what every other consumer
+  of `covertag_extract_art()` gets.
+- **Do not prefetch covers past some size**, which keeps the cache
+  honest and gives up the head start.
+
+That is a decision about what the player should do, not a defect to
+correct, and it wants taking on its own rather than inside a patch that
+was closing something else. **What is fixed here is the documentation,
+which claimed a number the code never enforced.**
+
 Applied in `player.c`'s decode loop, not `audio_out.c`, because only the
 USB route has a software gain stage -- the analog path writes ES8388
 registers, so a gain applied there would play the same track at two
@@ -4053,12 +4126,14 @@ have been a task, is the useful part of a list like this one.
   entry and sets `mp4_t.encrypted`, which is the one field there that
   survives `mp4_free()`. This is a better error message and nothing
   more -- there is no key here and there is not going to be one.
-- **Nothing is peak-limited.** ~~FLAC and WAV arrive at full scale where
-  MP3 rarely did.~~ **Measured in 1004 and false.** What is left of this
-  entry is a narrower question, below and in "Nothing digital can clip
-  here": whether anything in a real library reaches the rail. One
-  classical MP3 came within 3 dB. Nothing has yet clipped, and
-  `clamp_hits` has never fired.
+- ~~**Nothing is peak-limited.**~~ Closed by 1006, in two halves and
+  neither of them a limiter. ~~FLAC and WAV arrive at full scale where
+  MP3 rarely did~~ was measured in 1004 and is false. **Real music does
+  reach the rail** -- a 320 kbps MP3 reports `output peak 32768/32768
+  (0.00 dBFS)` -- and it still does not clip, because that only happens
+  on the unity pass while measuring, and every play after it applies
+  -11.96 dB. `clamp_hits` has never fired. See "Nothing digital can clip
+  here".
 
   **This is not the same as FLAC and WAV missing ReplayGain.** They do
   not miss it. `loudness.c` measures the decoded int16 block on its way
