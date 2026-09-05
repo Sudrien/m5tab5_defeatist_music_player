@@ -29,18 +29,25 @@ extern "C" {
 #define FRAMEWALK_MAX_COLUMNS   (1024)
 
 typedef struct {
-    uint32_t frames;        /* frames seen */
-    uint32_t rate;          /* Hz, from the first header */
-    uint32_t sec;           /* 0 when the format's frame size is unknown */
+    uint32_t sec;           /* 0 when the length is not known yet */
 
     /*
-     * Loudness per column, 0-255, already resampled from however many
-     * frames were found.
+     * Amplitude per column, 0-255, measured off the decoded PCM by
+     * loudness.c and resampled to whatever the doubling landed on.
      *
-     * has_levels is false for the formats where the header alone does not
-     * carry a loudness -- AAC and AMR state a frame length but nothing
-     * about the content. Those still produce a duration; the caller has
-     * to decide whether a waveform without them is worth a real decode.
+     * has_levels is vestigial and deliberately kept. It dates from the
+     * frame walk, where it was false for the formats whose headers state
+     * a frame length but nothing about the content -- AAC and AMR --
+     * which produced a duration and no envelope. The walk is gone (0206)
+     * and both remaining writers set it true unconditionally, so the test
+     * in waveform.c can no longer fail on it. It stays because it is
+     * still read there and removing it is a behaviour change rather than
+     * a struct trim: the guard would have to go with it, and a NULL or
+     * zero-column envelope would then be one test away from being drawn.
+     *
+     * `frames` and `rate` were the other two survivors and are gone as of
+     * 1001 -- nothing wrote them after the walk was deleted, so every
+     * reader saw the zeros memset() left.
      */
     bool has_levels;
     int columns;
