@@ -4031,6 +4031,17 @@ shipped a build failure for exactly that before". Caught by looking
 rather than by compiling, since the host stubs do not reach
 `albumart.c`.
 
+**And the hash only exists on the decode path.** `cover_hash()` runs
+inside `albumart_draw()`, which is reached for the cover being
+*displayed*; `prefetch_next()` stores the compressed image without
+hashing it, and the board shows exactly that -- one `jpeg in: ... hash
+04d36f37` for the playing track and none for the prefetched one, both
+1871582 bytes. So a comparison at a track change has nothing to compare
+against yet: whatever 1011b turns out to be, it has to hash where the
+image is fetched as well as where it is drawn, and hashing 1.8 MB on the
+prefetch path is a cost that belongs in that decision rather than
+assumed into it.
+
 **What this does not do yet.** The hash is not compared against
 anything. Skipping the decode when a track's cover matches the one
 already on screen needs somewhere to re-blit from: `ui_clear_art()` runs
@@ -4817,6 +4828,83 @@ playback and change the numbers this patch exists to collect. It is 0103,
 and it is the thing that will finally give the arbiter a contended window
 to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
 the only concurrent reader was the walk and 0101 switched it off.
+
+## Where v0.3.0 got to (the 1000 series)
+
+**Read this first if you are picking this up cold.** The 1000 series was
+one session, aimed at clearing the open list before tagging v0.3.0. It
+found three real bugs and a great deal of documentation that had stopped
+being true, and the proportion is the point: **most of what looked open
+was already closed, and most of what was actually broken was not on any
+list.**
+
+Three bugs, all found by a file rather than by reading:
+
+| | |
+| --- | --- |
+| 1005 | a 64-bit divide per pixel in the PNG scaler tripped the task watchdog on a 1600x1600 cover. RV32 has no 64-bit divide |
+| 1009 | a FLAC with 1.8 MB of metadata never reached its audio: the ES parser gives up at 512000 bytes. A whole album played nothing |
+| 1000 | `duration.c` filed the playing track's reads as PREFETCH |
+
+Everything else was the list disagreeing with the code. 1002 read every
+open entry against the source and found four stale and one *corrupted* --
+a bullet that asserted a restriction and denied it four lines later. 1008
+found the PCM ring described as 64 KB, 256 KB and 10 MB in six places
+when it is 3520 KB, and the heap-corruption section still saying the ring
+stays small because of an allocator the code no longer uses.
+
+**The method that worked, and it is the file's own:** measure before
+patching. 1003 was asked for a peak limiter and logged the peak instead,
+which is how 1004 could prove the format claim false and 1006 could close
+`peaking?` for a reason nobody had guessed -- real music does reach the
+rail, on the unity pass, and still never clips because the gain that
+follows is -11.96 dB. 1010 was asked whether to reclaim the cover cache
+and measured instead, which killed the idea in two log lines: the only
+cache tenant at the moment of failure was the compressed image being
+decoded.
+
+Twice the measurement corrected the patch that had just been written.
+1001 had to fix 1000's own falsification condition, which named a window
+the probe cannot run in. That is worth keeping as the shape of the
+session: **a check written from the code rather than from where the code
+runs is not a check.**
+
+### What is confirmed on hardware
+
+1000 (the probe's reads absent from PREFETCH's per-track total), 1005,
+1006, 1009 and 1011 all have board logs behind them. 1003's
+instrumentation has run on five formats and two libraries and
+`clamp_hits` has never once appeared, which is the prediction that would
+mean the ReplayGain headroom cap is wrong.
+
+### What is open, and what each one needs
+
+- **A 3000x3000 cover cannot be displayed.** It wants 17672 KB in one
+  block against 18037 KB total free, so it is 1544 KB short of a block
+  and 365 KB short of everything. Reclaiming is dead (1010). The only
+  real answer is decode-time scaling: **check whether the hardware
+  decoder scales before designing anything**, since `albumart.c` asserts
+  it does not and that assertion has never been verified. A TJpgDec
+  fallback via `espressif/esp_jpeg` is the plan if it does not, and it
+  needs `jpeg_dec_config_t` read before a line is written.
+- **The cover cache holds whole compressed images** -- three copies of
+  the same 1.8 MB picture on an album that shares one. 1006 recorded the
+  cost and declined to choose between capping, downscaling and not
+  prefetching, because they are three different behaviours.
+- **The decode skip** (1011b), which needs a retained decoded cover and
+  a hash on the prefetch path. See 1011.
+- **Gapless**, unstarted and no longer blocked.
+- The one storage lease, AMR's missing test file, UAC 2.0 and bus power,
+  all unchanged and all still correct as written.
+
+### The thing to keep doing
+
+Every stale entry in this file was fluent and plausible, and the one that
+contradicted itself in plain sight survived just as long as the rest --
+which says the list was not being read rather than being read and
+believed. **Read the open list against the code before trusting it**, and
+prefer a log line to a feature when the question is whether the feature
+is needed.
 
 ## Where v0.2.0 got to, and what is next
 
