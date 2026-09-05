@@ -2674,6 +2674,59 @@ of the request; then 400 mutated cases per file. Not IDF-built, and the
 decoder handoff -- reopen, replay, resume -- is the part no host test
 can reach.
 
+#### A FLAC with a big cover never reached its audio (1009)
+
+An album of 24-bit FLACs played nothing, three tracks in a row, and the
+player correctly gave up:
+
+```
+flac: 48000 Hz, 2 ch, 24 bit, audio at 1876654, 9343683 samples
+E ESP_ES_PARSER: Search overlimited 512000
+E tab5_dec: flac decode error -7
+E tab5_mp3: 3 tracks in a row played nothing; stopping.
+```
+
+**esp_audio_codec's elementary-stream parser searches a bounded window
+for a frame sync and gives up past it.** The limit is 512000 bytes.
+These files carry an embedded cover, so their audio starts 1876654 bytes
+in, and the sync is three and a half times further than the parser will
+look. The I/O line confirms it to the byte: `68 reads, 512 KB` -- the
+search limit exactly, then failure.
+
+Nothing was wrong with the files, the fold, or the 24 bits. `21
+flac-24bit.flac` in the corpus plays, and its audio starts at 8288.
+**The corpus has no file with a large cover, so it could not find
+this** -- the same gap 0808 recorded when synthetic files missed what
+ffmpeg's output caught, one step further out: a real file with a real
+picture in it.
+
+**The fix is machinery that already existed.** `flac_seek_probe()` reads
+STREAMINFO and records `first_frame` at open, and since 0704 a seek has
+replayed a synthesised header in front of the target -- `"fLaC"`, a
+last-block header, and the 34 bytes of STREAMINFO, 42 in total. That is
+applied at open now: position the file at `first_frame`, put the
+preamble in the window ahead of it. The parser sees a header and then a
+frame, which is what the front of a file with no pictures in it looks
+like.
+
+**Unconditional rather than gated on a size.** A threshold would leave
+two open paths differing only on files most people do not have, which is
+the second path `flacseek.c` declines to have for the SEEKTABLE and for
+the same reason. It is also precisely what a seek to 0 s already did,
+and that is proven on hardware: `flac: seek to 0s -> offset 8288, landed
+0.00s (+42 B header)`. Anything that fails -- no preamble, a refused
+`fseek()` -- falls back to reading from the top, which is what every
+FLAC did before.
+
+The refill path needed no change and that is worth knowing rather than
+rediscovering: it keeps `in_len - in_pos` bytes, moves them to the front
+and appends the file after, so a primed window is preserved rather than
+dropped. That is the same mechanism the seek path has always relied on.
+
+**A side effect worth having:** opening at the audio also means the
+1.8 MB of metadata is never read. The cover still arrives, through
+`covertag.c`, on the task that is supposed to fetch it.
+
 #### FLAC seeks by bisection (0704)
 
 `flacseek.c`. FLAC is the opposite problem from the CBR formats and has

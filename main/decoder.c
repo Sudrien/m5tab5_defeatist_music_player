@@ -780,6 +780,54 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
 
     install_table(d, ix, "recorded table");
 
+    /*
+     * FLAC STARTS AT ITS AUDIO, NOT AT ITS METADATA.
+     *
+     * esp_audio_codec's elementary-stream parser searches a bounded
+     * window for a frame sync and gives up past it:
+     *
+     *     E ESP_ES_PARSER: Search overlimited 512000
+     *     E tab5_dec: flac decode error -7
+     *
+     * A FLAC with more than that much metadata in front of its audio --
+     * which is any file carrying a large embedded cover; the one that
+     * found this has 1876654 bytes of it -- never reaches its first
+     * frame, and the whole album plays nothing. The I/O line says
+     * exactly that: 512 KB read, which is the search limit to the byte.
+     *
+     * The probe has already read STREAMINFO and knows where the audio
+     * begins, and the seek path has replayed a synthesised header in
+     * front of it since 0704. This is the same three lines applied at
+     * open: position the file at the first frame, and put "fLaC" plus a
+     * last-block STREAMINFO in the window ahead of it. The parser sees a
+     * header and then a frame, which is what it would have seen at the
+     * front of a file with no pictures in it.
+     *
+     * Unconditional rather than gated on a size, deliberately. A
+     * threshold would leave two open paths that differ only on files
+     * nobody has, which is the second path flacseek.c declines to have
+     * for the SEEKTABLE and for the same reason. This is also exactly
+     * what a seek to 0 s already does, and that is proven on hardware:
+     * `flac: seek to 0s -> offset 8288, landed 0.00s (+42 B header)`.
+     *
+     * Falls back to reading from the top if anything here does not
+     * work, which is the behaviour every FLAC had before this.
+     */
+    if (d->flac.ok && d->flac.first_frame > 0) {
+        uint8_t pre[FLAC_PREAMBLE_BYTES];
+        const size_t plen = flac_seek_preamble(&d->flac, pre, sizeof(pre));
+        if (plen && plen <= (size_t)ESP_IN_BUF &&
+            fseek(d->f, d->flac.first_frame, SEEK_SET) == 0) {
+            memcpy(d->inbuf, pre, plen);
+            d->in_len = (int)plen;
+            d->in_pos = 0;
+            d->eof = false;
+            ESP_LOGI(TAG, "flac: opening at the audio, %ld B of metadata "
+                          "skipped (+%u B header)",
+                     d->flac.first_frame, (unsigned)plen);
+        }
+    }
+
     /* Rate and channels are not known until the first frame comes out;
      * the caller must not configure I2S from info until decoder_read()
      * has returned at least once. */
