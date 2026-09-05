@@ -3816,6 +3816,77 @@ buffer hid and the board counted; this is a pattern a desktop *CPU*
 hides and the board counts. Both looked correct in review and cost
 seconds on hardware.
 
+#### Every other 64-bit divide was surveyed, and none of them move (1007)
+
+1005 was found by a file rather than by looking, so 1007 looked. Every
+64-bit division and modulo in `main/` was classified by how often it
+runs and whether the range needs the width. **Nothing else is being
+changed**, and the more useful half of the result is the list of places
+where 64 bits are load-bearing -- so that a later patch reading "remove
+the int64s" as the lesson of 1005 does not break large-file support to
+save cycles nobody is spending.
+
+**Hot -- per sample or per pixel:**
+
+| Site | Rate | Verdict |
+| --- | --- | --- |
+| `albumart.c` `png_on_draw()` | 10.2 M per 1600px cover | fixed in 1005; proved narrowable |
+| `player.c` `fade_apply()` | 44100/s, only during a fade | **64-bit required** |
+| `player.c` `xfade_mix()` | 2 per chunk | already hoisted, deliberately |
+
+`fade_apply()` is the only remaining per-sample 64-bit divide and it
+**cannot** be narrowed. `FADE_OUT_MS` is 3000, so at 44.1 kHz the ramp
+is 132300 frames and `32768 * 132300` is 4,335,206,400 -- past
+`UINT32_MAX` by 40 million. At 48 kHz it is worse. Narrowing it would
+overflow in the middle of the one code path whose whole job is to reach
+silence smoothly, and the symptom would be a fade that jumps to full
+volume near its end.
+
+It is also not worth restructuring. It runs at the sample rate for three
+seconds, which is about 3% of one core for the length of a fade, against
+1005's ten million in a burst with nothing yielding. **The two are the
+same construct four orders of magnitude apart**, which is the actual
+lesson: the width was never the problem, the multiplication by how often
+it runs was.
+
+`xfade_mix()` already got this right on its own and says so -- it takes
+its two divides per chunk and interpolates, "so the mix loop stays two
+multiplies and an add per sample". It is the pattern `png_on_draw()`
+should have used and the reason the crossfade never showed this fault.
+
+**Cold -- once per track, per image, per table entry or per draw:**
+`replaygain.c`'s envelope merge (bounded by columns), `decoder.c`'s
+table conversion (256 entries), `albumart.c`'s fit and 16.16 step (once
+per image), `cbrseek.c`'s sample points (five), `loudness.c`'s envelope
+span (once per open), `ui.c`'s drag target (25 Hz), and the various
+rate-to-frames conversions in `player.c`. None of these runs often
+enough to measure.
+
+**Load-bearing, and not to be narrowed under any circumstances:**
+
+- **`mp4seek.c`'s `be64()` and the `co64` path.** These are 64-bit
+  chunk offsets, which is the box a muxer writes precisely when a file
+  is past 4 GB. Narrowing it breaks exactly the large files exFAT is
+  enabled for. 0717 already settled this in the same words -- the
+  `<= UINT32_MAX` guard there is against a genuine `uint64_t` and *is*
+  a check, unlike the one it found in the recording path. **Type, not
+  habit.**
+- **`storage.c`'s capacity.** `csd.capacity * sector_size` overflows 32
+  bits on any volume past 4 GB, which is every card this player is
+  likely to meet -- the test rig's is 8 GB and reports correctly only
+  because of this.
+- **`oggseek.c`'s granule positions**, which are 64-bit in the Ogg
+  container by specification, and `tsseek.c`'s 33-bit PTS.
+- **`player.c`'s `frames_out`**, which counts output frames for the
+  length of a track and is the anchor for the elapsed clock.
+
+The general rule, stated so it survives the next optimisation pass:
+**64-bit width in this program is either a range requirement or a hot
+loop, and it is worth checking which before touching either.** 1005 was
+the second kind and was worth a patch. Everything else here is the
+first, and narrowing any of it would trade a correct player for cycles
+that were never being spent.
+
 ### The JPEG decoder's `rgb_order` is a byte scramble, not a colour order
 
 A gold cover on a deep red background rendered as silver on blue. Not a
