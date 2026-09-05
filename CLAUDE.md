@@ -1173,20 +1173,32 @@ the boundary. The gate exists because prefetch is a second reader on the
 device the decoder is already reading, which on a USB drive is exactly
 the contention the one-task-for-both design was built to avoid.
 
-The ring moved from 64 KB to 256 KB and into PSRAM, since 256 KB of the
-P4's 768 KB of L2MEM is not available to spend on a buffer the CPU only
-memcpy()s through. `xStreamBufferCreateWithCaps()` must be paired with
-`vStreamBufferDeleteWithCaps()`; the plain delete frees through the
-wrong heap, once per track.
+**The ring is `PCM_RING_BYTES`, 3520 KB, about 20 s at 44.1/16/2, in
+PSRAM and created static.** That is the number every log shows --
+`dropped 3519 KB of queued audio` at a skip, `tail: 3519 KB of this
+track still to play`.
 
-The ring is 64 KB in the ordinary heap. Patch 06 moved it to 256 KB in
-PSRAM via `xStreamBufferCreateWithCaps()`, which corrupted the heap --
-`tlsf_free: block already marked as free`, reproducibly, when skipping
-tracks fast enough that some decoded no blocks at all. Patch 11 reverted
-it and the same sequence then ran clean for three and a half minutes.
-The mechanism was never established, so the ring stays where it was. The justification for enlarging it was weak
-anyway -- ring size does not affect control latency, and the prefetch
-gate reads a percentage.
+*(The rest of this paragraph described the ring as 64 KB and then as
+256 KB, and other sections had it at 10 MB. All three were true once and
+none is now; corrected in 1008. The history is kept because the reverted
+attempt is the reason the current one is shaped the way it is.)*
+
+Patch 06 moved it to 256 KB in PSRAM via `xStreamBufferCreateWithCaps()`
+and the heap then corrupted -- `tlsf_free: block already marked as
+free`, reproducibly, when skipping tracks fast enough that some decoded
+no blocks at all. Patch 11 reverted it to 64 KB and the same sequence
+ran clean. The mechanism was never established.
+
+**The ring got its size back later without reinstating that call**, which
+is the part worth understanding: the storage is allocated once in
+`app_main()` and never freed, and `xStreamBufferCreateStatic()` is built
+on top of it. That allocates nothing, so there is no allocator to pair a
+free with, and `vStreamBufferDelete()` on a static buffer frees nothing
+-- it checks the statically-allocated flag and returns. The per-track
+delete therefore stays exactly as it was, with all its reasoning about
+handle ordering intact, and nothing on the per-track path allocates or
+frees at all. The authoritative version of this argument is the comment
+above `PCM_RING_BYTES` in `player.c`.
 
 The gate reads a **published integer**, not the ring handle.
 `media_task` calling `xStreamBufferBytesAvailable(s_pcm)` directly is a
@@ -3620,8 +3632,9 @@ nothing playing at all -- leaves its listing on screen.
 ### Pause stops the writer, not the decoder
 
 It used to stop the decoder. That was right when the ring held 0.37 s:
-stall the producer and the consumer empties in a third of a second. At
-10 MB the ring holds 59 seconds, and stalling the producer left the
+stall the producer and the consumer empties in a third of a second. Once
+the ring held tens of seconds -- 59 s at the size it was when this was
+written, about 20 s at today's 3520 KB -- stalling the producer left the
 writer to play all of it out -- pause fell silent up to a minute after
 the press, with `audio_out_set_idle()` cutting the amp somewhere in the
 middle, so the symptom read as the player starting up again on its own
@@ -3922,8 +3935,9 @@ arrived at by zero-initialisation is not a decision.
 ### Cover art has its own task
 
 `load_track_visuals()` runs on the decode loop, and it used to read the
-cover out of the tag and decode it there. The ring is 64 KB -- 0.37 s of
-44.1 kHz stereo -- and a 3000x3000 cover took 550 ms in the hardware
+cover out of the tag and decode it there. The ring was 64 KB at the time
+-- 0.37 s of 44.1 kHz stereo, against today's 20 s -- and a 3000x3000
+cover took 550 ms in the hardware
 decoder alone, after a 511 KB read off a USB drive. Every large cover was
 therefore spending longer than the ring holds, before anything progressive
 or software-decoded enters the picture.
@@ -4358,8 +4372,16 @@ crashed twice ran for three and a half minutes clean.
 
 **So: do not put the PCM ring in PSRAM with the WithCaps API.** The
 mechanism is not established -- absence of a crash in one long run is
-strong evidence, not proof -- and if it is ever revisited, it needs a
-soak test measured in hours, not one good run.
+strong evidence, not proof.
+
+**This is still the rule and the ring is nevertheless 3520 KB in PSRAM,
+which is not a contradiction.** What was banned was the *allocator*, not
+the memory. The storage is allocated once in `app_main()` and never
+freed, and `xStreamBufferCreateStatic()` sits on top of it, so there is
+no `WithCaps` create to mispair with a plain delete and nothing on the
+per-track path allocates at all. The way to get the size back was to
+remove the allocation from the hot path rather than to argue that the
+allocator was innocent.
 
 The ring is created and freed once per track, which makes it the
 most-churned allocation and therefore the block that discovers damage
@@ -4686,11 +4708,14 @@ was wrong.
    real contention the arbiter ever saw, and it held.
 
    The walk is gone as of 0206, and with it the only long read that ran
-   against playback. `worst wait` is back to 0-1 ms because nothing
-   contends any more: what is left is the open, the ring's own refills,
-   and a kilobyte of sidecar. The arbiter is now insurance rather than a
-   working part, which is a better place for it to be but does mean it is
-   again untested by anything current.
+   against playback. `worst wait` went back to 0-1 ms because nothing
+   contended any more: what was left was the open, the ring's own
+   refills, and a kilobyte of sidecar.
+
+   **It is a working part again as of 1006.** A 3.7 MB PNG cover being
+   prefetched against playback is a long read on the device the decoder
+   is using, which is exactly what the arbiter was built for, and it held
+   -- 234 ms of worst wait rather than the whole cover.
 3. **Gapless needs RAM caching.** Not started, but no longer blocked: it
    was impossible against a 19 s open and is merely unwritten against a
    1.5 s one.
@@ -4711,17 +4736,22 @@ was wrong.
 
 ### What to do next, roughly in order
 
-- **Check `worst wait` now that prefetch runs.** It is the first real
-  test of 0100 and the number that says whether the arbiter was worth it.
+- ~~**Check `worst wait` now that prefetch runs.**~~ Answered in 1006,
+  and the arbiter was worth it. Prefetching a 3.7 MB PNG cover against
+  playback produced `worst hold 387 ms, worst wait 234 ms` on PLAYBACK,
+  against 0-1 ms in every log since the walk was deleted. The lease held
+  and broke the read into chunks. What it also showed is that 234 ms is
+  not "roughly one chunk of the current device", which is what "The card
+  is arbitrated, not throttled" predicts -- see the cover cache note.
 - ~~The seek index.~~ Wired in 0703. What is left to check is the
   number it trades for: the seek timing `decoder_seek_sec()` now logs.
   A coarse table moves the cost from every play to every seek, and
   whether that is the right spacing is a measurement nobody has taken
   yet.
 - **Gapless**, which wants the next track decoding before the current one
-  ends. At 0.85% card duty there is room; the ring is 10 MB and reaches
-  0% at first sound, so the head start has to be built rather than
-  assumed.
+  ends. At 0.85% card duty there is room; the ring is 3520 KB -- about
+  20 s -- and reaches 0% at first sound, so the head start has to be
+  built rather than assumed.
 - ~~`MP3D_DO_NOT_SCAN` is now the only thing between a press and
   sound.~~ Taken in 0703, on the second and later plays of a file. The
   first play of a Xing-less MP3 still scans, because the table has to
