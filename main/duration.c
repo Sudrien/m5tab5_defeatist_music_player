@@ -44,10 +44,20 @@ static inline uint64_t le64(const uint8_t *p)
 
 /* Same chokepoint as covertag.c's, for the same reason. These reads are
  * a few hundred bytes each except the Ogg path's 64 KB tail window,
- * which is the one that wanted breaking up. */
-static bool read_at(FILE *f, long off, void *buf, size_t len)
+ * which is the one that wanted breaking up.
+ *
+ * The class is threaded from the caller rather than held here. Every
+ * probe below is reached from decoder_duration_sec() on the decode
+ * loop, which is the pause before the first sample -- the one read in
+ * the program that nothing may queue behind. Filing it as PREFETCH put
+ * the length of the track being listened to at equal standing with work
+ * for a track nobody has heard yet, which is 0906's finding about
+ * covertag.c reached from the other side, and the wart cbrseek.c named
+ * and declined to copy. */
+static bool read_at(FILE *f, long off, void *buf, size_t len,
+                    storage_io_class_t cls)
 {
-    return storage_io_read_at(f, off, buf, len, STORAGE_IO_PREFETCH);
+    return storage_io_read_at(f, off, buf, len, cls);
 }
 
 static long file_size(FILE *f)
@@ -75,10 +85,10 @@ static long file_size(FILE *f)
  * Total samples is 0 for a stream of unknown length, which is legal and
  * is exactly the "does not say" case.
  */
-static uint32_t probe_flac(FILE *f)
+static uint32_t probe_flac(FILE *f, storage_io_class_t cls)
 {
     uint8_t b[38];
-    if (!read_at(f, 0, b, sizeof(b))) return 0;
+    if (!read_at(f, 0, b, sizeof(b), cls)) return 0;
 
     const uint8_t *si = b + 8;                  /* skip magic + block header */
     const uint32_t rate = ((uint32_t)si[10] << 12) |
@@ -107,7 +117,7 @@ static uint32_t probe_flac(FILE *f)
  * Byte rate comes from `fmt `, so this is right for any PCM variant
  * without needing to know the bit depth.
  */
-static uint32_t probe_wav(FILE *f)
+static uint32_t probe_wav(FILE *f, storage_io_class_t cls)
 {
     const long end = file_size(f);
     if (end < 12) return 0;
@@ -117,12 +127,12 @@ static uint32_t probe_wav(FILE *f)
 
     while (pos + 8 <= end) {
         uint8_t h[8];
-        if (!read_at(f, pos, h, sizeof(h))) break;
+        if (!read_at(f, pos, h, sizeof(h), cls)) break;
         const uint32_t clen = le32(h + 4);
 
         if (memcmp(h, "fmt ", 4) == 0 && clen >= 16) {
             uint8_t fmt[16];
-            if (read_at(f, pos + 8, fmt, sizeof(fmt))) byte_rate = le32(fmt + 8);
+            if (read_at(f, pos + 8, fmt, sizeof(fmt), cls)) byte_rate = le32(fmt + 8);
         } else if (memcmp(h, "data", 4) == 0) {
             data_len = clen;
             /* A streamed WAV can carry 0 or 0xFFFFFFFF here, meaning
@@ -178,11 +188,12 @@ static uint32_t probe_wav(FILE *f)
  */
 #define OGG_WINDOW  (65536)
 
-static uint32_t ogg_rate_from_first_page(FILE *f, bool *is_opus,
+static uint32_t ogg_rate_from_first_page(FILE *f, storage_io_class_t cls,
+                                        bool *is_opus,
                                          uint32_t *serial)
 {
     uint8_t b[64];
-    if (!read_at(f, 0, b, sizeof(b))) return 0;
+    if (!read_at(f, 0, b, sizeof(b), cls)) return 0;
     if (memcmp(b, "OggS", 4) != 0) return 0;
     *serial = le32(b + 14);
 
@@ -207,11 +218,11 @@ static uint32_t ogg_rate_from_first_page(FILE *f, bool *is_opus,
     return 0;
 }
 
-static uint32_t probe_ogg(FILE *f)
+static uint32_t probe_ogg(FILE *f, storage_io_class_t cls)
 {
     bool is_opus = false;
     uint32_t serial = 0;
-    const uint32_t rate = ogg_rate_from_first_page(f, &is_opus, &serial);
+    const uint32_t rate = ogg_rate_from_first_page(f, cls, &is_opus, &serial);
     if (!rate || !serial) return 0;
 
     const long end = file_size(f);
@@ -233,7 +244,7 @@ static uint32_t probe_ogg(FILE *f)
 #endif
     if (!buf) return 0;
 
-    if (!read_at(f, start, buf, (size_t)win)) { free(buf); return 0; }
+    if (!read_at(f, start, buf, (size_t)win, cls)) { free(buf); return 0; }
 
     uint64_t granule = 0;
     bool found = false;
@@ -251,7 +262,7 @@ static uint32_t probe_ogg(FILE *f)
      * reads and only happens for the files that need it. */
     if (!found) {
         uint64_t g = 0;
-        if (ogg_stream_extent(f, serial, 0, end, STORAGE_IO_PREFETCH, NULL, &g)
+        if (ogg_stream_extent(f, serial, 0, end, cls, NULL, &g)
             && g && g != UINT64_MAX) {
             granule = g;
             found = true;
@@ -281,18 +292,18 @@ static uint32_t probe_ogg(FILE *f)
  * uses 32-bit. The layout differs by 12 bytes and reading the wrong one
  * gives a number that looks plausible.
  */
-static uint32_t probe_mp4(FILE *f)
+static uint32_t probe_mp4(FILE *f, storage_io_class_t cls)
 {
     const long end = file_size(f);
     long pos = 0;
 
     while (pos + 8 <= end) {
         uint8_t h[8];
-        if (!read_at(f, pos, h, sizeof(h))) break;
+        if (!read_at(f, pos, h, sizeof(h), cls)) break;
         uint64_t sz = be32(h);
         if (sz == 1) {
             uint8_t big[8];
-            if (!read_at(f, pos + 8, big, sizeof(big))) break;
+            if (!read_at(f, pos + 8, big, sizeof(big), cls)) break;
             sz = ((uint64_t)be32(big) << 32) | be32(big + 4);
         }
         if (sz < 8) break;
@@ -302,13 +313,13 @@ static uint32_t probe_mp4(FILE *f)
             const long moov_end = pos + (long)sz;
             while (in + 8 <= moov_end) {
                 uint8_t ih[8];
-                if (!read_at(f, in, ih, sizeof(ih))) return 0;
+                if (!read_at(f, in, ih, sizeof(ih), cls)) return 0;
                 const uint32_t isz = be32(ih);
                 if (isz < 8) return 0;
 
                 if (memcmp(ih + 4, "mvhd", 4) == 0) {
                     uint8_t m[32];
-                    if (!read_at(f, in + 8, m, sizeof(m))) return 0;
+                    if (!read_at(f, in + 8, m, sizeof(m), cls)) return 0;
                     const uint8_t ver = m[0];
                     uint32_t ts;
                     uint64_t dur;
@@ -333,7 +344,7 @@ static uint32_t probe_mp4(FILE *f)
 
 /* ------------------------------------------------------------------ */
 
-uint32_t duration_probe(FILE *f)
+uint32_t duration_probe(FILE *f, storage_io_class_t cls)
 {
     if (!f) return 0;
 
@@ -341,16 +352,16 @@ uint32_t duration_probe(FILE *f)
     uint32_t sec = 0;
 
     uint8_t magic[12];
-    if (read_at(f, 0, magic, sizeof(magic))) {
+    if (read_at(f, 0, magic, sizeof(magic), cls)) {
         if (memcmp(magic, "fLaC", 4) == 0) {
-            sec = probe_flac(f);
+            sec = probe_flac(f, cls);
         } else if (memcmp(magic, "OggS", 4) == 0) {
-            sec = probe_ogg(f);
+            sec = probe_ogg(f, cls);
         } else if (memcmp(magic, "RIFF", 4) == 0 &&
                    memcmp(magic + 8, "WAVE", 4) == 0) {
-            sec = probe_wav(f);
+            sec = probe_wav(f, cls);
         } else if (memcmp(magic + 4, "ftyp", 4) == 0) {
-            sec = probe_mp4(f);
+            sec = probe_mp4(f, cls);
         }
     }
 

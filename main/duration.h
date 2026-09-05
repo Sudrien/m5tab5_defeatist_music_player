@@ -23,6 +23,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "storage_io.h"   /* storage_io_class_t: callers state which read this is */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -37,6 +39,13 @@ extern "C" {
  * the caller has already picked a decoder by extension, and a probe that
  * trusted the same wrong extension would return a plausible number for a
  * mislabelled file instead of nothing.
+ *
+ * `cls` is the arbiter class the reads are filed under, and it is a
+ * parameter rather than a constant inside because the answer depends on
+ * who is asking, not on what is being read. The only caller today is
+ * decoder_duration_sec() on the decode loop, which is PLAYBACK. A
+ * prefetch that ever wants a length ahead of time passes PREFETCH and
+ * gets queued behind the track being listened to, which is the point.
  */
 /*
  * A LENGTH IN SECONDS IS ROUNDED, NOT TRUNCATED.
@@ -59,7 +68,7 @@ extern "C" {
  */
 #define ROUND_DIV(n, d)  (((n) + (d) / 2) / (d))
 
-uint32_t duration_probe(FILE *f);
+uint32_t duration_probe(FILE *f, storage_io_class_t cls);
 
 #ifdef __cplusplus
 }

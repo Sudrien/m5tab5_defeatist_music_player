@@ -512,6 +512,47 @@ Worth fixing in the same patch as the wait above rather than after it:
 removing the eight seconds makes these reads start sooner, so the
 priority they are filed under starts mattering more, not less.
 
+### And `duration.c` was the same wart, one file over (1000)
+
+0906 threaded a class parameter through `covertag.c` and fixed
+`albumart.c` alongside it, on the finding that the playing track's own
+tags and cover were filed as `STORAGE_IO_PREFETCH` -- queued behind, and
+at equal standing with, work for a track nobody has heard yet.
+`duration.c` had the identical constant and was not touched.
+
+It is reached from `decoder_duration_sec()`, which `play_file()` calls
+on the decode loop immediately after `decoder_open()` -- the pause
+before the first sample, which is the one read in the program nothing
+may queue behind. So the length of the track being listened to was filed
+as speculative work about a different track.
+
+**This was already written down twice and neither note closed it.**
+`cbrseek.c` says its class is `PLAYBACK` "not `duration.c`'s PREFETCH"
+and calls it "a wart this file declined to copy"; 0102's own section
+names the `covertag.c` half in the same words. Both correctly identified
+it, both declined to fix it, and the entry in the open list named only
+`covertag.c` -- so when 0906 fixed that file, the list read as closed and
+the second instance had nothing pointing at it. **A note that records a
+fault without owning it is a note that keeps the fault.**
+
+The class is a parameter rather than a constant, for 0906's reason
+restated: the answer depends on who is asking, not on what is read.
+Every probe below `duration_probe()` takes it, including the Ogg tail
+window and the chained-stream `ogg_stream_extent()` fallback, which are
+the only reads here big enough to matter -- 64 KB and a couple of dozen
+short reads respectively. The rest are a few hundred bytes each and
+would not have been worth a patch on their own.
+
+Today's only caller passes `STORAGE_IO_PLAYBACK`. Nothing prefetches a
+duration yet; when something does, it passes `PREFETCH` and is queued
+behind the music, which is the behaviour the constant was accidentally
+giving every caller.
+
+**Not flashed.** `duration.c` compiles clean under
+`gcc -Wall -Wextra -Wformat=2` against the host stubs. What to look for:
+`open playback` in `storage_io_report()` accounting for the probe's
+reads rather than `open prefetch`, on a FLAC, Ogg, WAV or MP4 track.
+
 **Threaded as a parameter, not held in a file-scope variable,** because
 those two callers are on different tasks and can both be inside
 `covertag.c` at once -- the file says so itself, at the top of
@@ -4242,8 +4283,14 @@ was wrong.
 
 ### Things left deliberately broken or unfinished
 
-- `covertag.c` is `PREFETCH` class for every caller, including the decode
-  loop's own `load_tags()`, which should be `PLAYBACK`.
+- ~~`covertag.c` is `PREFETCH` class for every caller, including the
+  decode loop's own `load_tags()`, which should be `PLAYBACK`.~~ Closed
+  by 0906, which threaded the class through as a parameter. This entry
+  outlived the work by the whole 0900 series and was still being read as
+  open at the v0.3.0 review -- the same failure 0811 and 0812 both
+  record, in the list that documents it.
+- ~~`duration.c` is `PREFETCH` for every read.~~ Closed by 1000, which
+  is the same fix from the other side. See below.
 - One lease covers the SD card and the USB port together.
 - ~~Raw ADTS and AMR have no duration on a track that has never been
   played through.~~ Fixed: `cbrseek.c` derives it from a proven-constant
