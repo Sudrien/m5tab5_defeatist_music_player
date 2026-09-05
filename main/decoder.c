@@ -1229,7 +1229,9 @@ uint32_t decoder_duration_sec(decoder_t *d)
      * answer cannot change. */
     if (!d->probed) {
         d->probed = true;
-        d->probe_sec = duration_probe(d->f);
+        /* PLAYBACK: this runs from decoder_duration_sec() on the
+         * decode loop, in the pause before the first sample. */
+        d->probe_sec = duration_probe(d->f, STORAGE_IO_PLAYBACK);
         /*
          * And the inference, when the container did not state one. This
          * is the length raw ADTS and AMR lost when the frame walk was
