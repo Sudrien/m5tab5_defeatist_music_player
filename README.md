@@ -64,6 +64,7 @@ What do you mean no audio over Bluetooth
 - build file lists faster
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
+- Internet Radio? Conceivable. Either of these options is "power tether" territory.
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
 - Sleep timer
