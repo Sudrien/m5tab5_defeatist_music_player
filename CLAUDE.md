@@ -2989,12 +2989,65 @@ The magnitude runs 0..32**768**, not 32767: `INT16_MIN` is a real sample
 value and `-(-32768)` does not fit in an `int16_t`, so it is negated as
 an `int`. Verified under UBSan rather than reasoned about.
 
-**What to look for.** Whether `03 mp3-cbr-noxing` and `04 mp3-vbr-xing`
-report lower peaks than `01 wav-pcm16`, `05 flac` and `21 flac-24bit`.
-If they do, the entry was right and a limiter has a case; if the lossless
-files sit a decibel or two down like everything else, it never did, and
-the entry can be struck rather than implemented. Either way `clamp_hits`
-should never appear.
+##### And the format claim was false (1004)
+
+Run, in one session:
+
+| Track | Peak | dBFS |
+| --- | --- | --- |
+| `03 mp3-cbr-noxing` | 15517 | -6.49 |
+| `04 mp3-vbr-xing` | 16032 | -6.21 |
+| `05 flac` | 15992 | -6.23 |
+| `06 ogg-vorbis` (interrupted) | 16396 | -6.01 |
+| `21 flac-24bit` | 15992 | -6.23 |
+| `01 wav-pcm16` | 15992 | -6.23 |
+
+**The lossless files are not louder.** The whole spread across five
+formats is 0.48 dB and the MP3s sit inside it rather than below it --
+`05 flac` against `04 mp3-vbr-xing` is 0.02 dB. `peaking?` had asserted
+the opposite since it was written, and a limiter built on it would have
+been solving a difference of two hundredths of a decibel.
+
+**A result nobody asked for, from the same numbers.** `01 wav-pcm16`,
+`05 flac` and `21 flac-24bit` all report **exactly 15992** -- the same
+master through PCM, lossless 16-bit and a 24-bit fold, landing on the
+identical sample. That is an independent check on `fold_24_to_16()`
+(0803) that no test was written for: a wrong shift there is a factor of
+256 and would have been unmissable in this column.
+
+**But the corpus cannot answer the question the entry was really
+asking.** All twenty-one files are one minute of the same source audio
+transcoded, so they are an excellent test of whether *format* moves the
+peak -- it does not -- and no test at all of whether real music reaches
+full scale, because the absolute level is a property of that one master
+and it sits at -6 dBFS. This is 0800's own lesson somewhere new: **a
+test whose wrong answer equals its right one is not a test.** The corpus
+was built to exercise mechanisms, and every file inheriting one master
+is what makes it useless for a question about levels.
+
+**One real track, and it is not conclusive either.** A 256 kbps MP3 off
+the SD card -- Advent Chamber Orchestra, Eine Kleine Nachtmusik --
+reports 23222, or **-2.99 dBFS**: 3.2 dB above everything in the corpus
+and still 3 dB short of the rail. It is one file, and it is chamber
+classical, which is the genre least likely to be limited to 0 dBFS. Its
+own envelope says so: levels **1..181** against the corpus's 68..124,
+which is the dynamic range a loudness-war master does not have. It was
+also played at unity -- the ReplayGain switch was thrown mid-track, for
+the *next* track -- so the figure is the file's own peak and no gain
+path was exercised.
+
+So the entry splits, and only half of it survives:
+
+- **"Lossless arrives at full scale where MP3 does not"** -- refuted,
+  struck.
+- **"Does anything in a real library reach the rail"** -- still open,
+  one classical data point at -3 dBFS, and not answerable from
+  `test_audio_files/` at all.
+
+The instrumentation is permanent, so the second question now answers
+itself as the library gets played rather than needing an experiment.
+**`clamp_hits` has still never appeared**, which is the prediction that
+matters most: it is the one that would mean the headroom cap is wrong.
 
 Applied in `player.c`'s decode loop, not `audio_out.c`, because only the
 USB route has a software gain stage -- the analog path writes ES8388
@@ -3944,14 +3997,12 @@ have been a task, is the useful part of a list like this one.
   entry and sets `mp4_t.encrypted`, which is the one field there that
   survives `mp4_free()`. This is a better error message and nothing
   more -- there is no key here and there is not going to be one.
-- **Nothing is peak-limited, and 1003 measured before writing one.**
-  The `peaking?` item stays open, but it is now instrumented rather
-  than asserted: every track logs `output peak N/32768 (X dBFS)` for
-  what the DAC was actually handed. The claim in this entry -- that
-  FLAC and WAV arrive at full scale where MP3 rarely did -- had never
-  been checked, and a limiter written on the strength of it would have
-  been aimed at a mechanism nobody had confirmed was running. See
-  "Nothing digital can clip here".
+- **Nothing is peak-limited.** ~~FLAC and WAV arrive at full scale where
+  MP3 rarely did.~~ **Measured in 1004 and false.** What is left of this
+  entry is a narrower question, below and in "Nothing digital can clip
+  here": whether anything in a real library reaches the rail. One
+  classical MP3 came within 3 dB. Nothing has yet clipped, and
+  `clamp_hits` has never fired.
 
   **This is not the same as FLAC and WAV missing ReplayGain.** They do
   not miss it. `loudness.c` measures the decoded int16 block on its way
