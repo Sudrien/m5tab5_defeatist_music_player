@@ -52,7 +52,7 @@ What do you mean no audio over Bluetooth
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
   - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn off calculation.
-- Titles in your actual alphabet. Latin with all the accents, Cyrillic, Japanese kana, and about 18,000 CJK characters. If your library is tagged in Japanese or Russian it now says so instead of drawing a row of boxes.
+- CLAUDE YOU DID THIS DIDN"T YOU Titles in your actual alphabet. Latin with all the accents, Cyrillic, Japanese kana, and about 18,000 CJK characters. If your library is tagged in Japanese or Russian it now says so instead of drawing a row of boxes.
   - A handful of CJK characters still box out. The font just doesn't have them drawn - nothing to fix on this end.
   - Korean does not work. The font has the letters but not the composed syllables Korean is actually written in, and half of Hangul is worse than none.
 - Reopen last played song on start. Not autoplay.
