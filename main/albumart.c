@@ -555,8 +555,34 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
      */
     const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     if (largest < want) {
+        /*
+         * TOTAL AS WELL AS LARGEST, because they answer different
+         * questions and only one of them has been asked so far.
+         *
+         * `largest` says this allocation cannot be made now. `total`
+         * says whether it could ever be made -- if the total is also
+         * short, no amount of freeing anything else helps and the only
+         * answers are a smaller decode or none. If the total is
+         * comfortably over and the largest is not, the PSRAM is
+         * fragmented and reclaiming a tenant (the cover cache is the
+         * obvious one, at several MB of compressed images) might
+         * actually recover the block.
+         *
+         * Measured rather than assumed on purpose: "free the cache and
+         * retry" is a plausible fix that is worthless in the first case
+         * and worth writing in the second, and nothing in the log so
+         * far distinguishes them. This is the instrumentation before
+         * the patch, which this project has twice paid for skipping.
+         */
+        const size_t total = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
         ESP_LOGW(TAG, "cover needs %u KB of PSRAM in one block, largest free is %u KB",
                  (unsigned)(want / 1024), (unsigned)(largest / 1024));
+        ESP_LOGW(TAG, "  PSRAM free: %u KB total, %u KB largest block, "
+                      "%u KB short%s",
+                 (unsigned)(total / 1024), (unsigned)(largest / 1024),
+                 (unsigned)((want - largest) / 1024),
+                 (total >= want) ? " -- fragmentation, not exhaustion"
+                                 : " -- exhausted; no reclaim can help");
         ret = ESP_ERR_NO_MEM;
         goto cleanup;
     }
