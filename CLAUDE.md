@@ -3983,6 +3983,65 @@ the second kind and was worth a patch. Everything else here is the
 first, and narrowing any of it would trade a correct player for cycles
 that were never being spent.
 
+### The cover hash is Murmur2, and 32-bit on purpose (1011)
+
+The cover's identity hash was MD5 from ROM, **ungated**: 1.8 MB hashed
+on every cover decode, for a log line. The comment above it already
+conceded the point -- "collision resistance is irrelevant when the
+question is are these the same bytes twice" -- and then paid for the
+collision resistance anyway.
+
+`cover_hash()` is MurmurHash2 now. The question is identity, which wants
+distribution and not cryptographic strength, and the diagnostic it
+exists for is unchanged: hashing `in` rather than the source still
+covers the ID3 extraction, the read off the card and the memcpy, which
+is what distinguishes bad bytes from a bad engine.
+
+**The 32-bit variant, and that is the interesting choice.**
+MurmurHash64A is the better hash and it is built on 64-bit multiplies,
+which on this RV32 target are calls into `__muldi3` -- the same class of
+fault 1005 hit with `__moddi3` and 1007 wrote down, in the same kind of
+loop. **A hash over a megabyte is precisely the shape that turns a
+software 64-bit op into real time**, so the rule from 1007 got applied
+before the mistake rather than after it, which is the first time in this
+series that has happened.
+
+Details that are load-bearing rather than tidy:
+
+- **The 4-byte load is a `memcpy()`, not a cast.** The buffer is DMA
+  reachable and nothing here promises its alignment; an unaligned 32-bit
+  load is a fault on some targets and a silent slow path on others. The
+  compiler folds it back into one load where it is allowed to.
+- **Length is mixed into the seed**, so a truncated read does not hash
+  the same as the whole image. Verified, not assumed.
+- **Public domain** (Austin Appleby), so it adds no licence obligation --
+  unlike the TJpgDec fallback, which does.
+
+Verified on the host under ASan and UBSan against the real cover size:
+deterministic, agreeing between aligned and unaligned copies, 2000
+single-bit flips all detected, truncation detected, and every tail
+length 0..7 exercised. The function extracted from the file reproduces
+the reference hash exactly, which is the check that the thing in the
+tree is the thing that was tested.
+
+**It was also nearly a build failure.** Written in place, `cover_hash()`
+landed 270 lines below its caller -- the use-before-definition this file
+records twice, once as a shipped break and once as "this file has
+shipped a build failure for exactly that before". Caught by looking
+rather than by compiling, since the host stubs do not reach
+`albumart.c`.
+
+**What this does not do yet.** The hash is not compared against
+anything. Skipping the decode when a track's cover matches the one
+already on screen needs somewhere to re-blit from: `ui_clear_art()` runs
+on the decode loop *before* `do_art()` is handed the image, so a skipped
+decode leaves a blank square unless a decoded copy is retained. That
+contradicts `mediacache.h`, which declines to cache the decoded cover
+because the codec rebuilds it in milliseconds -- an argument whose
+premise has since changed, since the 3000x3000 case takes hundreds of
+milliseconds when it works and fails outright when it does not. That is
+a decision, not an oversight, and it is not taken here.
+
 ### The JPEG decoder's `rgb_order` is a byte scramble, not a colour order
 
 A gold cover on a deep red background rendered as silver on blue. Not a
