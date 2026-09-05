@@ -3687,6 +3687,62 @@ ring with audio running through it. It usually fits; when it does not, the
 useful thing to print is how much was wanted, in one line, rather than
 whatever the driver says on the way down.
 
+### A 64-bit divide per pixel is a watchdog reset (1005)
+
+A 1600x1600 PNG cover -- Thumper's, 3.7 MB -- took the media task down
+with it:
+
+```
+E task_wdt: Task watchdog got triggered.
+E task_wdt:  - IDLE1 (CPU 1)
+E task_wdt: CPU 1: media
+MEPC : 0x4fc14d32   --- __moddi3 in ROM
+RA   : 0x40016138   --- png_on_draw at main/albumart.c:825
+```
+
+**`__moddi3` is the giveaway.** The P4 is RV32: it has a hardware 32-bit
+divider and **no 64-bit one**, so every `int64_t` division becomes a call
+into a software routine in ROM. `png_on_draw()` had four of them:
+
+    const int px0 = c->dx + (int)(((int64_t)x * c->cw) / c->iw);
+    ... and three more for px1, py0, py1
+
+pngle is a streaming decoder and calls the draw callback **once per
+pixel** for a non-interlaced image -- `w` and `h` are 1. So a 1600x1600
+cover is 2,560,000 callbacks and **10,240,000 software 64-bit
+divisions**, on the media task, with nothing yielding. The watchdog
+fired 5.4 s after `cover is 1600x1600 (png)`.
+
+**The 64 bits were never needed.** The largest product formed is
+`iw * cw`, and `cw` is bounded by the panel at 720. Overflowing a signed
+32-bit int needs a source image about 2.98 million pixels wide. The
+casts are 32-bit now, which is one hardware instruction.
+
+**Checked as equivalence, not as a rewrite.** The old and new
+expressions were run against each other over 196 source geometries from
+1 px to 100000 px, at every source column: 185,948 edge computations,
+zero mismatches and zero products exceeding `INT32_MAX`. The scaler
+draws exactly what it drew before, which matters because the edge
+arithmetic is what makes adjacent runs abut -- see the section below.
+
+`PNG_MAX_DIM` (100000) is the bound that keeps that proof true, checked
+in `png_on_init()`. **Refused rather than clamped**: clamping would draw
+a silently wrong picture, and the failure returns
+`ESP_ERR_NOT_SUPPORTED` so the format card appears instead of a black
+panel.
+
+**Why this survived until now.** The JPEG path has always used a 16.16
+fixed-point step and never did any of this; only PNG covers take the
+edge path, and only a *large* PNG makes it expensive. Small PNG covers
+had been fine for months. The first 1600x1600 one crashed the player.
+
+The general form is worth keeping, because this file has met the shape
+before from the other side: **an int64 cast written to be safe is not
+free on a 32-bit target.** 0709's MP4 reader was a pattern a desktop
+buffer hid and the board counted; this is a pattern a desktop *CPU*
+hides and the board counts. Both looked correct in review and cost
+seconds on hardware.
+
 ### The JPEG decoder's `rgb_order` is a byte scramble, not a colour order
 
 A gold cover on a deep red background rendered as silver on blue. Not a
