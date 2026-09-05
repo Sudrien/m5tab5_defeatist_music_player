@@ -4710,6 +4710,24 @@ static track_end_t play_file(const char *path)
     static loudness_t s_loud;      /* static only because it is ~4 KB */
     bool measuring = false;
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
+
+    /*
+     * What the DAC is actually handed, measured after the gain rather
+     * than before it. The open list carried `peaking?` for a long time
+     * on the grounds that FLAC and WAV arrive at full scale where MP3
+     * rarely did; nothing had ever measured whether they do, or whether
+     * anything downstream of the gain ever saturates.
+     *
+     * Both questions are one pass over a block already in cache, and
+     * where the gain runs it is not even that -- the max is folded into
+     * the loop that was already touching every sample.
+     *
+     * `out_peak` is a magnitude, so it is compared as a negated int:
+     * -(-32768) does not fit in an int16_t and INT16_MIN is a real
+     * sample value, not a sentinel.
+     */
+    int      out_peak = 0;         /* max |sample| this track, 0..32768 */
+    uint32_t clamp_hits = 0;       /* samples the gain loop saturated */
     bool  fmt_saved = false;       /* the format line is written once */
 
     /* Held, not published. Released by VISUALS_GATE() with everything
@@ -5467,9 +5485,22 @@ static track_end_t play_file(const char *path)
         if (rg_scale != 1.0f) {
             for (int i = 0; i < n; i++) {
                 int v = (int)lrintf((float)pcm[i] * rg_scale);
-                if (v >  32767) v =  32767;
-                if (v < -32768) v = -32768;
+                if (v >  32767) { v =  32767; clamp_hits++; }
+                if (v < -32768) { v = -32768; clamp_hits++; }
                 pcm[i] = (int16_t)v;
+                const int mag = v < 0 ? -v : v;
+                if (mag > out_peak) out_peak = mag;
+            }
+        } else {
+            /* The same question asked of a track playing at unity, which
+             * is every track that has not been measured yet and every
+             * one whose gain came out at exactly 0 dB. Without this the
+             * peak would only ever be known for tracks that had a gain
+             * applied, which is the half least likely to be at full
+             * scale. */
+            for (int i = 0; i < n; i++) {
+                const int mag = pcm[i] < 0 ? -(int)pcm[i] : pcm[i];
+                if (mag > out_peak) out_peak = mag;
             }
         }
 
@@ -6654,6 +6685,39 @@ static track_end_t play_file(const char *path)
      * the same figure in the "open" window is measured against an
      * otherwise idle card. */
     storage_io_report("track");
+
+    /*
+     * What the DAC was handed, once per track, next to the I/O figures
+     * for the same window.
+     *
+     * The point of the line is the `peaking?` entry, which asserted that
+     * lossless formats reach full scale where MP3 did not and had never
+     * been checked. `out_peak` answers it directly: 32767 is a track
+     * that arrived at the rail, and the dBFS figure says how far under
+     * it the rest land.
+     *
+     * `clamp_hits` should be zero, always, and is logged as a warning
+     * rather than folded into the line above because it is a claim
+     * about the code and not about the file. replaygain_gain_db() caps
+     * a positive gain at the headroom the measured peak leaves, so the
+     * saturation in the gain loop is unreachable by construction. If it
+     * ever fires, either that cap is wrong or the stored peak disagrees
+     * with the audio -- and both are worth a line that stands out from
+     * a per-track statistic nobody reads twice.
+     */
+    if (blocks > 0) {
+        const float peak_dbfs = out_peak > 0
+            ? 20.0f * log10f((float)out_peak / 32768.0f)
+            : -99.9f;
+        ESP_LOGI(TAG, "output peak %d/32768 (%.2f dBFS)%s",
+                 out_peak, (double)peak_dbfs,
+                 out_peak >= 32767 ? " -- at the rail" : "");
+    }
+    if (clamp_hits) {
+        ESP_LOGW(TAG, "the gain loop saturated %" PRIu32 " samples; "
+                      "replaygain_gain_db() should have made that "
+                      "impossible", clamp_hits);
+    }
 
     free(pcm);
     free(st);
