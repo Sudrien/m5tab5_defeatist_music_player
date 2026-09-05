@@ -2934,6 +2934,68 @@ peaks, and a music player has no business rewriting a waveform to hit a
 number. It is also what the peak is stored *for*, rather than as a
 curiosity beside the loudness.
 
+#### Nothing digital can clip here, so 1003 logged instead (1003)
+
+`peaking?` sat in the open list for a long time and 1003 was going to be
+the limiter. Reading the path first says a limiter would have nothing to
+limit, and three things combine to make that true:
+
+- **`replaygain_gain_db()` caps a positive gain at the headroom the
+  measured peak leaves**, minus `REPLAYGAIN_HEADROOM_DB` (1.0 dB). A
+  gain can never push a peak past -1 dBFS. That is the section above,
+  and it is the whole reason the peak is stored.
+- **The gain loop saturates anyway**, at +/-32767 -- which, given the
+  cap, is unreachable.
+- **Volume is attenuation on both routes.** The USB software path scales
+  linearly at or below unity; the analog path writes `LOUT1VOL`,
+  `ROUT1VOL`, `LOUT2VOL` and `ROUT2VOL`, which is **analog attenuation
+  after the DAC**. Turning the volume down does not reduce what the DAC
+  is handed.
+
+So a digital limiter's only effect would be to pull down content that is
+legitimately at full scale -- **exactly the "rewriting a waveform to hit
+a number" this file refuses one section up.** It would have closed the
+entry by contradicting the argument above it.
+
+**What the entry actually describes is analog**, and its own wording
+says so: what the ES8388 output stage does on clipping. Because volume
+attenuates after the DAC, the DAC sees full scale at every volume
+setting, so that question is not answerable from the sample path at all.
+
+**This is the cyan flash, caught one patch earlier than last time.** Six
+patches throttled bandwidth against a DSI underrun mechanism that was
+never running, and the note flagging the missing measurement as "the
+single highest-value next step" then went five more patches without
+taking it. The same move here would have been a limiter for clipping
+nobody had observed, in a path that cannot produce it.
+
+So 1003 is the measurement:
+
+- **`output peak N/32768 (X dBFS)`**, once per track, taken **after**
+  the gain rather than before it, because what is in question is what
+  the DAC receives. `-- at the rail` is appended at full scale, which is
+  the state the entry claims lossless files reach and MP3 does not.
+- **Folded into the gain loop where that runs**, so it costs nothing on
+  those tracks; a separate pass at unity, which is every unmeasured
+  track and every one whose gain came out at 0 dB. Leaving those out
+  would have measured only the half least likely to be at full scale.
+- **`clamp_hits` is a warning, not a statistic.** It should be zero
+  always, by the cap above. If it fires, either the cap is wrong or the
+  stored peak disagrees with the audio, and both are claims about the
+  code rather than about the file -- so it prints as `W` and says what
+  it contradicts.
+
+The magnitude runs 0..32**768**, not 32767: `INT16_MIN` is a real sample
+value and `-(-32768)` does not fit in an `int16_t`, so it is negated as
+an `int`. Verified under UBSan rather than reasoned about.
+
+**What to look for.** Whether `03 mp3-cbr-noxing` and `04 mp3-vbr-xing`
+report lower peaks than `01 wav-pcm16`, `05 flac` and `21 flac-24bit`.
+If they do, the entry was right and a limiter has a case; if the lossless
+files sit a decibel or two down like everything else, it never did, and
+the entry can be struck rather than implemented. Either way `clamp_hits`
+should never appear.
+
 Applied in `player.c`'s decode loop, not `audio_out.c`, because only the
 USB route has a software gain stage -- the analog path writes ES8388
 registers, so a gain applied there would play the same track at two
@@ -3882,10 +3944,14 @@ have been a task, is the useful part of a list like this one.
   entry and sets `mp4_t.encrypted`, which is the one field there that
   survives `mp4_free()`. This is a better error message and nothing
   more -- there is no key here and there is not going to be one.
-- **Nothing is peak-limited.** The `peaking?` item is still open — note
-  that FLAC and WAV arrive at full scale where MP3 rarely did, so
-  whatever the ES8388 output stage does on clipping is now easier to
-  reach.
+- **Nothing is peak-limited, and 1003 measured before writing one.**
+  The `peaking?` item stays open, but it is now instrumented rather
+  than asserted: every track logs `output peak N/32768 (X dBFS)` for
+  what the DAC was actually handed. The claim in this entry -- that
+  FLAC and WAV arrive at full scale where MP3 rarely did -- had never
+  been checked, and a limiter written on the strength of it would have
+  been aimed at a mechanism nobody had confirmed was running. See
+  "Nothing digital can clip here".
 
   **This is not the same as FLAC and WAV missing ReplayGain.** They do
   not miss it. `loudness.c` measures the decoded int16 block on its way
