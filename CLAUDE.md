@@ -69,8 +69,16 @@ resolves:
 - `DECODER_MAX_INT16` is a guess at the worst-case frame across all
   backends. If a FLAC with a 4608-sample block or an AAC-Plus file logs
   "frame needs N bytes", raise it rather than truncating.
-- Only 16-bit output is handled; `esp_codec_read()` rejects anything else
-  rather than playing it as noise. A 24-bit FLAC will refuse to play.
+- ~~Only 16-bit output is handled; `esp_codec_read()` rejects anything
+  else rather than playing it as noise. A 24-bit FLAC will refuse to
+  play.~~ Stale since 0803, corrected by 1002. **24-bit folds to 16 and
+  plays**; the samples are already in a buffer of ours one call before
+  they belong to anything else, so rounding them there costs a pass over
+  the frame and changes nothing downstream. **32-bit stays refused**, and
+  deliberately: `esp_audio_simple_dec_info_t` reports a bit count with no
+  way to tell an integer stream from a float one, and folding float as
+  integer is full-scale noise into headphones. Files 02 and 21 of the
+  corpus are the 24-bit cases and both play.
 
 ## One-frame-per-call codecs
 
@@ -625,6 +633,53 @@ to have been describing a struct that had moved underneath it. 0811 and
 0812 both name this failure. Neither stopped it, because what they
 recorded was the lesson and not a habit of re-reading the list against
 the code.
+
+### So the whole list was read against the code (1002)
+
+Three patches in a row found an open entry that had been closed by the
+work and never struck, so 1002 stops finding them one at a time and
+reads every remaining entry against the source. Four were stale. The
+rest were checked and are correct, which is worth recording as plainly
+as the corrections: **an audit that only reports what it changed cannot
+be told from one that stopped early.**
+
+Struck, with what actually closed them:
+
+| Entry | Closed by | Checked against |
+| --- | --- | --- |
+| MP3 sidecar index never re-harvests finer | 0711 | `decoder_index_extract()`'s `num_frames <= index_count` exception |
+| ALAC logs `Not find default parser` at every open | 0907 | `esp_log_level_set(SDEC_TAG, ...)` around both ALAC opens |
+| Only 16-bit output; a 24-bit FLAC will refuse to play | 0803 | `fold_24_to_16()`, reached when `bits_per_sample == 24` |
+| Seek on non-MP3 needs a provably constant byte rate | 0808 | the bullet contradicted itself; see below |
+
+Confirmed still true, and left alone:
+
+- **AMR has neither a test file nor a walk.** The corpus is twenty-one
+  files and none of them is `.amr`. Unchanged and for the stated reason.
+- **One lease covers the SD card and the USB port together.**
+  `storage_io.c` still holds a single `s_lock`, not one per
+  `storage_id_t`.
+- **Nothing is peak-limited.** No limiter in `main/`.
+- **No resampling, UAC 2.0 untested, bus power is USB 2.0 only.**
+- **The size-only handle in `do_art()`**, the 0100-0105 and 0200-series
+  compile-test caveats, the marquee not being eased, and gapless.
+
+**One entry was not stale but corrupted**, which is a failure this file
+had no category for. The seek bullet read:
+
+    Seek on non-MP3 works only where the byte rate is provably
+    constant, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
+    Every format this player decodes is seekable as of 0808, ...
+
+An 0808-era edit replaced the entry's body and left its opening sentence
+standing, so a single bullet asserted a restriction and then denied it
+four lines later, mid-sentence, with a dangling `FLAC, Ogg,`. Every
+other stale entry in this file is wrong in a way that reads as fluent
+and has to be checked against code to catch. This one contradicts itself
+in plain sight and survived anyway -- **which says the list was not being
+read at all, rather than being read and believed.** That is the stronger
+version of what 0811 and 0812 recorded, and the reason this audit was a
+patch rather than a note.
 
 **Threaded as a parameter, not held in a file-scope variable,** because
 those two callers are on different tasks and can both be inside
@@ -3750,9 +3805,9 @@ rather than against a board.
 
 ### What the controls do not do yet
 
-- **Seek on non-MP3 works only where the byte rate is provably
-  constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR. FLAC, Ogg,
-  Every format this player decodes is seekable as of 0808, by five
+- ~~**Seek on non-MP3 works only where the byte rate is provably
+  constant**, per above: PCM WAV, CBR ADTS, fixed-mode AMR.~~ **Every
+  format this player decodes is seekable as of 0808**, by five
   mechanisms: a proven-constant byte rate (WAV, CBR ADTS, AMR), a
   bisection over frame headers, page granules or PES timestamps (FLAC,
   Ogg, TS), a sample table with the audio remuxed to ADTS (AAC in MP4),
@@ -5134,15 +5189,24 @@ about the line beneath it.
   a fragmented file keeps its tables in `moof` boxes and the empty
   `stsz` is downstream of that. It now says `no usable stco or co64
   box`, which is the check that actually refused it.
-- **The MP3 sidecar index never re-harvests at a finer spacing**, where
-  the in-memory one does.
+- ~~**The MP3 sidecar index never re-harvests at a finer spacing**, where
+  the in-memory one does.~~ Closed by 0711 and struck by 1002.
+  `decoder_index_extract()` makes exactly this exception: an installed
+  table is normally not written back, but when minimp3 has since built
+  its own finer index on top of it, the finer one wins. The test is
+  `d->indexed && d->ex.index.num_frames <= d->index_count`, which is one
+  comparison and needs no flag. A sidecar written at the old ten-second
+  spacing upgrades itself to `REPLAYGAIN_INDEX_SPACING_SEC` (2 s) the
+  first time anybody drags in that track.
 - **AMR has neither a test file nor a walk.** No stock ffmpeg can
   encode it, and a synthetic file with valid headers and junk payload
   would test the probe and be useless to listen to, which is the wrong
   trade for a corpus judged by ear.
-- **`ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC` logs `Not find default parser`**
-  at every open. That is `ALAC` byte-swapped: the layer looks for a
-  parser for the type, there is not one because ALAC has no
-  self-framing format to parse, and with `use_frame_dec` we do not need
-  one. The open succeeds. It is noise from a layer that does not know
-  why we do not need it.
+- ~~**`ESP_AUDIO_SIMPLE_DEC_TYPE_ALAC` logs `Not find default parser`**
+  at every open.~~ Closed by 0907 and struck by 1002. The diagnosis in
+  this entry was right -- `1128352833` is `ALAC` read the other way up,
+  and with `use_frame_dec` the sample table does the framing -- and 0907
+  acted on it: `SDEC_TAG`'s threshold is raised to `ESP_LOG_ERROR` across
+  both ALAC opens in `decoder.c` and restored before the M4A fallback
+  open below them, which has every reason to be heard. The entry
+  outlived the fix by the rest of the 0900 series.
