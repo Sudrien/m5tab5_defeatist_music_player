@@ -752,8 +752,16 @@ cleanup:
  * Pixels are written straight into the panel's scan buffer with the
  * same centre-and-crop arithmetic the JPEG path uses.
  */
+/*
+ * The ceiling that keeps png_on_draw()'s edge map in 32-bit arithmetic.
+ * 100000 * 1280 is 1.28e8, comfortably inside INT32_MAX, and no cover
+ * that fits in COVERTAG_MAX_IMAGE is anywhere near this wide.
+ */
+#define PNG_MAX_DIM  (100000u)
+
 typedef struct {
     bool saw_init;
+    bool too_big;           /* dimensions would overflow the 32-bit edge map */
     uint16_t *fb;
     int screen_w, screen_h;
     int dx, dy;             /* top-left of the scaled image in screen space */
@@ -767,6 +775,22 @@ static void png_on_init(pngle_t *pngle, uint32_t w, uint32_t h)
     c->saw_init = true;
     c->iw = (int)w;
     c->ih = (int)h;
+
+    /*
+     * The edge map in png_on_draw() is 32-bit, and this is what makes
+     * that safe. The largest product it forms is iw * cw, with cw and ch
+     * bounded by the panel, so a dimension under PNG_MAX_DIM cannot
+     * overflow a signed 32-bit int with three orders of magnitude to
+     * spare. Refused rather than clamped: clamping would draw a
+     * silently wrong picture, and no real cover is 100000 px on a side
+     * inside COVERTAG_MAX_IMAGE anyway.
+     */
+    if (w == 0 || h == 0 || w > PNG_MAX_DIM || h > PNG_MAX_DIM) {
+        ESP_LOGW(TAG, "cover is %"PRIu32"x%"PRIu32", which this scaler "
+                      "will not map; skipping the picture", w, h);
+        c->too_big = true;
+        return;
+    }
 
     /*
      * Same fit-to-box as the JPEG path, up as well as down.
@@ -805,6 +829,7 @@ static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
 {
     png_ctx_t *c = pngle_get_user_data(pngle);
 
+    if (c->too_big) return;                     /* see png_on_init() */
     if (rgba[3] == 0) return;                   /* fully transparent */
     const uint16_t px = (uint16_t)(((rgba[0] & 0xF8) << 8) |
                                    ((rgba[1] & 0xFC) << 3) |
@@ -821,10 +846,10 @@ static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
      * to zero pixels and is dropped, which is the correct way to shrink
      * -- the run that lands on that pixel wins.
      */
-    const int px0 = c->dx + (int)(((int64_t)x * c->cw) / c->iw);
-    const int px1 = c->dx + (int)(((int64_t)(x + w) * c->cw) / c->iw);
-    const int py0 = c->dy + (int)(((int64_t)y * c->ch) / c->ih);
-    const int py1 = c->dy + (int)(((int64_t)(y + h) * c->ch) / c->ih);
+    const int px0 = c->dx + (int)(((int32_t)x * c->cw) / c->iw);
+    const int px1 = c->dx + (int)(((int32_t)(x + w) * c->cw) / c->iw);
+    const int py0 = c->dy + (int)(((int32_t)y * c->ch) / c->ih);
+    const int py1 = c->dy + (int)(((int32_t)(y + h) * c->ch) / c->ih);
 
     for (int sy = py0; sy < py1; sy++) {
         if (sy < 0 || sy >= c->screen_h) continue;
@@ -866,6 +891,9 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
      *
      * The init callback firing is the only proof the decoder actually
      * looked at an image. */
+    if (ret == ESP_OK && ctx.too_big) {
+        ret = ESP_ERR_NOT_SUPPORTED;
+    }
     if (ret == ESP_OK && !ctx.saw_init) {
         ESP_LOGW(TAG, "png produced no image (%d of %u bytes consumed)",
                  fed, (unsigned)png_len);
