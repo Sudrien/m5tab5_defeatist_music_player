@@ -2989,6 +2989,17 @@ static void do_art(const char *path, uint32_t gen)
     if (serr != ESP_OK) {
         ESP_LOGW(TAG, "cover art failed to decode (%s)",
                  esp_err_to_name(serr));
+        /* What the cache was holding at the moment it failed. albumart.c
+         * reports the PSRAM picture and cannot see this, and the two
+         * together are what say whether the cache is the tenant worth
+         * reclaiming or a bystander. */
+        if (serr == ESP_ERR_NO_MEM) {
+            int cent = 0;
+            size_t cbytes = 0;
+            mediacache_stats(&cent, &cbytes);
+            ESP_LOGW(TAG, "  cover cache held %d entries, %u KB at the time",
+                     cent, (unsigned)(cbytes / 1024));
+        }
         return;
     }
 

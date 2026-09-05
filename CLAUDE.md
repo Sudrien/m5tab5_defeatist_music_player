@@ -3826,6 +3826,36 @@ ring with audio running through it. It usually fits; when it does not, the
 useful thing to print is how much was wanted, in one line, rather than
 whatever the driver says on the way down.
 
+**And 1010 asks the second question, which had never been asked.** The
+board found a cover that does not fit:
+
+    cover needs 17672 KB of PSRAM in one block, largest free is 16128 KB
+    cover art failed to decode (ESP_ERR_NO_MEM)
+
+`largest` says the allocation cannot be made now. It does not say whether
+it could ever be made, and those want different fixes. If the **total**
+free is also short, nothing can be reclaimed into it and the only answers
+are a smaller decode or none. If the total is comfortably over while the
+largest is not, the PSRAM is fragmented and a tenant might be worth
+evicting -- the cover cache is the obvious candidate, since the same log
+shows it holding 5483 KB of compressed images, and the largest block fell
+from 16128 KB to 14080 KB as it filled.
+
+**"Free the cache and retry" is worthless in the first case and worth
+writing in the second, and no log so far tells them apart.** So 1010
+prints the total beside the largest and names which case it is, and
+`do_art()` adds what the cache was holding at that moment -- `albumart.c`
+reports the PSRAM picture and cannot see the cache, and the two together
+are what say whether it is the tenant to reclaim or a bystander.
+
+This is instrumentation before the patch, which is the thing the cyan
+flash cost six patches for skipping and which 1003 got right by
+accident of being asked to build a limiter. **A reclaim-and-retry is
+also not safe to write blind**: `do_art()` may be holding a *borrowed*
+pointer into the cache it would be clearing, and `mediacache_clear()`
+would free the image being decoded out from under it. That is a second
+reason to measure first rather than to write the plausible fix.
+
 ### A 64-bit divide per pixel is a watchdog reset (1005)
 
 A 1600x1600 PNG cover -- Thumper's, 3.7 MB -- took the media task down
