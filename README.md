@@ -93,6 +93,15 @@ What do you mean no audio over Bluetooth
   licence. Free, but the grant is limited to Espressif silicon. Fine
   here; worth knowing before this code gets copied somewhere it is not.
 - pngle and miniz are MIT.
+- **TJpgDec is ChaN's, under its own licence**, and arrives as the
+  `espressif/esp_jpeg` component. Permissive -- free for personal and
+  commercial use, source redistribution allowed -- but the copyright
+  notice has to be retained, so it travels with a redistribution the
+  same way the font's OFL does. Used only as a fallback, for cover art
+  the hardware JPEG decoder cannot allocate for: the P4's decoder has no
+  scaler, so a 3000 px cover wants 17 MB of PSRAM in one block and does
+  not get it.
+- MurmurHash2, for cover identity, is public domain. No obligation.
 - **Ark Pixel Font is SIL OFL-1.1, and `components/ark12` is therefore
   OFL-1.1 too, not MIT.** Converting the glyph PNGs into C arrays makes
   those files a Modified Version under OFL section 5, and section 5

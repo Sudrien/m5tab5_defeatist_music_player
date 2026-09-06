@@ -3983,6 +3983,73 @@ the second kind and was worth a patch. Everything else here is the
 first, and narrowing any of it would trade a correct player for cycles
 that were never being spent.
 
+### The hardware has no scaler, and that claim was true (1101)
+
+`albumart.c` has asserted since it was written that the P4's JPEG
+decoder produces the picture at full size or not at all. **Checked, and
+it is right.** `jpeg_decode_cfg_t` carries `output_format`, `rgb_order`
+and `conv_std` -- no scale, no sub-rectangle, no strip -- and the struct
+is identical across the ESP-IDF P4 driver documentation for v5.3, v5.3.1,
+v6.0.2 and v6.1. It has never had a scale field.
+
+**That is the first load-bearing claim this session checked that turned
+out true**, after the ring size, the seek bullet, the 16-bit limit and
+`peaking?` all turned out stale. Worth recording as plainly as the
+corrections: the file is not uniformly wrong, and knowing which parts
+held up is what makes the rest worth reading.
+
+So the 3000 px cover needed a second decoder, and TJpgDec via
+`espressif/esp_jpeg` is it.
+
+**A fallback and nothing else.** It is reached only on the branch that
+1010 instrumented -- the one where `heap_caps_get_largest_free_block()`
+is already short and the code used to print a number and give up. Every
+cover that fits keeps the hardware path and its milliseconds.
+
+| | Hardware | TJpgDec at 1/4 |
+| --- | --- | --- |
+| 3000x3000 buffer | 17,672 KB | **1,098 KB** |
+| Speed | ~550 ms | seconds |
+
+The scale is the gentlest reduction that still leaves at least the
+panel's worth of pixels in both directions, so the 16.16 fit downstream
+is still reducing and nothing visible is given away: 3000 px against a
+720 px box picks 1/4 for 750 px. A 6000 px cover picks 1/8 for the same
+750. If a scale will not allocate it keeps halving and, at the end,
+accepts an upscale rather than no cover -- which only arises for covers
+small enough that the hardware path would not have failed anyway.
+
+**The cost is why it is not the default.** TJpgDec Huffman-decodes every
+MCU whatever the output scale, so scaling saves memory and not time: a
+nine-megapixel cover is seconds of CPU against the hardware's hundreds
+of milliseconds. It runs on the media task, which is where 1005's
+watchdog fired, and `esp_jpeg_decode()` is blocking. **That is the thing
+to watch on the first board run**, and if it trips, the answer is not to
+make it faster but to stop doing it -- the format card was an acceptable
+outcome before this patch and still is.
+
+Three details that will matter to whoever touches this next:
+
+- **The blit reads its dimensions from whichever path ran.** The
+  hardware pads to 16-pixel boundaries so the stride is not the width;
+  TJpgDec writes tightly so the stride *is* the width. Three variables,
+  one `goto`, and the scaling loop below is untouched.
+- **`swap_color_bytes` is 0**, against the README example, which sets it
+  for LVGL. The shadow buffer, `gfx.c`'s `RGB()` and the DPI panel are
+  all native little-endian RGB565 and agree with each other. If a cover
+  comes back with reds and blues exchanged this is the one line to flip
+  -- and it is the same fault the `rgb_order` note above describes, from
+  the other side, so the symptom to look for is a gold cover rendering
+  silver.
+- **Not in ROM on this chip.** The ROM copy exists on ESP32, S3, C3, C6,
+  C5 and C61; the P4 is not on that list, so this is roughly 5 KB of
+  flash rather than free.
+
+**Licensing.** TJpgDec is ChaN's, under its own permissive text, and the
+notice has to travel with a redistribution -- the second such obligation
+after the font's OFL. Recorded in the README's licensing section, which
+also gained the MurmurHash2 line from 1011.
+
 ### The cover hash is Murmur2, and 32-bit on purpose (1011)
 
 The cover's identity hash was MD5 from ROM, **ungated**: 1.8 MB hashed

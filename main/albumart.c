@@ -21,6 +21,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
+#include "jpeg_decoder.h"   /* espressif/esp_jpeg: TJpgDec */
 #include "pngle.h"
 
 #include "albumart.h"
@@ -32,6 +33,95 @@ static const char *TAG = "tab5_art";
 /* ------------------------------------------------------------------ */
 /* ID3v2 APIC                                                          */
 /* ------------------------------------------------------------------ */
+
+/*
+ * The software decode, for covers the hardware cannot allocate for.
+ *
+ * Picks the gentlest reduction that still leaves at least the panel's
+ * worth of pixels in both directions, so the 16.16 fit below is still
+ * reducing rather than enlarging and nothing visible is given away. For
+ * a 3000 px cover against a 720 px box that is 1/4 -- 750 px, 1.1 MB,
+ * against the 17.3 MB the hardware wanted for the same picture.
+ *
+ * If even that will not allocate it keeps halving, down to 1/8, and
+ * accepts an upscale rather than no cover at all. Beyond that there is
+ * nothing left to try and the caller reports out of memory as before.
+ *
+ * TJpgDec writes RGB565 tightly packed, no padding, so the caller's
+ * stride is the width it gets back here.
+ */
+static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
+                                 const jpeg_decode_picture_info_t *info,
+                                 int screen_w, int screen_h,
+                                 uint8_t **out_buf, size_t *out_size,
+                                 int *out_w, int *out_h)
+{
+    static const esp_jpeg_image_scale_t scales[] = {
+        JPEG_IMAGE_SCALE_0, JPEG_IMAGE_SCALE_1_2,
+        JPEG_IMAGE_SCALE_1_4, JPEG_IMAGE_SCALE_1_8,
+    };
+
+    /* Gentlest reduction that still covers the box. Starts at 1/2: 1/1
+     * is what the caller already failed to allocate. */
+    int idx = 1;
+    while (idx < 3 &&
+           (int)(info->width  >> (idx + 1)) >= screen_w &&
+           (int)(info->height >> (idx + 1)) >= screen_h) {
+        idx++;
+    }
+
+    for (; idx <= 3; idx++) {
+        const int w = (int)(info->width  >> idx);
+        const int h = (int)(info->height >> idx);
+        if (w < 1 || h < 1) break;
+
+        const size_t need = (size_t)w * h * 2;
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM) < need) continue;
+
+        uint8_t *buf = heap_caps_malloc(need, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!buf) continue;
+
+        esp_jpeg_image_cfg_t cfg = {
+            .indata       = (uint8_t *)in,
+            .indata_size  = jpeg_len,
+            .outbuf       = buf,
+            .outbuf_size  = need,
+            .out_format   = JPEG_IMAGE_FORMAT_RGB565,
+            .out_scale    = scales[idx],
+            /*
+             * NOT swapped. The shadow buffer, gfx.c's RGB() macro and
+             * the DPI panel are all native little-endian RGB565 and
+             * agree with each other; the example in esp_jpeg's README
+             * sets this for LVGL, which is a different consumer. If a
+             * cover comes back with reds and blues exchanged this is the
+             * one line to flip -- and that is the same fault the
+             * hardware path's rgb_order note describes, from the other
+             * side.
+             */
+            .flags = { .swap_color_bytes = 0 },
+        };
+        esp_jpeg_image_output_t outimg = { 0 };
+
+        const esp_err_t err = esp_jpeg_decode(&cfg, &outimg);
+        if (err != ESP_OK) {
+            free(buf);
+            ESP_LOGW(TAG, "software decode at 1/%d failed (%s)",
+                     1 << idx, esp_err_to_name(err));
+            return err;
+        }
+
+        *out_buf = buf;
+        *out_size = need;
+        *out_w = (int)outimg.width;
+        *out_h = (int)outimg.height;
+        ESP_LOGI(TAG, "cover decoded in software at 1/%d: %dx%d, %u KB",
+                 1 << idx, *out_w, *out_h, (unsigned)(need / 1024));
+        return ESP_OK;
+    }
+
+    ESP_LOGW(TAG, "no scale of this cover fits; showing the format instead");
+    return ESP_ERR_NO_MEM;
+}
 
 /*
  * MurmurHash2, 32-bit, public domain. Identity for a blob of bytes: two
@@ -475,6 +565,10 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     jpeg_decoder_handle_t dec = NULL;
     uint8_t *in = NULL;
     uint8_t *rgb = NULL;
+    /* Declared here, above the goto into have_pixels: a jump must not
+     * cross an initialisation, and the blit reads all three. */
+    bool soft = false;
+    int  soft_w = 0, soft_h = 0;
     size_t in_size = 0, rgb_size = 0;
 
     uint8_t sof = 0;
@@ -620,8 +714,37 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
                  (unsigned)((want - largest) / 1024),
                  (total >= want) ? " -- fragmentation, not exhaustion"
                                  : " -- exhausted; no reclaim can help");
-        ret = ESP_ERR_NO_MEM;
-        goto cleanup;
+
+        /*
+         * SOFTWARE FALLBACK, because the hardware genuinely cannot do
+         * this one.
+         *
+         * `jpeg_decode_cfg_t` carries an output format, a byte order and
+         * a colour standard, and nothing else -- no scale, no sub-
+         * rectangle, no strip. Checked against the ESP-IDF P4 driver
+         * documentation for v5.3 through v6.1: the struct has never had
+         * a scale field. So the note above is right, and it is the one
+         * load-bearing claim in this file that a check confirmed rather
+         * than refuted.
+         *
+         * TJpgDec decodes at 1/2, 1/4 or 1/8 and it is the only way to
+         * get this picture onto the panel at all. It is reached ONLY
+         * here, on the branch that until now printed a number and gave
+         * up, so every cover that fits keeps the hardware path and its
+         * milliseconds.
+         *
+         * The cost is real and is why this is not the default: TJpgDec
+         * Huffman-decodes every MCU whatever the output scale, so a
+         * nine-megapixel cover is seconds of CPU, not the hardware's
+         * hundreds of milliseconds. It runs on the media task, which is
+         * where 1005's watchdog fired, so `esp_jpeg_decode()` being
+         * blocking is the thing to watch on the first board run.
+         */
+        ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
+                              &rgb, &rgb_size, &soft_w, &soft_h);
+        if (ret != ESP_OK) goto cleanup;
+        soft = true;
+        goto have_pixels;
     }
 
     rgb = jpeg_alloc_decoder_mem(want, &out_cfg, &rgb_size);
@@ -706,8 +829,17 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
      * better on fine detail and would read every source pixel rather than
      * one in seven, during playback. Album art is not fine detail.
      */
-    const int iw = (int)info.width, ih = (int)info.height;
-    const int stride = (int)pad_w;
+have_pixels:
+    /*
+     * Whichever path produced the pixels. The hardware pads to 16-pixel
+     * boundaries and the visible image is a window into that, so the row
+     * stride is not the image width; TJpgDec writes the scaled image
+     * tightly, so for it the stride IS the width. Everything below is
+     * unchanged and simply reads these three rather than the header.
+     */
+    const int iw     = soft ? soft_w : (int)info.width;
+    const int ih     = soft ? soft_h : (int)info.height;
+    const int stride = soft ? soft_w : (int)pad_w;
 
     /*
      * Fitted to the box in BOTH directions -- enlarged as well as
