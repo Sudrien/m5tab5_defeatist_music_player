@@ -4958,6 +4958,58 @@ the end of the first track with an empty port, the port label in settings
 reading `off`, and **no such line** when a stick, a headset or a remote is
 plugged in.
 
+## Building this from Android, under Termux
+
+The build host is a phone. That is not a footnote -- it explains why so
+much of this file says "not flashed" and why the host-stub test suite
+matters more here than it would elsewhere.
+
+**It has to be two environments, and the reason is not preference.**
+ESP-IDF's prebuilt toolchains are glibc-linked `linux-arm64` binaries
+and Termux is bionic, so they will not run natively and there is no
+`riscv32-esp-elf` in Termux's own repos. proot gives you glibc. But
+proot cannot reach USB, and Termux gives you no `/dev/ttyUSB*` node
+without root. **So: build inside proot, flash from Termux proper.**
+
+Build, in `proot-distro login debian`:
+
+    apt install -y git wget flex bison gperf python3 python3-pip         python3-venv cmake ninja-build ccache libffi-dev libssl-dev         dfu-util libusb-1.0-0
+    git clone -b v5.5.5 --recursive https://github.com/espressif/esp-idf.git
+    cd esp-idf && ./install.sh esp32p4 && . ./export.sh
+
+Budget 8-10 GB. Keep the project somewhere Termux can also see, so
+`build/*.bin` is reachable from outside proot.
+
+Flash, from Termux, through a USB-serial-to-TCP bridge app and a pty:
+
+    socat pty,link=$HOME/esp32,raw,echo=0 tcp:127.0.0.1:8080 &
+    esptool --chip esp32p4 --port $HOME/esp32 --baud 460800         write_flash @flash_args
+
+`idf.py monitor` takes the same pty, which is where every log quoted in
+this file comes from.
+
+`nrflash` is the Termux-native alternative and avoids the bridge app,
+but **it does not support the P4 today** -- the stub binary is in the
+package, the chip parameters and magic value are not.
+
+### What this costs, and what follows from it
+
+- **The cable is a real failure mode.** Charge-only cables and cables
+  that brown the board out both present as software faults. Rule it out
+  first.
+- **Phone sleep kills long builds.** `termux-wake-lock`.
+- **A build is expensive enough that it is not the fast feedback loop.**
+  That is why `texttest` and `ctrltest` exist and why patches here get
+  extracted and run in isolation on a host rather than compiled in
+  place. It is also why "not flashed" is stated on every patch rather
+  than assumed: the gap between written and run is wider here than the
+  usual one, and 1005, 1009 and the 0200 series were all found by a
+  board doing something a reading had not predicted.
+- **Compiling is worth more than it looks.** 1101's `esp_jpeg` call has
+  never been through a compiler, and a build alone -- no flash, no
+  cable, no bridge -- would settle the enum spellings it is most likely
+  to have got wrong.
+
 ## Where v0.3.0 got to (the 1000 series)
 
 **Read this first if you are picking this up cold.** The 1000 series was
