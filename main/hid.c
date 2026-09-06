@@ -939,6 +939,29 @@ static void open_remember(usb_device_handle_t dev)
                        HID_MAX_OPEN_DEVS);
 }
 
+/*
+ * Is any HID device open right now?
+ *
+ * Reads the same table under the same lock as everything else here. A
+ * slot with a handle and not yet marked gone is a device the port is
+ * feeding, which is the question the auto power-off asks: cutting VBUS
+ * on a plugged-in remote is a physical unplug of a working thing.
+ *
+ * Deliberately about *open* devices rather than enumerated ones. A
+ * device that failed to claim any interface is one we cannot use and
+ * would not miss, and one that has gone is already gone.
+ */
+bool hid_present(void)
+{
+    bool any = false;
+    portENTER_CRITICAL(&s_open_lock);
+    for (int i = 0; i < HID_MAX_OPEN_DEVS; i++) {
+        if (s_open[i].dev && !s_open[i].gone) { any = true; break; }
+    }
+    portEXIT_CRITICAL(&s_open_lock);
+    return any;
+}
+
 /* A claim succeeded on this device. Called from client_task, before any
  * polling task for it exists. */
 static void open_claimed(usb_device_handle_t dev)

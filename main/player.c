@@ -2095,6 +2095,10 @@ static volatile int      s_fmt_kbps;
 static volatile bool     s_fmt_known;
 
 static char              s_media_path[512];
+/* One-shot: the USB rail is dropped at most once, at the end of the
+ * first track that actually played. See the note where it is used. */
+static bool              s_usb_autooff_done;
+
 static volatile bool     s_media_want;
 
 /*
@@ -6734,6 +6738,56 @@ static track_end_t play_file(const char *path)
     free(st);
     decoder_close(dec);
     storage_hold(STORAGE_COUNT);
+
+    /*
+     * THE PORT STOPS BEING POWERED IF NOTHING TURNED UP.
+     *
+     * VBUS goes on unconditionally at boot and stays on, because a UAC
+     * headset cannot announce itself through a dark port -- that is why
+     * the old "only power USB if the card is unreadable" rule had to go.
+     * The cost is a rail driven all day for a port with nothing in it.
+     *
+     * So: after one track has actually played, ask once whether anything
+     * arrived, and if nothing did, drop the rail. One track is long
+     * enough that a drive or a headset has had every chance to enumerate
+     * -- the slowest seen here was mounted 2.7 s after boot -- and it is
+     * a moment the listener is not waiting on.
+     *
+     * ONCE, and never automatically back on. `s_usb_autooff_done` is set
+     * whether or not the rail moves, which is what keeps this from
+     * fighting the settings panel: if the listener turns the port on
+     * later, that is a request, and nothing here will second-guess it at
+     * the end of the next track. Turning it back on is a decision with a
+     * person behind it, and the panel is where that person is.
+     *
+     * All three attachment questions, because a device that is not a
+     * disk still needs the rail: `storage_present()` for a mounted
+     * volume, `uac_present()` for an audio device, and `hid_present()`
+     * for a remote -- which announces itself to nothing else and would
+     * otherwise be invisible here and have its power cut mid-press.
+     *
+     * `storage_usb_power(false)` rather than `usbhost_set_power(false)`,
+     * because cutting VBUS under a mounted volume is a physical unplug
+     * as far as FatFs is concerned. That call unmounts first and refuses
+     * outright while the volume is held, so the busy check is
+     * belt-and-braces rather than the safety.
+     *
+     * `blocks > 0` so an unreadable file does not count as the one
+     * track: three of those in a row is a stopped player, and cutting
+     * the rail underneath that would take the drive away from someone
+     * trying to work out why nothing plays.
+     */
+    if (!s_usb_autooff_done && blocks > 0) {
+        s_usb_autooff_done = true;
+        if (usbhost_vbus_on() &&
+            !storage_present(STORAGE_USB) &&
+            !uac_present() &&
+            !hid_present() &&
+            !storage_usb_busy() &&
+            storage_usb_power(false)) {
+            ESP_LOGI(TAG, "USB bus power off: nothing attached after a track");
+        }
+    }
 
     /*
      * One write, here, for everything this track taught us -- and only

@@ -4829,6 +4829,68 @@ and it is the thing that will finally give the arbiter a contended window
 to be judged on -- every `worst wait` in the 0101 log is 0 ms, because
 the only concurrent reader was the walk and 0101 switched it off.
 
+### The USB rail turns itself off if nothing turned up (1100)
+
+VBUS is driven unconditionally at boot and stays that way, because a UAC
+headset cannot announce itself through a dark port -- which is why the
+old "only power USB if the card is unreadable" rule had to go. The cost
+is a rail driven all day for a port with nothing in it.
+
+**After one track has actually played, the port is asked once whether
+anything arrived, and if nothing did the rail drops.** A track is long
+enough that anything has had every chance to enumerate -- the slowest
+mount observed was 2.7 s after boot, against a track measured in minutes
+-- and it is a moment the listener is not waiting on.
+
+**Once, and never automatically back on.** `s_usb_autooff_done` is set
+whether or not the rail moves, and that is the part worth keeping: it is
+what stops this fighting the settings panel. If the listener turns the
+port on afterwards, that is a request with a person behind it, and
+nothing should second-guess it at the end of the next track. **Automatic
+off is a power saving; automatic on would be an argument.**
+
+**Three attachment questions, not one.** A mounted volume is the obvious
+one and the other two are the ones that would have made this a bug:
+
+| Predicate | Catches |
+| --- | --- |
+| `storage_present(STORAGE_USB)` | a mounted drive |
+| `uac_present()` | a USB audio device |
+| `hid_present()` | **a remote, which announces itself to nothing else** |
+
+`hid_present()` is new, added here for exactly this. `hid.c` already
+tracked open devices in `s_open[]` -- it had to, since 0902 replaced a
+single handle with a table -- so the predicate is that table read under
+the lock it already has. Without it a plugged-in remote is invisible to
+every "is anything attached" test in the program and gets its power cut
+mid-press, which is the kind of fault that would have been reported as
+"the buttons stop working after the first song" and taken a while to
+connect to a power patch.
+
+`storage_usb_power(false)` and not `usbhost_set_power(false)`: cutting
+VBUS under a mounted volume is a physical unplug as far as FatFs is
+concerned, and the former unmounts first and refuses outright while the
+volume is held. The busy check beside it is belt-and-braces, not the
+safety.
+
+`blocks > 0`, so an unreadable file does not count as the track. Three
+of those in a row is a stopped player, and dropping the rail underneath
+that would take the drive away from someone trying to work out why
+nothing plays.
+
+**Not flashed.** The host stubs reach neither `player.c` nor `hid.c`. The
+gate was extracted and run against all eight attachment combinations plus
+the two sequencing cases -- second track, and manual re-power after an
+auto-off -- confirming among other things that `storage_usb_power()` is
+never reached until every predicate has cleared, since it is the only
+term in that chain with a side effect and C's short-circuit order is what
+guarantees it runs last.
+
+What to look for: `USB bus power off: nothing attached after a track` at
+the end of the first track with an empty port, the port label in settings
+reading `off`, and **no such line** when a stick, a headset or a remote is
+plugged in.
+
 ## Where v0.3.0 got to (the 1000 series)
 
 **Read this first if you are picking this up cold.** The 1000 series was

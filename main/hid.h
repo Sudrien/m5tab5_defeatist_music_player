@@ -22,6 +22,8 @@
  */
 #pragma once
 
+#include <stdbool.h>
+
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -65,6 +67,16 @@ typedef void (*hid_button_cb_t)(hid_button_t button);
  * enumeration is not offered the devices already attached.
  */
 esp_err_t hid_init(hid_button_cb_t cb);
+
+/*
+ * Whether any HID device is open on the port.
+ *
+ * Safe from any task. Exists so that whatever decides to cut USB bus
+ * power can tell a port with a remote on it from an empty one -- a HID
+ * device announces itself to nothing else, so without this it is
+ * invisible to any "is anything attached" test and gets its power cut.
+ */
+bool hid_present(void);
 
 #ifdef __cplusplus
 }
