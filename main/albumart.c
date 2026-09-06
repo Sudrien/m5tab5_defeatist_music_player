@@ -128,13 +128,18 @@ static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
  * covers that hash the same and are the same length are the same image
  * for every purpose this program has.
  *
+ * No longer static: mediacache.c hashes on the store path so that two
+ * entries holding the same picture can share one buffer, and it is
+ * load-bearing that it is this function and not a second one. Declared
+ * in albumart.h, which mediacache.h already includes.
+ *
  * The 4-byte load goes through memcpy() rather than a cast. The input is
  * a DMA-reachable buffer whose alignment nothing here promises, and an
  * unaligned 32-bit load is a fault on some targets and a silent
  * slow path on others; the compiler turns this back into one load where
  * it is allowed to.
  */
-static uint32_t cover_hash(const void *key, size_t len)
+uint32_t albumart_cover_hash(const void *key, size_t len)
 {
     const uint32_t m = 0x5bd1e995u;
     const int r = 24;
@@ -664,7 +669,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
      * Public domain (Austin Appleby), so unlike TJpgDec it adds no
      * licence obligation.
      */
-    const uint32_t sum = cover_hash(in, jpeg_len);
+    const uint32_t sum = albumart_cover_hash(in, jpeg_len);
     ESP_LOGI(TAG, "jpeg in: %u bytes, hash %08x",
              (unsigned)jpeg_len, (unsigned)sum);
 

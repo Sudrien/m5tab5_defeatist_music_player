@@ -62,6 +62,22 @@ esp_err_t albumart_show(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
 esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
                         const uint8_t *jpeg, size_t jpeg_len);
 
+/*
+ * MurmurHash2, 32-bit. Identity for a blob of bytes, not a checksum and
+ * not a digest -- see the comment on the definition in albumart.c.
+ *
+ * It lives here rather than staying static because there are two callers
+ * now and it is load-bearing that they agree. albumart_draw() hashes the
+ * image it is about to decode, as a diagnostic; mediacache hashes the
+ * image it is about to store, to notice that it already has it. If those
+ * two ever became different functions the log line and the cache would
+ * be talking about different things, and 1011's open question -- compare
+ * the drawn cover against the prefetched one -- would be unanswerable.
+ *
+ * One function, one seed, one answer.
+ */
+uint32_t albumart_cover_hash(const void *key, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

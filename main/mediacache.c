@@ -17,14 +17,33 @@
 
 static const char *TAG = "tab5_cache";
 
+/*
+ * A cover, and the entries that point at it.
+ *
+ * Refcounted because previous/current/next on one album are three paths
+ * with one picture, and 1006 measured what not knowing that costs. The
+ * hash is kept so the next store can ask "have I got this already"
+ * without a memcmp against every held image, and so mediacache_art_hash()
+ * can answer the question 1011 left open.
+ *
+ * `data` is the buffer the caller handed over, unmodified and unmoved --
+ * ordinary heap, from covertag_extract_art(). The blob header itself is
+ * a few words and goes wherever malloc puts it.
+ */
+typedef struct {
+    uint8_t    *data;
+    size_t      len;
+    uint32_t    hash;
+    int         rc;             /* entries pointing here; blob dies at 0 */
+} artblob_t;
+
 typedef struct {
     char        path[512];
     bool        used;
     bool        pinned;
     uint32_t    stamp;          /* MRU ordering; 0 means never touched */
 
-    uint8_t    *art;
-    size_t      art_len;
+    artblob_t  *art;            /* shared; see artblob_t */
     bool        no_art;         /* read, and there was none */
 
     bool        has_tags;
@@ -104,9 +123,27 @@ static entry_t *find(const char *path)
     return NULL;
 }
 
+/*
+ * Drop this entry's reference to its cover. The bytes go only when the
+ * last entry lets go of them.
+ *
+ * The old release() free()d the buffer outright, which was right when an
+ * entry owned its cover. Under sharing that would leave the other two
+ * entries on an album pointing into freed memory the moment one of them
+ * was evicted -- and they would keep answering mediacache_art() with it,
+ * because nothing else says the pointer is dead.
+ */
+static void art_unref(artblob_t *b)
+{
+    if (!b) return;
+    if (--b->rc > 0) return;
+    free(b->data);
+    free(b);
+}
+
 static void release(entry_t *e)
 {
-    free(e->art);
+    art_unref(e->art);
     heap_caps_free(e->walk);
     memset(e, 0, sizeof(*e));
 }
@@ -163,16 +200,62 @@ const uint8_t *mediacache_art(const char *path, size_t *len)
      * embedded art already in the cache, which is why it survived every
      * run until a test suite included one.
      */
-    if (len) *len = e->art_len;
-    const uint8_t *p = e->art;
+    if (len) *len = e->art->len;
+    const uint8_t *p = e->art->data;
     unlock();
     /* Borrowed past the lock -- media_task only. See the note above. */
     return p;
 }
 
+/*
+ * An entry already holding these exact bytes, or NULL.
+ *
+ * Hash and length first, memcmp only when both agree -- so the compare
+ * runs on a hit and not on a miss, which is the case that matters
+ * because a miss is what happens on every track that starts a new album.
+ *
+ * THE MEMCMP IS NOT OPTIONAL, and the reason is a change of stakes.
+ * 1011 wrote that two covers of equal length hashing the same are the
+ * same image "for every purpose this program has", and for a diagnostic
+ * log line that is true. This is not that purpose: a collision here puts
+ * one album's picture on another album's screen and nothing downstream
+ * would ever notice. 32 bits is a fine filter and a poor proof, so it is
+ * used as a filter.
+ *
+ * Caller holds the lock.
+ */
+static artblob_t *blob_find(uint32_t hash, size_t len, const uint8_t *img)
+{
+    for (int i = 0; i < MEDIACACHE_ENTRIES; i++) {
+        artblob_t *b = s_e[i].art;
+        if (!b || b->hash != hash || b->len != len) continue;
+        if (memcmp(b->data, img, len) == 0) return b;
+    }
+    return NULL;
+}
+
 void mediacache_put_art(const char *path, uint8_t *img, size_t len)
 {
     if (!img) return;
+    if (!len) { free(img); return; }
+
+    /*
+     * Hashed BEFORE the lock, deliberately.
+     *
+     * This is megabytes of Murmur2 -- tens of milliseconds on a cover
+     * the size 1006 measured -- and the decode loop takes this same
+     * mutex through mediacache_tags() at the instant of a track change.
+     * Hashing inside it would hand the one latency-critical caller a
+     * stall proportional to the size of somebody else's album art. The
+     * bytes are the caller's own and no other task can see them yet, so
+     * there is nothing to protect here.
+     *
+     * The memcmp inside blob_find() does run under the lock. It happens
+     * only on a hit, which is the path that is about to save a whole
+     * copy, and shortening the hold further would mean the two-phase
+     * lookup that the borrow contract makes unnecessary.
+     */
+    const uint32_t hash = albumart_cover_hash(img, len);
 
     lock();
     entry_t *e = slot_for(path);
@@ -183,15 +266,52 @@ void mediacache_put_art(const char *path, uint8_t *img, size_t len)
         snprintf(e->path, sizeof(e->path), "%s", path);
     }
 
+    artblob_t *shared = blob_find(hash, len, img);
+
+    if (shared && shared == e->art) {
+        /* Already pointing at it. Re-storing the same cover for the same
+         * path is what a prefetch racing a play does. */
+        free(img);
+        e->no_art = false;
+        touch(e);
+        unlock();
+        return;
+    }
+
+    artblob_t *b;
+    if (shared) {
+        shared->rc++;
+        free(img);                  /* ownership was taken; honour it */
+        b = shared;
+        ESP_LOGD(TAG, "cover shared (%u bytes, hash %08x, rc %d)",
+                 (unsigned)len, (unsigned)hash, shared->rc);
+    } else {
+        b = malloc(sizeof(*b));
+        if (!b) { unlock(); free(img); return; }
+        b->data = img;
+        b->len  = len;
+        b->hash = hash;
+        b->rc   = 1;
+    }
+
     /* Replacing rather than adding: a second cover for the same path
      * means the first was fetched before something changed, and keeping
-     * both would leak the older one. */
-    free(e->art);
-    e->art = img;
-    e->art_len = len;
+     * both would leak the older one. Unref rather than free -- the one
+     * being replaced may be another entry's too. */
+    art_unref(e->art);
+    e->art = b;
     e->no_art = false;
     touch(e);
     unlock();
+}
+
+uint32_t mediacache_art_hash(const char *path)
+{
+    lock();
+    entry_t *e = find(path);
+    const uint32_t h = (e && e->art) ? e->art->hash : 0u;
+    unlock();
+    return h;
 }
 
 bool mediacache_tags(const char *path, id3_tags_t *out)
@@ -322,19 +442,33 @@ void mediacache_clear(void)
     unlock();
 }
 
-void mediacache_stats(int *entries, size_t *bytes)
+void mediacache_stats(int *entries, size_t *bytes, size_t *saved)
 {
     int n = 0;
-    size_t b = 0;
+    size_t b = 0, dup = 0;
+
     lock();
     for (int i = 0; i < MEDIACACHE_ENTRIES; i++) {
         if (!s_e[i].used) continue;
         n++;
-        b += s_e[i].art_len;
         if (s_e[i].has_tags) b += sizeof(s_e[i].tags);
         if (s_e[i].walk) b += sizeof(*s_e[i].walk);
+
+        if (!s_e[i].art) continue;
+        /* Charge a blob to the first entry that names it and count the
+         * rest as saved. Three slots means the scan back is three
+         * comparisons; a hash set here would be machinery for a loop
+         * that cannot exceed nine iterations. */
+        bool first = true;
+        for (int j = 0; j < i; j++) {
+            if (s_e[j].used && s_e[j].art == s_e[i].art) { first = false; break; }
+        }
+        if (first) b += s_e[i].art->len;
+        else       dup += s_e[i].art->len;
     }
     unlock();
+
     if (entries) *entries = n;
     if (bytes) *bytes = b;
+    if (saved) *saved = dup;
 }

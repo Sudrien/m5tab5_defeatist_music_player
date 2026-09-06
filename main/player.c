@@ -2999,10 +2999,12 @@ static void do_art(const char *path, uint32_t gen)
          * reclaiming or a bystander. */
         if (serr == ESP_ERR_NO_MEM) {
             int cent = 0;
-            size_t cbytes = 0;
-            mediacache_stats(&cent, &cbytes);
-            ESP_LOGW(TAG, "  cover cache held %d entries, %u KB at the time",
-                     cent, (unsigned)(cbytes / 1024));
+            size_t cbytes = 0, csaved = 0;
+            mediacache_stats(&cent, &cbytes, &csaved);
+            ESP_LOGW(TAG, "  cover cache held %d entries, %u KB at the time "
+                          "(%u KB saved by sharing)",
+                     cent, (unsigned)(cbytes / 1024),
+                     (unsigned)(csaved / 1024));
         }
         return;
     }
@@ -3767,10 +3769,19 @@ static void prefetch_next(void)
     sidecar_prime(next);
 
     int n = 0;
-    size_t bytes = 0;
-    mediacache_stats(&n, &bytes);
-    ESP_LOGI(TAG, "prefetch done: cache %d entries, %u KB", n,
-             (unsigned)(bytes / 1024));
+    size_t bytes = 0, saved = 0;
+    mediacache_stats(&n, &bytes, &saved);
+    /*
+     * This is the line 1006 read 10935 KB on. `saved` is what sharing
+     * took off it: on an album whose tracks share one picture the total
+     * should now be about a third of what it was, and `saved` should be
+     * roughly twice the total. If saved is 0 across a whole album, the
+     * covers are not byte-identical between tracks and the sharing is
+     * doing nothing -- which is a real possibility for files retagged
+     * one at a time, and is the thing this line exists to show.
+     */
+    ESP_LOGI(TAG, "prefetch done: cache %d entries, %u KB (+%u KB shared)", n,
+             (unsigned)(bytes / 1024), (unsigned)(saved / 1024));
 }
 
 /*

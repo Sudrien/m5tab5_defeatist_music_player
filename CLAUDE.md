@@ -4050,6 +4050,76 @@ notice has to travel with a redistribution -- the second such obligation
 after the font's OFL. Recorded in the README's licensing section, which
 also gained the MurmurHash2 line from 1011.
 
+### One album, one picture (1102)
+
+1006 measured three cache slots holding 10935 KB and stopped there,
+because every fix it could see was a decision about what the player
+should do. It listed three and took none.
+
+**There was a fourth, and it is the one that changes nothing.** An album
+has one cover and its tracks are consecutive, so previous, current and
+next are three paths pointing at the same picture -- and the cache was
+storing it three times because nothing ever asked whether it already had
+it. Covers are refcounted blobs now: the store path hashes the incoming
+bytes, finds a held blob with the same hash and length, confirms with a
+memcmp, frees the duplicate and takes a reference.
+
+Every caller still gets back exactly the bytes the file contained. No
+cover is capped, downscaled, or not prefetched. That is the whole
+argument for doing this one before the other three: it is not a policy
+choice, so it does not pre-empt the policy choice, and the policy choice
+gets made against a smaller number.
+
+**What it does not do.** Three tracks with three genuinely different 4 MB
+covers still cost 12 MB. The worst case is untouched. This helps the
+common case and is honest about being nothing else -- and if an album's
+files were retagged one at a time, the pictures may not be byte-identical
+and it will do nothing at all. `prefetch done` now prints `+N KB shared`
+so that case is visible rather than assumed; **`+0 KB` across a whole
+album is the falsification condition**, and it means the sharing premise
+is wrong on real files even though it is right in principle.
+
+Four things that are load-bearing:
+
+- **The hash runs outside the lock, and that is not tidiness.** It is
+  megabytes of Murmur2 -- tens of milliseconds on the cover 1006
+  measured -- and the decode loop takes this same mutex through
+  `mediacache_tags()` at the instant of a track change. Hashing inside
+  it would hand the one latency-critical caller a stall proportional to
+  the size of someone else's album art. The bytes are the caller's own
+  and no other task can see them, so there is nothing to protect.
+- **The memcmp is not optional, and the reason is a change of stakes.**
+  1011 wrote that equal-length covers hashing the same are the same
+  image "for every purpose this program has", and for a log line that is
+  true. This is not that purpose: a collision here puts one album's
+  picture on another album's screen and nothing downstream would notice.
+  32 bits is a fine filter and a poor proof, so it is used as a filter.
+  It runs only on a hit, which is the path about to save a whole copy.
+- **`release()` had to become an unref.** Freeing outright would leave
+  the other two entries on an album pointing into freed memory the
+  moment one was evicted -- and they would go on answering
+  `mediacache_art()` with it, because nothing else says the pointer is
+  dead. This is the failure the test suite is mostly about.
+- **`cover_hash()` is `albumart_cover_hash()` now**, because two callers
+  that must agree should not be two functions. Which also hands 1011b
+  the thing it was missing: `mediacache_art_hash()` answers for the
+  prefetched cover, so a track change finally has something to compare.
+  Nothing compares them yet -- 1011b still needs somewhere to re-blit
+  from, which is unchanged.
+
+**Host-tested, not built and not flashed.** The real `mediacache.c`
+against the real `mediacache.h` and `albumart.h`, stubs only for the IDF
+headers, under ASan and UBSan: fourteen cases covering sharing, eviction
+of one sharer while another is pinned, replacement under one path,
+idempotent re-store, the all-slots-pinned refusal, and teardown. Leak
+detection clean, which is the check that matters -- the refcount's
+failure modes are a double free and a leak and both are silent on the
+board until much later.
+
+The gap that remains is the one this file keeps recording: a host harness
+compiles function bodies, not the file they sit in. The definition
+ordering was checked by hand for the same reason 1011's nearly was not.
+
 ### The cover hash is Murmur2, and 32-bit on purpose (1011)
 
 The cover's identity hash was MD5 from ROM, **ungated**: 1.8 MB hashed
@@ -5068,10 +5138,16 @@ mean the ReplayGain headroom cap is wrong.
   it does not and that assertion has never been verified. A TJpgDec
   fallback via `espressif/esp_jpeg` is the plan if it does not, and it
   needs `jpeg_dec_config_t` read before a line is written.
-- **The cover cache holds whole compressed images** -- three copies of
-  the same 1.8 MB picture on an album that shares one. 1006 recorded the
-  cost and declined to choose between capping, downscaling and not
-  prefetching, because they are three different behaviours.
+- ~~**The cover cache holds whole compressed images** -- three copies of
+  the same 1.8 MB picture on an album that shares one.~~ **Half closed by
+  1102**, and it is worth being precise about which half. The three
+  copies are gone: identical covers now share one refcounted buffer, so
+  an album costs one picture rather than three. The cache still holds
+  *whole compressed images* and a 4 MB cover is still 4 MB. The three
+  behaviour changes 1006 declined to choose between -- cap, downscale,
+  do not prefetch past a size -- are all still open and still not
+  equivalent. 1102 was the option nobody had listed, because it is the
+  only one that is not a behaviour change. **Not flashed.**
 - **The decode skip** (1011b), which needs a retained decoded cover and
   a hash on the prefetch path. See 1011.
 - **Gapless**, unstarted and no longer blocked.
