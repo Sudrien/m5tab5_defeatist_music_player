@@ -4050,6 +4050,68 @@ notice has to travel with a redistribution -- the second such obligation
 after the font's OFL. Recorded in the README's licensing section, which
 also gained the MurmurHash2 line from 1011.
 
+### The screen changes at the crossfade's midpoint (1103)
+
+Four things describe the playing track -- the title row, the cover, the
+envelope under the seek bar, and the chooser's playing marker -- and they
+are drawn by three different mechanisms. For most of this file's history
+they were four statements that happened to sit next to each other, and
+twice they came apart: the bar was published at `track_change_begin()`
+while the title waited for the handoff, and the chooser worked its marker
+out from `playlist_current()`, which is where the decoder is rather than
+where the speaker is. Both read as a bug in one of the four rather than
+in the arrangement.
+
+**They are one function and one struct now.** `track_commit()` takes a
+`track_commit_t` and publishes the lot in one pass on the decode loop.
+Adding a fifth thing means adding a field rather than remembering a site.
+`VISUALS_GATE()` is still a macro because it has to close over the decode
+loop's locals in two places, but it now does nothing except build the
+struct and ask `track_commit_due()`.
+
+**And the timing was wrong whenever a crossfade was on.** The gate fired
+on `!s_tail_pending`, which clears when the outgoing ring runs dry.
+Without a crossfade that is exactly right. With one it is late by the
+whole overlap, because the outgoing ring is drained *by the mix* and does
+not empty until the fade is over -- so a five-second crossfade played
+five seconds of the new song under the old song's title, cover, envelope
+and highlight, and then changed all four at the moment there was nothing
+left to change for.
+
+**The midpoint is where it belongs, and not as a split-the-difference.**
+`xfade_mix()` is equal-power: at the halfway frame the two tracks are at
+equal gain, and that is the frame at which what you are hearing stops
+being one song and starts being the other. It is also the only point in
+the overlap defined without deciding first which track is "playing".
+
+So `s_visuals_released` -- one volatile bit, raised by the writer,
+consumed by the decode loop, the same shape as `s_tail_pending` and for
+the same reason. Lowered in exactly one place, `track_change_begin()`,
+which matters because a crossfade raises it while the *previous* track's
+decode loop is still running and it must not survive into the next one.
+
+- **Tested on the advanced position, not the previous one**, so an
+  overlap shorter than one chunk still releases instead of silently
+  falling back to the end-of-overlap timing this replaces.
+- **The tail-dry site still raises it**, which is both the no-crossfade
+  path -- unchanged, to the instant -- and the backstop for an overlap
+  cut short by an outgoing ring that emptied early. Without that, a cut
+  short crossfade would wait for a halfway point that is no longer
+  coming and hold the old track's name for the whole of the new one.
+
+**Host-tested, not built, not flashed.** `texttest/committest.c` runs the
+extracted rule through eleven cases: play-from-stopped, tail without
+crossfade, the midpoint, a sub-chunk overlap, the cut-short backstop,
+survival across a track change, and monotonicity within one overlap. Two
+cases are marked EXACT and exist only to catch this changing the timing
+of an ordinary track change, which it must not.
+
+**What to watch on the board.** The prediction is that with crossfade set
+to 5 s the title and cover change about 2.5 s into the overlap rather
+than at the end of it. If they still change at the end, the midpoint is
+not being reached -- look at whether `xfade_mix()` is running at all
+before assuming the flag is wrong.
+
 ### One album, one picture (1102)
 
 1006 measured three cache slots holding 10935 KB and stopped there,

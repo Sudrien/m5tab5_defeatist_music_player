@@ -1293,6 +1293,34 @@ static volatile bool  s_ring_lufs_known[PCM_RINGS];
 static volatile bool     s_xfade_armed;
 static volatile uint32_t s_xfade_ms;
 
+/*
+ * "The incoming track is the one being heard."
+ *
+ * The single fact the whole screen changes on. The writer raises it; the
+ * decode loop consumes it in track_commit_due(). Volatile and one bit,
+ * for the same reason s_tail_pending is: it crosses two tasks and
+ * anything richer would want a lock on the audio path.
+ *
+ * WHY IT IS NOT JUST !s_tail_pending, WHICH IS WHAT THE GATE USED.
+ *
+ * s_tail_pending clears when the outgoing ring runs dry. Without a
+ * crossfade that is exactly right and this flag is raised at the same
+ * line. With one it is late by the whole overlap: the outgoing ring is
+ * drained BY the mix, so it does not empty until the fade is over and
+ * the new track is already alone in the output. A five-second crossfade
+ * therefore played five seconds of the new song under the old song's
+ * title, cover, envelope and chooser highlight, and then changed all
+ * four at the moment there was nothing left to change for.
+ *
+ * The midpoint is where the change belongs, and not as a compromise
+ * between two ends. xfade_mix() is equal-power: at the halfway frame the
+ * two tracks are at equal gain, and that is the frame at which what you
+ * are listening to stops being one song and starts being the other. It
+ * is also the only point in the overlap that is defined without
+ * reference to which track you decide is "playing".
+ */
+static volatile bool s_visuals_released;
+
 static bool     s_xfade_active;     /* writer-only from here down */
 static uint32_t s_xfade_pos;        /* frames into the overlap */
 static uint32_t s_xfade_frames;     /* its length */
@@ -1478,6 +1506,22 @@ static void xfade_mix(int16_t *a, const int16_t *b, size_t frames)
     }
 
     s_xfade_pos = p1;
+
+    /*
+     * The midpoint, and the screen goes with it.
+     *
+     * Tested on p1 after the advance rather than p0 before it, so a
+     * chunk that straddles the halfway frame releases on the chunk that
+     * contains it rather than the one after. At PCM_CHUNK_BYTES that is
+     * a few milliseconds either way and inaudible; getting it the wrong
+     * way round would make a crossfade shorter than one chunk never
+     * release here at all, and fall back to the end-of-overlap timing
+     * this exists to replace.
+     *
+     * Raised, never lowered here. The overlap only runs forwards and a
+     * release that flickered would be worse than one that is early.
+     */
+    if (!s_visuals_released && p1 * 2u >= total) s_visuals_released = true;
 }
 
 static volatile bool s_playing;
@@ -1590,6 +1634,19 @@ static void i2s_writer_task(void *arg)
          */
         if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
             s_tail_pending = false;
+            /*
+             * With no crossfade this is the release, and it is the same
+             * instant the gate used to fire on -- the timing of an
+             * ordinary track change is unchanged by any of this.
+             *
+             * It is also the backstop for a crossfade that never reached
+             * its midpoint: an outgoing ring that empties early cuts the
+             * overlap short a few lines below, and without this the
+             * screen would wait for a halfway point that is no longer
+             * coming and hold the old track's name for the whole of the
+             * new one.
+             */
+            s_visuals_released = true;
             ESP_LOGI(TAG, "the finished track has played out; "
                           "the screen is the next track's now");
         }
@@ -2528,6 +2585,57 @@ static volatile bool s_track_changing;
 enum { ENV_PENDING_NONE = 0, ENV_PENDING_SET, ENV_PENDING_CLEAR };
 static int s_env_pending = ENV_PENDING_NONE;
 
+/*
+ * Everything about a track that reaches the screen, held together.
+ *
+ * WHY THIS IS ONE STRUCT AND ONE CALL.
+ *
+ * The title row, the cover, the envelope under the seek bar and the
+ * chooser's playing marker are four things drawn by three different
+ * paths -- ui_draw() reads published globals, load_track_visuals() blits
+ * straight to the panel, browser_set_playing() writes the list -- and
+ * for most of this file's history they were four statements that
+ * happened to sit next to each other. Nothing enforced that they stayed
+ * next to each other, and twice they did not: the bar was published at
+ * track_change_begin() while the title waited for the handoff, and the
+ * chooser worked its marker out from playlist_current(), which is where
+ * the decoder is rather than where the speaker is.
+ *
+ * The failure is always the same shape and always reads as a bug in one
+ * of the four rather than in the arrangement: a cover that belongs to
+ * the song before, a highlight one row ahead of the sound, a seek bar
+ * filling under the wrong name. Four things that must change together
+ * are one thing, so this is one function taking one struct, and adding a
+ * fifth means adding a field rather than remembering a site.
+ */
+typedef struct {
+    const char *path;
+    uint32_t    len_sec;
+    bool        can_seek;
+    bool        rg_active;
+    bool        rg_measuring;
+    float       rg_gain_db;
+} track_commit_t;
+
+/*
+ * Is this the moment?
+ *
+ * One question with one answer, so the deferral and its release cannot
+ * disagree -- the failure that put the screen ahead of the sound in the
+ * first place was two different ways of asking it. See
+ * s_visuals_released for why the answer is not !s_tail_pending any more,
+ * and why it is the crossfade's midpoint rather than either of its ends.
+ *
+ * cur_rate is checked at the call site rather than here: it is a local
+ * of the decode loop and it asks a different question -- whether the
+ * open has returned a length for the bar to use -- which happens to also
+ * have to be true.
+ */
+static bool track_commit_due(void)
+{
+    return s_visuals_released;
+}
+
 static void track_change_begin(const char *path)
 {
     s_track_gen++;
@@ -2535,6 +2643,24 @@ static void track_change_begin(const char *path)
     s_scan_abort = true;
     s_prefetch_abort = true;
     s_wave_ready = false;
+
+    /*
+     * Armed here, and this is the one place it is lowered.
+     *
+     * When nothing is still being heard there is no handoff to wait for
+     * and the screen is this track's immediately -- which is the
+     * condition every deferral below already tests, so the release is
+     * set from the same call rather than from a second reading of the
+     * same fact.
+     *
+     * When a tail IS playing this stays down until the writer says the
+     * incoming track is the audible one: the tail running dry, or the
+     * midpoint of a crossfade. Lowering it here rather than at the end
+     * of the previous track matters, because a crossfade raises it while
+     * the previous track's decode loop is still running and it must not
+     * survive into this one.
+     */
+    s_visuals_released = !tail_playing();
 
     /*
      * Re-pin around the change. The track leaving the screen is the one
@@ -2728,6 +2854,40 @@ static void load_track_visuals(const char *path)
     snprintf(s_media_path, sizeof(s_media_path), "%s", path);
     s_media_want = true;
 }
+
+/*
+ * Publish the lot, in one pass, on the decode loop.
+ *
+ * Ordering inside here is deliberate and is cheapest-first: the four
+ * global writes are single words and land in the same UI frame whatever
+ * order they go in, then the chooser, then the two that touch the panel.
+ * load_track_visuals() is last because it is the only one that can
+ * block -- it may decode a cover -- and everything above it should
+ * already be true by the time it does.
+ *
+ * The gain itself is NOT here. See where rg_pending_* are computed: the
+ * scale is applied to PCM the decoder has already produced, so it has to
+ * take effect a ring earlier than the indicator that describes it.
+ * Deferring the number and publishing the indicator with the rest of the
+ * screen is what makes the badge appear on the track it is about.
+ */
+static void track_commit(const track_commit_t *tc)
+{
+    s_len_sec      = tc->len_sec;
+    s_can_seek     = tc->can_seek;
+    s_stats_valid  = true;
+
+    s_rg_active    = tc->rg_active;
+    s_rg_measuring = tc->rg_measuring;
+    s_rg_gain_db   = tc->rg_gain_db;
+
+    settings_set_track(tc->path);
+    browser_set_playing(tc->path);
+
+    track_change_show();
+    load_track_visuals(tc->path);
+}
+
 
 /*
  * Reads the cover out of the tag, decodes it, and puts it on screen.
@@ -5114,33 +5274,18 @@ static track_end_t play_file(const char *path)
      */
 #define VISUALS_GATE()                                                  \
     do {                                                                \
-        if (visuals_pending && cur_rate != 0 && !s_tail_pending) {      \
-            /* One condition, the same one track_change_begin() used,   \
-             * so the deferral and its release cannot disagree. The     \
-             * index comparison this replaced was a second way of       \
-             * asking, and two ways of asking one question is how the   \
-             * screen ended up ahead of the sound in the first place.   \
-             * cur_rate is still required: the bar needs this track's   \
-             * length and that is not known until the open returns. */  \
-            visuals_pending = false;                                    \
-            s_len_sec = len_sec;                                        \
-            s_can_seek = can_seek;                                      \
-            s_stats_valid = true;                                       \
-            /* The ReplayGain indicator, with the rest of the screen.   \
-             * See where these are computed for why the gain itself is  \
-             * not deferred with them. */                               \
-            s_rg_active = rg_pending_active;                            \
-            s_rg_measuring = rg_pending_measuring;                      \
-            s_rg_gain_db = rg_pending_db;                               \
-            settings_set_track(path);                                   \
-            /* The chooser's playing marker, with the title and the bar. \
-             * It used to work this out from playlist_current(), which  \
-             * is where the decoder is -- a ring ahead of the speaker.   \
-             * See browser_set_playing(). */                            \
-            browser_set_playing(path);                                  \
-            track_change_show();                                        \
-            load_track_visuals(path);                                   \
-        }                                                               \
+        if (visuals_pending && cur_rate != 0 && track_commit_due()) {    \
+            visuals_pending = false;                                     \
+            const track_commit_t _tc = {                                 \
+                .path           = path,                                  \
+                .len_sec        = len_sec,                               \
+                .can_seek       = can_seek,                              \
+                .rg_active      = rg_pending_active,                     \
+                .rg_measuring   = rg_pending_measuring,                   \
+                .rg_gain_db     = rg_pending_db,                         \
+            };                                                           \
+            track_commit(&_tc);                                          \
+        }                                                                \
     } while (0)
 
     /* Consume any repaint the chooser left pending. It closed a moment
