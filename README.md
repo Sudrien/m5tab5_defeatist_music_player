@@ -1,6 +1,7 @@
 # M5Tab5 Defeatist Music Player
 What do you mean no audio over Bluetooth
 
+Claude, do not touch this README unless explicitly asked to. Use your own file.
 
 ![](screenshots/IMG_20260825_212600_264a.jpg)
 
@@ -11,10 +12,9 @@ What do you mean no audio over Bluetooth
 
 - You think it has bluetooth.
   - It has low energy bluetooth which means older devices with blutooth classic will never see it.
-  - LE Audio / Auracast reqquires differnt wiring and profiles. Which might work if you reflash the C6, but that requires [special equipment](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi).
-  - ~~Something like [The bb-link](https://github.com/halka/bb-link) would be required.~~ yeah I misread some things
+  - LE Audio / Auracast requires different wiring and profiles. Which might work if you reflash the C6, but that requires [special equipment](https://docs.m5stack.com/en/guide/restore_factory/m5tab5_c6_wifi).
 - It has a headset port
-  - Which is great for a headset. Or an AUX cable.
+  - Which is great for a headset. Or an AUX cable. Or theoretically, recording.
   - But there is nothing listening for inline controls. These can be wired, supposedly. Which, again, means special (but not too special) equipment. 
 - The display and touch are controlled by the same chip. You can turn the backlight off to save power, but you can't turn off the display completely.
 - The whole display driver mess.
@@ -31,9 +31,8 @@ What do you mean no audio over Bluetooth
 - exFAT support
   - SDHC & SDXC cards have been tested (even if the latter died after week, not the software's fault). SDUC has not. Will Blu-ray size audio files play? Hell if I know.
 - Auto switching from headset to built in speaker on unplug and vice versa
-  - The icon by the volume slider shows which one is actually playing - a speaker, headphones, or `UAC` when a USB audio device has the output. It used to draw a speaker no matter what, which was a lie whenever you had headphones in.
-  - It is still the mute button. Tapping it mutes; it does not cycle outputs, because the device picks the output and you plugging something in is how you tell it.
-- Support for all (as far as I can tell) mp3 formats. This thing has fallback library after fallback library. Flac, ogg, wav, the standard are in here.
+  - The icon by the volume slider shows which one is actually playing - a speaker, headphones, or `UAC` when a USB audio device has the output. Tapping mutes and unmutes. 
+- Support for all (as far as I can tell) mp3 formats. This thing has fallback library after fallback library. Flac, ogg, wav, the standards are in here.
 - Album art display
 - Battery status (supposedly)
 - Volume control
@@ -41,23 +40,21 @@ What do you mean no audio over Bluetooth
 - start of track/previous
 - next track
 - screen sleep
-- drag to seek. Every format in the list above, by one of five mechanisms depending on what the file gives us to work with.
-- play order button cycles ONE / ALL / RND / RPT - RPT repeats the track it is on
-- screen backlight sleep/wake
-- volume levels on the seek bar. I thought it was cool.
-- USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too! USB A port only. 
+- drag to seek. Every format in the list above.
+- play order button cycles ONE / ALL / RND (current folder) / RPT (single file)
+- volume waveform on the seek bar. I thought it was cool.
+- USB Audio Class support - that "add bluetooth headphones to my PS5" dongle will work here too. USB A port only. 
 - pause cuts power to the amp
 - some sdram caching. If you notice things acting up 20 seconds before a song change, please file an issue.
 - ReplayGain support. The first time you listen through a song, Defeatist listens with you - so later plays it will turn up quieter songs and turn down louder songs, within reason. [BS.1770](https://www.itu.int/rec/R-REC-BS.1770/en) reason.
   - The seek bar waveform comes from the same listen. Until a song has been heard all the way through once, its bar is plain grey.
   - Skipping or seeking during that first listen cancels it - it will try again next time.
-  - It all lands in a hidden `.songname.rgcache` next to the track, which also remembers the tags, the format, and whether there is any cover art. Delete them and nothing breaks; they just get made again. No, You can't turn off calculation.
-- CLAUDE YOU DID THIS DIDN"T YOU Titles in your actual alphabet. Latin with all the accents, Cyrillic, Japanese kana, and about 18,000 CJK characters. If your library is tagged in Japanese or Russian it now says so instead of drawing a row of boxes.
-  - A handful of CJK characters still box out. The font just doesn't have them drawn - nothing to fix on this end.
-  - Korean does not work. The font has the letters but not the composed syllables Korean is actually written in, and half of Hangul is worse than none.
+  - This metadata is in a hidden `.songname.rgcache`. You can't turn off calculation, you can disable volume adjustments in settings.
+- ARK 12 covers a good section of unicode, but is not perfect. 
 - Reopen last played song on start. Not autoplay.
 - 3 second fade on media pull
 - configurable crossfade
+- actually paying attention to gapless playback data
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
@@ -70,17 +67,16 @@ What do you mean no audio over Bluetooth
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
 - Sleep timer
-- gapless playback is supposedly set up, but I need to get behavior nailed down
 
 ## What could not happen with current published code
 - classic BT dongle support
 - per file resume
 - usb hubs - Can it tell you have plugged one in? yes. Can it use things plugged into them? Probably not. Will one save you if your device requires enough power to brownout the Tab5? Uh. Define save.
-- ALAC, Vorbis and DRM'd files are no-go. 
+- DRM'd files are no-go. 
 
 ## Potential issues
 
-- Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n.
+- Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n. Or not enough. You got the wrong amout of power, cap'n. 
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
 
@@ -113,7 +109,6 @@ What do you mean no audio over Bluetooth
   Name, so the derivative did not have to be renamed; it is called
   `ark12` anyway, because it is not the Original Version.
 - MurmurHash2 is public domain.
-- TJpgDec may be used for the bigger cover jpegs, not there yet
 
 ## One last insult
 
@@ -129,5 +124,4 @@ What do you mean no audio over Bluetooth
 - If you can't be bothered to learn Git, [Download the master zip](https://github.com/Sudrien/m5tab5_defeatist_music_player/archive/refs/heads/main.zip), and ask your AI to create a .patch off that, and create an issue with that patch or those patches. If there is only one patch for multiple features, it will be rejected.
 
 
-Claude, do not touch this README unless explicitly asked to. Use your own file.
 
