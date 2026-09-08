@@ -1445,14 +1445,15 @@ enum {
     XEXIT_TAIL_DRY,     /* a tail played out */
     XEXIT_TAIL_GONE,    /* media removed under a tail */
     XEXIT_TAIL_CUT,     /* tail dropped by a press */
-    XEXIT_TAIL_LOST,    /* tail abandoned; see tail_retire() */
+    XEXIT_TAIL_LOST,    /* tail abandoned AND its audio discarded */
+    XEXIT_TAIL_SLOT,    /* slot reused; the audio still plays */
     XEXIT_N
 };
 static uint32_t s_xexit[XEXIT_N];
 
 static const char *const s_xexit_name[XEXIT_N] = {
     "start", "done", "cut", "partial", "rate-early", "rate-late",
-    "tail-dry", "tail-gone", "tail-cut", "tail-lost"
+    "tail-dry", "tail-gone", "tail-cut", "tail-lost", "tail-slot"
 };
 
 /*
@@ -1504,7 +1505,7 @@ static void xexit_report(const char *when)
  * Called from the decode loop, which is also the only writer of
  * s_ring_fill, so nothing else can be advancing underneath it.
  */
-static void tail_retire(const char *why)
+static void tail_retire(bool audio_discarded, const char *why)
 {
     if (!s_tail_pending) return;
 
@@ -1512,7 +1513,30 @@ static void tail_retire(const char *why)
                       ? xStreamBufferBytesAvailable(s_ring[s_tail_ring]) : 0;
 
     s_tail_pending = false;
-    s_xexit[XEXIT_TAIL_LOST]++;
+    s_xexit[audio_discarded ? XEXIT_TAIL_LOST : XEXIT_TAIL_SLOT]++;
+
+    if (!audio_discarded) {
+        /*
+         * The SLOT was reused, not the audio. Since 1115 the rings are a
+         * queue and the writer steps through them in turn, so a ring
+         * whose tail flag was overwritten is still played in its place;
+         * nothing resets it and nothing skips it.
+         *
+         * This used to say "%u KB unplayed", which was true when a
+         * second tail latching meant the older ring was forgotten and
+         * then reset out from under it. It is not true any more, and a
+         * line claiming lost audio on a boundary where none was lost
+         * sends the next reader hunting a fixed bug. What is actually
+         * given up is the ability to report `played out` for the older
+         * of the two tails -- one slot, two tails, and the newer one
+         * wins it.
+         */
+        ESP_LOGI(TAG, "tail slot on ring %d taken over (%u KB still queued "
+                      "and will play): %s",
+                 s_tail_ring, (unsigned)(left / 1024), why);
+        s_visuals_released = true;
+        return;
+    }
 
     /*
      * Released for the same reason every other tail ending releases:
@@ -1522,7 +1546,7 @@ static void tail_retire(const char *why)
      */
     s_visuals_released = true;
 
-    ESP_LOGW(TAG, "tail on ring %d abandoned (%u KB unplayed): %s",
+    ESP_LOGW(TAG, "tail on ring %d abandoned (%u KB DISCARDED): %s",
              s_tail_ring, (unsigned)(left / 1024), why);
 }
 
@@ -6725,7 +6749,10 @@ static track_end_t play_file(const char *path)
                  */
                 if (!xStreamBufferIsEmpty(s_pcm)) {
                     if (s_tail_pending && s_tail_ring == s_ring_fill) {
-                        tail_retire("the next track needs its ring");
+                        /* Reached only when the ring is about to be
+                         * reset -- a pause, a seek, or a track change.
+                         * This audio really is thrown away. */
+                        tail_retire(true, "the next track needs its ring");
                     }
                     const size_t left = xStreamBufferBytesAvailable(s_pcm);
                     ESP_LOGW(TAG, "incoming ring %d held %u KB; resetting",
@@ -7150,7 +7177,11 @@ static track_end_t play_file(const char *path)
                  * silence.
                  */
                 if (s_tail_pending && s_tail_ring != s_ring_fill) {
-                    tail_retire("a shorter track ended before it drained");
+                    /* Bookkeeping only: with three rings and a
+                     * sequential handoff the older ring is still played
+                     * in turn. Nothing is discarded here. */
+                    tail_retire(false,
+                                "a shorter track ended before it drained");
                 }
                 s_tail_ring = s_ring_fill;
                 s_tail_since = xTaskGetTickCount();   /* see tail_stall_check() */

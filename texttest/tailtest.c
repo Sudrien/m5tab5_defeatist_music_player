@@ -16,16 +16,17 @@
 static bool  pending;
 static int   tail_ring;
 static bool  released;
-static int   lost;                 /* XEXIT_TAIL_LOST */
+static int   lost;                 /* XEXIT_TAIL_LOST: audio discarded */
+static int   slot;                 /* XEXIT_TAIL_SLOT: bookkeeping only */
 static int   dry;                  /* XEXIT_TAIL_DRY  */
 static int   ring_bytes[RINGS];
 static int   play, fill;
 
-static void tail_retire(void)
+static void tail_retire(bool audio_discarded)
 {
     if (!pending) return;
     pending = false;
-    lost++;
+    if (audio_discarded) lost++; else slot++;
     released = true;
 }
 
@@ -33,7 +34,7 @@ static void tail_retire(void)
 static void advance_fill(void)
 {
     fill = (fill + 1) % RINGS;
-    if (pending && tail_ring == fill) tail_retire();
+    if (pending && tail_ring == fill) tail_retire(true);
     ring_bytes[fill] = 0;                    /* the reset */
 }
 
@@ -41,7 +42,7 @@ static void advance_fill(void)
 static void latch_tail(void)
 {
     if (ring_bytes[fill] == 0) return;
-    if (pending && tail_ring != fill) tail_retire();
+    if (pending && tail_ring != fill) tail_retire(false);
     tail_ring = fill;
     pending = true;
 }
@@ -68,7 +69,7 @@ static void writer_drain(void)
 static void reset_all(void)
 {
     memset(ring_bytes, 0, sizeof ring_bytes);
-    pending = false; released = false; lost = dry = 0; play = fill = 0;
+    pending = false; released = false; lost = slot = dry = 0; play = fill = 0;
 }
 
 static int fails;
@@ -95,7 +96,8 @@ int main(void)
     track_change_begin();
     advance_fill(); ring_bytes[1] = 3500;               /* short track B */
     latch_tail();                                       /* B's tail */
-    ck("a second tail retires the first", lost == 1);
+    ck("a second tail takes the slot, without discarding audio",
+       slot == 1 && lost == 0);
     ck("  the slot now names the newer ring", pending && tail_ring == 1);
     ck("  and the screen was released for the lost one", released);
 
@@ -105,7 +107,7 @@ int main(void)
     ck("tail is on ring 1", pending && tail_ring == 1);
     fill = 0;                       /* pretend we are on the other one */
     advance_fill();                 /* -> back to ring 1, the tail's */
-    ck("advancing onto the tail's ring retires it", !pending && lost == 1);
+    ck("advancing onto the tail's ring discards it", !pending && lost == 1);
     ck("  and releases the screen", released);
 
     /* Never two pendings at once, over a long run of short tracks. */
@@ -119,12 +121,17 @@ int main(void)
         if (!pending) ok = false;               /* exactly one, always */
     }
     ck("fifty short tracks never strand a tail", ok);
-    ck("  every abandonment was counted", lost == 49);
+    /* The count is one per boundary that had a tail already pending;
+     * what matters is that NONE of them discarded audio. */
+    ck("  every takeover was bookkeeping, and none discarded audio",
+       slot > 0 && lost == 0);
 
     /* A retire is idempotent and safe with nothing pending. */
     reset_all();
-    tail_retire();
-    ck("retiring nothing does nothing", lost == 0 && !released);
+    tail_retire(false);
+    tail_retire(true);
+    ck("retiring nothing does nothing",
+       lost == 0 && slot == 0 && !released);
 
     printf("\n%s\n", fails ? "FAILURES" : "all passed");
     return fails != 0;

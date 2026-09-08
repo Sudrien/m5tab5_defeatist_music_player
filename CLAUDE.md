@@ -4124,6 +4124,48 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### tail-lost was telling the truth about the wrong thing (1116)
+
+A clean album -- thirteen tracks, eleven crossfades, `done=11
+tail-dry=11`, none of the failure lines -- with one line in it that lied:
+
+    W tail on ring 1 abandoned (2057 KB unplayed): a shorter track ended
+      before it drained
+
+**That audio was not unplayed.** The retire fired because
+`s_tail_pending` is still one slot and `Prelude`'s tail latched while
+`Beautiful & Broken`'s was pending. But since 1115 the rings are a queue:
+nothing reset ring 1, the writer stepped to it in turn, and it drained
+normally. The `played out` twenty seconds after `crossfade done` is that
+ring finishing.
+
+So the counter had changed meaning underneath its own label. Before 1115
+`tail-lost` meant audio destroyed; after it, at the latch site, it means
+the slot was reused while the audio played on regardless. A line claiming
+`2057 KB unplayed` on a boundary where nothing was lost sends the next
+reader hunting a bug that is already fixed -- which is the specific
+failure mode this file exists to prevent.
+
+**Two outcomes, two counters, two levels.** `tail-lost` at `W` is the
+reset path -- a pause, a seek, or a track change -- where the audio
+really is discarded. `tail-slot` at `I` is the latch path, where the only
+thing given up is the ability to report `played out` for the older of two
+tails: one slot, two tails, the newer one wins it.
+
+**What has not changed** is that both release the screen. A boundary that
+retires either way still has to stop the display waiting for something
+that is not coming, which is 1112's rule and applies to bookkeeping
+exactly as much as to loss.
+
+**Host-tested, not built, not flashed.** `texttest/tailtest.c` gained the
+distinction rather than just the counter: a second tail takes the slot
+with `lost == 0`, advancing onto a tail's ring discards with `lost == 1`,
+and fifty consecutive short tracks produce takeovers but **no discarded
+audio at all**. That last assertion is the one that would have caught the
+mislabelling, and it is stated over the outcome rather than the count,
+because the count per boundary is an implementation detail and the
+absence of loss is not.
+
 ### The rings are a queue, not a pair (1115)
 
 1114's wait fired and the stall survived, which finally showed the shape
@@ -4297,6 +4339,13 @@ with it. This makes an existing silent loss into an event, counted as
 `tail-lost` and releasing the screen the way every other end of a tail
 does. Without that release the boundary would join 1112's list of ways to
 finish a handoff with the screen still on the previous track.
+
+> **Superseded in part by 1115.** The sentence above -- "the audio was
+> already being lost either way" -- stopped being true at the LATCH site
+> once the rings became a queue. With a sequential handoff the older
+> ring is still played in its turn, so a second tail latching now costs
+> only the bookkeeping slot. The two cases are counted separately as
+> `tail-lost` and `tail-slot`; see 1116.
 
 **Host-tested, not built, not flashed.** `texttest/tailtest.c` models two
 rings and drives fifty consecutive short tracks through them, asserting
