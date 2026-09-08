@@ -4982,6 +4982,60 @@ static char s_prev_dir[512];
 /* The whole path, not just the folder. See the arming block: a track
  * cannot be crossfaded into itself. */
 static char s_prev_path[512];
+
+/*
+ * The outgoing track's length and trim state, carried across the
+ * boundary because both questions are about a file that is no longer
+ * open by the time they are asked.
+ *
+ * Length is used at the arming decision, which runs in the INCOMING
+ * track's play_file() -- s_len_sec has already been replaced by then, or
+ * is about to be. Trim is used later still, at the first decoded block,
+ * because that is when the incoming track's own trim becomes known:
+ * decoder_read() reports it, not decoder_open().
+ */
+static uint32_t       s_prev_len_sec;
+static decoder_trim_t s_prev_trim = DECODER_TRIM_UNKNOWN;
+
+/*
+ * CAN THIS BOUNDARY BE JOINED SAMPLE-EXACTLY?
+ *
+ * decoder.h has argued since it was written that the caller "needs to be
+ * able to ASK, and to refuse", and until now no caller asked. This is
+ * the asking. An overlap -- or a gapless join -- has to be positioned
+ * against the trimmed END of the outgoing track and the trimmed START of
+ * the incoming one, so both have to be EXACT for the position to be
+ * known. UNKNOWN and NONE both fail, and they fail for different reasons
+ * the enum is careful to distinguish: NONE means the file has been
+ * checked and has encoder silence on both ends, UNKNOWN means nothing
+ * has checked.
+ *
+ * WHAT THIS DOES NOT DO, AND WHY. It does not refuse crossfades.
+ *
+ * The temptation is obvious and it is wrong by a factor of about two
+ * hundred. Encoder delay is around 1152 samples, 26 ms at 44.1 kHz, and
+ * padding is the same order -- so the worst misalignment an untrimmed
+ * boundary can produce is roughly 50 ms. Against a 2 s overlap that is
+ * 2.5% of the fade; against 12 s it is 0.4%. A crossfade is a
+ * deliberate blur and it swallows that without trace. decoder.h's
+ * argument -- "the incoming track entering early or late, and on
+ * anything with a beat that is the artefact you hear" -- is about a
+ * SAMPLE-EXACT join, where 50 ms of silence is the entire defect.
+ *
+ * And the cost of getting it wrong is total. Every MP3 without a Xing
+ * header reports NONE, which on the board's own test library is every
+ * file: `no Xing header, no gapless trim` on all of them. A trim
+ * refusal wired into the crossfade would switch crossfade off for the
+ * whole collection, in the name of an error nobody could hear.
+ *
+ * So this reports, and gapless will refuse on it. That is the division
+ * decoder.h actually described; the mistake would be to apply a gapless
+ * precondition to a feature that does not need it.
+ */
+static bool boundary_join_exact(decoder_trim_t out, decoder_trim_t in)
+{
+    return out == DECODER_TRIM_EXACT && in == DECODER_TRIM_EXACT;
+}
 static bool s_prev_ended_clean;
 
 /*
@@ -5131,19 +5185,54 @@ static track_end_t play_file(const char *path)
          * a 3 s track and the track was inaudible.
          *
          * Twice the fade is the threshold, so the incoming track gets
-         * at least as long at full volume as it spent arriving. The
-         * length comes from the sidecar, which track_change_begin()
-         * loaded a moment ago; a track with no recorded length is not
-         * refused, because unknown is not short.
+         * longer at full volume than it spent arriving. The length comes
+         * from the sidecar, which track_change_begin() loaded a moment
+         * ago; a track with no recorded length is not refused, because
+         * unknown is not short.
+         *
+         * The comparison is `<=` and that is a deliberate change: it was
+         * `<`, which let a track of EXACTLY twice the fade through, and
+         * a 24 s track under a 12 s fade is half arrival and half
+         * departure with no middle. Exactly two-to-one is the degenerate
+         * case, not the first acceptable one. The rule below uses the
+         * same comparison so the two ends cannot disagree about a track
+         * that sits on the boundary.
          */
         if (ok && sec) {
             const uint32_t in_len = (rg_holding(path) && s_rg.format.present)
                                   ? s_rg.format.sec : 0;
-            if (in_len && in_len < sec * 2) {
+            if (in_len && in_len <= sec * 2) {
                 ok = false;
                 ESP_LOGI(TAG, "no crossfade: the incoming track is only "
                               "%" PRIu32 " s", in_len);
             }
+        }
+
+        /*
+         * NOR OUT OF ONE.
+         *
+         * The check above covers the track arriving; this one covers the
+         * track leaving, and they fail differently. A short INCOMING
+         * track never reaches full volume. A short OUTGOING track is
+         * already most of the way through its own length by the time the
+         * fade starts -- a 24 s track under a 12 s fade spends half its
+         * duration on the way out, so what the listener hears of it is a
+         * fade with a short introduction attached.
+         *
+         * The writer's `tail was shorter` clamp is not this. That clamps
+         * the fade to whatever of the track is still QUEUED, which keeps
+         * the overlap legal; it says nothing about whether a fade that
+         * long belongs on a track that short.
+         *
+         * Twice the fade, the same threshold and the same `<=` as
+         * above, so a track of exactly twice the fade is refused at
+         * whichever end of the boundary it appears. Unknown is not
+         * short, so a track with no recorded length is not refused.
+         */
+        if (ok && sec && s_prev_len_sec && s_prev_len_sec <= sec * 2) {
+            ok = false;
+            ESP_LOGI(TAG, "no crossfade: the outgoing track was only "
+                          "%" PRIu32 " s", s_prev_len_sec);
         }
 
         /*
@@ -5995,6 +6084,36 @@ static track_end_t play_file(const char *path)
             ESP_LOGI(TAG, "%s: %d Hz, %d ch, %d kbps, trim %s",
                      info.codec, info.sample_rate, info.channels,
                      info.bitrate_kbps, decoder_trim_name(info.trim));
+
+            /*
+             * The boundary's trim verdict, at the first moment both
+             * halves are known: the outgoing track's was carried across
+             * in s_prev_trim, the incoming track's has just arrived --
+             * decoder_read() reports it, decoder_open() does not, which
+             * is why this cannot live with the arming decision.
+             *
+             * Logged and not acted on. See boundary_join_exact() for the
+             * arithmetic on why a crossfade does not care and a gapless
+             * join does, and for what wiring this into the crossfade
+             * would cost. Printed only when there was a previous track,
+             * because the first track after a boot has no boundary.
+             *
+             * The point of the line is the collection, not the file: if
+             * a library reports `exact/exact` everywhere then gapless
+             * can be unconditional on it, and if it reports `none` on
+             * everything then gapless needs the delay from somewhere
+             * else before it is worth writing. That is the question
+             * decoder.h says has to be answered before the overlap is
+             * built on top of it.
+             */
+            if (s_prev_path[0]) {
+                ESP_LOGI(TAG, "boundary trim: out %s, in %s -- "
+                              "gapless join %s",
+                         decoder_trim_name(s_prev_trim),
+                         decoder_trim_name(info.trim),
+                         boundary_join_exact(s_prev_trim, info.trim)
+                             ? "possible" : "not possible");
+            }
 
             /* For the format card, which is what a file with no picture
              * in it shows instead of a cover. Published rather than
@@ -6983,6 +7102,10 @@ static track_end_t play_file(const char *path)
     }
 
     s_prev_ended_clean = clean;
+    /* For the next boundary's arming decision and its trim gate. Both
+     * are about this file and both are asked after it has closed. */
+    s_prev_len_sec = s_len_sec;
+    s_prev_trim    = track_info.trim;
 
     /*
      * `why` itself is deliberately NOT changed by the test above. It is

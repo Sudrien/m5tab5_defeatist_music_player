@@ -4124,6 +4124,74 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### Both ends of the boundary, and the first caller that asks about trim (1108)
+
+Two things, and the second is smaller than it looks.
+
+**The fade is refused at both ends now.** There was already a rule
+against fading INTO a track shorter than twice the fade -- a short
+incoming track never reaches full volume, and the board once ran a
+10244 ms fade into a 3 s track that was inaudible. Nothing said anything
+about fading OUT of one. A 24 s track under a 12 s fade is half arrival
+and half departure with no middle.
+
+The writer's `tail was shorter` clamp is not this rule. That clamps the
+fade to whatever of the track is still QUEUED, which keeps the overlap
+legal; it says nothing about whether a fade that long belongs on a track
+that short.
+
+**The comparison changed from `<` to `<=`, deliberately, at both ends.**
+`<` let a track of exactly twice the fade through, and exactly
+two-to-one is the degenerate case rather than the first acceptable one.
+This alters shipped behaviour for exactly one value per fade length, and
+both ends use the same comparison so they cannot disagree about a track
+sitting on the boundary. The host test checks the boundary rather than a
+comfortable example, which is how the ambiguity surfaced at all.
+
+**And decoder.h finally has a caller.** It has argued since it was
+written that the caller "needs to be able to ASK, and to refuse", and
+until now nothing asked. `boundary_join_exact()` is the asking: a join is
+sample-exact only when BOTH sides report `DECODER_TRIM_EXACT`, because
+the overlap has to be positioned against the trimmed end of one and the
+trimmed start of the other.
+
+It runs at the first decoded block, not at the arming decision, and that
+placement is forced: `decoder_read()` reports trim, `decoder_open()` does
+not, so the incoming track's state does not exist when the fade is armed.
+The outgoing track's is carried across in `s_prev_trim`, alongside
+`s_prev_len_sec` for the rule above -- both are questions about a file
+that has already closed.
+
+**IT DOES NOT REFUSE CROSSFADES, and the arithmetic is why.** Encoder
+delay is about 1152 samples, 26 ms at 44.1 kHz, and padding is the same
+order, so the worst misalignment an untrimmed boundary can produce is
+roughly 50 ms. Against a 2 s overlap that is 2.5% of the fade; against
+12 s it is 0.4%. A crossfade is a deliberate blur and swallows it.
+decoder.h's warning -- the incoming track entering early or late, audible
+on anything with a beat -- is about a SAMPLE-EXACT join, where 50 ms of
+silence is the entire defect rather than a rounding error in a blur.
+
+**And the cost of getting that wrong is total.** Every MP3 without a
+Xing header reports `NONE`, which on the board's own test library is
+every file: `no Xing header, no gapless trim` on all of them. A trim
+refusal wired into the crossfade would switch crossfade off for the whole
+collection, in the name of an error nobody could hear. So the verdict is
+logged at every boundary and gapless will refuse on it -- which is the
+division decoder.h actually described. Applying a gapless precondition to
+a feature that does not need one would have been the mistake.
+
+The line exists for the collection rather than the file. A library
+reporting `exact/exact` everywhere can have gapless unconditionally; one
+reporting `none` everywhere needs the delay from somewhere else before
+gapless is worth writing at all.
+
+**Host-tested, not built, not flashed.** `texttest/trimtest.c` checks
+both length rules against the boundary value in both directions, that
+unknown lengths never refuse (unknown is not short), that a zero setting
+is off regardless, and that the trim verdict accepts only exact/exact --
+with `UNKNOWN` and `NONE` both failing, since the enum distinguishes them
+for a reason that is not this one.
+
 ### Counting the exits, because a log line cannot investigate itself (1107)
 
 1106's watchdog answered, and the answer was that both previous patches
