@@ -478,7 +478,30 @@ extern uint32_t g_tab5_dpi_underruns;
  *
  * 3.5 MB each, 7 MB total, against the single 10 MB ring this replaced.
  */
-#define PCM_RINGS               (2)
+/*
+ * THREE, AND THE THIRD IS NOT HEADROOM.
+ *
+ * Two was argued for on the grounds that a third ring only lowers a
+ * collision rate. That was wrong twice over (1113, 1114). With three
+ * tracks in flight -- which is what a track shorter than a ring
+ * produces, because the previous tail is still queued when it ends --
+ * the play order has to be A, B, C while only two rings exist. There is
+ * no assignment that satisfies it. The third ring is not about how often
+ * something fires; it is about the ordering being expressible at all.
+ *
+ * A track shorter than PCM_RING_BYTES is the trigger, and twenty seconds
+ * of ring against a twenty-second `Prelude` is not a corner case: album
+ * interludes are routinely that length.
+ *
+ * The cost is 3.5 MB more of PSRAM, taking the rings from 7 MB to
+ * 10.5 MB. That competes with 1104's software cover decode (1098 KB) and
+ * 1111's kept frame (capped at 2 MB) for a largest free block that is a
+ * structural 16128 KB. Four tracks in flight would need a fourth ring by
+ * the same argument, and that is where this stops being affordable --
+ * 1114's wait is the backstop for that case, which is what it should
+ * have been introduced as.
+ */
+#define PCM_RINGS               (3)
 
 /*
  * How long the decode loop will wait for a ring to play out before
@@ -1704,6 +1727,43 @@ static volatile bool s_playing;
 
 static void ring_publish(void);
 
+/*
+ * MOVE TO THE NEXT RING, NOT TO THE NEWEST ONE.
+ *
+ * The handoff used to be `s_ring_play = s_ring_fill`, which jumps to
+ * whatever the decoder is filling right now. With two rings and two
+ * tracks in flight those are the same ring and it never mattered. With
+ * three tracks in flight they are not, and the ring in between is
+ * skipped -- permanently, because nothing ever goes back for it:
+ *
+ *   W tail on ring 0 abandoned   (track A)
+ *     ... track B latches its tail on ring 1 ...
+ *   I waited 11920 ms for ring 0 to play out   (track C takes ring 0)
+ *   W tail still pending ... play ring 0, fill ring 0, tail ring 1
+ *
+ * Ring 1 holds a whole track that was never played and never will be.
+ * The rings are a queue and the writer was treating them as a pair.
+ *
+ * `s_ring_fill` only ever advances by one, so stepping by one here is
+ * what makes the two agree. The fallback exists because a flush -- a
+ * seek, or a track change that drops the queue -- empties rings without
+ * moving either index, and after one of those the next ring in sequence
+ * can legitimately be empty while the fill ring has the audio. Jumping
+ * is right there and wrong everywhere else, so it says which it did.
+ */
+static void ring_advance_play(void)
+{
+    const int next = (s_ring_play + 1) % PCM_RINGS;
+
+    if (next != s_ring_fill && xStreamBufferIsEmpty(s_ring[next])) {
+        ESP_LOGW(TAG, "ring %d is empty out of turn; skipping to %d",
+                 next, s_ring_fill);
+        s_ring_play = s_ring_fill;
+        return;
+    }
+    s_ring_play = next;
+}
+
 /* Defined below, used by both watchdogs. This file has shipped a
  * use-before-definition twice; the declaration is cheaper than a third. */
 static void writer_state_dump(void);
@@ -1960,7 +2020,7 @@ static void i2s_writer_task(void *arg)
          */
         const int play = s_ring_play;
         if (play != s_ring_fill && xStreamBufferIsEmpty(s_ring[play])) {
-            s_ring_play = s_ring_fill;
+            ring_advance_play();
             /* An overlap cannot outlive the ring it was fading out of.
              * Reaching here mid-crossfade means the outgoing track ran
              * dry early -- the incoming one is now simply the track. */
@@ -2075,7 +2135,12 @@ static void i2s_writer_task(void *arg)
                         const size_t left =
                             xStreamBufferBytesAvailable(s_ring[play]);
                         xStreamBufferReset(s_ring[play]);
-                        s_ring_play = fill;
+                        /* Sequential, like every other handoff. During an
+                         * overlap the incoming ring is the next one, so
+                         * this is `fill` in practice -- but saying it the
+                         * same way everywhere is what stops a third ring
+                         * from reintroducing the skip here. */
+                        ring_advance_play();
                         ring_publish();
                         ESP_LOGI(TAG, "crossfade done; dropped %u KB of the "
                                       "outgoing track", (unsigned)(left / 1024));
@@ -8169,11 +8234,21 @@ void app_main(void)
         s_ring[i] = xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
                                               s_pcm_store[i], &s_pcm_struct[i]);
     }
-    /* Both or neither. One ring would play, but every boundary would
+    /*
+     * ALL OR NONE. One ring short would play, but every boundary would
      * then behave differently from every other boundary, which is worse
-     * than a boot that says plainly it cannot play. */
+     * than a boot that says plainly it cannot play.
+     *
+     * Written as a loop rather than `s_ring[0] && s_ring[1]`, which is
+     * what it was: that spelling silently accepted a two-ring player
+     * the moment PCM_RINGS became 3, and a player short of a ring is
+     * exactly the shape of the bug this release spent four patches on.
+     */
     s_ring_fill = s_ring_play = 0;
-    s_pcm = (s_ring[0] && s_ring[1]) ? s_ring[0] : NULL;
+    s_pcm = s_ring[0];
+    for (int i = 0; i < PCM_RINGS; i++) {
+        if (!s_ring[i]) { s_pcm = NULL; break; }
+    }
     if (s_pcm) {
         xTaskCreate(i2s_writer_task, "i2s_wr", 4096, NULL, 6, NULL);
     } else {

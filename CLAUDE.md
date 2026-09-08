@@ -4124,6 +4124,66 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### The rings are a queue, not a pair (1115)
+
+1114's wait fired and the stall survived, which finally showed the shape
+of it:
+
+    W tail on ring 0 abandoned (2065 KB unplayed)     track A
+      ... track B latches its tail on ring 1 ...
+    I waited 11920 ms for ring 0 to play out          track C
+    W tail still pending ... play ring 0, fill ring 0, tail ring 1
+
+**The writer never visits ring 1.** Its handoff was
+`s_ring_play = s_ring_fill` -- a jump to the NEWEST ring rather than a
+step to the next one. With two tracks in flight those are the same ring
+and it never showed. With three they are not, and the ring in between is
+skipped permanently, because nothing ever goes back for it.
+
+Two changes, and they only work together.
+
+**The handoff steps by one.** `s_ring_fill` only ever advances by one, so
+stepping by one is what makes the two agree. There is a fallback for the
+case a flush creates -- a seek empties rings without moving either index,
+after which the next ring in sequence can legitimately be empty while the
+fill ring holds the audio -- and it logs, because jumping is right there
+and wrong everywhere else.
+
+**And PCM_RINGS is 3.** This was argued against twice and both arguments
+were wrong. 1113 said a third ring "does not restore the invariant".
+1114 corrected that to "the wait restores it, the ring count decides how
+often it fires". Both missed the real point: with three tracks in flight
+the play order must be A, B, C while only two rings exist, and **there is
+no assignment that satisfies it**. The third ring is not about frequency;
+it is about the ordering being expressible at all.
+
+A track shorter than `PCM_RING_BYTES` is the trigger, and twenty seconds
+of ring against a twenty-second `Prelude` is not a corner case -- album
+interludes are routinely that length.
+
+**What it costs, and where it stops.** 3.5 MB more of PSRAM, rings going
+from 7 MB to 10.5 MB, competing with 1104's software decode (1098 KB) and
+1111's kept frame (2 MB cap) for a structural 16128 KB largest block.
+FOUR tracks in flight -- two consecutive short ones -- would need a
+fourth ring by exactly the same argument, and that is where this stops
+being affordable. 1114's wait is the backstop for that case, which is
+what it should have been introduced as rather than as the fix.
+
+**One thing the change nearly broke silently.** The boot check was
+`s_ring[0] && s_ring[1]`, which would have accepted a two-ring player the
+moment `PCM_RINGS` became 3 -- a player short of a ring being exactly the
+shape of bug this release has spent four patches on. It is a loop now.
+
+**Host-tested, not built, not flashed.** `texttest/orderingtest.c` states
+the property over the AUDIO: every byte written is eventually played, in
+the order the tracks were decoded. It asserts two rings CANNOT express
+three tracks, that three rings can and in order, that an album of
+alternating short tracks holds across twenty of them, and that four in
+flight fills every ring so the next decode must wait rather than
+overwrite. The twenty-track case failed first time and the failure was
+real -- it was demanding four-in-flight behaviour from three rings, which
+is the limit above rather than a bug below it.
+
 ### Never reuse a ring that is still being heard (1114)
 
 1113's guard fired and the stall survived, which located the fault
