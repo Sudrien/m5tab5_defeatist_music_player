@@ -4124,6 +4124,67 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### One tail slot, two tails (1113)
+
+`tail still pending after 60023 ms` survived 1112, and with no `partial=`
+anywhere in the tallies -- so 1105's exit was never taken and **1112's
+diagnosis of this symptom was wrong**. 1112 fixed a real bug, the frozen
+screen after a cut-short overlap, and was credited with one it had
+nothing to do with.
+
+**The actual fault is that `s_tail_pending` and `s_tail_ring` are one
+slot.** Two things can leave them naming a ring that will never report
+empty:
+
+- a second tail latching before the first has drained, which overwrites
+  `s_tail_ring` and forgets the older ring entirely;
+- the decode loop advancing onto a ring the tail still owns and
+  resetting it, which empties the audio but leaves the flag set against a
+  ring that is now the new track's.
+
+Both need a track shorter than the ring depth. `PCM_RING_BYTES` is about
+twenty seconds and `Prelude` is twenty seconds, which is why every
+occurrence in every log is around that one file.
+
+**The code had been reporting it for a while.** The reset site claims the
+ring it advances onto is always already empty, and says outright that if
+the log is not silent then the assumption was wrong and *that* is the
+bug. `incoming ring N held X KB; resetting` fired three times in one
+session and a stall followed each.
+
+**Not a third ring.** That was the obvious answer and it does not restore
+the invariant -- with two rings one short track collides, with three you
+need two consecutive short ones, which albums with interludes have. It
+buys a lower rate and keeps the same silent failure, which is the worst
+combination: harder to reproduce, identical symptom. It also costs 3.5 MB
+against a structural 16128 KB largest block that 1104's software decode
+and 1111's kept frame are already competing for.
+
+**Nor a crossfade threshold.** The stalled boundary had already been
+refused: `no crossfade: the incoming track is only 20 s` fired at 936494
+and the collision happened at 944973 regardless. The tail mechanism runs
+on every boundary whether or not an overlap does, so no crossfade rule
+can reach this. Tying 1108's threshold to the ring length would also be
+wrong on its own terms -- that rule is musical, about a fade not
+occupying more than half a track, and a 2 s fade on a 15 s track is
+perfectly reasonable.
+
+So `tail_retire()`, called from both sites. **The audio was already being
+lost either way** -- the reset threw it away, the overwrite left it
+unplayable. What was missing was anyone saying so, and the state going
+with it. This makes an existing silent loss into an event, counted as
+`tail-lost` and releasing the screen the way every other end of a tail
+does. Without that release the boundary would join 1112's list of ways to
+finish a handoff with the screen still on the previous track.
+
+**Host-tested, not built, not flashed.** `texttest/tailtest.c` models two
+rings and drives fifty consecutive short tracks through them, asserting
+that exactly one tail is ever pending and that every abandonment is
+counted. The interesting failure was in the test rather than the code: it
+lowered the release inside the latch, and the release belongs to
+`track_change_begin()` -- the retire's raise is about the boundary being
+abandoned, not the one after it.
+
 ### 1105 was worse than the thing it fixed (1112)
 
 The board found it, and the symptom was a screen that stopped changing:

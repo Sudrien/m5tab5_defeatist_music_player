@@ -951,6 +951,7 @@ static bool tail_playing(void)
     return s_tail_pending;
 }
 
+
 /*
  * Set by play_file() before it drains the ring, and the reason the
  * pause gate below is not simply "if (!s_playing)".
@@ -1401,13 +1402,14 @@ enum {
     XEXIT_TAIL_DRY,     /* a tail played out */
     XEXIT_TAIL_GONE,    /* media removed under a tail */
     XEXIT_TAIL_CUT,     /* tail dropped by a press */
+    XEXIT_TAIL_LOST,    /* tail abandoned; see tail_retire() */
     XEXIT_N
 };
 static uint32_t s_xexit[XEXIT_N];
 
 static const char *const s_xexit_name[XEXIT_N] = {
     "start", "done", "cut", "partial", "rate-early", "rate-late",
-    "tail-dry", "tail-gone", "tail-cut"
+    "tail-dry", "tail-gone", "tail-cut", "tail-lost"
 };
 
 /*
@@ -1430,6 +1432,55 @@ static void xexit_report(const char *when)
     }
     if (!n) { snprintf(buf, sizeof(buf), "none yet"); }
     ESP_LOGI(TAG, "exits at %s: %s", when, buf);
+}
+
+/*
+ * GIVE UP ON A TAIL THAT CANNOT DRAIN, AS A DECISION.
+ *
+ * s_tail_pending and s_tail_ring are ONE SLOT, and two things can leave
+ * them naming a ring that will never report empty:
+ *
+ *   - a second tail latching before the first has drained, which
+ *     overwrites s_tail_ring and forgets the older ring entirely;
+ *   - the decode loop advancing onto a ring the tail still owns and
+ *     resetting it, which empties the audio but leaves the flag set
+ *     against a ring that is now somebody else's.
+ *
+ * Both need a track shorter than the ring depth, which is why they only
+ * ever appear around the 20 s `Prelude` on a ring that holds 20 s. Both
+ * end the same way: `tail still pending after 60023 ms`, the screen
+ * never released, and the tail's audio silently gone.
+ *
+ * The audio was already being lost in both cases -- the reset threw it
+ * away, and the overwrite left it unplayable. What was missing was
+ * anyone SAYING so, and the two pieces of state that describe it going
+ * with it. So this is not a new loss; it is the existing loss made into
+ * an event, with the screen released the way every other end of a tail
+ * releases it.
+ *
+ * Called from the decode loop, which is also the only writer of
+ * s_ring_fill, so nothing else can be advancing underneath it.
+ */
+static void tail_retire(const char *why)
+{
+    if (!s_tail_pending) return;
+
+    const size_t left = s_ring[s_tail_ring]
+                      ? xStreamBufferBytesAvailable(s_ring[s_tail_ring]) : 0;
+
+    s_tail_pending = false;
+    s_xexit[XEXIT_TAIL_LOST]++;
+
+    /*
+     * Released for the same reason every other tail ending releases:
+     * the tail is what the screen was waiting for, and it is not coming.
+     * Without this the boundary joins 1112's list of ways to end a
+     * handoff with the screen still on the previous track.
+     */
+    s_visuals_released = true;
+
+    ESP_LOGW(TAG, "tail on ring %d abandoned (%u KB unplayed): %s",
+             s_tail_ring, (unsigned)(left / 1024), why);
 }
 
 static void fade_apply(int16_t *pcm, size_t frames)
@@ -6514,6 +6565,22 @@ static track_end_t play_file(const char *path)
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
+
+                /*
+                 * If the tail is in here, the reset below is about to
+                 * destroy it -- and would leave s_tail_pending naming a
+                 * ring that is now this track's, so it could never
+                 * report empty. That is one of the two routes to
+                 * `tail still pending after 60023 ms`.
+                 *
+                 * The comment above claims this ring is always already
+                 * empty. It fired three times in one board session, and
+                 * this is what it was firing about.
+                 */
+                if (s_tail_pending && s_tail_ring == s_ring_fill) {
+                    tail_retire("the next track needs its ring");
+                }
+
                 if (!xStreamBufferIsEmpty(s_pcm)) {
                     const size_t left = xStreamBufferBytesAvailable(s_pcm);
                     ESP_LOGW(TAG, "incoming ring %d held %u KB; resetting",
@@ -6929,6 +6996,17 @@ static track_end_t play_file(const char *path)
              * is not this track's.
              */
             if (blocks > 0 && !xStreamBufferIsEmpty(s_ring[s_ring_fill])) {
+                /*
+                 * One slot, so latching a second tail forgets the first.
+                 * That is what happens when a track is shorter than the
+                 * ring: the previous track's tail is still queued when
+                 * this one ends, and s_tail_ring is about to name a
+                 * different ring. Say so rather than overwrite in
+                 * silence.
+                 */
+                if (s_tail_pending && s_tail_ring != s_ring_fill) {
+                    tail_retire("a shorter track ended before it drained");
+                }
                 s_tail_ring = s_ring_fill;
                 s_tail_since = xTaskGetTickCount();   /* see tail_stall_check() */
                 s_tail_pending = true;
