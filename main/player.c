@@ -1343,6 +1343,18 @@ static uint32_t s_xfade_frames;     /* its length */
 static int32_t  s_xfade_gain_a;     /* match trims, Q15 */
 static int32_t  s_xfade_gain_b;
 
+/* For xfade_stall_check(). Set with s_xfade_active, and writer-only like
+ * everything else here. s_xfade_expect_ms is the overlap's intended
+ * length -- the same number the "crossfade: %u ms" line reports, kept
+ * rather than recomputed so the watchdog and the log cannot disagree. */
+static uint32_t s_xfade_since;
+static uint32_t s_xfade_expect_ms;
+static bool     s_xfade_warned;
+
+/* A floor under "twice the overlap's length", so a very short fit does
+ * not produce a limit of a few milliseconds. */
+#define XFADE_STALL_FLOOR_MS  (2000u)
+
 static void fade_apply(int16_t *pcm, size_t frames)
 {
     const uint32_t total = s_fade_frames;
@@ -1544,6 +1556,10 @@ static volatile bool s_playing;
 
 static void ring_publish(void);
 
+/* Defined below, used by both watchdogs. This file has shipped a
+ * use-before-definition twice; the declaration is cheaper than a third. */
+static void writer_state_dump(void);
+
 /*
  * "This tail should have finished by now."
  *
@@ -1579,6 +1595,20 @@ static void tail_stall_check(void)
     warned = true;
     ESP_LOGW(TAG, "tail still pending after %" PRIu32 " ms -- "
                   "this should be impossible", held);
+    writer_state_dump();
+}
+
+/*
+ * Everything the writer knows about where playback is, in two lines.
+ *
+ * Shared by both watchdogs deliberately. They are looking for the same
+ * fault from opposite ends -- one asks why a tail has not finished, the
+ * other why an overlap has not -- and a fault that shows up in both
+ * should produce two readings that can be compared line for line rather
+ * than two formats that have to be reconciled first.
+ */
+static void writer_state_dump(void)
+{
     ESP_LOGW(TAG, "  play ring %d (%u B), fill ring %d (%u B), "
                   "tail ring %d (%u B)",
              s_ring_play,
@@ -1591,10 +1621,61 @@ static void tail_stall_check(void)
              (unsigned)(s_ring[s_tail_ring]
                         ? xStreamBufferBytesAvailable(s_ring[s_tail_ring]) : 0));
     ESP_LOGW(TAG, "  crossfade armed %d active %d, %" PRIu32 "/%" PRIu32
-                  " frames; playing %d, paused-writer %d",
+                  " frames; tail %d, playing %d, paused-writer %d",
              (int)s_xfade_armed, (int)s_xfade_active,
-             s_xfade_pos, s_xfade_frames,
+             s_xfade_pos, s_xfade_frames, (int)s_tail_pending,
              (int)s_playing, (int)s_writer_stop);
+}
+
+/*
+ * "This overlap should have finished by now."
+ *
+ * The tail watchdog next to this one measures sixty seconds from the
+ * tail latch, and that is too blunt for the fault actually being chased.
+ * Five boundaries across two board sessions now show the same thing: the
+ * FIRST crossfade after the feature is switched on prints neither
+ * `crossfade done` nor `crossfade cut short` nor `played out`, and every
+ * subsequent one prints its pair. The tail watchdog only fires if the
+ * tail flag is the thing that is stuck, and it fires so late that no
+ * capture so far has run long enough to contain it.
+ *
+ * This one is scoped to the overlap and fires at twice its own length --
+ * six seconds for a three-second crossfade, which is where the missing
+ * `crossfade done` should have been. That is the difference between one
+ * warning and another board run per hypothesis.
+ *
+ * It distinguishes the three cases guesswork has been unable to
+ * separate: the overlap is still running and cannot advance (active set,
+ * position short of frames), the overlap ended but the tail flag was
+ * orphaned (active clear, tail set), or both cleared and only the
+ * logging was lost (neither set, and this never fires).
+ *
+ * Writer-task only, so the state it prints is the state it owns.
+ */
+static void xfade_stall_check(void)
+{
+    if (!s_xfade_active) { s_xfade_warned = false; return; }
+    if (s_xfade_warned) return;
+
+    const uint32_t held = (xTaskGetTickCount() - s_xfade_since) *
+                          portTICK_PERIOD_MS;
+
+    /*
+     * Twice the overlap's own length, with a floor. The floor is for a
+     * fit so short that twice it is a handful of milliseconds -- a
+     * legitimately starved overlap stretches, by design (see the solo
+     * branch), and a watchdog that fired on that would be reporting the
+     * feature working.
+     */
+    uint32_t limit = s_xfade_expect_ms * 2u;
+    if (limit < XFADE_STALL_FLOOR_MS) limit = XFADE_STALL_FLOOR_MS;
+    if (held < limit) return;
+
+    s_xfade_warned = true;
+    ESP_LOGW(TAG, "crossfade still active after %" PRIu32 " ms "
+                  "(expected %" PRIu32 " ms) -- no exit was taken",
+             held, s_xfade_expect_ms);
+    writer_state_dump();
 }
 
 /* Drains the ring into I2S and nothing else, so the only thing it ever
@@ -1701,8 +1782,10 @@ static void i2s_writer_task(void *arg)
          * including the ones where the receive below times out, because
          * a ring that has run dry generates no other event.
          */
-        /* Cheap, and one branch on the common path: see tail_stall_check(). */
+        /* Cheap, and one branch each on the common path. Both, because
+         * they are looking for the same fault from opposite ends. */
         tail_stall_check();
+        xfade_stall_check();
 
         if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
             s_tail_pending = false;
@@ -1785,6 +1868,9 @@ static void i2s_writer_task(void *arg)
                         s_xfade_armed  = false;
                         s_xfade_pos    = 0;
                         s_xfade_frames = fit;
+                        s_xfade_since  = xTaskGetTickCount();
+                        s_xfade_expect_ms = fit * 1000u / rate;
+                        s_xfade_warned = false;
                         xfade_match(play, fill);
                         ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms"
                                       "%s, trim out %d%% in %d%%",

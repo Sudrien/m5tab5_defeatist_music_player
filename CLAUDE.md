@@ -4124,6 +4124,82 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### A watchdog scoped to the overlap (1106)
+
+1105 closed a hole and the hole was not the fault. The next board run
+carried the fix, printed no `crossfade ended on a partial frame`, and
+reproduced the silence anyway. **The partial-frame theory is dead as an
+explanation** -- it was reachable by inspection, it was never observed,
+and the fix now guards a case nobody was falling through. Worth recording
+plainly: two patches were spent narrowing a fault that is still open.
+
+**What five boundaries across two sessions do say:**
+
+| enabled | crossfade | endings |
+| --- | --- | --- |
+| 58254 | **87632** | **silent** |
+| | 181869 | complete |
+| | 382293 | complete |
+| 306617 | **389219** | **silent** |
+| | 751091 | complete |
+
+The FIRST crossfade after the feature is switched on goes silent; every
+one after it prints its pair. No counterexample. That kills the earlier
+guess that it was the seeks -- the second session had none -- and points
+at state initialised on first use rather than at ring arithmetic.
+
+**And a correction to how the boundary was being read.** The overlap is
+not between two decoding tracks. It fades the outgoing track's QUEUED
+TAIL into the incoming track that is already playing, which is why
+`crossfade:` lands seventeen seconds after `playing`, when the tail ring
+drains to the overlap length. So the state that differs on first use
+belongs to the tail path, not to track startup. Several messages of
+reasoning went the other way before this was noticed.
+
+**Why 1105's watchdog was not enough.** It measures sixty seconds from
+the tail latch. In the session above it would have fired thirty-eight
+seconds past the end of the capture, and it only fires at all if the TAIL
+FLAG is the thing stuck -- if the overlap is stalling while
+`s_tail_pending` clears normally, it never speaks.
+
+`xfade_stall_check()` is scoped to the overlap and fires at twice its own
+length: six seconds for a three-second crossfade, which is where the
+missing `crossfade done` should have been. It separates the three cases
+that guesswork has not been able to:
+
+- overlap still running and unable to advance -- active set, position
+  short of frames;
+- overlap ended but the tail flag orphaned -- active clear, tail set;
+- both cleared and only the logging lost -- neither set, and it stays
+  silent, which is itself the answer.
+
+Both watchdogs print through one `writer_state_dump()`, because they are
+looking for the same fault from opposite ends and two readings that can
+be compared line for line are worth more than two formats that have to be
+reconciled first. The dump gained `s_tail_pending` for the same reason.
+
+**The floor matters more than the multiplier.** A starved overlap
+stretches ON PURPOSE -- the solo branch holds the ramp where it is rather
+than falling through to unity -- so a watchdog that fired on a stretched
+overlap would be reporting the feature working. Twice the length with a
+two-second floor clears a legitimately short fit whose doubled limit
+would otherwise be a handful of milliseconds.
+
+**Host-tested, not built, not flashed.** `texttest/stalltest.c` runs the
+trigger over a simulated clock: a 3 s overlap completing on time never
+warns, a stuck one warns exactly once by 6 s and never again, the state
+re-arms for the next overlap, a 20 ms fit is silent inside the floor, and
+a 12 s overlap is silent at 20 s and warns at 24. The false-positive
+cases are the point; the true positive was never in doubt.
+
+**Not a code change: the crossfade settings were saving correctly all
+along.** `record_line()` writes `crossfade` and `crossfade_album` through
+one shared `SETTINGS_FIELDS_FMT` used by all three exits, so both keys
+reach every record of the main dotfile. What loses them is the
+volume-follow overwrite -- `/sd` adopted at boot, `/usb`'s richer file
+never read, the next save replacing it -- which is a policy question and
+is left open rather than decided here.
+
 ### A crossfade with no exit (1105)
 
 Three lines are supposed to be exhaustive at a crossfade boundary: the
