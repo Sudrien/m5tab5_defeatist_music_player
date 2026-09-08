@@ -4124,6 +4124,57 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### The seek bar was left behind by 1103 (1109)
+
+A regression, introduced by 1103 and found on the board: with a 12 s
+crossfade the seek bar ran toward the end of the outgoing track, then
+snapped backwards.
+
+`ring_publish()` read the position from `s_ring_play`, and `s_ring_play`
+stays on the OUTGOING ring for the whole overlap -- it only moves when
+the crossfade completes. That was correct while the screen also changed
+at the end of the overlap, because the position, the title and the
+length all turned over on the same instant. **1103 moved the screen to
+the midpoint and left this one line behind.**
+
+What the glass showed, on the boundary at 275534: from the midpoint at
+281554 to the end at 287563, six seconds of the outgoing track's
+position -- climbing toward its 203 s length -- drawn against the
+incoming track's 228 s length, under the incoming track's title. Then
+`s_ring_play` moved and the bar snapped back to about 12 s.
+
+The fix is that the position follows the same commit as everything else:
+`s_visuals_released` already answers "which track is the screen showing",
+so the bar reads the fill ring once it is raised and `s_ring_play` has
+not caught up. Reusing that flag rather than adding a second test is the
+entire argument of `track_commit()` -- four things that must change
+together are one thing -- and the bar had been the fifth all along
+without anyone noticing, because until 1103 it happened to change at the
+right moment for the wrong reason.
+
+**Outside a crossfade nothing changes.** An ordinary tail raises
+`s_visuals_released` at the moment the tail ring empties, and by then
+`s_ring_play` has already caught up, so the new test is false and the
+ring chosen is the ring that was always chosen.
+
+**What this says about 1103.** That patch grouped four things and argued
+that a fifth would be a field rather than a site. It was right about the
+principle and wrong about the count: the seek bar's position was a fifth
+member that lived somewhere else entirely, on the writer, and grouping
+the other four made its absence visible only once the timing moved. The
+lesson is not that the grouping was wrong; it is that "what else reads
+which track is playing" is a question worth asking exhaustively rather
+than from the list already in hand.
+
+**Host-tested, not built, not flashed.** `texttest/postest.c` checks the
+pairing rather than the ring index, because the ring number is an
+implementation detail and the property is that the position and the
+length never come from different tracks. Every combination of play ring,
+fill ring and released flag is swept, including the mirrored assignment
+-- the rings alternate, so an outgoing ring 1 is exactly as common as an
+outgoing ring 0, and a rule that only worked one way round would be
+right half the time.
+
 ### Both ends of the boundary, and the first caller that asks about trim (1108)
 
 Two things, and the second is smaller than it looks.

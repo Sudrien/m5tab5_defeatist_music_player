@@ -3993,8 +3993,39 @@ static void ring_publish(void)
     const size_t fill_queued = xStreamBufferBytesAvailable(s_pcm);
     s_ring_pct = (int)((fill_queued * 100) / PCM_RING_BYTES);
 
-    const int play = s_ring_play;
-    pos_publish(play, xStreamBufferBytesAvailable(s_ring[play]));
+    /*
+     * AND DURING AN OVERLAP THE TWO RINGS ARE BOTH AUDIBLE, SO "THE RING
+     * BEING PLAYED" STOPS BEING AN ANSWER.
+     *
+     * s_ring_play stays on the outgoing ring for the whole crossfade --
+     * it only moves when the overlap completes. That was right when the
+     * screen also changed at the end of the overlap, because the
+     * position and the title and the length all turned over together.
+     *
+     * 1103 moved the screen to the midpoint and left this behind, and
+     * the seek bar paid for it. From the midpoint to the end of a 12 s
+     * fade the bar drew the OUTGOING track's position against the
+     * INCOMING track's length, under the incoming track's title: six
+     * seconds of a bar running toward 203 s on a track that is 228 s
+     * long, and then a snap back to about 12 s when s_ring_play finally
+     * moved. Every part of that is this one line.
+     *
+     * So the position follows the same commit the rest of the screen
+     * does. s_visuals_released is the flag that already answers "which
+     * track is the screen showing" -- reusing it is what stops the bar
+     * and the title from being able to disagree again, which is the
+     * whole argument of track_commit().
+     *
+     * Outside a crossfade this changes nothing: an ordinary tail clears
+     * s_visuals_released at the moment the tail ring empties, and by
+     * then s_ring_play has already caught up, so the test below is
+     * false and the ring chosen is the one that was always chosen.
+     */
+    int pos_ring = s_ring_play;
+    if (s_visuals_released && s_ring_play != s_ring_fill) {
+        pos_ring = s_ring_fill;
+    }
+    pos_publish(pos_ring, xStreamBufferBytesAvailable(s_ring[pos_ring]));
 
     /* And act on it. Nothing else was: s_prefetch_abort was set on a
      * track change and nowhere else, so the low-water threshold the
