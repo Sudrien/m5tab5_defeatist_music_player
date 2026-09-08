@@ -3,6 +3,8 @@
 Notes for anyone (or anything) working on this repository. The README is
 the design document; this file is the set of things that are easy to get
 
+Claude should create git am-able patches as "Author: Claude <noreply@anthropic.com>". Patches should never be rewrites. 
+
 ## Why two decoders
 
 `main/decoder.c` routes by file extension:
