@@ -4124,6 +4124,62 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### Settings belong to the player, the resume track belongs to the card (1110)
+
+The volume-follow overwrite, closed. It was left open through five
+patches because it was a policy question rather than a defect, and the
+policy is now: **settings are mirrored to every volume present; the
+remembered track is per-volume.**
+
+The split is the whole patch. Volume, ReplayGain and the two crossfade
+settings describe the PLAYER -- someone set them once and means them
+wherever the music is coming from. The remembered track describes the
+VOLUME -- "carry on where I left off" means nothing applied to a card
+that has never held that file.
+
+One record on one volume made both wrong at once. A boot from the SD
+card followed by playback from USB replaced the USB file with the SD
+card's state, losing crossfade settings set while listening to USB; and
+there was only ever one remembered track, so returning to the other
+volume resumed something that was not on it. The first symptom is what
+made 1103's midpoint take four sessions to exercise -- the feature under
+test was being switched off by the act of choosing where to play from.
+
+Boot precedence is SD, then USB, then whichever volume turns up first.
+That was already the order `restore_last_track()` iterated; what changed
+is that a second volume appearing no longer replaces what the first one
+supplied.
+
+**A bug the host test caught before the board could.** The writer task
+has to read a volume before appending to it -- it needs the byte count,
+and it needs the track that file is already holding -- and the first
+implementation had it take the settings at the same time. Someone
+changing the volume with no card in, then inserting one, would have had
+that change overwritten by whatever the card remembered, **at the moment
+of the save that was supposed to record it**. So the read takes two
+flags rather than one, and `may_adopt` is true only from
+`settings_note_path()`: a track starting is a deliberate act, and the one
+moment where taking a volume's stored settings is what was asked for.
+
+Each half is read at most once. The track the first time a volume is
+seen, because reading it again would undo `settings_set_track()`, which
+is newer than anything on the card. The settings from whichever volume
+adopts first, and never again.
+
+**The file format did not change.** One record, same keys, still
+readable by an older build. What changed is which volumes get written and
+which single field differs between them. The first boot after this patch
+still loses whatever the non-adopted volume remembered, because there is
+no way to merge two files that disagree without inventing a rule about
+which is newer -- after that they agree for ever.
+
+**Host-tested, not built, not flashed.** `texttest/setstest.c` models two
+cards and a reboot: a crossfade set on USB survives a boot that adopts
+SD, each volume resumes its own track, a volume inserted later receives
+the settings without losing its track, and a change made with no card
+present survives to the first one that appears. That last case is the one
+that failed first time.
+
 ### The seek bar was left behind by 1103 (1109)
 
 A regression, introduced by 1103 and found on the board: with a 12 s

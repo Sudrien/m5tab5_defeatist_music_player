@@ -108,7 +108,36 @@ static bool       s_crossfade_album;
 
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
-static char       s_track[512];
+/*
+ * THE RESUME TRACK IS PER-VOLUME. EVERYTHING ELSE IS NOT.
+ *
+ * Volume, ReplayGain and the two crossfade settings describe the
+ * PLAYER: the person set them once and means them wherever the music is
+ * coming from. The remembered track describes the VOLUME: "carry on
+ * where I left off" means nothing when applied to a card that has never
+ * held that file.
+ *
+ * They used to be one record on one volume, which made both wrong. A
+ * boot from the SD card followed by playback from USB replaced the USB
+ * file with the SD card's state -- losing the crossfade settings the
+ * person had set while listening to USB -- and there was only ever one
+ * remembered track, so returning to the other volume resumed something
+ * that was not on it.
+ *
+ * So: the settings are mirrored to every volume present, and each
+ * volume's file carries its own track. A file is still one record and
+ * still readable by an older build; the difference is which volumes get
+ * written and which field varies between them.
+ */
+static char       s_track[STORAGE_COUNT][512];
+
+/* Whether this volume's file has been read for its track. Settings are
+ * read once, from whichever volume is adopted first; a track is read
+ * per volume, the first time that volume is seen. */
+static bool       s_track_seen[STORAGE_COUNT];
+
+/* The volume settings_track() answers about -- the last one noted. */
+static storage_id_t s_last_id = STORAGE_COUNT;
 static volatile bool s_dirty;
 static TickType_t s_dirty_since;
 
@@ -121,7 +150,7 @@ static TickType_t s_dirty_since;
  * of the matter: the values live in memory regardless, and the first
  * volume that plays a track gets them written to it.
  */
-static const char *s_root;
+
 
 /* Whether a file has ever been read. Guards a second load: adopting a
  * volume mid-session takes the settings that are already in effect to
@@ -130,9 +159,10 @@ static const char *s_root;
  * not a request to restore someone else's preferences. */
 static bool s_loaded;
 
-/* The file's size as last known, so a save can tell an append from a
- * compaction without stat()ing first. */
-static size_t s_bytes;
+/* Each file's size as last known, so a save can tell an append from a
+ * compaction without stat()ing first. Per volume, because the two files
+ * fill up independently. */
+static size_t s_bytes[STORAGE_COUNT];
 
 uint8_t settings_volume(void) { return s_volume; }
 
@@ -166,13 +196,30 @@ void settings_set_rg_enabled(bool on)
     s_dirty_since = xTaskGetTickCount();
 }
 
-const char *settings_track(void) { return s_track[0] ? s_track : NULL; }
+/*
+ * The remembered track of the volume last noted.
+ *
+ * There is one per volume now, so this needs to know which; s_last_id is
+ * set by settings_note_path(), and restore_last_track() calls that
+ * immediately before this. A caller that has noted nothing gets NULL,
+ * which is the same answer it used to get before anything was loaded.
+ */
+const char *settings_track(void)
+{
+    if (s_last_id >= STORAGE_COUNT) return NULL;
+    return s_track[s_last_id][0] ? s_track[s_last_id] : NULL;
+}
 
 void settings_set_track(const char *path)
 {
     if (!path || !*path) return;
-    if (strcmp(path, s_track) == 0) return;
-    snprintf(s_track, sizeof(s_track), "%s", path);
+    /* Into its own volume's slot. A track on the SD card is not what
+     * the USB drive should resume, and writing one record to both files
+     * was how it became that. */
+    const storage_id_t id = storage_of_path(path);
+    if (id >= STORAGE_COUNT) return;
+    if (strcmp(path, s_track[id]) == 0) return;
+    snprintf(s_track[id], sizeof(s_track[id]), "%s", path);
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -188,10 +235,13 @@ void settings_set_volume(uint8_t percent)
 
 /* ------------------------------------------------------------------ */
 
-static bool path_for(char *out, size_t out_len, const char *name)
+static bool path_for(storage_id_t id, char *out, size_t out_len,
+                     const char *name)
 {
-    if (!s_root) return false;
-    return snprintf(out, out_len, "%s/%s", s_root, name) < (int)out_len;
+    if (id >= STORAGE_COUNT) return false;
+    const char *root = storage_mount_path(id);
+    if (!root) return false;
+    return snprintf(out, out_len, "%s/%s", root, name) < (int)out_len;
 }
 
 /*
@@ -208,7 +258,8 @@ static bool path_for(char *out, size_t out_len, const char *name)
  * form any more; the first append after a load leaves a JSON record
  * below it, and the compaction eventually removes the rest.
  */
-static bool parse_line(char *line)
+static bool parse_line(char *line, storage_id_t id, bool take_settings,
+                       bool take_track)
 {
     if (line[0] == '{') {
         cJSON *root = cJSON_Parse(line);
@@ -217,7 +268,7 @@ static bool parse_line(char *line)
         bool any = false;
 
         const cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "volume");
-        if (cJSON_IsNumber(v)) {
+        if (take_settings && cJSON_IsNumber(v)) {
             int n = v->valueint;
             if (n < 0)   n = 0;
             if (n > 100) n = 100;
@@ -236,7 +287,7 @@ static bool parse_line(char *line)
          * hand-edited line that is not quite right loses that key
          * instead of turning the feature off by accident. */
         const cJSON *rg = cJSON_GetObjectItemCaseSensitive(root, "replaygain");
-        if (cJSON_IsBool(rg)) {
+        if (take_settings && cJSON_IsBool(rg)) {
             s_rg_enabled = cJSON_IsTrue(rg);
             any = true;
         }
@@ -245,7 +296,7 @@ static bool parse_line(char *line)
          * hand-editable and a number from it is not more trustworthy for
          * having been written by this program last time. */
         const cJSON *xf = cJSON_GetObjectItemCaseSensitive(root, "crossfade");
-        if (cJSON_IsNumber(xf)) {
+        if (take_settings && cJSON_IsNumber(xf)) {
             int v = xf->valueint;
             if (v < 0) v = 0;
             if (v > SETTINGS_CROSSFADE_MAX) v = SETTINGS_CROSSFADE_MAX;
@@ -254,14 +305,15 @@ static bool parse_line(char *line)
         }
 
         const cJSON *xa = cJSON_GetObjectItemCaseSensitive(root, "crossfade_album");
-        if (cJSON_IsBool(xa)) {
+        if (take_settings && cJSON_IsBool(xa)) {
             s_crossfade_album = cJSON_IsTrue(xa);
             any = true;
         }
 
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
-        if (cJSON_IsString(t) && t->valuestring && t->valuestring[0]) {
-            snprintf(s_track, sizeof(s_track), "%s", t->valuestring);
+        if (take_track && cJSON_IsString(t) && t->valuestring &&
+            t->valuestring[0] && id < STORAGE_COUNT) {
+            snprintf(s_track[id], sizeof(s_track[id]), "%s", t->valuestring);
             any = true;
         }
         cJSON_Delete(root);
@@ -273,6 +325,13 @@ static bool parse_line(char *line)
     *eq = '\0';
     const char *key = line;
     const char *val = eq + 1;
+
+    if (!take_settings) {
+        /* The legacy form carries no track, so a track-only read of an
+         * old file has nothing to take and must not take the settings
+         * either. */
+        return false;
+    }
 
     if (strcmp(key, "volume") == 0) {
         int v = atoi(val);
@@ -315,10 +374,11 @@ static bool parse_line(char *line)
  * s_bytes is left holding the file's size, which is what decides
  * whether the next save appends or compacts.
  */
-static bool load_file(const char *name)
+static bool load_file(storage_id_t id, const char *name, bool take_settings,
+                      bool take_track)
 {
     char path[128];
-    if (!path_for(path, sizeof(path), name)) return false;
+    if (!path_for(id, path, sizeof(path), name)) return false;
 
     FILE *f = storage_io_open(path, "r");
     if (!f) return false;
@@ -346,11 +406,11 @@ static bool load_file(const char *name)
          * unexpected: the last one is the one a power cut can truncate,
          * and every earlier line has already been superseded anyway.
          */
-        if (parse_line(line)) any = true;
+        if (parse_line(line, id, take_settings, take_track)) any = true;
     }
     storage_io_close(f);
 
-    s_bytes = total;
+    s_bytes[id] = total;
     if (any) ESP_LOGD(TAG, "%s: %d records, %u bytes", name, records,
                       (unsigned)total);
     return any;
@@ -362,7 +422,7 @@ static bool load_file(const char *name)
  * Shared by the append and the compaction so there is one definition of
  * what a record contains.
  */
-static int record_line(char *out, size_t out_len)
+static int record_line(storage_id_t id, char *out, size_t out_len)
 {
     /*
      * The track is written through cJSON rather than into the format
@@ -386,12 +446,12 @@ static int record_line(char *out, size_t out_len)
                             "\"crossfade\":%u,\"crossfade_album\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa
 
-    if (!s_track[0]) {
+    if (id >= STORAGE_COUNT || !s_track[id][0]) {
         return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",
                         SETTINGS_FIELDS_ARGS);
     }
 
-    cJSON *str = cJSON_CreateString(s_track);
+    cJSON *str = cJSON_CreateString(s_track[id]);
     char *esc = str ? cJSON_PrintUnformatted(str) : NULL;
     cJSON_Delete(str);
     if (!esc) return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",
@@ -429,17 +489,17 @@ static int record_line(char *out, size_t out_len)
  * a playback read can get in between them. Any prefix of the sequence
  * leaves a loadable file, which is what makes that safe.
  */
-static bool compact_file(void)
+static bool compact_file(storage_id_t id)
 {
     char tmp[128], dat[128], bak[128];
-    if (!path_for(tmp, sizeof(tmp), TEMP_NAME) ||
-        !path_for(dat, sizeof(dat), SETTINGS_NAME) ||
-        !path_for(bak, sizeof(bak), BACKUP_NAME)) {
+    if (!path_for(id, tmp, sizeof(tmp), TEMP_NAME) ||
+        !path_for(id, dat, sizeof(dat), SETTINGS_NAME) ||
+        !path_for(id, bak, sizeof(bak), BACKUP_NAME)) {
         return false;
     }
 
     char line[SETTINGS_MAX_LINE];
-    const int len = record_line(line, sizeof(line));
+    const int len = record_line(id, line, sizeof(line));
     if (len <= 0 || len >= (int)sizeof(line)) return false;
 
     FILE *f = storage_io_open(tmp, "w");
@@ -478,7 +538,7 @@ static bool compact_file(void)
     }
 
     storage_mark_hidden(dat);
-    s_bytes = (size_t)len;
+    s_bytes[id] = (size_t)len;
     ESP_LOGI(TAG, "compacted %s (volume=%u)", dat, s_volume);
     return true;
 }
@@ -497,17 +557,17 @@ static bool compact_file(void)
  * That is the whole of the crash safety this needs, and it is why the
  * rotation is not here.
  */
-static void write_file(void)
+static void write_file(storage_id_t id)
 {
     char dat[128];
-    if (!path_for(dat, sizeof(dat), SETTINGS_NAME)) return;
+    if (!path_for(id, dat, sizeof(dat), SETTINGS_NAME)) return;
 
     char line[SETTINGS_MAX_LINE];
-    const int len = record_line(line, sizeof(line));
+    const int len = record_line(id, line, sizeof(line));
     if (len <= 0 || len >= (int)sizeof(line)) return;
 
-    if (s_bytes + (size_t)len > SETTINGS_MAX_FILE_BYTES) {
-        compact_file();
+    if (s_bytes[id] + (size_t)len > SETTINGS_MAX_FILE_BYTES) {
+        compact_file(id);
         return;
     }
 
@@ -538,82 +598,121 @@ static void write_file(void)
 
     /* First write of the session on a volume that had no file: the dot
      * hides it here, this hides it on FAT. Cheap enough to repeat. */
-    if (s_bytes == 0) storage_mark_hidden(dat);
+    if (s_bytes[id] == 0) storage_mark_hidden(dat);
 
-    s_bytes += (size_t)len;
+    s_bytes[id] += (size_t)len;
     ESP_LOGI(TAG, "saved %s (volume=%u, %u bytes)", dat, s_volume,
-             (unsigned)s_bytes);
+             (unsigned)s_bytes[id]);
+}
+
+/*
+ * Read one volume's file.
+ *
+ * `take_settings` is the difference between the boot load and every
+ * later one. The first volume adopted supplies the settings; after that
+ * the settings in force are the ones the person has been listening at,
+ * and replacing them because a second volume turned up would be the
+ * player changing its own volume behind them.
+ *
+ * The track is taken every time, per volume, because it is the one
+ * field that belongs to the file rather than to the player.
+ */
+static bool load_volume(storage_id_t id, bool take_settings, bool take_track)
+{
+    const char *root = storage_mount_path(id);
+    if (!root) return false;
+
+    s_bytes[id] = 0;
+
+    if (load_file(id, SETTINGS_NAME, take_settings, take_track)) {
+        ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", root, SETTINGS_NAME, s_volume);
+        return true;
+    }
+    if (load_file(id, BACKUP_NAME, take_settings, take_track)) {
+        /* Only compaction writes that file, so reaching it means a
+         * compaction was interrupted. It is a real record, not a
+         * guess. The size that came back is the backup's; the next save
+         * appends to SETTINGS_NAME, which is absent or unusable. */
+        ESP_LOGW(TAG, "using %s after a bad or missing %s",
+                 BACKUP_NAME, SETTINGS_NAME);
+        s_bytes[id] = 0;
+        return true;
+    }
+    if (load_file(id, LEGACY_NAME, take_settings, take_track) ||
+        load_file(id, LEGACY_BACKUP, take_settings, take_track)) {
+        ESP_LOGI(TAG, "loaded %s/%s (volume=%u); saving as %s from now on",
+                 root, LEGACY_NAME, s_volume, SETTINGS_NAME);
+        s_bytes[id] = 0;
+        s_dirty = true;
+        s_dirty_since = xTaskGetTickCount();
+        return true;
+    }
+
+    ESP_LOGI(TAG, "no settings file on %s", root);
+    return false;
+}
+
+/*
+ * Make sure this volume's file has been read for what is still wanted
+ * from it.
+ *
+ * Two flags, not one, and the reason is a bug the host test caught
+ * before the board could. The writer task has to read a volume before
+ * appending to it -- it needs the byte count, and it needs the track
+ * that file is already holding -- but the writer task must NEVER adopt
+ * settings. Someone who changes the volume with no card in, then
+ * inserts one, would have had their change overwritten by whatever that
+ * card remembered, at the moment of the save that was supposed to
+ * record it.
+ *
+ * So `may_adopt` is true only from settings_note_path(), which is a
+ * track starting: a deliberate act by the person, and the one moment
+ * where taking a volume's stored settings is what they asked for.
+ *
+ * Each half is read at most once. The track is read the first time the
+ * volume is seen -- reading it again would undo settings_set_track(),
+ * which is newer than anything on the card. The settings are read from
+ * whichever volume adopts first and never again.
+ */
+static void ensure_volume_loaded(storage_id_t id, bool may_adopt)
+{
+    if (id >= STORAGE_COUNT) return;
+
+    const bool want_settings = may_adopt && !s_loaded;
+    const bool want_track    = !s_track_seen[id];
+    if (!want_settings && !want_track) return;
+
+    if (want_settings) s_loaded = true;
+    s_track_seen[id] = true;
+    load_volume(id, want_settings, want_track);
 }
 
 /*
  * Adopt a volume, which is the one a track is playing from.
  *
- * Called on every track start, so the common case is that the root has
- * not changed and this does nothing. When it has changed -- first
- * playback of the boot, or a switch between the card and a drive -- the
- * settings move with the music:
+ * Called on every track start, so the common case is that this volume
+ * has already been seen and this only records which one to answer
+ * settings_track() about.
  *
- *   - The first adoption of the session loads, because that is the
- *     boot-time load that cannot happen in settings_init(): a USB drive
- *     is still enumerating then.
- *   - Later ones do not load. The volume in force is the one the person
- *     has been listening at; replacing it from a file because they
- *     tapped the USB tab would be the player changing its own volume
- *     behind them. They are marked dirty instead, so the new volume
- *     gets a copy.
- *
- * Returns true on that first adoption, meaning the values here are now
- * the ones that apply and the caller has to push them at whatever acts
- * on them. See settings.h.
+ * Returns true when this call is what put the settings in force, so the
+ * caller knows to push them at whatever acts on them. See settings.h.
  */
 bool settings_note_path(const char *path)
 {
     const storage_id_t id = storage_of_path(path);
     if (id == STORAGE_COUNT || !storage_present(id)) return false;
 
-    const char *root = storage_mount_path(id);
-    if (!root || (s_root && strcmp(root, s_root) == 0)) return false;
+    const bool first = !s_loaded;
+    ensure_volume_loaded(id, true);
+    s_last_id = id;
 
-    s_root = root;
-    /* A different volume is a different file, and its size is not known
-     * until something reads it. */
-    s_bytes = 0;
-
-    if (!s_loaded) {
-        s_loaded = true;
-        if (load_file(SETTINGS_NAME)) {
-            ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", s_root, SETTINGS_NAME, s_volume);
-        } else if (load_file(BACKUP_NAME)) {
-            /* Only compaction writes that file, so reaching it means a
-             * compaction was interrupted. It is a real record, not a
-             * guess. */
-            ESP_LOGW(TAG, "using %s after a bad or missing %s", BACKUP_NAME, SETTINGS_NAME);
-            /* The size that came back is the backup's. The next save
-             * appends to SETTINGS_NAME, which is absent or unusable. */
-            s_bytes = 0;
-        } else if (load_file(LEGACY_NAME) || load_file(LEGACY_BACKUP)) {
-            ESP_LOGI(TAG, "loaded %s/%s (volume=%u); saving as %s from now on",
-                     s_root, LEGACY_NAME, s_volume, SETTINGS_NAME);
-            /* Same reason: load_file() left the legacy file's size here
-             * and the next save appends to the dotted one. */
-            s_bytes = 0;
-            s_dirty = true;
-            s_dirty_since = xTaskGetTickCount();
-        } else {
-            ESP_LOGI(TAG, "no settings file on %s; using defaults", s_root);
-        }
-        /* True whether or not a file was found: the caller's question is
-         * "are the values in this module now the ones that apply", and
-         * after the first adoption they are, defaults included. */
-        return true;
-    }
-
-    ESP_LOGI(TAG, "settings follow the music to %s", s_root);
+    /* The other volume, if it is here, wants a copy of the settings --
+     * they describe the player and not the card. Its own track is left
+     * alone, which is the whole reason the two are stored apart. */
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
-    /* Nothing was loaded -- the settings in force travelled to the new
-     * volume, so the caller has nothing to apply. */
-    return false;
+
+    return first;
 }
 
 static void settings_task(void *arg)
@@ -636,26 +735,40 @@ static void settings_task(void *arg)
          * pass; clearing afterwards would swallow that change instead. */
         s_dirty = false;
 
-        /* The volume the file is meant to hold could have moved since
-         * the flag was set, and that is fine -- write_file() reads the
-         * current value, which is the one worth keeping. */
         /*
-         * Nowhere to write is not a reason to drop the value. The flag
-         * is set again so that the first volume to turn up gets it --
-         * this is the whole of "kept in memory when there is no
-         * storage".
+         * EVERY VOLUME PRESENT, NOT THE ONE PLAYING.
+         *
+         * The settings describe the player, so both cards should come
+         * back with them next boot regardless of which one is in the
+         * machine. Each file gets its own remembered track, which is
+         * why this is a loop over volumes and not one write copied
+         * twice.
+         *
+         * A volume that has not been read yet is read first: appending
+         * a record to a file whose size is unknown would restart the
+         * byte count from zero and defer the compaction indefinitely,
+         * and reading it is also the only way to learn the track that
+         * file is already holding.
          */
-        if (!s_root) {
-            s_dirty = true;
-            continue;
+        int written = 0;
+        for (int v = 0; v < STORAGE_COUNT; v++) {
+            const storage_id_t id = (storage_id_t)v;
+            if (!storage_present(id)) continue;
+            /* Track and byte count only. Never the settings -- see
+             * ensure_volume_loaded(): this runs on a save, and a save
+             * must not undo the change it was scheduled to record. */
+            ensure_volume_loaded(id, false);
+            write_file(id);
+            written++;
         }
 
-        if (storage_present(storage_of_path(s_root))) {
-            write_file();
-        } else {
-            /* The volume went away between the change and the write.
-             * Hold the value for the next one rather than losing it. */
-            s_root = NULL;
+        if (written == 0) {
+            /*
+             * Nowhere to write is not a reason to drop the value. The
+             * flag is set again so that the first volume to turn up
+             * gets it -- this is the whole of "kept in memory when
+             * there is no storage".
+             */
             s_dirty = true;
         }
     }
