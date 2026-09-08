@@ -4124,6 +4124,67 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### Never reuse a ring that is still being heard (1114)
+
+1113's guard fired and the stall survived, which located the fault
+precisely:
+
+    W tail on ring 0 abandoned (2057 KB unplayed)
+    W incoming ring 0 held 2041 KB; resetting
+    W tail still pending ... play ring 0, fill ring 0, tail ring 1
+
+**play AND fill both 0.** The reset landed on the ring the writer was
+reading -- the one case the comment at that site rules out as impossible.
+
+It takes three tracks in flight and two rings. A track shorter than
+`PCM_RING_BYTES` -- twenty seconds of audio against a twenty-second
+`Prelude` -- ends while the PREVIOUS track's tail is still queued and
+unplayed. The writer only advances when its own ring empties, so it never
+reaches the short track's ring, and the track after that comes back
+around to a ring that is still being read.
+
+**1113 guarded the wrong thing, and this is the lesson worth keeping.**
+"Not the tail's ring" is a PROXY for "not in use", and at that boundary
+the proxy picked the wrong ring: it retired the tail the writer was about
+to play and left the genuinely stranded one alone. The accounting came
+out right -- `tail-lost=1`, screen released, which is why the display
+stayed correct -- and the audio was still destroyed under the writer.
+
+The invariant is simpler than the proxy: **never reuse a ring that still
+holds unplayed audio.** With two rings and three tracks there is no legal
+ring, so the only correct move is to wait.
+
+**Waiting costs nothing audible.** The writer has up to a ring queued, so
+the listener hears no gap; what is delayed is the decode of a track that
+will not be heard for another twenty seconds. The bound is the time that
+ring takes to drain.
+
+It yields to the pause gate, because a paused writer drains nothing and
+waiting on it would hang the loop that reads the controls -- including
+the one that unpauses. It yields to a seek and to a track change, which
+supersede this track entirely. The reset survives as the last resort for
+exactly those exits, where the audio is being discarded on purpose, and
+1113's retire still runs there so the tail's state goes with it.
+
+**And a correction on the third ring.** 1113 said a third ring "does not
+restore the invariant" and buys only a lower collision rate. That was
+wrong in a way worth recording. The invariant is restored by the WAIT;
+the ring count decides how often the wait fires. With three rings the
+track after a short one takes a fresh ring, nothing waits and nothing
+resets. They are not alternatives -- one is the correctness fix and the
+other is the headroom that keeps it from mattering. `PCM_RINGS` is left
+at 2 deliberately, so the `waited N ms for ring` line says whether 3.5 MB
+is worth spending before it is spent.
+
+**Host-tested, not built, not flashed.** `texttest/ringwaittest.c` states
+the property over the AUDIO rather than over the tail flag, which is
+where 1113 went wrong: no reset lands on a ring holding unplayed bytes
+except on the exits that discard deliberately. It covers ordinary
+boundaries never waiting, the short-middle-track case waiting exactly
+once, pause and seek not blocking, and the bound holding against a writer
+that never drains. The first run failed on the ordinary case and the
+fault was in the model -- it never let the writer reach the second ring.
+
 ### One tail slot, two tails (1113)
 
 `tail still pending after 60023 ms` survived 1112, and with no `partial=`

@@ -481,6 +481,26 @@ extern uint32_t g_tab5_dpi_underruns;
 #define PCM_RINGS               (2)
 
 /*
+ * How long the decode loop will wait for a ring to play out before
+ * taking it anyway.
+ *
+ * A ring is PCM_RING_BYTES, about twenty seconds at 44.1/16/2, so a full
+ * one drains in about that. 30 s clears it with margin and is still a
+ * bound rather than a promise: reaching it means the writer is not
+ * draining for a reason this loop cannot see, and taking the ring is
+ * better than never decoding again.
+ *
+ * If the "still busy after" line ever appears, that is the interesting
+ * one -- it means the wait was not enough and the reason needs finding,
+ * not that the timeout needs raising.
+ *
+ * The step is the granularity of noticing, and 20 ms matches
+ * SEND_SLICE_MS: the same responsiveness the send loop already has.
+ */
+#define RING_WAIT_MAX_MS        (30u * 1000)
+#define RING_WAIT_STEP_MS       (20u)
+
+/*
  * How long the decode loop will sit in one xStreamBufferSend() before
  * coming up for air to look at the controls.
  *
@@ -6567,21 +6587,81 @@ static track_end_t play_file(const char *path)
                 s_pcm = s_ring[s_ring_fill];
 
                 /*
-                 * If the tail is in here, the reset below is about to
-                 * destroy it -- and would leave s_tail_pending naming a
-                 * ring that is now this track's, so it could never
-                 * report empty. That is one of the two routes to
-                 * `tail still pending after 60023 ms`.
+                 * WAIT FOR IT, RATHER THAN RESET OVER IT.
                  *
-                 * The comment above claims this ring is always already
-                 * empty. It fired three times in one board session, and
-                 * this is what it was firing about.
+                 * The comment above asserts this ring is always already
+                 * empty, and says that if the log is not silent the
+                 * assumption was wrong and that is the bug. It was
+                 * wrong. The board:
+                 *
+                 *   W tail on ring 0 abandoned (2057 KB unplayed)
+                 *   W incoming ring 0 held 2041 KB; resetting
+                 *   W tail still pending ... play ring 0, fill ring 0,
+                 *     tail ring 1
+                 *
+                 * play AND fill both 0: the reset landed on the ring the
+                 * writer was reading, which is the one case the comment
+                 * above rules out.
+                 *
+                 * It takes three tracks in flight and two rings. A track
+                 * shorter than PCM_RING_BYTES -- twenty seconds of audio
+                 * against a twenty-second `Prelude` -- ends while the
+                 * PREVIOUS track's tail is still queued and unplayed.
+                 * The writer only advances when its own ring empties, so
+                 * it never reaches the short track's ring, and the track
+                 * after that comes back around to a ring that is still
+                 * being read.
+                 *
+                 * 1113 guarded the wrong thing. "Not the tail's ring" is
+                 * a proxy for "not in use", and at that boundary it
+                 * picked the wrong ring: it retired the tail the writer
+                 * was about to play and left the genuinely stranded one
+                 * alone. The invariant is simpler than the proxy --
+                 * NEVER REUSE A RING THAT STILL HOLDS UNPLAYED AUDIO --
+                 * and with two rings and three tracks there is no legal
+                 * ring, so the only correct move is to wait.
+                 *
+                 * Waiting is safe and nearly free. The writer has up to
+                 * a ring of audio queued, so the listener hears no gap;
+                 * what is delayed is the decode of a track that will not
+                 * be heard for another twenty seconds. The bound is
+                 * therefore the time that ring takes to drain.
+                 *
+                 * It yields to the pause gate, because a paused writer
+                 * drains nothing and waiting for it would hang the loop
+                 * that reads the controls -- including the one that
+                 * unpauses. It also yields to a seek or a track change,
+                 * which supersede this track entirely. The reset stays
+                 * as the last resort for those exits, where the audio in
+                 * the ring is being abandoned deliberately.
                  */
-                if (s_tail_pending && s_tail_ring == s_ring_fill) {
-                    tail_retire("the next track needs its ring");
+                uint32_t ring_wait_ms = 0;
+                while (!xStreamBufferIsEmpty(s_pcm)) {
+                    if (!s_playing || s_pending_ready || s_seek_pct >= 0) break;
+                    if (ring_wait_ms >= RING_WAIT_MAX_MS) {
+                        ESP_LOGW(TAG, "ring %d still busy after %" PRIu32
+                                      " ms; taking it anyway",
+                                 s_ring_fill, ring_wait_ms);
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(RING_WAIT_STEP_MS));
+                    ring_wait_ms += RING_WAIT_STEP_MS;
+                }
+                if (ring_wait_ms) {
+                    ESP_LOGI(TAG, "waited %" PRIu32 " ms for ring %d "
+                                  "to play out", ring_wait_ms, s_ring_fill);
                 }
 
+                /*
+                 * Only reachable now by the exits above -- a pause, a
+                 * seek, or a track change -- where what is in the ring
+                 * is being discarded on purpose. If the tail is what is
+                 * being discarded, its state goes with it (1113).
+                 */
                 if (!xStreamBufferIsEmpty(s_pcm)) {
+                    if (s_tail_pending && s_tail_ring == s_ring_fill) {
+                        tail_retire("the next track needs its ring");
+                    }
                     const size_t left = xStreamBufferBytesAvailable(s_pcm);
                     ESP_LOGW(TAG, "incoming ring %d held %u KB; resetting",
                              s_ring_fill, (unsigned)(left / 1024));
