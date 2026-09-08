@@ -1,0 +1,821 @@
+on 1109
+
+"beautiful & broken" remains on screen as next song plays
+manual selection fixes
+
+I (174) esp_image: segment 1: paddr=000f1f70 vaddr=30100000 sizeESP-ROM:esp32p4-eco2-20240710
+Build:Jul 10 2024
+rst:0x17 (CHIP_USB_UART_RESET),boot:0x20f (SPI_FAST_FLASH_BOOT)
+Core0 Saved PC:0x4fc0420c
+--- 0x4fc0420c: ets_sha_finish in ROM
+Core1 Saved PC:0x4fc058e0
+--- 0x4fc058e0: wdt_hal_config_stage in ROM
+SPI mode:DIO, clock div:2
+load:0x4ff33ce0,len:0x1664
+load:0x4ff29ed0,len:0xe24
+--- 0x4ff29ed0: esp_bootloader_get_description at /home/sudrien/esp/esp-idf/components/esp_bootloader_format/esp_bootloader_desc.c:39
+load:0x4ff2cbd0,len:0x3548
+--- 0x4ff2cbd0: esp_flash_encryption_enabled at /home/sudrien/esp/esp-idf/components/bootloader_support/src/flash_encrypt.c:89
+entry 0x4ff29eda
+--- 0x4ff29eda: call_start_cpu0 at /home/sudrien/esp/esp-idf/components/bootloader/subproject/main/bootloader_start.c:27
+I (13) boot: ESP-IDF v5.5.5 2nd stage bootloader
+I (14) boot: compile time Aug 30 2026 12:55:11
+I (14) boot: Multicore bootloader
+I (15) boot: chip revision: v1.3
+I (15) boot: efuse block revision: v0.3
+I (16) boot.esp32p4: SPI Speed      : 40MHz
+I (16) boot.esp32p4: SPI Mode       : DIO
+I (16) boot.esp32p4: SPI Flash Size : 16MB
+I (17) boot: Enabling RNG early entropy source...
+I (17) boot: Partition Table:
+I (17) boot: ## Label            Usage          Type ST Offset   Length
+I (18) boot:  0 nvs              WiFi data        01 02 00009000 00005000
+I (18) boot:  1 otadata          OTA data         01 00 0000e000 00002000
+I (19) boot:  2 app0             OTA app          00 10 00010000 00300000
+I (20) boot:  3 app1             OTA app          00 11 00310000 00300000
+I (20) boot:  4 ffat             Unknown data     01 81 00610000 009e0000
+I (21) boot:  5 coredump         Unknown data     01 03 00ff0000 00010000
+I (22) boot: End of partition table
+I (23) boot: No factory image, trying OTA 0
+I (24) esp_image: segment 0: paddr=00010020 vaddr=400e0020 size=e1f48h (925512) map
+I (176) esp_image: segment 1: paddr=000f1f70 vaddr=30100000 size=00070h (   112) load
+I (178) esp_image: segment 2: paddr=000f1fe8 vaddr=4ff00000 size=0e030h ( 57392) load
+I (190) esp_image: segment 3: paddr=00100020 vaddr=40000020 size=de894h (911508) map
+I (341) esp_image: segment 4: paddr=001de8bc vaddr=4ff0e030 size=06a04h ( 27140) load
+I (347) esp_image: segment 5: paddr=001e52c8 vaddr=4ff14a80 size=03474h ( 13428) load
+I (351) esp_image: segment 6: paddr=001e8744 vaddr=50108080 size=00020h (    32) load
+I (357) boot: Loaded app from partition at offset 0x10000
+I (361) boot: Set actual ota_seq=1 in otadata[0]
+I (362) boot: Disabling RNG early entropy source...
+I (365) hex_psram: vendor id    : 0x0d (AP)
+I (366) hex_psram: Latency      : 0x01 (Fixed)
+I (366) hex_psram: DriveStr.    : 0x00 (25 Ohm)
+I (366) hex_psram: dev id       : 0x03 (generation 4)
+I (367) hex_psram: density      : 0x07 (256 Mbit)
+I (367) hex_psram: good-die     : 0x06 (Pass)
+I (367) hex_psram: SRF          : 0x02 (Slow Refresh)
+I (368) hex_psram: BurstType    : 0x00 ( Wrap)
+I (368) hex_psram: BurstLen     : 0x03 (2048 Byte)
+I (368) hex_psram: BitMode      : 0x01 (X16 Mode)
+I (369) hex_psram: Readlatency  : 0x04 (14 cycles@Fixed)
+I (369) hex_psram: DriveStrength: 0x00 (1/1)
+I (369) MSPI Timing: Enter psram timing tuning
+I (538) esp_psram: Found 32MB PSRAM device
+I (538) esp_psram: Speed: 200MHz
+I (539) hex_psram: psram CS IO is dedicated
+I (539) cpu_start: Multicore app
+I (1016) esp_psram: SPI SRAM memory test OK
+I (1027) cpu_start: Pro cpu start user code
+I (1027) cpu_start: cpu freq: 360000000 Hz
+I (1027) app_init: Application information:
+I (1027) app_init: Project name:     m5tab5_defeatist_music_player
+I (1027) app_init: App version:      v0.2.0-90-gff75420-dirty
+I (1028) app_init: Compile time:     Sep  7 2026 22:15:52
+I (1028) app_init: ELF file SHA256:  1b92c567a...
+I (1028) app_init: ESP-IDF:          v5.5.5
+I (1028) efuse_init: Min chip rev:     v0.0
+I (1028) efuse_init: Max chip rev:     v1.99
+I (1029) efuse_init: Chip rev:         v1.3
+I (1029) heap_init: Initializing. RAM available for dynamic allocation:
+I (1029) heap_init: At 4FF213E0 len 00019BE0 (102 KiB): RETENT_RAM
+I (1030) heap_init: At 4FF3AFC0 len 00004BF0 (18 KiB): RAM
+I (1030) heap_init: At 4FF40000 len 00040000 (256 KiB): RAM
+I (1030) heap_init: At 501080A0 len 00007F60 (31 KiB): RTCRAM
+I (1030) heap_init: At 30100070 len 00001F90 (7 KiB): SPM
+I (1031) esp_psram: Adding pool of 32768K of PSRAM memory to heap allocator
+I (1033) spi_flash: detected chip: generic
+I (1033) spi_flash: flash io: dio
+I (1033) sleep_gpio: Configure to isolate all GPIO pins in sleep state
+I (1034) sleep_gpio: Enable automatic switching of GPIO sleep configuration
+I (1035) main_task: Started on CPU0
+I (1036) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+I (1037) main_task: Calling app_main()
+W (1037) tab5_mp3: === Defeatist Music Player === v0.2.0-90-gff75420-dirty, IDF v5.5.5, built Sep  7 2026 22:15:52
+I (1039) tab5_mp3: SPK_EN and LCD_RST released (expander 0x43)
+I (1141) st7121: version: 1.0.1
+I (1542) tab5_mp3: ST7121 initialised (720x1280)
+I (1557) tab5_audio: ES8388 initialised (0x10)
+I (1557) tab5_audio: headphones in
+I (1557) tab5_audio: output: headphones (pack 0 mV)
+I (1608) tab5_io: storage arbiter up, 16 KB chunks, 3 x 16 KB stdio buffers
+I (1610) tab5_storage: SDMMC IO power up (LDO ch4)
+I (1642) tab5_batt: INA226 at 0x41 (die id 0x2260)
+I (1672) tab5_usbhost: class driver msc installed
+I (1672) uac-host: Install Succeed, Version: 1.5.0
+I (1672) tab5_usbhost: class driver uac installed
+I (1673) tab5_usbhost: class driver hid installed
+I (1674) tab5_usbhost: USB-A VBUS on (expander 0x44, P3)
+I (1843) tab5_touch: ST7123 at 0x55
+I (1845) ST7123: Firmware version: 1(1.80.1.16), Max.X: 720, Max.Y: 1280, Max.Touchs: 10
+I (1846) ST7123: Touch panel create success, version: 1.0.2
+I (1873) tab5_mp3: nothing to play; opening the chooser
+W (2057) uac-host: USB device with addr(1) is not UAC device
+I (2684) tab5_storage: USB drive mounted at /usb
+I (2776) tab5_io: stdio would use 0 byte reads (st_blksize); using 16384 instead
+I (2823) tab5_settings: loaded /usb/.defeatist.dat (volume=40)
+I (2825) tab5_mp3: volume 40 from settings
+I (2844) tab5_playlist: /usb/Bôa - Twilight: 15 tracks
+I (2845) tab5_mp3: ready to resume /usb/Bôa - Twilight/Bôa - Twilight - 02 Twilight.mp3
+I (3558) tab5_audio: amplifier off (idle)
+I (8511) tab5_touch: touch: down at 461,192 (1 point)
+I (8511) tab5_browser: button: row 0 (file) "Bôa - Twilight - 01 Duvet.mp3"
+I (8519) tab5_playlist: /usb/Bôa - Twilight: 15 tracks
+I (8558) tab5_mp3: playing /usb/Bôa - Twilight/Bôa - Twilight - 01 Duvet.mp3
+I (8574) tab5_rg: sidecar: /usb/Bôa - Twilight/.Bôa - Twilight - 01 Duvet.mp3.rgcache (waveform+loudness)
+I (8575) tab5_mp3: envelope from sidecar: 636 columns, 203s
+I (8575) tab5_wave: envelope: 636 columns, levels 1..233
+I (8575) tab5_mp3: tags from cache: "Duvet"
+I (8626) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (8627) tab5_dec: mp3: index built, 17957520 samples, 203 s, seekable
+I (8627) tab5_mp3: open took 32 ms
+I (8628) tab5_io: open playback: 2 reads, 128 KB in 20 ms held of 32 ms (62%), 6400 KB/s, worst hold 17 ms, worst wait 0 ms
+I (8629) tab5_mp3: replaygain: -11.90 LUFS, peak -0.78 dBFS -> -6.10 dB
+I (8666) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (8667) tab5_mp3: tags from cache: "Duvet"
+I (8673) tab5_touch: touch: up after 162 ms
+I (8675) tab5_audio: amplifier on
+I (8704) tab5_mp3: first sound 144 ms to sound (open was 32 ms of it), ring 1%
+I (9849) tab5_art: cover art: image/jpeg, 115569 bytes
+I (9855) tab5_art: cover is 700x700
+I (9859) tab5_art: jpeg in: 115569 bytes, hash 8a181f76
+I (9903) tab5_art: cover enlarged to 720x720
+I (10331) tab5_mp3: prefetched tags: "Twilight"
+I (10437) tab5_art: cover art: image/jpeg, 115569 bytes
+I (10445) tab5_mp3: prefetched cover for /usb/Bôa - Twilight/Bôa - Twilight - 02 Twilight.mp3 (115569 bytes)
+I (10466) tab5_rg: sidecar: /usb/Bôa - Twilight/.Bôa - Twilight - 02 Twilight.mp3.rgcache (waveform+loudness)
+I (10467) tab5_mp3: envelope from sidecar: 715 columns, 228s
+I (10467) tab5_mp3: prefetch done: cache 2 entries, 115 KB (+112 KB shared)
+I (12168) tab5_settings: saved /usb/.defeatist.dat (volume=40, 27855 bytes)
+I (191793) tab5_mp3: exits at tail latch: none yet
+I (191794) tab5_mp3: tail: 3517 KB of this track still to play; holding the screen
+I (191795) tab5_mp3: finished, 975 blocks
+I (191796) tab5_io: track playback: 93 reads, 8068 KB in 1338 ms held of 183168 ms (0%), 6029 KB/s, worst hold 29 ms, worst wait 2 ms
+I (191796) tab5_io: track prefetch: 20 reads, 112 KB in 78 ms held of 183168 ms (0%), 1447 KB/s, worst hold 20 ms, worst wait 0 ms
+I (191797) tab5_mp3: output peak 14840/32768 (-6.88 dBFS)
+I (191800) tab5_mp3: playing /usb/Bôa - Twilight/Bôa - Twilight - 02 Twilight.mp3
+I (191814) tab5_rg: sidecar: /usb/Bôa - Twilight/.Bôa - Twilight - 02 Twilight.mp3.rgcache (waveform+loudness)
+I (191842) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (191843) tab5_dec: mp3: index built, 20180160 samples, 228 s, seekable
+I (191843) tab5_mp3: open took 28 ms
+I (191843) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 28 ms (67%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (191844) tab5_mp3: replaygain: -11.29 LUFS, peak -0.46 dBFS -> -6.71 dB
+I (191880) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (191881) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (191951) tab5_mp3: first sound 150 ms to sound (open was 28 ms of it), ring 1%
+I (200228) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (200230) tab5_mp3: exits at crossfade start: start=1
+I (206220) tab5_wave: envelope: 715 columns, levels 1..242
+I (206221) tab5_mp3: tags from cache: "Twilight"
+I (206303) tab5_mp3: cover from cache (115569 bytes)
+I (206304) tab5_art: cover is 700x700
+I (206308) tab5_art: jpeg in: 115569 bytes, hash 8a181f76
+I (206327) tab5_art: cover enlarged to 720x720
+I (206697) tab5_mp3: prefetched tags: "Fool"
+I (206727) tab5_art: cover art: image/jpeg, 115569 bytes
+I (206732) tab5_mp3: prefetched cover for /usb/Bôa - Twilight/Bôa - Twilight - 03 Fool.mp3 (115569 bytes)
+I (206744) tab5_mp3: prefetch done: cache 3 entries, 115 KB (+225 KB shared)
+I (209700) tab5_settings: saved /usb/.defeatist.dat (volume=40, 27990 bytes)
+I (408587) tab5_mp3: exits at tail latch: start=1 done=1 tail-dry=1
+I (408588) tab5_mp3: tail: 3518 KB of this track still to play; holding the screen
+I (408589) tab5_mp3: finished, 1095 blocks
+I (408589) tab5_io: track playback: 95 reads, 8938 KB in 1423 ms held of 216745 ms (0%), 6281 KB/s, worst hold 25 ms, worst wait 0 ms
+I (408590) tab5_io: track prefetch: 20 reads, 112 KB in 20 ms held of 216745 ms (0%), 5646 KB/s, worst hold 2 ms, worst wait 0 ms
+I (408590) tab5_mp3: output peak 14357/32768 (-7.17 dBFS)
+I (408592) tab5_mp3: playing /usb/Bôa - Twilight/Bôa - Twilight - 03 Fool.mp3
+I (408632) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (408633) tab5_dec: mp3: index built, 27095040 samples, 307 s, seekable
+I (408633) tab5_mp3: open took 30 ms
+I (408633) tab5_io: open playback: 2 reads, 128 KB in 20 ms held of 30 ms (66%), 6400 KB/s, worst hold 18 ms, worst wait 0 ms
+I (408691) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (408692) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (408763) tab5_mp3: first sound 170 ms to sound (open was 30 ms of it), ring 1%
+I (417011) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (417013) tab5_mp3: exits at crossfade start: start=2 done=1 tail-dry=1
+I (423030) tab5_mp3: tags from cache: "Fool"
+I (423086) tab5_mp3: cover from cache (115569 bytes)
+I (423088) tab5_art: cover is 700x700
+I (423092) tab5_art: jpeg in: 115569 bytes, hash 8a181f76
+I (423111) tab5_art: cover enlarged to 720x720
+I (423471) tab5_mp3: prefetched tags: "Rain"
+I (423502) tab5_art: cover art: image/jpeg, 115569 bytes
+I (423507) tab5_mp3: prefetched cover for /usb/Bôa - Twilight/Bôa - Twilight - 04 Rain.mp3 (115569 bytes)
+I (423519) tab5_mp3: prefetch done: cache 3 entries, 114 KB (+225 KB shared)
+I (426241) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28121 bytes)
+I (427789) tab5_touch: touch: down at 44,1130 (1 point)
+I (427791) tab5_mp3: button: folder
+I (427852) tab5_browser: hiding a shared prefix on 15 files: "Bôa - Twilight - "
+I (427946) tab5_touch: touch: up after 157 ms
+I (430881) tab5_touch: touch: down at 49,1240 (1 point)
+I (430882) tab5_browser: button: up
+I (430995) tab5_touch: touch: up after 114 ms
+I (432832) tab5_touch: touch: down at 377,470 (1 point)
+I (432833) tab5_browser: button: row 3 (dir) "Bôa - Get There"
+I (432840) tab5_browser: hiding a shared prefix on 12 files: "Bôa - Get There - "
+I (432931) tab5_touch: touch: up after 99 ms
+I (434012) tab5_touch: touch: down at 328,205 (1 point)
+I (434013) tab5_browser: button: row 0 (file) "Bôa - Get There - 01 Angry.mp3"
+I (434025) tab5_playlist: /usb/Bôa - Get There: 12 tracks
+I (434040) tab5_mp3: interrupted, 180 blocks
+I (434040) tab5_io: track playback: 14 reads, 1587 KB in 259 ms held of 25406 ms (1%), 6128 KB/s, worst hold 23 ms, worst wait 0 ms
+I (434040) tab5_io: track prefetch: 20 reads, 112 KB in 20 ms held of 25406 ms (0%), 5646 KB/s, worst hold 2 ms, worst wait 0 ms
+I (434041) tab5_mp3: output peak 30303/32768 (-0.68 dBFS)
+I (434043) tab5_mp3: playing /usb/Bôa - Get There/Bôa - Get There - 01 Angry.mp3
+I (434054) tab5_rg: sidecar: /usb/Bôa - Get There/.Bôa - Get There - 01 Angry.mp3.rgcache (waveform only)
+I (434055) tab5_mp3: tags from cache: "Angry"
+I (434095) tab5_mp3: interrupted: dropped 3519 KB of queued audio
+I (434147) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (434148) tab5_dec: mp3: index built, 19615680 samples, 222 s, seekable
+I (434148) tab5_mp3: open took 31 ms
+I (434148) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 32 ms (59%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (434190) tab5_touch: touch: up after 178 ms
+I (434202) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (434203) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (434205) tab5_mp3: tags from cache: "Angry"
+I (434226) tab5_mp3: first sound 183 ms to sound (open was 31 ms of it), ring 1%
+I (436567) tab5_art: cover art: image/jpeg, 131149 bytes
+I (436573) tab5_art: cover is 700x700
+I (436577) tab5_art: jpeg in: 131149 bytes, hash 254e010a
+I (436597) tab5_art: cover enlarged to 720x720
+I (437119) tab5_mp3: prefetched tags: "Get There"
+I (437226) tab5_art: cover art: image/jpeg, 131149 bytes
+I (437235) tab5_mp3: prefetched cover for /usb/Bôa - Get There/Bôa - Get There - 02 Get There.mp3 (131149 bytes)
+I (437294) tab5_mp3: prefetch done: cache 3 entries, 241 KB (+128 KB shared)
+I (437306) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28255 bytes)
+I (437408) tab5_rg: sidecar written: /usb/Bôa - Twilight/.Bôa - Twilight - 03 Fool.mp3.rgcache (139 bytes)
+I (455526) tab5_touch: touch: down at 51,1150 (1 point)
+I (455528) tab5_mp3: button: folder
+I (455583) tab5_browser: hiding a shared prefix on 12 files: "Bôa - Get There - "
+I (455686) tab5_touch: touch: up after 160 ms
+I (458171) tab5_touch: touch: down at 67,1214 (1 point)
+I (458172) tab5_browser: button: up
+I (458268) tab5_touch: touch: up after 97 ms
+I (459565) tab5_touch: touch: down at 328,657 (1 point)
+I (459566) tab5_browser: button: row 5 (dir) "Bôa - Whiplash"
+I (459606) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (459701) tab5_touch: touch: up after 136 ms
+I (460782) tab5_touch: touch: down at 300,198 (1 point)
+I (460783) tab5_browser: button: row 0 (file) "Bôa - Whiplash - 01 Let Me Go.mp3"
+I (460790) tab5_playlist: /usb/Bôa - Whiplash: 13 tracks
+I (460791) tab5_mp3: interrupted, 225 blocks
+I (460791) tab5_io: track playback: 24 reads, 2052 KB in 408 ms held of 26642 ms (1%), 5029 KB/s, worst hold 44 ms, worst wait 0 ms
+I (460791) tab5_io: track prefetch: 21 reads, 128 KB in 79 ms held of 26642 ms (0%), 1622 KB/s, worst hold 17 ms, worst wait 0 ms
+I (460792) tab5_mp3: output peak 31367/32768 (-0.38 dBFS)
+I (460795) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 01 Let Me Go.mp3
+I (460849) tab5_mp3: interrupted: dropped 3519 KB of queued audio
+I (460858) tab5_mp3: tags: "Let Me Go" / "Bôa" / "Whiplash"
+I (460909) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (460910) tab5_dec: mp3: index built, 22325714 samples, 253 s, seekable
+I (460910) tab5_mp3: open took 30 ms
+I (460910) tab5_io: open playback: 8 reads, 128 KB in 67 ms held of 30 ms (223%), 1910 KB/s, worst hold 44 ms, worst wait 0 ms
+I (460955) tab5_touch: touch: up after 173 ms
+I (460963) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (460964) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (460966) tab5_mp3: tags from cache: "Let Me Go"
+I (460993) tab5_mp3: first sound 197 ms to sound (open was 30 ms of it), ring 1%
+I (463340) tab5_art: cover art: image/jpeg, 81772 bytes
+I (463346) tab5_art: cover is 700x700
+I (463348) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (463372) tab5_art: cover enlarged to 720x720
+I (463889) tab5_mp3: prefetched tags: "Crawling"
+I (463987) tab5_art: cover art: image/jpeg, 81772 bytes
+I (463993) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 02 Crawling.mp3 (81772 bytes)
+I (464033) tab5_mp3: prefetch done: cache 3 entries, 208 KB (+79 KB shared)
+I (464332) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28391 bytes)
+I (693671) tab5_mp3: exits at tail latch: start=2 done=2 tail-dry=2 tail-cut=2
+I (693672) tab5_mp3: tail: 3516 KB of this track still to play; holding the screen
+I (693676) tab5_mp3: loudness: -7.36 LUFS, peak 0.00 dBFS, 2447 gated blocks
+I (693677) tab5_mp3: envelope from playback: 395 columns
+I (693677) tab5_mp3: finished, 1212 blocks
+I (693677) tab5_io: track playback: 110 reads, 9968 KB in 1622 ms held of 232767 ms (0%), 6145 KB/s, worst hold 28 ms, worst wait 0 ms
+I (693678) tab5_io: track prefetch: 17 reads, 79 KB in 72 ms held of 232767 ms (0%), 1110 KB/s, worst hold 21 ms, worst wait 0 ms
+I (693678) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (693679) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 02 Crawling.mp3
+I (693716) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (693716) tab5_dec: mp3: index built, 19488588 samples, 220 s, seekable
+I (693717) tab5_mp3: open took 28 ms
+I (693717) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 28 ms (67%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (693778) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 01 Let Me Go.mp3.rgcache (877 bytes)
+I (693824) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (693825) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (693895) tab5_mp3: first sound 215 ms to sound (open was 28 ms of it), ring 1%
+I (702094) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (702095) tab5_mp3: exits at crossfade start: start=3 done=2 tail-dry=2 tail-cut=2
+I (708123) tab5_mp3: tags from cache: "Crawling"
+I (708191) tab5_mp3: cover from cache (81772 bytes)
+I (708192) tab5_art: cover is 700x700
+I (708210) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (708233) tab5_art: cover enlarged to 720x720
+I (708608) tab5_mp3: prefetched tags: "Walk With Me"
+I (708642) tab5_art: cover art: image/jpeg, 141969 bytes
+I (708647) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 03 Walk With Me.mp3 (141969 bytes)
+I (708656) tab5_mp3: prefetch done: cache 3 entries, 219 KB (+79 KB shared)
+I (711374) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28526 bytes)
+I (714122) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (902595) tab5_mp3: exits at tail latch: start=3 done=3 tail-dry=3 tail-cut=2
+I (902596) tab5_mp3: tail: 3519 KB of this track still to play; holding the screen
+I (902600) tab5_mp3: loudness: -8.21 LUFS, peak 0.00 dBFS, 2127 gated blocks
+I (902601) tab5_mp3: envelope from playback: 690 columns
+I (902601) tab5_mp3: finished, 1058 blocks
+I (902602) tab5_io: track playback: 92 reads, 8632 KB in 1417 ms held of 208884 ms (0%), 6092 KB/s, worst hold 71 ms, worst wait 0 ms
+I (902602) tab5_io: track prefetch: 21 reads, 138 KB in 22 ms held of 208884 ms (0%), 6305 KB/s, worst hold 2 ms, worst wait 0 ms
+I (902602) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (902603) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 03 Walk With Me.mp3
+I (902675) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 02 Crawling.mp3.rgcache (1203 bytes)
+I (902678) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (902678) tab5_dec: mp3: index built, 19664774 samples, 222 s, seekable
+I (902678) tab5_mp3: open took 65 ms
+I (902678) tab5_io: open playback: 2 reads, 128 KB in 50 ms held of 65 ms (76%), 2560 KB/s, worst hold 49 ms, worst wait 0 ms
+I (902735) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (902737) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (902807) tab5_mp3: first sound 202 ms to sound (open was 65 ms of it), ring 1%
+I (911051) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (911053) tab5_mp3: exits at crossfade start: start=4 done=3 tail-dry=3 tail-cut=2
+I (917070) tab5_mp3: tags from cache: "Walk With Me"
+I (917145) tab5_mp3: cover from cache (141969 bytes)
+I (917147) tab5_art: cover is 700x700
+I (917152) tab5_art: jpeg in: 141969 bytes, hash 2bd954ab
+I (917172) tab5_art: cover enlarged to 720x720
+I (917532) tab5_mp3: prefetched tags: "Beautiful & Broken"
+I (917557) tab5_art: cover art: image/jpeg, 48786 bytes
+I (917559) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 04 Beautiful & Broken.mp3 (48786 bytes)
+I (917568) tab5_mp3: prefetch done: cache 3 entries, 266 KB (+0 KB shared)
+I (920421) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28665 bytes)
+I (923080) tab5_mp3: crossfade done; dropped 0 KB of the outgoing track
+I (923081) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (1113588) tab5_mp3: exits at tail latch: start=4 done=4 tail-dry=4 tail-cut=2
+I (1113589) tab5_mp3: tail: 3516 KB of this track still to play; holding the screen
+I (1113594) tab5_mp3: loudness: -8.07 LUFS, peak 0.00 dBFS, 2203 gated blocks
+I (1113595) tab5_mp3: envelope from playback: 696 columns
+I (1113596) tab5_mp3: finished, 1067 blocks
+I (1113596) tab5_io: track playback: 93 reads, 8711 KB in 1381 ms held of 210917 ms (0%), 6307 KB/s, worst hold 24 ms, worst wait 0 ms
+I (1113596) tab5_io: track prefetch: 15 reads, 47 KB in 15 ms held of 210917 ms (0%), 3181 KB/s, worst hold 2 ms, worst wait 0 ms
+I (1113596) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (1113597) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 04 Beautiful & Broken.mp3
+I (1113636) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1113637) tab5_dec: mp3: index built, 18426682 samples, 208 s, seekable
+I (1113637) tab5_mp3: open took 29 ms
+I (1113637) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 29 ms (65%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (1113732) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1113733) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (1113735) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 03 Walk With Me.mp3.rgcache (1212 bytes)
+I (1113803) tab5_mp3: first sound 204 ms to sound (open was 29 ms of it), ring 1%
+I (1122012) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (1122014) tab5_mp3: exits at crossfade start: start=5 done=4 tail-dry=4 tail-cut=2
+I (1128037) tab5_mp3: tags from cache: "Beautiful & Broken"
+I (1128102) tab5_mp3: cover from cache (48786 bytes)
+I (1128104) tab5_art: cover is 700x700
+I (1128105) tab5_art: jpeg in: 48786 bytes, hash 1dc81627
+I (1128141) tab5_art: cover enlarged to 720x720
+I (1128517) tab5_mp3: prefetched tags: "Prelude"
+I (1128545) tab5_art: cover art: image/jpeg, 81772 bytes
+I (1128548) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 05 Prelude.mp3 (81772 bytes)
+I (1128557) tab5_mp3: prefetch done: cache 3 entries, 266 KB (+0 KB shared)
+I (1131480) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28810 bytes)
+I (1310486) tab5_mp3: exits at tail latch: start=5 done=5 tail-dry=5 tail-cut=2
+I (1310487) tab5_mp3: tail: 3517 KB of this track still to play; holding the screen
+I (1310492) tab5_mp3: loudness: -8.32 LUFS, peak 0.00 dBFS, 1993 gated blocks
+I (1310493) tab5_mp3: envelope from playback: 652 columns
+I (1310493) tab5_mp3: finished, 1000 blocks
+I (1310494) tab5_io: track playback: 88 reads, 8162 KB in 1346 ms held of 196856 ms (0%), 6064 KB/s, worst hold 52 ms, worst wait 0 ms
+I (1310494) tab5_io: track prefetch: 17 reads, 79 KB in 33 ms held of 196856 ms (0%), 2422 KB/s, worst hold 17 ms, worst wait 0 ms
+I (1310494) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (1310495) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 05 Prelude.mp3
+I (1310579) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 04 Beautiful & Broken.mp3.rgcache (1154 bytes)
+I (1310581) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1310581) tab5_dec: mp3: index built, 1782302 samples, 20 s, seekable
+I (1310581) tab5_mp3: open took 75 ms
+I (1310581) tab5_io: open playback: 2 reads, 128 KB in 53 ms held of 75 ms (70%), 2415 KB/s, worst hold 51 ms, worst wait 0 ms
+I (1310637) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1310637) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (1310707) tab5_mp3: first sound 210 ms to sound (open was 75 ms of it), ring 1%
+I (1318921) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (1318923) tab5_mp3: exits at crossfade start: start=6 done=5 tail-dry=5 tail-cut=2
+I (1320524) tab5_mp3: exits at tail latch: start=6 done=5 tail-dry=5 tail-cut=2
+I (1320525) tab5_mp3: tail: 3201 KB of this track still to play; holding the screen
+I (1320529) tab5_mp3: loudness: -20.34 LUFS, peak -7.97 dBFS, 187 gated blocks
+I (1320530) tab5_mp3: envelope from playback: 505 columns
+I (1320531) tab5_mp3: finished, 97 blocks
+I (1320531) tab5_io: track playback: 22 reads, 790 KB in 130 ms held of 9949 ms (1%), 6083 KB/s, worst hold 25 ms, worst wait 0 ms
+I (1320531) tab5_mp3: output peak 13084/32768 (-7.97 dBFS)
+I (1320532) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 06 Frozen.mp3
+I (1320571) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1320572) tab5_dec: mp3: index built, 22468268 samples, 254 s, seekable
+I (1320572) tab5_mp3: open took 29 ms
+I (1320572) tab5_io: open playback: 2 reads, 128 KB in 20 ms held of 29 ms (68%), 6400 KB/s, worst hold 18 ms, worst wait 0 ms
+I (1320636) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 05 Prelude.mp3.rgcache (974 bytes)
+I (1320678) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1320678) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+W (1320679) tab5_mp3: incoming ring 0 held 1765 KB; resetting
+W (1320698) tab5_mp3: crossfade ended on a partial frame (0 bytes left, 14% through the overlap)
+I (1320769) tab5_mp3: first sound 236 ms to sound (open was 29 ms of it), ring 0%
+I (1376001) tab5_touch: touch: down at 41,1121 (1 point)
+I (1376002) tab5_mp3: button: folder
+I (1376051) tab5_touch: touch: up after 50 ms
+I (1376060) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+W (1380526) tab5_mp3: tail still pending after 60002 ms -- this should be impossible
+W (1380527) tab5_mp3:   play ring 0 (3600384 B), fill ring 0 (3600384 B), tail ring 1 (3253308 B)
+W (1380527) tab5_mp3:   crossfade armed 0 active 0, 77824/529200 frames; tail 1, playing 1, paused-writer 0
+I (1381553) tab5_touch: touch: down at 663,1221 (1 point)
+I (1381554) tab5_browser: button: cancel
+I (1381709) tab5_touch: touch: up after 156 ms
+I (1555048) tab5_mp3: exits at tail latch: start=6 done=5 partial=1 tail-dry=5 tail-cut=2
+I (1555049) tab5_mp3: tail: 3511 KB of this track still to play; holding the screen
+I (1555055) tab5_mp3: loudness: -9.25 LUFS, peak 0.00 dBFS, 2437 gated blocks
+I (1555056) tab5_mp3: envelope from playback: 398 columns
+I (1555056) tab5_mp3: finished, 1219 blocks
+I (1555056) tab5_io: track playback: 104 reads, 9952 KB in 1671 ms held of 234483 ms (0%), 5955 KB/s, worst hold 69 ms, worst wait 0 ms
+I (1555056) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (1555057) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 07 Vienna.mp3
+I (1555134) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 06 Frozen.mp3.rgcache (815 bytes)
+I (1555147) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1555147) tab5_dec: mp3: index built, 25885764 samples, 293 s, seekable
+I (1555148) tab5_mp3: open took 79 ms
+I (1555148) tab5_io: open playback: 2 reads, 128 KB in 33 ms held of 79 ms (41%), 3879 KB/s, worst hold 32 ms, worst wait 0 ms
+I (1555198) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1555199) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+W (1555200) tab5_mp3: incoming ring 1 held 3177 KB; resetting
+I (1555288) tab5_mp3: first sound 229 ms to sound (open was 79 ms of it), ring 1%
+I (1562466) tab5_touch: touch: down at 526,600 (1 point)
+I (1563437) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (1563439) tab5_mp3: exits at crossfade start: start=7 done=5 partial=1 tail-dry=5 tail-cut=2
+I (1563791) tab5_touch: touch: up after 1325 ms
+I (1564566) tab5_touch: touch: down at 50,1137 (1 point)
+I (1564567) tab5_mp3: button: folder
+I (1564624) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (1564725) tab5_touch: touch: up after 159 ms
+I (1566670) tab5_touch: touch: down at 325,729 (1 point)
+I (1566671) tab5_browser: button: row 6 (file) "Bôa - Whiplash - 07 Vienna.mp3"
+I (1566680) tab5_playlist: /usb/Bôa - Whiplash: 13 tracks
+I (1566743) tab5_mp3: interrupted, 113 blocks
+I (1566744) tab5_io: track playback: 9 reads, 1025 KB in 166 ms held of 11596 ms (1%), 6180 KB/s, worst hold 23 ms, worst wait 0 ms
+I (1566745) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (1566748) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 07 Vienna.mp3
+I (1566749) tab5_mp3: sidecar: from the record still being written
+I (1566796) tab5_mp3: interrupted: dropped 4991 KB of queued audio
+W (1566797) tab5_mp3: crossfade cut short: the outgoing ring emptied
+I (1566836) tab5_touch: touch: up after 166 ms
+I (1566843) tab5_mp3: tags: "Vienna" / "Bôa" / "Whiplash"
+I (1566872) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 07 Vienna.mp3.rgcache (139 bytes)
+I (1566906) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1566907) tab5_dec: mp3: index built, 25885764 samples, 293 s, seekable
+I (1566907) tab5_mp3: open took 30 ms
+I (1566907) tab5_io: open playback: 8 reads, 128 KB in 72 ms held of 30 ms (240%), 1778 KB/s, worst hold 43 ms, worst wait 0 ms
+I (1566957) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1566958) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (1566959) tab5_mp3: tags from cache: "Vienna"
+I (1566985) tab5_mp3: first sound 236 ms to sound (open was 30 ms of it), ring 1%
+I (1569361) tab5_art: cover art: image/jpeg, 81772 bytes
+I (1569367) tab5_art: cover is 700x700
+I (1569369) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (1569390) tab5_art: cover enlarged to 720x720
+I (1569911) tab5_mp3: prefetched tags: "Worry"
+I (1570024) tab5_art: cover art: image/jpeg, 117722 bytes
+I (1570030) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 08 Worry.mp3 (117722 bytes)
+I (1570079) tab5_mp3: prefetch done: cache 3 entries, 195 KB (+79 KB shared)
+I (1570204) tab5_settings: saved /usb/.defeatist.dat (volume=40, 28943 bytes)
+I (1839966) tab5_mp3: exits at tail latch: start=7 done=5 cut=1 partial=1 tail-dry=5 tail-cut=3
+I (1839967) tab5_mp3: tail: 3518 KB of this track still to play; holding the screen
+I (1839972) tab5_mp3: loudness: -9.41 LUFS, peak 0.00 dBFS, 2702 gated blocks
+I (1839973) tab5_mp3: envelope from playback: 458 columns
+I (1839973) tab5_mp3: finished, 1405 blocks
+I (1839973) tab5_io: track playback: 125 reads, 11546 KB in 1870 ms held of 273066 ms (0%), 6174 KB/s, worst hold 29 ms, worst wait 0 ms
+I (1839974) tab5_io: track prefetch: 20 reads, 115 KB in 59 ms held of 273066 ms (0%), 1949 KB/s, worst hold 8 ms, worst wait 0 ms
+I (1839974) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (1839975) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 08 Worry.mp3
+I (1840016) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (1840017) tab5_dec: mp3: index built, 25485124 samples, 288 s, seekable
+I (1840017) tab5_mp3: open took 30 ms
+I (1840017) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 30 ms (63%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (1840079) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 07 Vienna.mp3.rgcache (956 bytes)
+I (1840117) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (1840117) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (1840187) tab5_mp3: first sound 211 ms to sound (open was 30 ms of it), ring 1%
+I (1848400) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (1848402) tab5_mp3: exits at crossfade start: start=8 done=5 cut=1 partial=1 tail-dry=5 tail-cut=3
+I (1854419) tab5_mp3: tags from cache: "Worry"
+I (1854510) tab5_mp3: cover from cache (117722 bytes)
+I (1854512) tab5_art: cover is 700x700
+I (1854515) tab5_art: jpeg in: 117722 bytes, hash 4f780657
+I (1854535) tab5_art: cover enlarged to 720x720
+I (1854924) tab5_mp3: prefetched tags: "Whiplash"
+I (1854952) tab5_art: cover art: image/jpeg, 81772 bytes
+I (1854972) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 09 Whiplash.mp3 (81772 bytes)
+I (1854983) tab5_mp3: prefetch done: cache 3 entries, 195 KB (+79 KB shared)
+I (1857748) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29075 bytes)
+I (1860427) tab5_mp3: crossfade done; dropped 2 KB of the outgoing track
+I (1860428) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (2116886) tab5_mp3: exits at tail latch: start=8 done=6 cut=1 partial=1 tail-dry=6 tail-cut=3
+I (2116887) tab5_mp3: tail: 3519 KB of this track still to play; holding the screen
+I (2116893) tab5_mp3: loudness: -7.48 LUFS, peak 0.00 dBFS, 2766 gated blocks
+I (2116894) tab5_mp3: envelope from playback: 451 columns
+I (2116894) tab5_mp3: finished, 1383 blocks
+I (2116894) tab5_io: track playback: 116 reads, 11288 KB in 1860 ms held of 276876 ms (0%), 6069 KB/s, worst hold 59 ms, worst wait 0 ms
+I (2116894) tab5_io: track prefetch: 17 reads, 79 KB in 17 ms held of 276876 ms (0%), 4701 KB/s, worst hold 2 ms, worst wait 0 ms
+I (2116895) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (2116896) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 09 Whiplash.mp3
+I (2116936) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (2116936) tab5_dec: mp3: index built, 13325262 samples, 151 s, seekable
+I (2116936) tab5_mp3: open took 29 ms
+I (2116936) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 29 ms (65%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (2116991) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (2116991) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (2117048) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 08 Worry.mp3.rgcache (889 bytes)
+I (2117061) tab5_mp3: first sound 164 ms to sound (open was 29 ms of it), ring 1%
+I (2125342) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (2125343) tab5_mp3: exits at crossfade start: start=9 done=6 cut=1 partial=1 tail-dry=6 tail-cut=3
+I (2131360) tab5_mp3: tags from cache: "Whiplash"
+I (2131407) tab5_mp3: cover from cache (81772 bytes)
+I (2131409) tab5_art: cover is 700x700
+I (2131412) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2131449) tab5_art: cover enlarged to 720x720
+I (2131826) tab5_mp3: prefetched tags: "Strange Few"
+I (2131855) tab5_art: cover art: image/jpeg, 81772 bytes
+I (2131858) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 10 Strange Few.mp3 (81772 bytes)
+I (2131869) tab5_mp3: prefetch done: cache 3 entries, 195 KB (+79 KB shared)
+I (2134804) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29210 bytes)
+I (2255976) tab5_mp3: exits at tail latch: start=9 done=7 cut=1 partial=1 tail-dry=7 tail-cut=3
+I (2255977) tab5_mp3: tail: 3518 KB of this track still to play; holding the screen
+I (2255982) tab5_mp3: loudness: -7.60 LUFS, peak 0.00 dBFS, 1454 gated blocks
+I (2255983) tab5_mp3: envelope from playback: 472 columns
+I (2255983) tab5_mp3: finished, 723 blocks
+I (2255983) tab5_io: track playback: 68 reads, 5903 KB in 966 ms held of 139046 ms (0%), 6110 KB/s, worst hold 24 ms, worst wait 0 ms
+I (2255983) tab5_io: track prefetch: 17 reads, 79 KB in 33 ms held of 139046 ms (0%), 2422 KB/s, worst hold 17 ms, worst wait 0 ms
+I (2255984) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (2255985) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 10 Strange Few.mp3
+I (2256082) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 09 Whiplash.mp3.rgcache (916 bytes)
+I (2256084) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (2256084) tab5_dec: mp3: index built, 23728280 samples, 269 s, seekable
+I (2256084) tab5_mp3: open took 82 ms
+I (2256084) tab5_io: open playback: 2 reads, 128 KB in 57 ms held of 82 ms (69%), 2245 KB/s, worst hold 55 ms, worst wait 0 ms
+I (2256145) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (2256146) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (2256216) tab5_mp3: first sound 230 ms to sound (open was 82 ms of it), ring 1%
+I (2264400) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (2264402) tab5_mp3: exits at crossfade start: start=10 done=7 cut=1 partial=1 tail-dry=7 tail-cut=3
+I (2270424) tab5_mp3: tags from cache: "Strange Few"
+I (2270484) tab5_mp3: cover from cache (81772 bytes)
+I (2270486) tab5_art: cover is 700x700
+I (2270489) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2270509) tab5_art: cover enlarged to 720x720
+I (2270884) tab5_mp3: prefetched tags: "Seafarer"
+I (2270929) tab5_art: cover art: image/jpeg, 81772 bytes
+I (2270933) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 11 Seafarer.mp3 (81772 bytes)
+I (2270944) tab5_mp3: prefetch done: cache 3 entries, 80 KB (+159 KB shared)
+I (2273849) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29348 bytes)
+I (2276428) tab5_mp3: crossfade done; dropped 2 KB of the outgoing track
+I (2276430) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (2513010) tab5_mp3: exits at tail latch: start=10 done=8 cut=1 partial=1 tail-dry=8 tail-cut=3
+I (2513011) tab5_mp3: tail: 3516 KB of this track still to play; holding the screen
+I (2513016) tab5_mp3: loudness: -8.56 LUFS, peak 0.00 dBFS, 2496 gated blocks
+I (2513017) tab5_mp3: envelope from playback: 420 columns
+I (2513017) tab5_mp3: finished, 1288 blocks
+I (2513018) tab5_io: track playback: 109 reads, 10510 KB in 1695 ms held of 256933 ms (0%), 6200 KB/s, worst hold 24 ms, worst wait 0 ms
+I (2513018) tab5_io: track prefetch: 17 reads, 79 KB in 18 ms held of 256933 ms (0%), 4440 KB/s, worst hold 2 ms, worst wait 0 ms
+I (2513018) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (2513019) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 11 Seafarer.mp3
+I (2513060) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (2513060) tab5_dec: mp3: index built, 21278334 samples, 241 s, seekable
+I (2513060) tab5_mp3: open took 29 ms
+I (2513061) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 29 ms (65%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (2513161) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (2513162) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (2513165) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 10 Strange Few.mp3.rgcache (843 bytes)
+I (2513232) tab5_mp3: first sound 211 ms to sound (open was 29 ms of it), ring 1%
+I (2521434) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (2521436) tab5_mp3: exits at crossfade start: start=11 done=8 cut=1 partial=1 tail-dry=8 tail-cut=3
+I (2527452) tab5_mp3: tags from cache: "Seafarer"
+I (2527528) tab5_mp3: cover from cache (81772 bytes)
+I (2527530) tab5_art: cover is 700x700
+I (2527532) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2527551) tab5_art: cover enlarged to 720x720
+I (2527909) tab5_mp3: prefetched tags: "I Don't Know"
+I (2527937) tab5_art: cover art: image/jpeg, 81772 bytes
+I (2527941) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 12 I Don't Know.mp3 (81772 bytes)
+I (2527952) tab5_mp3: prefetch done: cache 3 entries, 80 KB (+159 KB shared)
+I (2530899) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29483 bytes)
+I (2533457) tab5_mp3: crossfade done; dropped 0 KB of the outgoing track
+I (2533459) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (2547348) tab5_touch: touch: down at 56,1114 (1 point)
+I (2547349) tab5_mp3: button: folder
+I (2547427) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (2547519) tab5_touch: touch: up after 171 ms
+I (2550760) tab5_touch: touch: down at 663,1254 (1 point)
+I (2550761) tab5_browser: button: cancel
+I (2550917) tab5_touch: touch: up after 157 ms
+I (2550952) tab5_mp3: tags from cache: "Seafarer"
+I (2551010) tab5_mp3: cover from cache (81772 bytes)
+I (2551012) tab5_art: cover is 700x700
+I (2551015) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2551034) tab5_art: cover enlarged to 720x720
+I (2551408) tab5_mp3: prefetch done: cache 3 entries, 80 KB (+159 KB shared)
+I (2742234) tab5_mp3: exits at tail latch: start=11 done=9 cut=1 partial=1 tail-dry=9 tail-cut=3
+I (2742235) tab5_mp3: tail: 3519 KB of this track still to play; holding the screen
+I (2742239) tab5_mp3: loudness: -7.77 LUFS, peak 0.00 dBFS, 2370 gated blocks
+I (2742240) tab5_mp3: envelope from playback: 376 columns
+I (2742241) tab5_mp3: finished, 1155 blocks
+I (2742241) tab5_io: track playback: 99 reads, 9425 KB in 1538 ms held of 229180 ms (0%), 6128 KB/s, worst hold 63 ms, worst wait 0 ms
+I (2742241) tab5_io: track prefetch: 17 reads, 79 KB in 17 ms held of 229180 ms (0%), 4701 KB/s, worst hold 2 ms, worst wait 0 ms
+I (2742241) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (2742242) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 12 I Don't Know.mp3
+I (2742338) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 11 Seafarer.mp3.rgcache (788 bytes)
+I (2742340) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (2742340) tab5_dec: mp3: index built, 21310332 samples, 241 s, seekable
+I (2742341) tab5_mp3: open took 86 ms
+I (2742341) tab5_io: open playback: 2 reads, 128 KB in 57 ms held of 86 ms (66%), 2245 KB/s, worst hold 56 ms, worst wait 0 ms
+I (2742395) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (2742395) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (2742466) tab5_mp3: first sound 222 ms to sound (open was 86 ms of it), ring 1%
+I (2750691) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (2750692) tab5_mp3: exits at crossfade start: start=12 done=9 cut=1 partial=1 tail-dry=9 tail-cut=3
+I (2756715) tab5_mp3: tags from cache: "I Don't Know"
+I (2756796) tab5_mp3: cover from cache (81772 bytes)
+I (2756798) tab5_art: cover is 700x700
+I (2756800) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2756838) tab5_art: cover enlarged to 720x720
+I (2757216) tab5_mp3: prefetched tags: "Shadow"
+I (2757244) tab5_art: cover art: image/jpeg, 81772 bytes
+I (2757247) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 13 Shadow.mp3 (81772 bytes)
+I (2757259) tab5_mp3: prefetch done: cache 3 entries, 80 KB (+159 KB shared)
+I (2759948) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29622 bytes)
+I (2762710) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (2827717) tab5_touch: touch: down at 46,1127 (1 point)
+I (2827718) tab5_mp3: button: folder
+I (2827767) tab5_touch: touch: up after 50 ms
+I (2827776) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (2830244) tab5_touch: touch: down at 705,716 (1 point)
+I (2830813) tab5_touch: touch: up after 569 ms
+I (2830814) tab5_browser: scrolled to row 2 of 13
+I (2831854) tab5_touch: touch: down at 661,1229 (1 point)
+I (2831855) tab5_browser: button: cancel
+I (2832010) tab5_touch: touch: up after 156 ms
+I (2832030) tab5_mp3: tags from cache: "I Don't Know"
+I (2832090) tab5_mp3: cover from cache (81772 bytes)
+I (2832092) tab5_art: cover is 700x700
+I (2832095) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2832115) tab5_art: cover enlarged to 720x720
+I (2832495) tab5_mp3: prefetch done: cache 3 entries, 80 KB (+159 KB shared)
+I (2971861) tab5_mp3: exits at tail latch: start=12 done=10 cut=1 partial=1 tail-dry=10 tail-cut=3
+I (2971862) tab5_mp3: tail: 3518 KB of this track still to play; holding the screen
+I (2971866) tab5_mp3: loudness: -7.73 LUFS, peak 0.00 dBFS, 2327 gated blocks
+I (2971867) tab5_mp3: envelope from playback: 377 columns
+I (2971867) tab5_mp3: finished, 1157 blocks
+I (2971867) tab5_io: track playback: 99 reads, 9439 KB in 1513 ms held of 229526 ms (0%), 6239 KB/s, worst hold 25 ms, worst wait 0 ms
+I (2971868) tab5_io: track prefetch: 17 reads, 79 KB in 18 ms held of 229526 ms (0%), 4440 KB/s, worst hold 2 ms, worst wait 0 ms
+I (2971868) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (2971869) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 13 Shadow.mp3
+I (2971910) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (2971910) tab5_dec: mp3: index built, 16590236 samples, 188 s, seekable
+I (2971910) tab5_mp3: open took 29 ms
+I (2971911) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 29 ms (65%), 6737 KB/s, worst hold 18 ms, worst wait 0 ms
+I (2972006) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (2972007) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (2972012) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 12 I Don't Know.mp3.rgcache (786 bytes)
+I (2972077) tab5_mp3: first sound 207 ms to sound (open was 29 ms of it), ring 1%
+I (2980296) tab5_mp3: crossfade: 12000 ms, trim out 100% in 100%
+I (2980298) tab5_mp3: exits at crossfade start: start=13 done=10 cut=1 partial=1 tail-dry=10 tail-cut=3
+I (2986314) tab5_mp3: tags from cache: "Shadow"
+I (2986394) tab5_mp3: cover from cache (81772 bytes)
+I (2986396) tab5_art: cover is 700x700
+I (2986399) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (2986420) tab5_art: cover enlarged to 720x720
+I (2989516) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29755 bytes)
+I (2992326) tab5_mp3: crossfade done; dropped 2 KB of the outgoing track
+I (2992327) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (3147953) tab5_mp3: exits at tail latch: start=13 done=11 cut=1 partial=1 tail-dry=11 tail-cut=3
+I (3147954) tab5_mp3: tail: 3518 KB of this track still to play; holding the screen
+I (3147958) tab5_mp3: loudness: -7.21 LUFS, peak 0.00 dBFS, 1781 gated blocks
+I (3147959) tab5_mp3: envelope from playback: 587 columns
+I (3147959) tab5_mp3: finished, 901 blocks
+I (3147959) tab5_io: track playback: 81 reads, 7348 KB in 1193 ms held of 176048 ms (0%), 6160 KB/s, worst hold 56 ms, worst wait 0 ms
+I (3147960) tab5_mp3: output peak 32768/32768 (0.00 dBFS) -- at the rail
+I (3148064) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 13 Shadow.mp3.rgcache (1067 bytes)
+I (3168399) tab5_mp3: the finished track has played out; the screen is the next track's now
+I (3168411) tab5_mp3: end of /usb/Bôa - Whiplash
+I (3168541) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (3170021) tab5_audio: amplifier off (idle)
+I (3176407) tab5_touch: touch: down at 319,470 (1 point)
+I (3176407) tab5_browser: button: row 3 (file) "Bôa - Whiplash - 04 Beautiful & Broken.mp3"
+I (3176416) tab5_playlist: /usb/Bôa - Whiplash: 13 tracks
+I (3176512) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 04 Beautiful & Broken.mp3
+I (3176526) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 04 Beautiful & Broken.mp3.rgcache (waveform+loudness)
+I (3176527) tab5_mp3: envelope from sidecar: 652 columns, 208s
+I (3176527) tab5_wave: envelope: 652 columns, levels 1..255
+I (3176540) tab5_mp3: tags: "Beautiful & Broken" / "Bôa" / "Whiplash"
+I (3176572) tab5_touch: touch: up after 165 ms
+I (3176573) tab5_audio: amplifier on
+I (3176599) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (3176600) tab5_dec: mp3: index built, 18426682 samples, 208 s, seekable
+I (3176600) tab5_mp3: open took 38 ms
+I (3176600) tab5_io: open playback: 8 reads, 128 KB in 32 ms held of 39 ms (82%), 4001 KB/s, worst hold 24 ms, worst wait 0 ms
+I (3176601) tab5_mp3: replaygain: -8.32 LUFS, peak 0.00 dBFS -> -9.68 dB
+I (3176642) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (3176642) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (3176643) tab5_mp3: tags from cache: "Beautiful & Broken"
+I (3176664) tab5_mp3: first sound 150 ms to sound (open was 38 ms of it), ring 1%
+I (3177808) tab5_art: cover art: image/jpeg, 48786 bytes
+I (3177813) tab5_art: cover is 700x700
+I (3177814) tab5_art: jpeg in: 48786 bytes, hash 1dc81627
+I (3177836) tab5_art: cover enlarged to 720x720
+I (3178248) tab5_mp3: prefetched tags: "Prelude"
+I (3178349) tab5_art: cover art: image/jpeg, 81772 bytes
+I (3178355) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 05 Prelude.mp3 (81772 bytes)
+I (3178397) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 05 Prelude.mp3.rgcache (waveform+loudness)
+I (3178398) tab5_mp3: envelope from sidecar: 505 columns, 20s
+I (3178399) tab5_mp3: prefetch done: cache 3 entries, 130 KB (+79 KB shared)
+I (3180068) tab5_settings: saved /usb/.defeatist.dat (volume=40, 29900 bytes)
+I (3365102) tab5_mp3: exits at tail latch: start=13 done=11 cut=1 partial=1 tail-dry=12 tail-cut=3
+I (3365103) tab5_mp3: tail: 3517 KB of this track still to play; holding the screen
+I (3365103) tab5_mp3: finished, 1000 blocks
+I (3365104) tab5_io: track playback: 95 reads, 8209 KB in 1354 ms held of 188503 ms (0%), 6063 KB/s, worst hold 26 ms, worst wait 13 ms
+I (3365104) tab5_io: track prefetch: 17 reads, 79 KB in 53 ms held of 188503 ms (0%), 1508 KB/s, worst hold 8 ms, worst wait 16 ms
+I (3365105) tab5_mp3: output peak 10749/32768 (-9.68 dBFS)
+I (3365106) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 05 Prelude.mp3
+I (3365120) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 05 Prelude.mp3.rgcache (waveform+loudness)
+I (3365155) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (3365156) tab5_dec: mp3: index built, 1782302 samples, 20 s, seekable
+I (3365156) tab5_mp3: open took 36 ms
+I (3365157) tab5_io: open playback: 2 reads, 128 KB in 25 ms held of 36 ms (69%), 5120 KB/s, worst hold 24 ms, worst wait 0 ms
+I (3365157) tab5_mp3: no crossfade: the incoming track is only 20 s
+I (3365158) tab5_mp3: replaygain: -20.34 LUFS, peak -7.97 dBFS -> +2.34 dB
+I (3365213) tab5_rg: sidecar written: /usb/Bôa - Whiplash/.Bôa - Whiplash - 04 Beautiful & Broken.mp3.rgcache (1227 bytes)
+I (3365234) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (3365234) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (3365304) tab5_mp3: first sound 197 ms to sound (open was 36 ms of it), ring 1%
+I (3373562) tab5_mp3: exits at tail latch: start=13 done=11 cut=1 partial=1 tail-dry=12 tail-cut=3
+I (3373563) tab5_mp3: tail: 3481 KB of this track still to play; holding the screen
+I (3373564) tab5_mp3: finished, 97 blocks
+I (3373564) tab5_io: track playback: 22 reads, 790 KB in 165 ms held of 8407 ms (1%), 4792 KB/s, worst hold 54 ms, worst wait 0 ms
+I (3373564) tab5_mp3: output peak 17127/32768 (-5.64 dBFS)
+I (3373566) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 06 Frozen.mp3
+I (3373579) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 06 Frozen.mp3.rgcache (waveform+loudness)
+I (3373580) tab5_mp3: envelope from sidecar: 398 columns, 254s
+I (3373615) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (3373616) tab5_dec: mp3: index built, 22468268 samples, 254 s, seekable
+I (3373616) tab5_mp3: open took 36 ms
+I (3373616) tab5_io: open playback: 2 reads, 128 KB in 25 ms held of 36 ms (69%), 5120 KB/s, worst hold 24 ms, worst wait 0 ms
+I (3373617) tab5_mp3: replaygain: -9.25 LUFS, peak 0.00 dBFS -> -8.75 dB
+I (3373624) tab5_mp3: crossfade: 11921 ms (tail was shorter), trim out 100% in 100%
+I (3373624) tab5_mp3: exits at crossfade start: start=14 done=11 cut=1 partial=1 tail-dry=12 tail-cut=3
+I (3373659) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (3373660) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+W (3373661) tab5_mp3: incoming ring 1 held 2045 KB; resetting
+I (3373754) tab5_mp3: first sound 187 ms to sound (open was 36 ms of it), ring 0%
+W (3433564) tab5_mp3: tail still pending after 60002 ms -- this should be impossible
+W (3433565) tab5_mp3:   play ring 1 (3592192 B), fill ring 1 (3592192 B), tail ring 0 (3556412 B)
+W (3433565) tab5_mp3:   crossfade armed 0 active 0, 2048/525725 frames; tail 1, playing 1, paused-writer 0
+I (3449803) tab5_touch: touch: down at 367,1105 (1 point)
+I (3449804) tab5_mp3: button: play/pause
+I (3449952) tab5_touch: touch: up after 149 ms
+I (3451460) tab5_audio: amplifier off (idle)
+I (3452398) tab5_touch: touch: down at 51,1137 (1 point)
+I (3452399) tab5_mp3: button: folder
+I (3452448) tab5_touch: touch: up after 50 ms
+I (3452457) tab5_browser: hiding a shared prefix on 13 files: "Bôa - Whiplash - "
+I (3454277) tab5_touch: touch: down at 320,576 (1 point)
+I (3454278) tab5_browser: button: row 4 (file) "Bôa - Whiplash - 05 Prelude.mp3"
+I (3454287) tab5_playlist: /usb/Bôa - Whiplash: 13 tracks
+I (3454368) tab5_mp3: interrupted, 463 blocks
+I (3454369) tab5_io: track playback: 34 reads, 3832 KB in 624 ms held of 80753 ms (0%), 6141 KB/s, worst hold 25 ms, worst wait 0 ms
+I (3454370) tab5_mp3: output peak 11960/32768 (-8.75 dBFS)
+I (3454372) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 05 Prelude.mp3
+I (3454425) tab5_mp3: interrupted: dropped 6993 KB of queued audio
+I (3454441) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 05 Prelude.mp3.rgcache (waveform+loudness)
+I (3454441) tab5_wave: envelope: 505 columns, levels 1..102
+I (3454442) tab5_mp3: tags from cache: "Prelude"
+I (3454444) tab5_touch: touch: up after 167 ms
+I (3454509) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (3454510) tab5_dec: mp3: index built, 1782302 samples, 20 s, seekable
+I (3454510) tab5_mp3: open took 31 ms
+I (3454510) tab5_io: open playback: 2 reads, 128 KB in 19 ms held of 31 ms (61%), 6737 KB/s, worst hold 17 ms, worst wait 0 ms
+I (3454511) tab5_mp3: replaygain: -20.34 LUFS, peak -7.97 dBFS -> +2.34 dB
+I (3454550) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (3454551) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (3454552) tab5_wave: envelope: 505 columns, levels 1..102
+I (3454553) tab5_mp3: tags from cache: "Prelude"
+I (3454573) tab5_mp3: first sound 200 ms to sound (open was 31 ms of it), ring 1%
+I (3454644) tab5_mp3: cover from cache (81772 bytes)
+I (3454646) tab5_art: cover is 700x700
+I (3454649) tab5_art: jpeg in: 81772 bytes, hash 28cbd5c1
+I (3454672) tab5_art: cover enlarged to 720x720
+I (3455943) tab5_mp3: prefetched tags: "Frozen"
+I (3456030) tab5_art: cover art: image/jpeg, 81772 bytes
+I (3456038) tab5_mp3: prefetched cover for /usb/Bôa - Whiplash/Bôa - Whiplash - 06 Frozen.mp3 (81772 bytes)
+I (3456039) tab5_mp3: prefetch done: cache 3 entries, 131 KB (+79 KB shared)
+I (3456135) tab5_mp3: exits at tail latch: start=14 done=11 cut=1 partial=2 tail-dry=12 tail-cut=4
+I (3456136) tab5_mp3: tail: 3481 KB of this track still to play; holding the screen
+I (3456136) tab5_mp3: finished, 97 blocks
+I (3456137) tab5_io: track playback: 22 reads, 790 KB in 126 ms held of 1626 ms (7%), 6276 KB/s, worst hold 21 ms, worst wait 0 ms
+I (3456137) tab5_io: track prefetch: 17 reads, 79 KB in 70 ms held of 1626 ms (4%), 1141 KB/s, worst hold 26 ms, worst wait 13 ms
+I (3456138) tab5_mp3: output peak 17127/32768 (-5.64 dBFS)
+I (3456139) tab5_mp3: playing /usb/Bôa - Whiplash/Bôa - Whiplash - 06 Frozen.mp3
+I (3456152) tab5_rg: sidecar: /usb/Bôa - Whiplash/.Bôa - Whiplash - 06 Frozen.mp3.rgcache (waveform+loudness)
+I (3456183) tab5_dec: mp3: layer 3, Xing/LAME found, gapless trim active
+I (3456184) tab5_dec: mp3: index built, 22468268 samples, 254 s, seekable
+I (3456184) tab5_mp3: open took 31 ms
+I (3456184) tab5_io: open playback: 2 reads, 128 KB in 20 ms held of 31 ms (64%), 6400 KB/s, worst hold 19 ms, worst wait 0 ms
+I (3456185) tab5_mp3: no crossfade: the outgoing track was only 20 s
+I (3456186) tab5_mp3: replaygain: -9.25 LUFS, peak 0.00 dBFS -> -8.75 dB
+I (3456232) tab5_mp3: mp3: 44100 Hz, 2 ch, 320 kbps, trim exact
+I (3456233) tab5_mp3: boundary trim: out exact, in exact -- gapless join possible
+I (3456304) tab5_mp3: first sound 164 ms to sound (open was 31 ms of it), ring 1%
+I (3457613) tab5_settings: saved /usb/.defeatist.dat (volume=40, 30034 bytes)
