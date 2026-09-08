@@ -4124,6 +4124,73 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### Counting the exits, because a log line cannot investigate itself (1107)
+
+1106's watchdog answered, and the answer was that both previous patches
+were aimed at the wrong layer.
+
+A full boot log, nothing trimmed. The first crossfade started at 167179
+and 1106's check was due at 173179; the tail latched at 149743 and 1105's
+was due at 209743. Both fell inside the capture. **Neither fired.** So
+`s_xfade_active` and `s_tail_pending` were both false on time -- the
+flags cleared normally, through one of the sites that clear them.
+
+Every one of those sites logs. There are six, checked one at a time:
+
+| clears | line |
+| --- | --- |
+| `xfade_active` | `crossfade cut short` (W) |
+| `xfade_active` | `crossfade done` (I) |
+| `xfade_active` | `crossfade ended on a partial frame` (W, 1105) |
+| `xfade_active` | `no crossfade: %u Hz into %d Hz` (I) |
+| `xfade_active` | `no crossfade: the rate changes` (I) |
+| `tail_pending` | `played out` / `media gone` / `interrupted` |
+
+A cleared flag and no line is a contradiction the source cannot produce.
+**So the thing to doubt is delivery, not state.**
+
+**What this costs, recorded rather than glossed.** 1105 fixed a hole that
+was real, narrow, and not being fallen through. 1106 chased a stall that
+is not happening. Two patches and four board runs on hypotheses the
+instrument then excluded -- and the instrument's value turned out to be
+its silence, not its output. The earlier guesses (seeks, then first-use
+initialisation) both fitted every observation available at the time and
+were both wrong.
+
+**A log line cannot investigate its own delivery, but a counter can.**
+Each exit increments one; the tallies are printed LATER, at the next
+boundary, on a console demonstrably working because the line carrying
+them arrived. `crossfade:` and `tail:` have appeared at every boundary in
+every log so far, so the report rides those two.
+
+Which makes the next reading decisive rather than suggestive:
+
+- tallies show an exit that printed nothing -> the path ran and the line
+  was lost, and the search moves to the logging path;
+- tallies show no exit at all -> something clears the flag outside the
+  six known sites, the grep above is wrong, and the search moves back
+  into the player.
+
+**Not atomic, deliberately.** Two tasks touch these -- the writer for the
+overlap's own exits, the decode loop for the rate refusals -- but each
+counter has a single writer, and they are read for comparison against log
+lines rather than for control. A lock would be protecting a diagnostic
+from a race that cannot change the conclusion.
+
+**1106's limit is tighter here too.** Twice the overlap's length meant
+waiting twenty-four seconds on a twelve-second fade to learn nothing. A
+fixed two-second grace is tighter everywhere: 5 s for a 3 s fade, 14 s
+rather than 24 s for a 12 s one. The grace still has to exceed any
+stretch a refill can produce, since a starved overlap stretches on
+purpose, and two seconds against a twenty-second ring is comfortable.
+
+**Host-tested, not built, not flashed.** `texttest/exittest.c` checks the
+properties that make the tally trustworthy rather than merely present: a
+zero is never printed as though the exit occurred, a start without its
+matching done is visible as such, all nine counters at `UINT32_MAX` stay
+inside the buffer, and the order follows the enum so two reports can be
+diffed by eye. A diagnostic that lies is worse than none.
+
 ### A watchdog scoped to the overlap (1106)
 
 1105 closed a hole and the hole was not the fault. The next board run

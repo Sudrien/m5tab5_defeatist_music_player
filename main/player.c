@@ -1351,9 +1351,86 @@ static uint32_t s_xfade_since;
 static uint32_t s_xfade_expect_ms;
 static bool     s_xfade_warned;
 
-/* A floor under "twice the overlap's length", so a very short fit does
- * not produce a limit of a few milliseconds. */
-#define XFADE_STALL_FLOOR_MS  (2000u)
+/*
+ * How long past its intended length an overlap may run before the
+ * watchdog speaks.
+ *
+ * Was twice the length, which on a twelve-second fade meant waiting
+ * twenty-four seconds to learn nothing. A fixed grace is tighter
+ * everywhere and tightest where it matters: 5 s for a 3 s fade, 14 s
+ * rather than 24 s for a 12 s one. A starved overlap stretches on
+ * purpose (see the solo branch), so the grace has to be larger than any
+ * stretch a refill can produce -- two seconds against a ring that holds
+ * twenty is comfortable.
+ */
+#define XFADE_STALL_GRACE_MS  (2000u)
+
+/*
+ * EVERY WAY AN OVERLAP OR A TAIL CAN END, COUNTED.
+ *
+ * The problem this exists for: five boundaries across three sessions
+ * where a crossfade printed none of its endings, and 1106's watchdog
+ * then stayed silent -- which means the flags DID clear, on time,
+ * through one of the six sites that all log. A cleared flag and no line
+ * is a contradiction the source cannot produce, so the next thing to
+ * doubt is whether the line was delivered rather than whether the path
+ * ran.
+ *
+ * A log line cannot investigate its own delivery. A counter can: it is
+ * printed LATER, at the next boundary, on a console that is
+ * demonstrably working because the line carrying it arrived. If the
+ * tallies show an exit that printed nothing, the path ran and the line
+ * was lost. If they show no exit at all, something clears the flag
+ * outside the six known sites and the search moves back into the
+ * player.
+ *
+ * Not atomic, and deliberately not. Two tasks touch these -- the writer
+ * for the overlap's own exits, the decode loop for the rate refusals --
+ * but each counter is written by one task only, and they are read for
+ * comparison against log lines rather than for control. A lock here
+ * would be protecting a diagnostic from a race that cannot change the
+ * conclusion.
+ */
+enum {
+    XEXIT_START = 0,    /* an overlap began */
+    XEXIT_DONE,         /* ran to its full length */
+    XEXIT_CUT_SHORT,    /* outgoing ring emptied under it */
+    XEXIT_PARTIAL,      /* sub-frame remainder; see 1105 */
+    XEXIT_RATE_EARLY,   /* refused: rate mismatch, at the open */
+    XEXIT_RATE_LATE,    /* refused: rate mismatch, at the drain */
+    XEXIT_TAIL_DRY,     /* a tail played out */
+    XEXIT_TAIL_GONE,    /* media removed under a tail */
+    XEXIT_TAIL_CUT,     /* tail dropped by a press */
+    XEXIT_N
+};
+static uint32_t s_xexit[XEXIT_N];
+
+static const char *const s_xexit_name[XEXIT_N] = {
+    "start", "done", "cut", "partial", "rate-early", "rate-late",
+    "tail-dry", "tail-gone", "tail-cut"
+};
+
+/*
+ * Print the tallies, omitting the zeros.
+ *
+ * Called from the two lines that have arrived at every boundary in
+ * every log so far -- the overlap's start and the tail's latch -- so
+ * the numbers ride a message already known to get through.
+ */
+static void xexit_report(const char *when)
+{
+    char buf[160];
+    int n = 0;
+    for (int i = 0; i < XEXIT_N; i++) {
+        if (!s_xexit[i]) continue;
+        const int w = snprintf(buf + n, sizeof(buf) - (size_t)n, "%s%s=%" PRIu32,
+                               n ? " " : "", s_xexit_name[i], s_xexit[i]);
+        if (w < 0 || (size_t)(n + w) >= sizeof(buf)) break;
+        n += w;
+    }
+    if (!n) { snprintf(buf, sizeof(buf), "none yet"); }
+    ESP_LOGI(TAG, "exits at %s: %s", when, buf);
+}
 
 static void fade_apply(int16_t *pcm, size_t frames)
 {
@@ -1660,15 +1737,8 @@ static void xfade_stall_check(void)
     const uint32_t held = (xTaskGetTickCount() - s_xfade_since) *
                           portTICK_PERIOD_MS;
 
-    /*
-     * Twice the overlap's own length, with a floor. The floor is for a
-     * fit so short that twice it is a handful of milliseconds -- a
-     * legitimately starved overlap stretches, by design (see the solo
-     * branch), and a watchdog that fired on that would be reporting the
-     * feature working.
-     */
-    uint32_t limit = s_xfade_expect_ms * 2u;
-    if (limit < XFADE_STALL_FLOOR_MS) limit = XFADE_STALL_FLOOR_MS;
+    /* Its own length plus a fixed grace: see XFADE_STALL_GRACE_MS. */
+    const uint32_t limit = s_xfade_expect_ms + XFADE_STALL_GRACE_MS;
     if (held < limit) return;
 
     s_xfade_warned = true;
@@ -1789,6 +1859,7 @@ static void i2s_writer_task(void *arg)
 
         if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
             s_tail_pending = false;
+            s_xexit[XEXIT_TAIL_DRY]++;
             /*
              * With no crossfade this is the release, and it is the same
              * instant the gate used to fire on -- the timing of an
@@ -1825,6 +1896,7 @@ static void i2s_writer_task(void *arg)
             if (s_xfade_active) {
                 s_xfade_active = false;
                 s_xfade_armed = false;
+                s_xexit[XEXIT_CUT_SHORT]++;
                 ESP_LOGW(TAG, "crossfade cut short: the outgoing ring emptied");
             }
             continue;
@@ -1871,6 +1943,7 @@ static void i2s_writer_task(void *arg)
                         s_xfade_since  = xTaskGetTickCount();
                         s_xfade_expect_ms = fit * 1000u / rate;
                         s_xfade_warned = false;
+                        s_xexit[XEXIT_START]++;
                         xfade_match(play, fill);
                         ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms"
                                       "%s, trim out %d%% in %d%%",
@@ -1878,6 +1951,9 @@ static void i2s_writer_task(void *arg)
                                  fit < want ? " (tail was shorter)" : "",
                                  (int)((s_xfade_gain_a * 100) / 32768),
                                  (int)((s_xfade_gain_b * 100) / 32768));
+                        /* The previous boundary's tallies, on a line
+                         * that has arrived at every boundary so far. */
+                        xexit_report("crossfade start");
                     }
                 }
             }
@@ -1905,6 +1981,7 @@ static void i2s_writer_task(void *arg)
                          * exactly the ordinary handoff arriving early.
                          */
                         s_xfade_active = false;
+                        s_xexit[XEXIT_DONE]++;
                         const size_t left =
                             xStreamBufferBytesAvailable(s_ring[play]);
                         xStreamBufferReset(s_ring[play]);
@@ -2008,6 +2085,7 @@ static void i2s_writer_task(void *arg)
                 s_xfade_active = false;
                 s_xfade_armed  = false;
                 s_ring_play    = fill;
+                s_xexit[XEXIT_PARTIAL]++;
                 ring_publish();
                 ESP_LOGW(TAG, "crossfade ended on a partial frame "
                               "(%u bytes left, %u%% through the overlap)",
@@ -6022,6 +6100,7 @@ static track_end_t play_file(const char *path)
                              audio_out_rate(), info.sample_rate);
                     s_xfade_armed = false;
                     s_xfade_active = false;
+                    s_xexit[XEXIT_RATE_EARLY]++;
 
                     /*
                      * A DIP INSTEAD, IN TWO HALVES.
@@ -6138,6 +6217,7 @@ static track_end_t play_file(const char *path)
                          * stop.
                          */
                         s_xfade_active = false;
+                        s_xexit[XEXIT_RATE_LATE]++;
                     }
                     /*
                      * Until the ring is empty, not until the indices
@@ -6686,6 +6766,7 @@ static track_end_t play_file(const char *path)
                 s_tail_ring = s_ring_fill;
                 s_tail_since = xTaskGetTickCount();   /* see tail_stall_check() */
                 s_tail_pending = true;
+                xexit_report("tail latch");
                 ESP_LOGI(TAG, "tail: %u KB of this track still to play; "
                               "holding the screen",
                          (unsigned)(xStreamBufferBytesAvailable(s_ring[s_ring_fill]) / 1024));
@@ -6727,6 +6808,7 @@ static track_end_t play_file(const char *path)
              * chooser coming up behind it.
              */
             s_tail_pending = false;
+            s_xexit[XEXIT_TAIL_GONE]++;
         } else {
             /*
              * Interrupted: what is queued is a track the user has
@@ -6764,6 +6846,7 @@ static track_end_t play_file(const char *path)
              * to be out of step with.
              */
             s_tail_pending = false;
+            s_xexit[XEXIT_TAIL_CUT]++;
         }
 
         /*
