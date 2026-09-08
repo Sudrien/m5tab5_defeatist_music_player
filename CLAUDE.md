@@ -4124,6 +4124,71 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### A crossfade with no exit (1105)
+
+Three lines are supposed to be exhaustive at a crossfade boundary: the
+overlap completes (`crossfade done`), or it is cut short, or the ring it
+was fading out of runs dry (`the finished track has played out`). A
+boundary in the second board log printed none of them:
+
+    69194  tail: 3518 KB of this track still to play; holding the screen
+    87632  crossfade: 2000 ms, trim out 100% in 100%
+    88659  no text tags in this file; showing the filename
+           ... nothing ...
+
+The other three boundaries in the same log all printed their pair.
+
+**The screen changed anyway, and that is 1103's doing.** The visuals
+released at the midpoint, 1027 ms into a 2000 ms overlap, so nothing
+downstream noticed the writer state was where it should not be. Under the
+old end-of-overlap timing this would have shown as the screen never
+changing. 1103 turned a visible failure into a silent one, which is right
+for the viewer and is why this needed looking for rather than seeing.
+
+**The hole.** In the overlap block, `n` is the frame-aligned minimum of
+the two rings and `solo` is the frame-aligned outgoing ring. If the
+outgoing ring holds one, two or three bytes, all three exits miss it: not
+empty, so the handoff at the top of the loop does not fire; not a frame,
+so neither the mix nor the solo path can take it. The code fell out of
+the crossfade block and did the ordinary single-ring receive **with
+`s_xfade_active` still true** -- writing at unity partway down a fade,
+which is the exact artefact the solo branch above it exists to prevent
+and whose comment says so.
+
+**How a ring comes to hold a partial frame**, which is what makes this
+reachable rather than merely arithmetic. Every write is whole frames, so
+the remainder cannot come from a write that succeeded -- only from one
+that did not finish. `xStreamBufferSend()` returns a short count when the
+ring fills, and the decode loop's send loop breaks out on `s_seek_pct` or
+`s_pending_ready` with `remain` outstanding. A seek is followed by
+`s_pcm_flush`, which drains both rings and restores the alignment. **A
+pending track change is not.** So one to three bytes of a frame can cross
+a track boundary and land in the next overlap.
+
+**What is NOT established.** That this is what happened at 69194. The
+mechanism is reachable by inspection; it was not observed, and the log
+cannot distinguish it from the other ways those three lines could have
+gone quiet. The old code was also not permanently stuck -- the ordinary
+receive would drain the stray bytes and the handoff would fire on the
+pass after -- so the visible cost is one chunk of unity-gain audio inside
+a fade, not a hang. That is a smaller claim than "found it".
+
+So two things here. The exit is closed: the overlap ends explicitly, at
+the fade's current gain, with a line that names the byte count. And
+`tail_stall_check()` fires once if `s_tail_pending` outlives sixty
+seconds -- unreachable by any amount of audio a twenty-second ring can
+hold -- printing every ring's occupancy, which ring the tail is in, and
+where the overlap had got to. If the fall-through was the cause it will
+never fire; if it was something else it names it, instead of leaving the
+next reading to another 114 seconds of inference.
+
+**Host-tested, not built, not flashed.** `texttest/xfadetest.c`
+transcribes the exit arithmetic and sweeps both ring occupancies 0..64:
+the ordinary cases still reach mix, solo and handoff where they did, a
+sub-frame remainder reaches none of them, and **no other combination
+falls through**. That last one is the useful half -- it says the hole is
+exactly one case wide and the fix does not need to be broader.
+
 ### The screen changes at the crossfade's midpoint (1103)
 
 Four things describe the playing track -- the title row, the cover, the

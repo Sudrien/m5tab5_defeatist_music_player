@@ -930,6 +930,22 @@ static volatile int  s_tail_ring;
  */
 static volatile bool s_refill_pacing;
 
+/*
+ * When the tail latched, in ticks. Only meaningful while s_tail_pending.
+ */
+static volatile uint32_t s_tail_since;
+
+/*
+ * How long a tail can legitimately take to play out.
+ *
+ * A ring is about twenty seconds of audio, so a tail is at most that
+ * plus a crossfade, plus whatever a pause adds -- and a pause is why
+ * this is generous rather than tight. Sixty seconds cannot be reached
+ * by any amount of audio the ring can hold; it can only be reached by
+ * the flag being stuck.
+ */
+#define TAIL_STALL_MS   (60u * 1000)
+
 static bool tail_playing(void)
 {
     return s_tail_pending;
@@ -1528,6 +1544,59 @@ static volatile bool s_playing;
 
 static void ring_publish(void);
 
+/*
+ * "This tail should have finished by now."
+ *
+ * The second board log showed a boundary where a crossfade printed
+ * neither of its endings and the tail it was fading out of never
+ * reported playing out. Those three lines are supposed to be
+ * exhaustive: an overlap either completes, or is cut short, or the ring
+ * runs dry. All three were silent, and the screen changed anyway --
+ * because 1103 releases the visuals at the midpoint, which is correct
+ * for the viewer and is why nothing downstream noticed.
+ *
+ * That is the shape of fault this cannot be left to catch by eye. The
+ * detector is cheap, fires once, and prints the whole state rather than
+ * an opinion about it: which ring is playing, which is filling, which
+ * one the tail is in, how many bytes are in each, and where the overlap
+ * had got to. If the fall-through closed above was the cause, this will
+ * never fire again; if it was something else, this names it rather than
+ * leaving the next reading to another 114 seconds of inference.
+ *
+ * Writer-task only, so the state it prints is the state it owns.
+ */
+static void tail_stall_check(void)
+{
+    static bool warned;
+
+    if (!s_tail_pending) { warned = false; return; }
+    if (warned) return;
+
+    const uint32_t held = (xTaskGetTickCount() - s_tail_since) *
+                          portTICK_PERIOD_MS;
+    if (held < TAIL_STALL_MS) return;
+
+    warned = true;
+    ESP_LOGW(TAG, "tail still pending after %" PRIu32 " ms -- "
+                  "this should be impossible", held);
+    ESP_LOGW(TAG, "  play ring %d (%u B), fill ring %d (%u B), "
+                  "tail ring %d (%u B)",
+             s_ring_play,
+             (unsigned)(s_ring[s_ring_play]
+                        ? xStreamBufferBytesAvailable(s_ring[s_ring_play]) : 0),
+             s_ring_fill,
+             (unsigned)(s_ring[s_ring_fill]
+                        ? xStreamBufferBytesAvailable(s_ring[s_ring_fill]) : 0),
+             s_tail_ring,
+             (unsigned)(s_ring[s_tail_ring]
+                        ? xStreamBufferBytesAvailable(s_ring[s_tail_ring]) : 0));
+    ESP_LOGW(TAG, "  crossfade armed %d active %d, %" PRIu32 "/%" PRIu32
+                  " frames; playing %d, paused-writer %d",
+             (int)s_xfade_armed, (int)s_xfade_active,
+             s_xfade_pos, s_xfade_frames,
+             (int)s_playing, (int)s_writer_stop);
+}
+
 /* Drains the ring into I2S and nothing else, so the only thing it ever
  * blocks on is DMA. */
 static void i2s_writer_task(void *arg)
@@ -1632,6 +1701,9 @@ static void i2s_writer_task(void *arg)
          * including the ones where the receive below times out, because
          * a ring that has run dry generates no other event.
          */
+        /* Cheap, and one branch on the common path: see tail_stall_check(). */
+        tail_stall_check();
+
         if (s_tail_pending && xStreamBufferIsEmpty(s_ring[s_tail_ring])) {
             s_tail_pending = false;
             /*
@@ -1797,6 +1869,67 @@ static void i2s_writer_task(void *arg)
                     ring_publish();
                     continue;
                 }
+
+                /*
+                 * BOTH SIDES HAD NOTHING, AND THIS USED TO FALL THROUGH.
+                 *
+                 * n is zero and so is solo, which means the outgoing
+                 * ring holds less than one whole frame -- one, two or
+                 * three bytes. Not empty, so the handoff at the top of
+                 * the loop did not fire; not a frame, so neither the
+                 * mix nor the solo path can take it. The code then fell
+                 * out of the crossfade block entirely and did the
+                 * ordinary single-ring receive with `s_xfade_active`
+                 * still true.
+                 *
+                 * Two things wrong with that, and the second is worse.
+                 * The ordinary path writes at unity, which partway down
+                 * a fade is a step back up in level -- precisely the
+                 * artefact the solo branch above exists to prevent, and
+                 * its comment says so. And the overlap was left running
+                 * with nothing able to advance or end it: no `crossfade
+                 * done`, no `crossfade cut short`, and the tail it was
+                 * fading out of never reported having played out.
+                 *
+                 * HOW A RING COMES TO HOLD A PARTIAL FRAME, which is
+                 * the part that makes this reachable rather than merely
+                 * arithmetic. Everything writes whole frames, so the
+                 * remainder cannot come from a write that succeeded. It
+                 * comes from one that did not finish: xStreamBufferSend()
+                 * returns a SHORT count when the ring fills, and the
+                 * decode loop's send loop breaks out on `s_seek_pct` or
+                 * `s_pending_ready` with `remain` still outstanding. A
+                 * seek is followed by s_pcm_flush, which drains both
+                 * rings and puts the alignment back. A pending track
+                 * change is not. So the ring can carry one to three
+                 * bytes of a frame across a track boundary and into the
+                 * next overlap.
+                 *
+                 * A boundary in the second board log went silent on all
+                 * three of those lines at once, which is what sent
+                 * anyone looking here. **That this is that boundary is
+                 * NOT established** -- the mechanism above is reachable
+                 * by inspection and was not observed. The stall detector
+                 * below is what will say so next time.
+                 *
+                 * Ended explicitly rather than left to the handoff. The
+                 * handoff would catch it on the pass after the ordinary
+                 * receive drained the stray bytes, so the old code was
+                 * not permanently stuck; it was one pass of unity-gain
+                 * audio in the middle of a fade, and a state machine
+                 * whose exits were not where its logging said they were.
+                 */
+                s_xfade_active = false;
+                s_xfade_armed  = false;
+                s_ring_play    = fill;
+                ring_publish();
+                ESP_LOGW(TAG, "crossfade ended on a partial frame "
+                              "(%u bytes left, %u%% through the overlap)",
+                         (unsigned)avail_a,
+                         (unsigned)(s_xfade_frames
+                                    ? (s_xfade_pos * 100u) / s_xfade_frames
+                                    : 0));
+                continue;
             }
         }
 
@@ -6465,6 +6598,7 @@ static track_end_t play_file(const char *path)
              */
             if (blocks > 0 && !xStreamBufferIsEmpty(s_ring[s_ring_fill])) {
                 s_tail_ring = s_ring_fill;
+                s_tail_since = xTaskGetTickCount();   /* see tail_stall_check() */
                 s_tail_pending = true;
                 ESP_LOGI(TAG, "tail: %u KB of this track still to play; "
                               "holding the screen",
