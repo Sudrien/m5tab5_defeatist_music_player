@@ -1897,6 +1897,18 @@ static void i2s_writer_task(void *arg)
                 s_xfade_active = false;
                 s_xfade_armed = false;
                 s_xexit[XEXIT_CUT_SHORT]++;
+                /*
+                 * An overlap that ends before its midpoint still ends,
+                 * and the screen has to go with it. Only two of the
+                 * three exits used to raise this -- `done` because it
+                 * runs past the midpoint, and the tail-dry check
+                 * afterwards -- so an overlap cut short at 14% left the
+                 * screen on the outgoing track with nothing left to
+                 * change it. Raised on every exit now, so the question
+                 * "did the overlap end" has one answer rather than one
+                 * per branch.
+                 */
+                s_visuals_released = true;
                 ESP_LOGW(TAG, "crossfade cut short: the outgoing ring emptied");
             }
             continue;
@@ -1982,6 +1994,13 @@ static void i2s_writer_task(void *arg)
                          */
                         s_xfade_active = false;
                         s_xexit[XEXIT_DONE]++;
+                        /* Belt and braces: xfade_mix() raised this at
+                         * the midpoint, which is always before here.
+                         * Setting it again costs a store and removes
+                         * the need to reason about whether an overlap
+                         * short enough to skip the midpoint test can
+                         * exist. */
+                        s_visuals_released = true;
                         const size_t left =
                             xStreamBufferBytesAvailable(s_ring[play]);
                         xStreamBufferReset(s_ring[play]);
@@ -2034,66 +2053,41 @@ static void i2s_writer_task(void *arg)
                 }
 
                 /*
-                 * BOTH SIDES HAD NOTHING, AND THIS USED TO FALL THROUGH.
+                 * BOTH SIDES HAD NOTHING, AND IT FALLS THROUGH -- AGAIN.
                  *
-                 * n is zero and so is solo, which means the outgoing
-                 * ring holds less than one whole frame -- one, two or
-                 * three bytes. Not empty, so the handoff at the top of
-                 * the loop did not fire; not a frame, so neither the
-                 * mix nor the solo path can take it. The code then fell
-                 * out of the crossfade block entirely and did the
+                 * n is zero and so is solo, so the outgoing ring holds
+                 * less than one whole frame. 1105 added an explicit exit
+                 * here on the reasoning that falling through does the
                  * ordinary single-ring receive with `s_xfade_active`
-                 * still true.
+                 * still true, writing at unity partway down a fade.
+                 * That reasoning was right and the exit was worse than
+                 * the problem.
                  *
-                 * Two things wrong with that, and the second is worse.
-                 * The ordinary path writes at unity, which partway down
-                 * a fade is a step back up in level -- precisely the
-                 * artefact the solo branch above exists to prevent, and
-                 * its comment says so. And the overlap was left running
-                 * with nothing able to advance or end it: no `crossfade
-                 * done`, no `crossfade cut short`, and the tail it was
-                 * fading out of never reported having played out.
+                 * WHAT THE EXIT COST. It ended the overlap without
+                 * reaching the midpoint, so `s_visuals_released` was
+                 * never raised and the screen kept the previous track's
+                 * title, cover and envelope through the whole of the
+                 * next one -- "Beautiful & Broken" stayed up across two
+                 * more tracks until a manual selection cleared it. And
+                 * it moved `s_ring_play` to the fill ring while the tail
+                 * was still in the other one, leaving 3.2 MB that
+                 * nothing drains and `s_tail_pending` set for ever:
                  *
-                 * HOW A RING COMES TO HOLD A PARTIAL FRAME, which is
-                 * the part that makes this reachable rather than merely
-                 * arithmetic. Everything writes whole frames, so the
-                 * remainder cannot come from a write that succeeded. It
-                 * comes from one that did not finish: xStreamBufferSend()
-                 * returns a SHORT count when the ring fills, and the
-                 * decode loop's send loop breaks out on `s_seek_pct` or
-                 * `s_pending_ready` with `remain` still outstanding. A
-                 * seek is followed by s_pcm_flush, which drains both
-                 * rings and puts the alignment back. A pending track
-                 * change is not. So the ring can carry one to three
-                 * bytes of a frame across a track boundary and into the
-                 * next overlap.
+                 *   W tail still pending after 60002 ms
+                 *     play ring 0 (3600384 B), fill ring 0 (3600384 B),
+                 *     tail ring 1 (3253308 B)
                  *
-                 * A boundary in the second board log went silent on all
-                 * three of those lines at once, which is what sent
-                 * anyone looking here. **That this is that boundary is
-                 * NOT established** -- the mechanism above is reachable
-                 * by inspection and was not observed. The stall detector
-                 * below is what will say so next time.
+                 * Both stalls in that log follow a `partial=` increment
+                 * and nothing else does.
                  *
-                 * Ended explicitly rather than left to the handoff. The
-                 * handoff would catch it on the pass after the ordinary
-                 * receive drained the stray bytes, so the old code was
-                 * not permanently stuck; it was one pass of unity-gain
-                 * audio in the middle of a fade, and a state machine
-                 * whose exits were not where its logging said they were.
+                 * The fall-through produced neither symptom across five
+                 * board sessions. One chunk of unity-gain audio inside a
+                 * fade is a worse-sounding boundary; an orphaned tail
+                 * and a frozen screen are broken ones. So it falls
+                 * through, and 1107's counter stays to say how often --
+                 * which is how this was found at all.
                  */
-                s_xfade_active = false;
-                s_xfade_armed  = false;
-                s_ring_play    = fill;
                 s_xexit[XEXIT_PARTIAL]++;
-                ring_publish();
-                ESP_LOGW(TAG, "crossfade ended on a partial frame "
-                              "(%u bytes left, %u%% through the overlap)",
-                         (unsigned)avail_a,
-                         (unsigned)(s_xfade_frames
-                                    ? (s_xfade_pos * 100u) / s_xfade_frames
-                                    : 0));
-                continue;
             }
         }
 
@@ -5232,10 +5226,30 @@ static track_end_t play_file(const char *path)
         if (ok && sec) {
             const uint32_t in_len = (rg_holding(path) && s_rg.format.present)
                                   ? s_rg.format.sec : 0;
-            if (in_len && in_len <= sec * 2) {
+            /*
+             * The decoder, when the sidecar has nothing.
+             *
+             * "Unknown is not short" is the right default and it had a
+             * hole: a track with no sidecar yet reported 0, so the rule
+             * did not fire, and the board crossfaded 12 s into a 20 s
+             * `Prelude` that had never been played before. The very next
+             * boundary -- once the sidecar existed -- refused correctly
+             * with `the incoming track is only 20 s`, which is the same
+             * file failing and passing the same test on consecutive
+             * plays.
+             *
+             * decoder_open() has already run by here and the index it
+             * built knows the length; it is the same number the sidecar
+             * would have held. Asking it costs nothing and closes the
+             * first-play hole, which is exactly the case a listener hits
+             * on a new album.
+             */
+            const uint32_t in_len_dec = in_len ? in_len
+                                              : decoder_duration_sec(dec);
+            if (in_len_dec && in_len_dec <= sec * 2) {
                 ok = false;
                 ESP_LOGI(TAG, "no crossfade: the incoming track is only "
-                              "%" PRIu32 " s", in_len);
+                              "%" PRIu32 " s", in_len_dec);
             }
         }
 
@@ -6251,6 +6265,7 @@ static track_end_t play_file(const char *path)
                     s_xfade_armed = false;
                     s_xfade_active = false;
                     s_xexit[XEXIT_RATE_EARLY]++;
+                    s_visuals_released = true;
 
                     /*
                      * A DIP INSTEAD, IN TWO HALVES.
@@ -6368,6 +6383,7 @@ static track_end_t play_file(const char *path)
                          */
                         s_xfade_active = false;
                         s_xexit[XEXIT_RATE_LATE]++;
+                        s_visuals_released = true;
                     }
                     /*
                      * Until the ring is empty, not until the indices

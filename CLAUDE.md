@@ -4124,6 +4124,65 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### 1105 was worse than the thing it fixed (1112)
+
+The board found it, and the symptom was a screen that stopped changing:
+"Beautiful & Broken" stayed up across two subsequent tracks until a
+manual selection cleared it.
+
+**The cause was 1105's exit.** At 1318921 a crossfade started; at 1320698
+it ended through the partial-frame branch, `14% through the overlap`. The
+midpoint was never reached, so `s_visuals_released` was never raised, and
+the exit did not raise it either -- so nothing was left that could change
+the screen. It also moved `s_ring_play` to the fill ring while the tail
+was still in the other one:
+
+    W tail still pending after 60002 ms -- this should be impossible
+      play ring 0 (3600384 B), fill ring 0 (3600384 B), tail ring 1 (3253308 B)
+
+3.2 MB that nothing drains and `s_tail_pending` set for ever. Both stalls
+in that log follow a `partial=` increment and nothing else does.
+
+**So it falls through again.** 1105's reasoning was right -- falling
+through does the ordinary single-ring receive with `s_xfade_active` still
+true, writing at unity partway down a fade -- and its conclusion was
+wrong. One chunk of unity-gain audio inside a fade is a worse-sounding
+boundary. An orphaned tail and a frozen screen are broken ones. The
+fall-through produced neither across five board sessions.
+
+1107's counter stays, which is the only reason this was findable: the
+`partial=1` then `partial=2` in the tallies is what tied two
+sixty-second stalls to one branch.
+
+**Every exit releases the screen now.** Only two of them did -- `done`,
+because it runs past the midpoint, and the tail-dry check. That was
+enough while nothing else ended an overlap early, and 1105 added
+something that did. The rule is now that ending an overlap and releasing
+the screen are the same event, so the question has one answer rather than
+one per branch.
+
+**And the length rule had a first-play hole.** "Unknown is not short" is
+the right default, but a track with no sidecar yet reported 0, so 1108's
+rule did not fire and the board crossfaded 12 s into a 20 s `Prelude`
+that had never been played. The very next boundary, once the sidecar
+existed, refused correctly with `the incoming track is only 20 s` -- the
+same file failing and passing the same test on consecutive plays. The
+decoder is already open at the arming decision and its index knows the
+length, so it is asked when the sidecar has nothing. Had that fired at
+1318921, neither stall would have happened.
+
+**The honest summary of 1105 and 1106.** 1105 guarded a case nobody was
+hitting, which was said at the time; when the case did start being hit,
+the guard was the failure. 1106 was built to catch a stall that was not
+happening, and then caught this one -- the watchdog's value has now twice
+been something other than what it was aimed at.
+
+**Host-tested, not built, not flashed.** `texttest/releasetest.c` sweeps
+every exit rather than checking any one of them, because the fault was
+the existence of an exception rather than the behaviour of a branch. It
+also asserts the shape of the new partial-frame case: it does not end the
+overlap, so it cannot end it without releasing.
+
 ### One decoded cover, kept (1111)
 
 `mediacache.h` has said since it was written that caching the decode
