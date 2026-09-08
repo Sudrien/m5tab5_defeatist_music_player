@@ -7782,6 +7782,10 @@ static void player_loop(void)
              * track with a coincidentally equal path getting someone
              * else's cover. */
             mediacache_clear();
+            /* And the one decoded frame, for the same reason: it belongs
+             * to a file that is no longer reachable, and it is a
+             * megabyte the next large cover will want in one piece. */
+            albumart_forget_cover();
             /*
              * The chooser waits for the fade, and so does the clear.
              *

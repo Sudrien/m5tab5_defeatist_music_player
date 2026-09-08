@@ -4124,6 +4124,71 @@ the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
 `CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
 TJpgDec cannot decode at any pool size.
 
+### One decoded cover, kept (1111)
+
+`mediacache.h` has said since it was written that caching the decode
+would cost forty times the memory to save a delay nobody can perceive.
+That was true while every cover went through the hardware codec in
+single-digit milliseconds. **1104 overturned its own premise.** Routing
+the 3000x3000 cover through TJpgDec made it work, and the board then
+measured the same picture -- same 1871582 bytes, same `hash 04d36f37` --
+decoding for 4.6 seconds at every track change AND at every
+settings-panel close. Nine decodes in one session, nine identical
+hashes, one of them necessary.
+
+4.6 s is not a delay nobody can perceive, and it runs on media_task, so
+the prefetch queues behind it: `prefetched tags` landed ~500 ms after
+each decode finished rather than during the track.
+
+So one frame is kept -- the last one drawn -- with the hash of the
+bitstream it came from. **This is 1011b, and it only became possible by
+accident.** 1011 wanted exactly this and could not have it, because the
+hash existed only inside `albumart_draw()`; 1102 put it on the store
+path as a side effect of sharing buffers, and 1104 made it one function
+rather than two that had to agree.
+
+**The hash is taken on the caller's bitstream, before an engine or a
+buffer exists.** Hashing the DMA copy would mean allocating the input
+buffer to discover it was not needed. The log line still reports it, so
+a board log reads the same on both paths.
+
+**The cap is the load-bearing part.** A full-size decode of a large cover
+is megabytes -- 3000x3000 is 17 MB -- and the largest free PSRAM block is
+a structural 16128 KB with the framebuffer across the middle of the heap.
+Retaining a frame that size would guarantee the next large cover cannot
+decode at all: a slow success turned into a permanent failure. Two
+megabytes covers what is actually reached -- a 700x700 native decode is
+~991 KB, TJpgDec's 1/4 of a 3000 px cover is 1098 KB -- and anything
+larger is drawn and dropped.
+
+**And the old frame goes before the new decode starts, not after.** Held
+across it, it is a megabyte of the contiguous block the decode is about
+to ask for, on the one path where that block is already 1544 KB short of
+what the hardware wanted.
+
+Two smaller rules, both of which the host test exists to hold:
+
+- **Kept only if it was drawn.** A frame that failed to blit is not what
+  is on the panel, and answering a later request with it would put up a
+  picture nobody has seen instead of retrying.
+- **Ownership moves.** `cover_retain()` takes the buffer and says so; the
+  caller frees only what was refused. A frame that is both kept and freed
+  is a use-after-free the board would show as a corrupted cover, much
+  later, on an unrelated track.
+
+**What this does not cover.** PNG covers go through `albumart_draw_png()`,
+which streams through pngle and never holds a full bitmap, so there is no
+frame to keep and no change here. A PNG cover still re-decodes on every
+repaint. That is the right trade while pngle's whole point is not
+materialising the image, but it means the fix is JPEG-only and the log
+will show it.
+
+**Host-tested, not built, not flashed.** `texttest/kepttest.c` under ASan
+checks what makes the cache safe rather than that it works: repeated hits
+never decode, a different hash never hits, an oversized frame is dropped
+rather than kept, a failed blit is not answered with later, the release
+is idempotent, and a hash of 0 does not collide with "nothing kept".
+
 ### Settings belong to the player, the resume track belongs to the card (1110)
 
 The volume-follow overwrite, closed. It was left open through five

@@ -677,6 +677,181 @@ static const char *sof_name(uint8_t m)
     }
 }
 
+/*
+ * ONE DECODED COVER, KEPT.
+ *
+ * mediacache.h has said since it was written that caching the decode
+ * would cost forty times the memory to save a delay nobody can perceive.
+ * That was true while every cover went through the hardware codec in
+ * single-digit milliseconds. 1104 made the 3000x3000 cover work by
+ * routing it through TJpgDec, and the board then measured the same
+ * picture -- same 1871582 bytes, same hash 04d36f37 -- decoding for 4.6
+ * seconds at every track change AND at every settings-panel close. Nine
+ * decodes in one session, nine identical hashes, one of them necessary.
+ *
+ * 4.6 s is not a delay nobody can perceive, and it runs on media_task,
+ * so the prefetch queues behind it. The arithmetic that made caching
+ * absurd has been overturned by its own subject.
+ *
+ * WHAT IS KEPT: one frame, the last one drawn, with the hash of the
+ * bitstream it came from. 1011 wanted exactly this and could not have
+ * it, because the hash existed only on the draw path; 1102 put it on the
+ * store path as a side effect of sharing buffers, and 1108's
+ * albumart_cover_hash() made it one function rather than two that had to
+ * agree.
+ *
+ * THE CAP IS THE LOAD-BEARING PART. A full-size decode of a large cover
+ * is megabytes -- 3000x3000 is 17 MB -- and the largest free PSRAM block
+ * is a structural 16128 KB with the framebuffer sitting across the
+ * middle of the heap. Retaining a frame of that size would guarantee the
+ * next large cover cannot decode at all, turning a slow success into a
+ * permanent failure. Two megabytes covers the sizes actually reached:
+ * a 700x700 native decode is ~991 KB and TJpgDec's 1/4 of a 3000 px
+ * cover is 1098 KB. Anything larger is drawn and dropped.
+ *
+ * AND THE OLD FRAME GOES BEFORE THE NEW DECODE STARTS, not after. Held
+ * across the decode it would be a megabyte of the contiguous block the
+ * decode is about to ask for, on the one path where that block is
+ * already short.
+ */
+#define COVER_KEEP_MAX_BYTES  (2u * 1024 * 1024)
+
+static uint8_t *s_kept;
+static size_t   s_kept_size;
+static int      s_kept_w, s_kept_h, s_kept_stride;
+static uint32_t s_kept_hash;
+
+static void cover_drop(void)
+{
+    if (!s_kept) return;
+    free(s_kept);
+    s_kept = NULL;
+    s_kept_size = 0;
+    s_kept_hash = 0;
+}
+
+/* Takes ownership when it keeps, and says whether it did -- the caller
+ * frees only what was refused. */
+static bool cover_retain(uint8_t *rgb, size_t size, int iw, int ih,
+                         int stride, uint32_t hash)
+{
+    if (!rgb || !size || size > COVER_KEEP_MAX_BYTES) return false;
+    cover_drop();
+    s_kept = rgb;
+    s_kept_size = size;
+    s_kept_w = iw;
+    s_kept_h = ih;
+    s_kept_stride = stride;
+    s_kept_hash = hash;
+    return true;
+}
+
+void albumart_forget_cover(void)
+{
+    cover_drop();
+}
+
+/*
+ * Centre, fit and blit a decoded RGB565 cover.
+ *
+ * Split out of albumart_draw() so it can be reached twice: once behind a
+ * decode, and once from the retained frame when the same picture is
+ * asked for again. Everything it needs is the pixels and their shape --
+ * it never sees the JPEG -- which is what makes the second path possible
+ * at all.
+ */
+static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
+                            int screen_w, int screen_h,
+                            const uint8_t *rgb, int iw, int ih, int stride)
+{
+    (void)panel;
+
+    /*
+     * Fitted to the box in BOTH directions -- enlarged as well as
+     * reduced. There used to be an `if (iw > screen_w || ih > screen_h)`
+     * around this, so a cover smaller than the panel was centred at its
+     * native size with black all round it. A 300 px cover on a 720 px
+     * panel occupied a sixth of the area it was given and looked like a
+     * thumbnail somebody forgot to load properly.
+     *
+     * Nothing about the arithmetic below needed to change to enlarge:
+     * the 16.16 step is simply less than 1.0 when cw > iw, and the same
+     * loop reads each source pixel several times instead of skipping
+     * some. That is the advantage of a fixed-point step over the integer
+     * one this replaced.
+     *
+     * Nearest neighbour, so enlarging is blocky -- a 300 px cover on a
+     * 720 px panel is 2.4x and the pixels show. That is the honest
+     * result: the alternative is a bilinear pass that makes a small
+     * image look soft instead of blocky, which is not obviously better
+     * and costs four reads and three lerps per output pixel during
+     * playback.
+     */
+    const int64_t fit_by_width = (int64_t)iw * screen_h;
+    const int64_t fit_by_height = (int64_t)ih * screen_w;
+
+    int cw, ch;
+    if (fit_by_width >= fit_by_height) {
+        /* Wider than the box's aspect: width is the binding dimension. */
+        cw = screen_w;
+        ch = (int)(((int64_t)ih * screen_w) / iw);
+    } else {
+        ch = screen_h;
+        cw = (int)(((int64_t)iw * screen_h) / ih);
+    }
+    if (cw < 1) cw = 1;
+    if (ch < 1) ch = 1;
+
+    /* 16.16, rounded up so the last output pixel cannot index past the
+     * last source row or column. */
+    const uint32_t xstep = (uint32_t)(((uint64_t)iw << 16) / (uint32_t)cw);
+    const uint32_t ystep = (uint32_t)(((uint64_t)ih << 16) / (uint32_t)ch);
+
+    const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
+
+    if (cw != iw || ch != ih) {
+        ESP_LOGI(TAG, "cover %s to %dx%d",
+                 (cw > iw) ? "enlarged" : "fitted", cw, ch);
+    }
+
+    /* The shadow, not the panel's buffer. Drawing straight into the
+     * scanned-out buffer is what made the cover appear as a flash of
+     * black followed by a slow fill. */
+    uint16_t *fb = gfx_fb();
+    ESP_RETURN_ON_ERROR(fb ? ESP_OK : ESP_ERR_INVALID_STATE,
+                        TAG, "no shadow buffer");
+
+    /* Black out, then place the crop, then copy the band up once.
+     *
+     * screen_h is the height of the artwork area, not of the panel: the
+     * caller passes the space above the transport bar. Clearing the full
+     * panel height here would blank the bar in the shadow and blit that
+     * over it, so the bar vanished on every track change until the next
+     * ui_draw() put it back. */
+    memset(fb, 0, (size_t)screen_w * screen_h * 2);
+    const uint16_t *src = (const uint16_t *)rgb;
+    for (int y = 0; y < ch; y++) {
+        uint32_t syf = (uint32_t)y * ystep;
+        int srow = (int)(syf >> 16);
+        if (srow >= ih) srow = ih - 1;
+
+        const uint16_t *row = &src[(size_t)srow * stride];
+        uint16_t *dst = &fb[(dy + y) * screen_w + dx];
+
+        if (xstep == (1u << 16)) {
+            memcpy(dst, row, (size_t)cw * 2);
+        } else {
+            uint32_t sxf = 0;
+            for (int x = 0; x < cw; x++, sxf += xstep) {
+                int scol = (int)(sxf >> 16);
+                if (scol >= iw) scol = iw - 1;
+                dst[x] = row[scol];
+            }
+        }
+    }
+    return gfx_blit_err(0, screen_h);
+}
+
 esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
                         const uint8_t *jpeg, size_t jpeg_len)
 {
@@ -689,6 +864,38 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     bool soft = false;
     int  soft_w = 0, soft_h = 0;
     size_t in_size = 0, rgb_size = 0;
+
+    /*
+     * The hash first, before an engine, a buffer or a byte of work.
+     *
+     * Taken on the caller's bitstream rather than on the DMA copy `in`.
+     * They are the same bytes -- `in` is a memcpy of this -- but hashing
+     * here is what lets the whole decode be skipped, and hashing there
+     * would mean allocating the input buffer to discover it was not
+     * needed. The log line below still reports it, so a board log reads
+     * the same on both paths.
+     */
+    const uint32_t in_hash = albumart_cover_hash(jpeg, jpeg_len);
+
+    if (s_kept && s_kept_hash == in_hash) {
+        /*
+         * The picture already on the panel, drawn again without a
+         * decoder. This is the settings-panel close and the track change
+         * within an album -- the cases the board measured at 4.6 s each.
+         */
+        ESP_LOGI(TAG, "cover from the kept frame (hash %08x, %dx%d)",
+                 (unsigned)in_hash, s_kept_w, s_kept_h);
+        return blit_cover(panel, screen_w, screen_h, s_kept,
+                          s_kept_w, s_kept_h, s_kept_stride);
+    }
+
+    /*
+     * A miss, so the old frame goes NOW rather than after the decode.
+     * Held across it, it is a megabyte of the contiguous block the
+     * decode is about to ask for -- on the one path where that block is
+     * already 1544 KB short of what the hardware wanted.
+     */
+    cover_drop();
 
     uint8_t sof = 0;
     uint32_t sof_w = 0, sof_h = 0;
@@ -783,9 +990,8 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
      * Public domain (Austin Appleby), so unlike TJpgDec it adds no
      * licence obligation.
      */
-    const uint32_t sum = albumart_cover_hash(in, jpeg_len);
     ESP_LOGI(TAG, "jpeg in: %u bytes, hash %08x",
-             (unsigned)jpeg_len, (unsigned)sum);
+             (unsigned)jpeg_len, (unsigned)in_hash);
 
     const jpeg_decode_memory_alloc_cfg_t out_cfg = {
         .buffer_direction = JPEG_DEC_ALLOC_OUTPUT_BUFFER,
@@ -960,93 +1166,19 @@ have_pixels:
     const int ih     = soft ? soft_h : (int)info.height;
     const int stride = soft ? soft_w : (int)pad_w;
 
+    ret = blit_cover(panel, screen_w, screen_h, rgb, iw, ih, stride);
+
     /*
-     * Fitted to the box in BOTH directions -- enlarged as well as
-     * reduced. There used to be an `if (iw > screen_w || ih > screen_h)`
-     * around this, so a cover smaller than the panel was centred at its
-     * native size with black all round it. A 300 px cover on a 720 px
-     * panel occupied a sixth of the area it was given and looked like a
-     * thumbnail somebody forgot to load properly.
-     *
-     * Nothing about the arithmetic below needed to change to enlarge:
-     * the 16.16 step is simply less than 1.0 when cw > iw, and the same
-     * loop reads each source pixel several times instead of skipping
-     * some. That is the advantage of a fixed-point step over the integer
-     * one this replaced.
-     *
-     * Nearest neighbour, so enlarging is blocky -- a 300 px cover on a
-     * 720 px panel is 2.4x and the pixels show. That is the honest
-     * result: the alternative is a bilinear pass that makes a small
-     * image look soft instead of blocky, which is not obviously better
-     * and costs four reads and three lerps per output pixel during
-     * playback.
+     * Kept only if it was drawn. A frame that failed to blit is not
+     * what is on the panel, and answering a later request with it would
+     * put up a picture nobody has seen instead of retrying.
      */
-    const int64_t fit_by_width = (int64_t)iw * screen_h;
-    const int64_t fit_by_height = (int64_t)ih * screen_w;
-
-    int cw, ch;
-    if (fit_by_width >= fit_by_height) {
-        /* Wider than the box's aspect: width is the binding dimension. */
-        cw = screen_w;
-        ch = (int)(((int64_t)ih * screen_w) / iw);
-    } else {
-        ch = screen_h;
-        cw = (int)(((int64_t)iw * screen_h) / ih);
+    if (ret == ESP_OK && cover_retain(rgb, rgb_size, iw, ih, stride, in_hash)) {
+        rgb = NULL;             /* ownership moved; see cleanup */
     }
-    if (cw < 1) cw = 1;
-    if (ch < 1) ch = 1;
-
-    /* 16.16, rounded up so the last output pixel cannot index past the
-     * last source row or column. */
-    const uint32_t xstep = (uint32_t)(((uint64_t)iw << 16) / (uint32_t)cw);
-    const uint32_t ystep = (uint32_t)(((uint64_t)ih << 16) / (uint32_t)ch);
-
-    const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
-
-    if (cw != iw || ch != ih) {
-        ESP_LOGI(TAG, "cover %s to %dx%d",
-                 (cw > iw) ? "enlarged" : "fitted", cw, ch);
-    }
-
-    /* The shadow, not the panel's buffer. Drawing straight into the
-     * scanned-out buffer is what made the cover appear as a flash of
-     * black followed by a slow fill. */
-    uint16_t *fb = gfx_fb();
-    ESP_GOTO_ON_ERROR(fb ? ESP_OK : ESP_ERR_INVALID_STATE,
-                      cleanup, TAG, "no shadow buffer");
-
-    /* Black out, then place the crop, then copy the band up once.
-     *
-     * screen_h is the height of the artwork area, not of the panel: the
-     * caller passes the space above the transport bar. Clearing the full
-     * panel height here would blank the bar in the shadow and blit that
-     * over it, so the bar vanished on every track change until the next
-     * ui_draw() put it back. */
-    memset(fb, 0, (size_t)screen_w * screen_h * 2);
-    const uint16_t *src = (const uint16_t *)rgb;
-    for (int y = 0; y < ch; y++) {
-        uint32_t syf = (uint32_t)y * ystep;
-        int srow = (int)(syf >> 16);
-        if (srow >= ih) srow = ih - 1;
-
-        const uint16_t *row = &src[(size_t)srow * stride];
-        uint16_t *dst = &fb[(dy + y) * screen_w + dx];
-
-        if (xstep == (1u << 16)) {
-            memcpy(dst, row, (size_t)cw * 2);
-        } else {
-            uint32_t sxf = 0;
-            for (int x = 0; x < cw; x++, sxf += xstep) {
-                int scol = (int)(sxf >> 16);
-                if (scol >= iw) scol = iw - 1;
-                dst[x] = row[scol];
-            }
-        }
-    }
-    ESP_GOTO_ON_ERROR(gfx_blit_err(0, screen_h),
-                      cleanup, TAG, "draw");
 
 cleanup:
+    /* NULL when the frame was kept -- cover_retain() took it. */
     if (rgb) free(rgb);
     if (in) free(in);
     if (dec) jpeg_del_decoder_engine(dec);
