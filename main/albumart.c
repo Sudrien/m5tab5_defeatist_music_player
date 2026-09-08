@@ -49,7 +49,77 @@ static const char *TAG = "tab5_art";
  *
  * TJpgDec writes RGB565 tightly packed, no padding, so the caller's
  * stride is the width it gets back here.
+ *
+ * THE WORK BUFFER IS OURS, AND IT HAS TO BE (1104)
+ *
+ * esp_jpeg will allocate TJpgDec's scratch pool itself, and on the
+ * board that pool was 380 bytes too small -- every cover failed at
+ * jd_prepare() with JDR_MEM1 before a single MCU was decoded. It is not
+ * a memory shortage and it has nothing to do with the fragmentation the
+ * hardware path reports a few lines above: the same failure happens on
+ * a 200x200 cover with megabytes free.
+ *
+ * jpeg_decoder.c picks between two sizes at compile time:
+ *
+ *     JD_FASTDECODE == 2  ->  65472
+ *     otherwise           ->   3100   "Recommended buffer size;
+ *                                      Independent on the size of the image"
+ *
+ * The comment is true and beside the point. The pool is independent of
+ * the image's dimensions and is NOT independent of its chroma
+ * subsampling or of JD_FASTDECODE. For a 4:2:0 image jd_prepare() takes
+ * JD_SZBUF for the input buffer (512), two quantiser tables at 64
+ * int32_t (512), four Huffman tables at 16 + np*2 + np (~1108), a
+ * workbuf of n*64*2 + 64 with n = 4 (576), and an mcubuf of
+ * (n + 2) * 64 * sizeof(jd_yuv_t) -- and that last type is int16_t when
+ * JD_FASTDECODE >= 1 and uint8_t when it is 0. So:
+ *
+ *     FASTDECODE 0:  512 + 512 + 1112 + 576 + 384  =  3096   fits 3100
+ *     FASTDECODE 1:  512 + 512 + 1112 + 576 + 768  =  3480   does not
+ *
+ * (Every block is rounded up to a word by alloc_pool(), which is where
+ * the odd four bytes in the Huffman row come from.)
+ *
+ * 3100 is tuned for FASTDECODE 0 and clears it by FOUR BYTES. This
+ * project builds with CONFIG_JD_FASTDECODE=1, which doubles the mcubuf
+ * row and puts it 380 over.
+ *
+ * Note what this means for the shape of the bug: it depends on the
+ * chroma subsampling and not on the dimensions. A 4:4:4 cover has n = 1
+ * and fits either way, which is why this looked like a large-image
+ * problem on a memory-starved path and was neither.
+ *
+ * Fixed here rather than by setting CONFIG_JD_FASTDECODE=0, because 0
+ * gives up the 32-bit barrel-shifter path on a decode that is already
+ * seconds of CPU on the task 1005's watchdog fired on. Making the buffer
+ * the right size costs 8 KB of DRAM for the length of one decode; making
+ * the decoder slower costs every cover, for ever.
+ *
+ * TWO CONFIG SYMBOLS THIS DEPENDS ON, which 1101 used without saying so:
+ *
+ *   CONFIG_JD_USE_SCALE   must be set, or tjpgdcnf.h defaults JD_USE_SCALE
+ *                         to 0 and any out_scale but 1/1 comes back
+ *                         JDR_PAR from jd_decomp() -- a different failure
+ *                         at a later stage, and the whole point of this
+ *                         path is the scale.
+ *   CONFIG_JD_FORMAT      may be either. 0 is RGB888 and esp_jpeg's output
+ *                         callback converts to RGB565 for us; out_color_bytes
+ *                         comes from cfg.out_format, not from JD_FORMAT, so
+ *                         the buffer arithmetic below is right at 2 bytes
+ *                         per pixel whichever way it is set.
  */
+
+/*
+ * Room for four quantiser tables and Huffman tables larger than the
+ * typical ones, on top of the ~3.5 KB above. Internal DRAM, not PSRAM:
+ * this is TJpgDec's hot scratch and it is touched per MCU.
+ *
+ * heap_caps_malloc() returns at least word-aligned, which is what
+ * alloc_pool() needs -- it rounds every block size up to 4 and then
+ * hands out slices from the front, so a misaligned base would misalign
+ * the int32_t quantiser tables and nothing would report it.
+ */
+#define JPEG_SW_WORKBUF  (8u * 1024)
 static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
                                  const jpeg_decode_picture_info_t *info,
                                  int screen_w, int screen_h,
@@ -68,6 +138,21 @@ static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
            (int)(info->width  >> (idx + 1)) >= screen_w &&
            (int)(info->height >> (idx + 1)) >= screen_h) {
         idx++;
+    }
+
+    /*
+     * One buffer for the whole ladder rather than one per attempt. Every
+     * iteration hands it to a fresh esp_jpeg_decode() which calls
+     * jd_prepare(), and jd_prepare() memsets the JDEC and resets the
+     * pool pointer to the base -- so a second attempt reuses it cleanly
+     * and there is nothing to carry between them.
+     */
+    uint8_t *work = heap_caps_malloc(JPEG_SW_WORKBUF,
+                                     MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!work) {
+        ESP_LOGW(TAG, "no DRAM for the %u KB JPEG work buffer",
+                 (unsigned)(JPEG_SW_WORKBUF / 1024));
+        return ESP_ERR_NO_MEM;
     }
 
     for (; idx <= 3; idx++) {
@@ -99,14 +184,41 @@ static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
              * side.
              */
             .flags = { .swap_color_bytes = 0 },
+            /* See JPEG_SW_WORKBUF. Supplying this is the whole of 1104:
+             * esp_jpeg only allocates its own when working_buffer is
+             * NULL, and its own is the size that does not fit. */
+            .advanced = {
+                .working_buffer      = work,
+                .working_buffer_size = JPEG_SW_WORKBUF,
+            },
         };
         esp_jpeg_image_output_t outimg = { 0 };
 
         const esp_err_t err = esp_jpeg_decode(&cfg, &outimg);
         if (err != ESP_OK) {
             free(buf);
-            ESP_LOGW(TAG, "software decode at 1/%d failed (%s)",
-                     1 << idx, esp_err_to_name(err));
+            /*
+             * The context, because the error code carries none.
+             * esp_jpeg_decode() collapses every TJpgDec JDR_* code into
+             * ESP_FAIL, so "failed (ESP_FAIL)" on its own cost two board
+             * runs to tell a work-pool shortage from a real allocation
+             * failure. The component prints the raw code itself at E,
+             * one line above this one; what it does not print is any of
+             * the state that says which of its meanings applies.
+             *
+             * If this line appears again, read the JPEG's own E line
+             * first: 3 is JDR_MEM1 and means the pool is still short --
+             * raise JPEG_SW_WORKBUF; 5 is JDR_PAR and means
+             * CONFIG_JD_USE_SCALE is off; 6-8 are format errors and mean
+             * the cover is progressive, which TJpgDec cannot decode at
+             * any pool size and which no change here will fix.
+             */
+            ESP_LOGW(TAG, "software decode at 1/%d failed (%s): "
+                          "%dx%d out, %u KB outbuf, %u KB workbuf",
+                     1 << idx, esp_err_to_name(err), w, h,
+                     (unsigned)(need / 1024),
+                     (unsigned)(JPEG_SW_WORKBUF / 1024));
+            heap_caps_free(work);
             return err;
         }
 
@@ -116,9 +228,11 @@ static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
         *out_h = (int)outimg.height;
         ESP_LOGI(TAG, "cover decoded in software at 1/%d: %dx%d, %u KB",
                  1 << idx, *out_w, *out_h, (unsigned)(need / 1024));
+        heap_caps_free(work);
         return ESP_OK;
     }
 
+    heap_caps_free(work);
     ESP_LOGW(TAG, "no scale of this cover fits; showing the format instead");
     return ESP_ERR_NO_MEM;
 }

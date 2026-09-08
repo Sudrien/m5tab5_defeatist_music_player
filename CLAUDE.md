@@ -4050,6 +4050,80 @@ notice has to travel with a redistribution -- the second such obligation
 after the font's OFL. Recorded in the README's licensing section, which
 also gained the MurmurHash2 line from 1011.
 
+### The software decoder never had room to start (1104)
+
+1101 shipped the TJpgDec fallback uncompiled. It compiled, it ran, and
+every cover failed:
+
+    E JPEG: esp_jpeg_decode(98): Error in preparing JPEG image! 3
+    W tab5_art: software decode at 1/4 failed (ESP_FAIL)
+
+**Not a memory shortage, and nothing to do with the fragmentation the
+line above it reports.** `3` is TJpgDec's `JDR_MEM1` and it came from
+`jd_prepare()`, before a single MCU was decoded. The 1098 KB output
+buffer allocated fine; the code never reaches `esp_jpeg_decode()`
+otherwise. What was short was TJpgDec's scratch pool, which esp_jpeg
+sizes at compile time and which is 3100 bytes on this build.
+
+**The arithmetic, which is the whole finding.** `jd_prepare()` takes from
+one pool: `JD_SZBUF` for the input buffer, the quantiser tables at 64
+`int32_t` each, the Huffman tables at `16 + np*2 + np`, a `workbuf` of
+`n*64*2 + 64`, and an `mcubuf` of `(n + 2) * 64 * sizeof(jd_yuv_t)`.
+That last type is `int16_t` when `JD_FASTDECODE >= 1` and `uint8_t` when
+it is 0. For a 4:2:0 image, where `n` is 4:
+
+    FASTDECODE 0:  3096  against a pool of 3100
+    FASTDECODE 1:  3480  against a pool of 3100
+
+**3100 is tuned for `JD_FASTDECODE=0` and clears it by four bytes.** The
+comment beside it in `jpeg_decoder.c` -- "Independent on the size of the
+image" -- is true and beside the point: it is independent of the
+dimensions and dependent on the subsampling and on `JD_FASTDECODE`, and
+it checks neither. This project builds `CONFIG_JD_FASTDECODE=1`.
+
+So the pool is ours now: 8 KB of internal DRAM through
+`cfg.advanced.working_buffer`, one buffer for the whole scale ladder,
+freed on every exit. Not `CONFIG_JD_FASTDECODE=0`, which would also work
+and would give up the 32-bit path on a decode 1101 already measured in
+seconds on the task 1005's watchdog fired on. 8 KB for the length of one
+decode against every cover being slower for ever.
+
+**The shape of the bug is worth keeping.** It depends on chroma
+subsampling, not on dimensions -- a 4:4:4 cover has `n = 1` and fits
+either way, and a 200x200 4:2:0 cover fails identically with megabytes
+free. It looked like a large-image problem on a memory-starved path and
+was neither. Two logs' worth of "the 3000 px cover is too big" was the
+wrong reading of both.
+
+**Two config symbols 1101 depended on without saying so.**
+`CONFIG_JD_USE_SCALE` must be set or `tjpgdcnf.h` defaults `JD_USE_SCALE`
+to 0 and every scale but 1/1 returns `JDR_PAR` from `jd_decomp()` -- a
+different failure at a later stage, and the scale is the entire point of
+this path. `CONFIG_JD_FORMAT` may be either: 0 is RGB888 and esp_jpeg's
+output callback converts to RGB565 for us, with `out_color_bytes` taken
+from `cfg.out_format` rather than `JD_FORMAT`, so the two-bytes-per-pixel
+arithmetic holds whichever way it is set. Both were checked against the
+component source rather than assumed.
+
+**And the log line gained its context.** `esp_jpeg_decode()` collapses
+every `JDR_*` code into `ESP_FAIL`, so `failed (ESP_FAIL)` cost two board
+runs to distinguish a work-pool shortage from a real allocation failure.
+The component prints the raw code one line above at `E`; what it does not
+print is any of the state that says which meaning applies. The scales and
+both buffer sizes are in the line now, and the comment above it says what
+each raw code means so the next reading does not need this round trip.
+
+**Host-tested, not built, not flashed.** `texttest/pooltest.c` transcribes
+`alloc_pool()`'s word rounding and `jd_prepare()`'s allocation sequence
+and runs both pool sizes against both `FASTDECODE` settings: 3100 fails
+at `FASTDECODE=1`, passes at 0 by four bytes, passes at 4:4:4, fails
+independently of image size, and 8 KB clears the worst case of four
+quantiser tables and 256-code Huffman tables with 3.5 KB spare. That
+tests the explanation, not the board -- if the next log still shows `3`,
+the pool is still short and `JPEG_SW_WORKBUF` goes up; `5` means
+`CONFIG_JD_USE_SCALE`; `6`-`8` mean the cover is progressive, which
+TJpgDec cannot decode at any pool size.
+
 ### The screen changes at the crossfade's midpoint (1103)
 
 Four things describe the playing track -- the title row, the cover, the
@@ -5192,14 +5266,23 @@ mean the ReplayGain headroom cap is wrong.
 
 ### What is open, and what each one needs
 
-- **A 3000x3000 cover cannot be displayed.** It wants 17672 KB in one
-  block against 18037 KB total free, so it is 1544 KB short of a block
-  and 365 KB short of everything. Reclaiming is dead (1010). The only
-  real answer is decode-time scaling: **check whether the hardware
-  decoder scales before designing anything**, since `albumart.c` asserts
-  it does not and that assertion has never been verified. A TJpgDec
-  fallback via `espressif/esp_jpeg` is the plan if it does not, and it
-  needs `jpeg_dec_config_t` read before a line is written.
+- **A 3000x3000 cover cannot be displayed.** Still true, and now for a
+  reason that has been narrowed twice. The hardware wants 17672 KB in one
+  block against a largest free block of 16128 KB. **That 16128 figure is
+  structural, not fragmentation**: two board logs 223 seconds apart,
+  across a seek that dropped 3.5 MB of queued audio, a track change and a
+  cache that went from one entry to three, report it bit-identically.
+  Churn does not reproduce to the kilobyte. 18036 - 16128 = 1908 KB of
+  free PSRAM is stranded behind something permanent, and `gfx.c`'s
+  1800 KB shadow buffer is the obvious candidate -- **unconfirmed**, the
+  108 KB difference is unaccounted for, and a
+  `heap_caps_print_heap_info(MALLOC_CAP_SPIRAM)` at boot would settle it.
+  If it holds, 1010's "365 KB short of everything" measured against a
+  total that is unreachable by construction, and the hardware path was
+  never going to decode this cover on any build with a framebuffer.
+  Verified true (1101): the hardware decoder has no scale field. The
+  TJpgDec fallback is therefore the only path, and 1104 fixed the reason
+  it could not start. **Whether it now produces a picture is unflashed.**
 - ~~**The cover cache holds whole compressed images** -- three copies of
   the same 1.8 MB picture on an album that shares one.~~ **Half closed by
   1102**, and it is worth being precise about which half. The three
