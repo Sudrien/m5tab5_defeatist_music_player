@@ -10,13 +10,17 @@
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_netif.h"
+/* Declared by esp_netif, but it reads CONFIG_LWIP_SNTP_MAX_SERVERS and
+ * lwip's ip_event_t, so both components are required. esp_sntp.h is the
+ * older lower-level interface and declares none of this. */
+#include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "esp_hosted.h"
-#include "esp_sntp.h"
 #include "esp_hosted_transport_config.h"
 
 #include "settings.h"
@@ -209,16 +213,30 @@ static void on_sntp_sync(struct timeval *tv)
  * second round of "where does NTP go" design. Until then it is dead
  * code with a host-testable half (settings_note_ntp_time()) and an
  * unreachable half (this).
+ *
+ * Marked unused rather than left to warn: -Wunused-function is right
+ * about it and will keep being right until the portal calls it, and a
+ * warning that is expected on every build is a warning nobody reads.
+ * Remove the attribute when the call site appears.
  */
+__attribute__((unused))
 static void sntp_start(void)
 {
     if (s_sntp_started || !settings_ntp_enabled()) return;
 
-    const esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+    esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
         3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.cloudflare.com",
                                 "time.google.com"));
-    esp_netif_sntp_init(&cfg);
-    esp_sntp_set_time_sync_notification_cb(on_sntp_sync);
+    /* The config carries the callback, so there is no window between
+     * starting the client and installing the hook in which a fast first
+     * reply could land unobserved. */
+    cfg.sync_cb = on_sntp_sync;
+
+    const esp_err_t err = esp_netif_sntp_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_netif_sntp_init: %s", esp_err_to_name(err));
+        return;
+    }
     s_sntp_started = true;
 
     /* Three servers so a single forged reply is not the only voice: see
