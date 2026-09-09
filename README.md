@@ -118,10 +118,4 @@ Claude, do not touch this README unless explicitly asked to. Use your own file.
   - it's called "transcoding" by the way
   - Your lack of work assured me that there are layers to vibe coding
 
-## Contributing
-
-- Make a fork, commit your changes, and make a pull request from that. If there is only one commit for multiple features, it will be rejected.
-- If you can't be bothered to learn Git, [Download the master zip](https://github.com/Sudrien/m5tab5_defeatist_music_player/archive/refs/heads/main.zip), and ask your AI to create a .patch off that, and create an issue with that patch or those patches. If there is only one patch for multiple features, it will be rejected.
-
-
 
