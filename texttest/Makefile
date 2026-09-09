@@ -16,6 +16,20 @@
 # SPDX-License-Identifier: MIT
 
 CC      ?= cc
+
+# A second, non-sanitised pass at -O2 -Werror, run before the real build.
+#
+# ASan needs -O1 or the reports lose their frames, but several warnings --
+# -Wformat-truncation is the one that caught us -- only fire after the
+# constant propagation that -O2 does. The firmware is built at -O2 with
+# warnings as errors, so a file could pass every check here and fail the
+# real build on a diagnostic this harness structurally could not produce.
+# That happened, twice, on code that had been "checked".
+#
+# Warnings only: no binary is kept and nothing is run from it.
+WARNCFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -Wno-unused-parameter \
+              -D_GNU_SOURCE -I. -Ifake -I../main -I../components/ark12
+
 CFLAGS  := -std=c11 -g -O1 -Wall -Wextra -Wno-unused-parameter \
            -fsanitize=address,undefined -fno-sanitize-recover=all \
            -fno-omit-frame-pointer \
@@ -57,6 +71,7 @@ run-wifi: $(WIFI_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(WIFI_BIN)
 
 $(CLOCK_BIN): clocktest.c
+	$(CC) $(WARNCFLAGS) -fsyntax-only clocktest.c
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ clocktest.c $(LDFLAGS)
 
 run-clock: $(CLOCK_BIN)

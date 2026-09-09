@@ -776,10 +776,26 @@ static void fmt_epoch(int64_t t, char *out, size_t out_len)
     const int64_t m   = mp + (mp < 10 ? 3 : -9);
     const int64_t y   = yoe + era * 400 + (m <= 2);
 
-    snprintf(out, out_len, "%04lld-%02lld-%02lld %02lld:%02lld:%02lldZ",
-             (long long)y, (long long)m, (long long)d,
-             (long long)(rem / 3600), (long long)(rem % 3600 / 60),
-             (long long)(rem % 60));
+    /*
+     * Clamped into ints before formatting.
+     *
+     * y, m and d are 1..12, 1..31 and a four-digit year by construction,
+     * but that follows from the era arithmetic above and the compiler
+     * cannot see it -- it assumes the full int64_t range and reports the
+     * buffer as possibly too small, which at -O2 -Werror is an error and
+     * a correct one on the information available. Clamping is how the
+     * bound is stated in a form the range analysis can use, and it also
+     * means a nonsense epoch prints nonsense rather than overrunning.
+     */
+    const int yy = (int)(y < 0 ? 0 : y > 9999 ? 9999 : y);
+    const int mo = (int)(m < 1 ? 1 : m > 12 ? 12 : m);
+    const int dd = (int)(d < 1 ? 1 : d > 31 ? 31 : d);
+    const int hh = (int)(rem / 3600);
+    const int mi = (int)(rem % 3600 / 60);
+    const int ss = (int)(rem % 60);
+
+    snprintf(out, out_len, "%04d-%02d-%02d %02d:%02d:%02dZ",
+             yy, mo, dd, hh, mi, ss);
 }
 
 static void write_file(storage_id_t id)
