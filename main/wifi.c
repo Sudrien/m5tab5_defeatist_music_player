@@ -16,6 +16,7 @@
 #include "freertos/task.h"
 
 #include "esp_hosted.h"
+#include "esp_hosted_transport_config.h"
 
 #include "settings.h"
 #include "wifi.h"
@@ -44,6 +45,28 @@ static const char *TAG = "tab5_wifi";
  * with an opinion.
  */
 #define POWER_SETTLE_MS         (100)
+
+/*
+ * The C6's SDIO2 pins, from the schematic, as P4 GPIO numbers.
+ *
+ * Set here rather than left to a board preset in menuconfig. The preset
+ * exists -- esp_hosted >= 3.0.2 carries M5Stack Tab5 among its per-board
+ * defaults -- but a board's wiring is not a build option: it cannot be
+ * chosen wrongly by anyone holding this hardware, and a project that
+ * asks a person to select it has invented a way to get it wrong. Three
+ * builds on this board went out with the P4-Function-EV-Board pins
+ * because the menu had not been visited.
+ *
+ * If a future preset disagrees with these numbers, the schematic wins
+ * and this comment is the place to argue with it.
+ */
+#define SDIO_PIN_CLK            (12)
+#define SDIO_PIN_CMD            (13)
+#define SDIO_PIN_D0             (11)
+#define SDIO_PIN_D1             (10)
+#define SDIO_PIN_D2             (9)
+#define SDIO_PIN_D3             (8)
+#define SDIO_PIN_RESET          (15)    /* SOC_EXTRF_RST -> the C6's EN */
 
 /* A scan long enough to hear a quiet AP and short enough not to look
  * hung. Active scan, all channels, IDF's own per-channel defaults. */
@@ -187,6 +210,35 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
      * NOT mean anything answered: "bus backend up" is logged either way,
      * and the first call that needs a reply is esp_wifi_init() below.
      */
+    /*
+     * The pins, before the transport is brought up.
+     *
+     * esp_hosted_init() takes whatever configuration is in place, and
+     * the default is the P4-Function-EV-Board's -- CLK 18, CMD 19,
+     * D0-D3 14-17, reset 54. None of those are wired to the C6 here, and
+     * the failure is quiet in the worst way: the SDIO peripheral
+     * configures fine, "bus backend up" is logged, and nothing goes
+     * wrong until esp_wifi_init() waits five seconds for an answer.
+     */
+    struct esp_hosted_sdio_config sdio = INIT_DEFAULT_HOST_SDIO_CONFIG();
+    sdio.pin_clk.pin   = SDIO_PIN_CLK;
+    sdio.pin_cmd.pin   = SDIO_PIN_CMD;
+    sdio.pin_d0.pin    = SDIO_PIN_D0;
+    sdio.pin_d1.pin    = SDIO_PIN_D1;
+    sdio.pin_d2.pin    = SDIO_PIN_D2;
+    sdio.pin_d3.pin    = SDIO_PIN_D3;
+    sdio.pin_reset.pin = SDIO_PIN_RESET;
+
+    esp_err_t err = esp_hosted_sdio_set_config(&sdio);
+    if (err != ESP_OK) {
+        /* Refused rather than ignored, which is worth failing on: going
+         * ahead would bring the transport up on the wrong pins and spend
+         * five seconds proving it. */
+        ESP_LOGE(TAG, "esp_hosted_sdio_set_config: %s", esp_err_to_name(err));
+        wlan_power(exp2, false);
+        return err;
+    }
+
     esp_err_t hosted = esp_hosted_init();
     if (hosted != ESP_OK) {
         ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(hosted));
@@ -217,17 +269,17 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
      * that reads like success.
      */
     const wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    esp_err_t err = esp_wifi_init(&cfg);
+    err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
         ESP_LOGE(TAG, "this is the first call that needs an answer from the "
                       "C6. Check the SDIO pins esp_hosted logged above: this "
                       "board is CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, "
                       "reset 15.");
-        ESP_LOGE(TAG, "if they read CLK 18 CMD 19 D0-D3 14-17 RESET 54 those "
-                      "are the P4-Function-EV-Board defaults and the board "
-                      "preset is not selected: menuconfig -> Component config "
-                      "-> ESP-Hosted -> Configure host -> Host transport");
+        ESP_LOGE(TAG, "the pins are set in wifi.c and should match. If they "
+                      "do, the transport is reaching the C6 and this is the "
+                      "slave firmware -- read what is on it over J1 before "
+                      "writing anything to it.");
         wlan_power(exp2, false);
         return err;
     }

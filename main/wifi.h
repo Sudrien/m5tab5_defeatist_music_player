@@ -30,14 +30,15 @@
  * side logs correctly -- which is a long way to go to find an unwritten
  * expander bit.
  *
- * THE PINS COME FROM A BOARD PRESET, NOT FROM HERE
+ * THE PINS ARE SET HERE, NOT IN A MENU
  *
- * esp_hosted >= 3.0.2 carries per-board GPIO defaults and the Tab5 is one
- * of them. Without the preset it uses the P4-Function-EV-Board pins --
- * CLK 18, CMD 19, D0-D3 14-17, reset 54 -- none of which are wired to
- * the C6 on this board. Tab5 is CLK 12, CMD 13, D0 11, D1 10, D2 9,
- * D3 8, reset 15. Check what esp_hosted logs against those numbers
- * before believing any other explanation.
+ esp_hosted >= 3.0.2 carries per-board GPIO defaults and the Tab5 is
+ * among them, but this file sets the pins itself with
+ * esp_hosted_sdio_set_config() before esp_hosted_init(). A board'''s
+ * wiring is not a build option: it cannot be chosen wrongly by anyone
+ * holding this hardware, and a project that asks someone to pick it in a
+ * menu has invented a way to get it wrong. Three builds went out with
+ * the P4-Function-EV-Board pins because that menu had not been visited.
  *
  * PI4IOE2_IO_DIR is already 0xB9 and bit 0 is set, so P0 has been
  * configured as an output since the first boot of this program. Nothing
