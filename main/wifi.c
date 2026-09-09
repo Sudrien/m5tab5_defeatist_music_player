@@ -178,20 +178,23 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
      * loser would be whichever ran second.
      */
     /*
-     * Called here, by hand, because cmake/hosted.cmake removed the
-     * constructor that would otherwise have called it before app_main().
-     * See that file: a constructor cannot be after a power-up that
-     * happens in app_main(), and it also makes the Wi-Fi switch above
-     * unenforceable.
+     * Called here, by hand, because sdkconfig.defaults sets
+     * CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n. A pre-main
+     * init cannot be after a power-up that happens once a volume is
+     * mounted, and it would also make the switch above unenforceable.
+     *
+     * Succeeding here means the SDIO peripheral was configured. It does
+     * NOT mean anything answered: "bus backend up" is logged either way,
+     * and the first call that needs a reply is esp_wifi_init() below.
      */
-    esp_err_t err = esp_hosted_init();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(err));
+    esp_err_t hosted = esp_hosted_init();
+    if (hosted != ESP_OK) {
+        ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(hosted));
         ESP_LOGE(TAG, "check the SDIO pins esp_hosted logged: this board is "
                       "CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, reset 15. "
                       "Anything else is the wrong board preset.");
         wlan_power(exp2, false);
-        return err;
+        return hosted;
     }
 
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
@@ -201,10 +204,41 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
         return ESP_FAIL;
     }
 
+    /*
+     * esp_wifi_init() is the first call that talks to the C6 rather than
+     * to the driver on this side. esp_hosted_init() installing the bus
+     * says only that the SDIO peripheral was configured; whether
+     * anything answers on those pins is not known until here.
+     *
+     * So this is where a wrong pin map surfaces, several seconds after
+     * the transport reported itself up, as an RPC that never gets a
+     * reply. It is worth spelling out at the failure rather than in a
+     * header, because the log line above it says "bus backend up" and
+     * that reads like success.
+     */
     const wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "wifi init");
-    ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "start");
+    esp_err_t err = esp_wifi_init(&cfg);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "this is the first call that needs an answer from the "
+                      "C6. Check the SDIO pins esp_hosted logged above: this "
+                      "board is CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, "
+                      "reset 15.");
+        ESP_LOGE(TAG, "if they read CLK 18 CMD 19 D0-D3 14-17 RESET 54 those "
+                      "are the P4-Function-EV-Board defaults and the board "
+                      "preset is not selected: menuconfig -> Component config "
+                      "-> ESP-Hosted -> Configure host -> Host transport");
+        wlan_power(exp2, false);
+        return err;
+    }
+
+    err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err == ESP_OK) err = esp_wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
+        wlan_power(exp2, false);
+        return err;
+    }
 
     uint8_t mac[6] = { 0 };
     if (esp_wifi_get_mac(WIFI_IF_STA, mac) == ESP_OK) {
