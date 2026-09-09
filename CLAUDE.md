@@ -3,7 +3,7 @@
 Notes for anyone (or anything) working on this repository. The README is
 the design document; this file is the set of things that are easy to get
 
-Claude should create git am-able patches as "Author: Claude <noreply@anthropic.com>". Patches should never be rewrites. 
+Claude should create git am-able patches as "Author: Claude <noreply@anthropic.com>". Don't hand back a rewritten path file, the should always be cumulative.
 
 ## Why two decoders
 
