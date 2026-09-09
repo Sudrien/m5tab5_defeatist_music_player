@@ -80,6 +80,7 @@
 #include "uac.h"
 #include "ui.h"
 #include "usbhost.h"
+#include "wifi.h"
 #include "waveform.h"
 
 static const char *TAG = "tab5_mp3";
@@ -8316,6 +8317,22 @@ void app_main(void)
     settings_init();
     s_volume = settings_volume();
     audio_out_set_volume((uint8_t)s_volume);
+
+    /*
+     * The radio, which lives on the C6 over SDIO2 and is off unless the
+     * NET tab says otherwise.
+     *
+     * After settings_init(), because there has to be a setting to read.
+     * After storage_init(), because the card and the C6 share the SDMMC
+     * host driver and the one that gets there first initialises it --
+     * the card is the one with deadlines, so it goes first.
+     *
+     * Not ESP_ERROR_CHECK'd, for the same reason uac_init() is not: a
+     * player that will not boot because its radio did not is worse than
+     * one that plays the card in silence. wifi.c logs every failure and
+     * powers the module back down on its way out.
+     */
+    wifi_probe(s_exp2);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the

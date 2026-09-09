@@ -39,6 +39,28 @@ dependencies:
   # is ILI9881C + GT911, rev 2 is ST7121/ST7123 + ST7123. Dropping the one
   # your board does not have saves a little flash and guarantees the other
   # revision fails at runtime instead of at link time.
+  # The radio, which is an ESP32-C6 on the other end of SDIO2. The P4 has
+  # none of its own. esp_wifi_remote makes the C6 look like a local
+  # esp_wifi; esp_hosted is the transport underneath it.
+  #
+  # DELIBERATELY UNPINNED, following usb_host_msc's reasoning: a guessed
+  # pin that the registry cannot satisfy stops the project configuring
+  # entirely, so a feature nobody is using breaks a build that has
+  # nothing to do with it.
+  #
+  # If what the registry resolves does not work, the known-good pure-IDF
+  # pairing on this board is esp_hosted 1.4.0 with esp_wifi_remote 0.8.5,
+  # from BufferRoot/M5STACK-TAB5-DEMO-CLEAN. That pairing cannot be used
+  # in a tree containing arduino-esp32, which pins esp_wifi_remote ^1.2.2
+  # and conflicts -- but this project has no Arduino core, so the
+  # conflict does not arise here.
+  #
+  # The M5 slave firmware reports no version, so the transport logs
+  # "Version mismatch: Host [x] > Co-proc [0.0.0]" and works anyway. That
+  # warning is upstream's and is not a fault.
+  espressif/esp_wifi_remote: "*"
+  espressif/esp_hosted: "*"
+
   espressif/esp_lcd_touch_st7123: "*"
   espressif/esp_lcd_touch_gt911: "*"
 
