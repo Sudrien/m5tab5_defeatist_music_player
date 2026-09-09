@@ -82,6 +82,27 @@ static bool s_powered;
 static bool s_up;
 static bool s_sntp_started;
 
+/*
+ * NIST, and three of them.
+ *
+ * time.nist.gov is a round-robin across the NIST Internet Time Service;
+ * the -a-g and -b-g names are individual Gaithersburg hosts, named so a
+ * failure can be attributed to a machine rather than to the pool.
+ *
+ * Three because one reply is one voice. IDF's SNTP client does not
+ * cross-check servers against each other -- settings_note_ntp_time()'s
+ * floor is the actual check, applied to whichever reply lands -- but
+ * more servers means fewer sessions where the only reachable source is
+ * also the only one an attacker had to influence.
+ *
+ * The count must match CONFIG_LWIP_SNTP_MAX_SERVERS, which sizes the
+ * array this list initialises. It defaults to 1, and overflowing it is a
+ * warning rather than an error: the excess servers are silently dropped
+ * and the build succeeds. sdkconfig.defaults sets it to 3 alongside
+ * this; the constant exists so the two are visibly one number.
+ */
+#define NTP_SERVER_COUNT (3)
+
 static esp_err_t wlan_power(i2c_master_dev_handle_t exp2, bool on)
 {
     if (!exp2) return ESP_ERR_INVALID_STATE;
@@ -225,8 +246,10 @@ static void sntp_start(void)
     if (s_sntp_started || !settings_ntp_enabled()) return;
 
     esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
-        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.cloudflare.com",
-                                "time.google.com"));
+        NTP_SERVER_COUNT,
+        ESP_SNTP_SERVER_LIST("time.nist.gov",
+                             "time-a-g.nist.gov",
+                             "time-b-g.nist.gov"));
     /* The config carries the callback, so there is no window between
      * starting the client and installing the hook in which a fast first
      * reply could land unobserved. */
@@ -239,12 +262,7 @@ static void sntp_start(void)
     }
     s_sntp_started = true;
 
-    /* Three servers so a single forged reply is not the only voice: see
-     * settings.h's note on why last-known-time exists at all. IDF's
-     * SNTP client does not itself cross-check servers against each
-     * other; settings_note_ntp_time() is the actual check, run against
-     * whichever reply lands first. */
-    ESP_LOGI(TAG, "SNTP started (3 servers)");
+    ESP_LOGI(TAG, "SNTP started (%d servers)", NTP_SERVER_COUNT);
 }
 
 esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)

@@ -76,12 +76,20 @@ static int64_t parse_build_time(const char *date, const char *time_)
         return 0;
     }
 
-    struct tm t = {
-        .tm_year = year - 1900, .tm_mon = mi, .tm_mday = day,
-        .tm_hour = hh, .tm_min = mm, .tm_sec = ss,
-    };
-    const time_t r = timegm(&t);
-    return r > 0 ? (int64_t)r : 0;
+    /* days_from_civil, same as settings.c. See there for why not
+     * timegm(). On the host timegm() does exist, which lets t_civil()
+     * below check this arithmetic against it -- the one place the
+     * duplication pays for itself. */
+    int64_t y = year;
+    const int64_t m = mi + 1;
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = era * 146097 + doe - 719468;
+
+    return days * 86400 + (int64_t)hh * 3600 + (int64_t)mm * 60 + ss;
 }
 
 /* ---- harness ------------------------------------------------------- */
@@ -295,6 +303,57 @@ static void t_written_is_acceptable(void)
     }
 }
 
+/*
+ * The civil-date arithmetic against timegm(), which the host has and the
+ * target does not. Every day across a span that includes the leap-year
+ * rules that actually differ: 2100 is not a leap year, 2000 was.
+ */
+static void t_civil(void)
+{
+    printf("days_from_civil agrees with timegm across 180 years\n");
+
+    static const char *const mon3[12] = {
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec",
+    };
+
+    int mismatches = 0, tested = 0;
+    for (int year = 2020; year <= 2199; year++) {
+        for (int mon = 0; mon < 12; mon++) {
+            for (int day = 1; day <= 31; day++) {
+                struct tm probe = {
+                    .tm_year = year - 1900, .tm_mon = mon, .tm_mday = day,
+                    .tm_hour = 12, .tm_min = 34, .tm_sec = 56,
+                };
+                struct tm norm = probe;
+                const time_t ref = timegm(&norm);
+                /* timegm normalises 31 Feb into March; skip those rather
+                 * than compare against a different date. */
+                if (norm.tm_mday != day || norm.tm_mon != mon) continue;
+
+                char ds[32], ts[16];
+                snprintf(ds, sizeof(ds), "%s %2d %4d", mon3[mon], day, year);
+                snprintf(ts, sizeof(ts), "12:34:56");
+                const int64_t got = parse_build_time(ds, ts);
+
+                tested++;
+                if (got != (int64_t)ref) mismatches++;
+            }
+        }
+    }
+    ck(tested > 60000, "swept a real span");
+    ck(mismatches == 0, "no disagreement with timegm");
+    if (mismatches) printf("  (%d of %d disagreed)\n", mismatches, tested);
+
+    /* The two centuries that catch a naive leap rule. */
+    ck(parse_build_time("Mar  1 2100", "00:00:00") -
+       parse_build_time("Feb 28 2100", "00:00:00") == 86400,
+       "2100 is not a leap year");
+    ck(parse_build_time("Mar  1 2024", "00:00:00") -
+       parse_build_time("Feb 28 2024", "00:00:00") == 2 * 86400,
+       "2024 is");
+}
+
 int main(void)
 {
     t_seed();
@@ -302,6 +361,7 @@ int main(void)
     t_monotonic_carry();
     t_2038();
     t_parse();
+    t_civil();
     t_seed_then_card();
     t_updated_at();
     t_written_is_acceptable();

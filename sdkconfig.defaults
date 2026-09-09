@@ -259,3 +259,10 @@ CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15
 # Set explicitly rather than left to the default, because it was wrong
 # once and a comment on an absent line cannot say why.
 CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+
+# Room for the three NIST servers wifi.c asks for. The default is 1, and
+# it sizes the array that ESP_SNTP_SERVER_LIST initialises -- exceeding it
+# is only a warning, so the extra servers are dropped and the build
+# succeeds with one source instead of three. Keep in step with
+# NTP_SERVER_COUNT in wifi.c.
+CONFIG_LWIP_SNTP_MAX_SERVERS=3

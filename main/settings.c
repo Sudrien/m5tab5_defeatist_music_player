@@ -1003,23 +1003,39 @@ static int64_t parse_build_time(const char *date, const char *time_)
         return 0;
     }
 
-    struct tm t = {
-        .tm_year = year - 1900, .tm_mon = mi, .tm_mday = day,
-        .tm_hour = hh, .tm_min = mm, .tm_sec = ss,
-    };
-    /* timegm(), not mktime(): the fields above are being asserted as UTC
-     * by the comment above this function, and mktime() would reinterpret
-     * them through whatever TZ is set -- which, per settings.h, this
-     * project deliberately does not set anywhere.
+    /*
+     * Days since 1970-01-01 from a civil date, computed rather than
+     * handed to libc.
      *
-     * timegm() is a BSD/glibc extension, not POSIX, but ESP-IDF's newlib
-     * carries it -- confirmed by grep of that toolchain's headers rather
-     * than assumed. If a future toolchain ever drops it, the failure
-     * mode here is a link error, not a silent wrong answer, because
-     * nothing in this file works around its absence.
+     * NOT timegm(): it is a BSD/glibc extension, not POSIX, and this
+     * toolchain does not declare it without _GNU_SOURCE. An earlier
+     * version of this file claimed the opposite and said the claim had
+     * been checked against the toolchain headers. It had not been. The
+     * build found it immediately, which is the good case; the bad case
+     * is a reader trusting the comment.
+     *
+     * NOT mktime() either, for the original reason: these fields are
+     * asserted as UTC and mktime() reinterprets them through TZ, which
+     * this project deliberately never sets.
+     *
+     * Howard Hinnant's days_from_civil, which is exact for any date in
+     * the proleptic Gregorian calendar and is a handful of integer
+     * operations with no table and no library. The era arithmetic shifts
+     * the epoch to 0000-03-01 so that leap days land at the end of a
+     * 400-year cycle and the month-length series repeats cleanly.
+     *
+     * src: http://howardhinnant.github.io/date_algorithms.html
      */
-    const time_t r = timegm(&t);
-    return r > 0 ? (int64_t)r : 0;
+    int64_t y = year;
+    const int64_t m = mi + 1;                 /* 1..12 */
+    y -= m <= 2;
+    const int64_t era = (y >= 0 ? y : y - 399) / 400;
+    const int64_t yoe = y - era * 400;                        /* 0..399 */
+    const int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+    const int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    const int64_t days = era * 146097 + doe - 719468;
+
+    return days * 86400 + (int64_t)hh * 3600 + (int64_t)mm * 60 + ss;
 }
 
 void settings_init(void)
