@@ -42,6 +42,7 @@
 #include "esp_check.h"
 #include "esp_timer.h"
 #include "esp_app_desc.h"
+#include "nvs_flash.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -81,6 +82,7 @@
 #include "ui.h"
 #include "usbhost.h"
 #include "wifi.h"
+#include "wifistore.h"
 #include "waveform.h"
 
 static const char *TAG = "tab5_mp3";
@@ -8317,6 +8319,35 @@ void app_main(void)
     settings_init();
     s_volume = settings_volume();
     audio_out_set_volume((uint8_t)s_volume);
+
+    /*
+     * NVS, and the saved networks in it.
+     *
+     * Before wifi_probe(), which is the only thing that will want them,
+     * and after settings_init() only because nothing here depends on the
+     * order -- the two stores are unrelated and live in different media.
+     *
+     * The erase-and-retry is IDF's documented idiom, not defensiveness:
+     * a partition that is full or was written by a different NVS version
+     * cannot be opened, and the alternative to erasing it is a player
+     * that has no network list and no way to acquire one. Both failures
+     * lose the saved networks; only one of them can be recovered from
+     * without a reflash.
+     */
+    esp_err_t nvs_err = nvs_flash_init();
+    if (nvs_err == ESP_ERR_NVS_NO_FREE_PAGES ||
+        nvs_err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS unusable (%s); erasing", esp_err_to_name(nvs_err));
+        if (nvs_flash_erase() == ESP_OK) nvs_err = nvs_flash_init();
+    }
+    if (nvs_err != ESP_OK) {
+        /* Not fatal, and wifistore_init() is still called: it logs once
+         * and leaves an empty list, which is settings.c's bargain. A
+         * player that will not start because it could not read its
+         * network list is a worse program than one that forgets them. */
+        ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
+    }
+    wifistore_init();
 
     /*
      * The radio, which lives on the C6 over SDIO2 and is off unless the
