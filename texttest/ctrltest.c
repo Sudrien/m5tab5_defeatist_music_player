@@ -89,8 +89,6 @@ typedef struct {
     bool            abandoned;
 } ctrl_ctx_t;
 
-static pthread_mutex_t g_flag_lock = PTHREAD_MUTEX_INITIALIZER;
-
 static void ctrl_ctx_free(ctrl_ctx_t *c)
 {
     if (c->transfer) host_free(c->transfer);
@@ -103,20 +101,22 @@ static void ctrl_cb(transfer_t *t)
 {
     ctrl_ctx_t *c = (ctrl_ctx_t *)t->context;
 
+    /* One lock, one critical section: either we observe the waiter's
+     * abandonment and own the context, or we publish `signalled` and it
+     * does. Reading the flag under a separate lock left a window in
+     * which the waiter's deadline expired after this read but before
+     * the store below, so neither side claimed ownership and both
+     * allocations leaked. */
     bool mine;
-    pthread_mutex_lock(&g_flag_lock);
-    mine = c->abandoned;
-    pthread_mutex_unlock(&g_flag_lock);
-
-    if (mine) {
-        ctrl_ctx_free(c);
-        return;
-    }
-
     pthread_mutex_lock(&c->lock);
-    c->signalled = true;
-    pthread_cond_signal(&c->cv);
+    mine = c->abandoned;
+    if (!mine) {
+        c->signalled = true;
+        pthread_cond_signal(&c->cv);
+    }
     pthread_mutex_unlock(&c->lock);
+
+    if (mine) ctrl_ctx_free(c);
 }
 
 /* Returns true if the descriptor was got, matching report_desc_scan(). */
@@ -149,13 +149,14 @@ static bool scan(int timeout_ms, int completion_delay_ms)
         if (pthread_cond_timedwait(&c->cv, &c->lock, &ts) != 0) break;
     }
     got = c->signalled;
+    /* Giving up and handing ownership over has to be indivisible from
+     * the test above, or a completion racing the deadline is disowned
+     * by both sides. */
+    if (!got) c->abandoned = true;
     pthread_mutex_unlock(&c->lock);
 
     if (!got) {
-        /* Timed out. Hand ownership over and touch nothing after. */
-        pthread_mutex_lock(&g_flag_lock);
-        c->abandoned = true;
-        pthread_mutex_unlock(&g_flag_lock);
+        /* Timed out. Touch nothing after: the callback owns `c` now. */
         host_flush();       /* retires it; cb runs and frees */
         return false;
     }
