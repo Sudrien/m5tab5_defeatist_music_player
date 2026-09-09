@@ -236,3 +236,27 @@ CONFIG_ESP32P4_TAB5_C6_BOARD=y
 # logged, and the first RPC -- esp_wifi_init() -- waits five seconds for a
 # reply from something that is not running.
 CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15
+
+# AND ITS POLARITY, WHICH IS THE OTHER HALF OF THE SAME FAULT.
+#
+# esp_hosted defaults to active-low, and its own Kconfig says why:
+#
+#   ESP modules' EN / RST pin is active-low by convention (pull LOW to
+#   assert reset, HIGH to run).  Boards with a transistor-buffered EN
+#   that inverts polarity need the explicit "Active high" override here.
+#
+# This is one of those boards. With the default, GPIO15 is driven low to
+# "reset" the C6 and left there, so the module never runs: the SDIO
+# peripheral configures against pins wired to a chip that is off, the
+# transport reports itself up, and the first RPC waits out its timeout.
+# Correct pins and a correct reset GPIO were both necessary and neither
+# was sufficient.
+#
+# Taken from a build that works on this hardware. The map project's
+# sdkconfig.defaults carries CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y,
+# and its Arduino build brings the radio up on the same C6.
+#
+# SDIO_ and not HOST_: ESP_HOSTED_HOST_RESET_ACTIVE_LOW is a derived
+# symbol with no prompt (`default y if ESP_HOSTED_SDIO_RESET_ACTIVE_LOW`),
+# so setting it directly does nothing. The choice is the SDIO one.
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y

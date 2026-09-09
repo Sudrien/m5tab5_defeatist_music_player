@@ -293,13 +293,15 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_init: %s", esp_err_to_name(err));
         ESP_LOGE(TAG, "this is the first call that needs an answer from the "
-                      "C6. Check the SDIO pins esp_hosted logged above: this "
-                      "board is CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, "
-                      "reset 15.");
-        ESP_LOGE(TAG, "the pins are set in wifi.c and should match. If they "
-                      "do, the transport is reaching the C6 and this is the "
-                      "slave firmware -- read what is on it over J1 before "
-                      "writing anything to it.");
+                      "C6, so a silent slave surfaces here rather than at "
+                      "any of the transport lines above -- all of which "
+                      "report success against a module that is not running.");
+        ESP_LOGE(TAG, "three things have to be right before the C6 runs: the "
+                      "SDIO pins (logged above as 'SDIO in use'), the reset "
+                      "GPIO (15), and the reset polarity (active HIGH on this "
+                      "board). All three are set in sdkconfig.defaults and "
+                      "wifi.c. Only after all three does the slave firmware "
+                      "become the suspect.");
         wlan_power(exp2, false);
         return err;
     }
