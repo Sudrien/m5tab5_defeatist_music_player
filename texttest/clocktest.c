@@ -46,6 +46,13 @@ static bool note_time(int64_t epoch, int64_t boot_us)
 
 static void reset_clock(void) { s_epoch = 0; s_boot_us = 0; }
 
+/* settings_now(): the floor as of a given monotonic reading. What gets
+ * written to the file on every save. */
+static int64_t now_at(int64_t boot_us)
+{
+    return s_epoch + (boot_us - s_boot_us) / 1000000;
+}
+
 /* parse_build_time(), same source, same fixed input format. */
 static int64_t parse_build_time(const char *date, const char *time_)
 {
@@ -228,6 +235,66 @@ static void t_seed_then_card(void)
     ck(s_epoch == built + 86400 * 30, "the newer value still stands");
 }
 
+/*
+ * The property the updated-at adds: uptime survives reboots even with no
+ * network ever. Each session writes its floor; each boot seeds from the
+ * later of the build stamp and that written value.
+ */
+static void t_updated_at(void)
+{
+    printf("uptime carries across reboots without a network\n");
+
+    const int64_t built = parse_build_time("Sep  9 2026", "10:38:28");
+
+    /* Session one: boot, seed from the build, run for an hour, save. */
+    reset_clock();
+    note_time(built, 0);
+    const int64_t saved1 = now_at(3600 * SEC);
+    ck(saved1 == built + 3600, "an hour of uptime is in the saved value");
+
+    /* Session two: fresh boot. Monotonic time restarts at 0, the build
+     * stamp is the same firmware, and the card holds session one's
+     * value. The card must win. */
+    reset_clock();
+    note_time(built, 0);
+    ck(note_time(saved1, 0), "the card's later value is taken");
+    ck(s_epoch == saved1, "floor is now an hour past the build");
+
+    const int64_t saved2 = now_at(1800 * SEC);
+    ck(saved2 == saved1 + 1800, "session two adds its own uptime");
+    ck(saved2 > saved1, "strictly forward across the reboot");
+
+    /* Session three, with the clock never having been set by anything.
+     * Three sessions of uptime are now folded in. */
+    reset_clock();
+    note_time(built, 0);
+    note_time(saved2, 0);
+    ck(now_at(0) == built + 3600 + 1800, "all of it accumulated");
+
+    /* And a card that is behind still loses, however it got that way. */
+    ck(!note_time(built, 1 * SEC), "the bare build stamp no longer raises it");
+}
+
+/*
+ * What the file records must be something this player would itself
+ * accept on the next boot. If settings_now() and the floor ever
+ * disagreed, a record would be refused by the device that wrote it.
+ */
+static void t_written_is_acceptable(void)
+{
+    printf("what is written is what would be accepted back\n");
+    reset_clock();
+    note_time(parse_build_time("Sep  9 2026", "10:38:28"), 0);
+
+    for (int64_t up = 0; up <= 10000; up += 997) {
+        const int64_t written = now_at(up * SEC);
+        int64_t ke = s_epoch, kb = s_boot_us;   /* a reboot */
+        s_epoch = 0; s_boot_us = 0;
+        ck(note_time(written, 0), "a written value is accepted next boot");
+        s_epoch = ke; s_boot_us = kb;
+    }
+}
+
 int main(void)
 {
     t_seed();
@@ -236,6 +303,8 @@ int main(void)
     t_2038();
     t_parse();
     t_seed_then_card();
+    t_updated_at();
+    t_written_is_acceptable();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

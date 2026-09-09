@@ -294,6 +294,23 @@ int64_t settings_last_ntp_epoch(void);
 int64_t settings_last_ntp_boot_us(void);
 
 /*
+ * The floor right now: the last accepted epoch plus the monotonic time
+ * since it was accepted. What this player believes the time to be.
+ *
+ * This is what is written to the file, on every write, so `ntp_epoch` is
+ * an updated-at rather than a synced-at. It advances across a session
+ * whether or not anything syncs, so a device that never reaches a
+ * network still records forward progress, and each reboot's floor is the
+ * later of the build time and the last write.
+ *
+ * NOT time(). The system clock is not set from any of this -- nothing
+ * calls settimeofday() yet -- so time() still returns 1970, which is the
+ * one value the floor exists to refuse. This is derived arithmetic and
+ * needs no clock.
+ */
+int64_t settings_now(void);
+
+/*
  * NO ZONE SETTING, DELIBERATELY.
  *
  * NTP answers in UTC and nothing here displays a local time: there is no

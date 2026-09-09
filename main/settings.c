@@ -223,6 +223,14 @@ bool settings_ntp_pref(void)    { return s_ntp_enabled; }
 int64_t settings_last_ntp_epoch(void)   { return s_last_ntp_epoch; }
 int64_t settings_last_ntp_boot_us(void) { return s_last_ntp_boot_us; }
 
+int64_t settings_now(void)
+{
+    /* The same expression settings_note_ntp_time() compares against. If
+     * these two ever disagree the file records a time this player would
+     * itself refuse on the next boot. */
+    return s_last_ntp_epoch + (esp_timer_get_time() - s_last_ntp_boot_us) / 1000000;
+}
+
 /*
  * The clock only ever moves forward.
  *
@@ -599,12 +607,20 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      * value would mean turning the radio off and on again silently
      * reset the clock preference to whatever it was gated to. */
     const char *const np = s_ntp_enabled ? "true" : "false";
-    /* Both fields or neither: a lone epoch with no boot offset cannot be
-     * checked against on the next boot and would be indistinguishable
-     * from an attacker's claim with no way to tell the two apart. */
+    /*
+     * The floor as of now, not the epoch as last synced -- an updated-at.
+     * Uptime since the last sync is real elapsed time, so folding it in
+     * here means a device that never reaches a network still moves its
+     * floor forward across reboots, one session's uptime at a time.
+     *
+     * ntp_boot_us is written beside it so a record says which monotonic
+     * reading its epoch was taken at, and is not read back: it belongs
+     * to the power-on that wrote it. Written because a record with a
+     * lone number in it invites the next reader to guess.
+     */
     char nte[24], ntb[24];
-    snprintf(nte, sizeof(nte), "%lld", (long long)s_last_ntp_epoch);
-    snprintf(ntb, sizeof(ntb), "%lld", (long long)s_last_ntp_boot_us);
+    snprintf(nte, sizeof(nte), "%lld", (long long)settings_now());
+    snprintf(ntb, sizeof(ntb), "%lld", (long long)esp_timer_get_time());
 
     /*
      * One format string for the settings half, used by all three exits
