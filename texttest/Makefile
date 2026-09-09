@@ -29,7 +29,11 @@ BIN  := texttest
 # own main(). Separate binary rather than another file in BIN.
 CTRL_BIN := ctrltest
 
-all: run run-ctrl
+# The saved-network list. Its own binary for the same reason ctrltest is:
+# its own main(), and no overlap with the text path.
+WIFI_BIN := wifistoretest
+
+all: run run-ctrl run-wifi
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -43,8 +47,14 @@ $(CTRL_BIN): ctrltest.c
 run-ctrl: $(CTRL_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CTRL_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM
+$(WIFI_BIN): wifistoretest.c ../main/wifistore.c ../main/wifistore.h fake/wifistore_host.h
+	$(CC) $(CFLAGS) -DWIFISTORE_HOST -o $@ wifistoretest.c ../main/wifistore.c $(LDFLAGS)
 
-.PHONY: all run run-ctrl clean
+run-wifi: $(WIFI_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(WIFI_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM
+
+.PHONY: all run run-ctrl run-wifi clean
