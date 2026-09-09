@@ -7,9 +7,13 @@
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <inttypes.h>
 #include <string.h>
+#include <time.h>
 
+#include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -120,6 +124,13 @@ static bool       s_wifi_enabled;
 /* On, but gated by the above on the way out. */
 static bool       s_ntp_enabled = true;
 
+/* Seeded from the build timestamp in settings_init(), before anything
+ * else can call settings_note_ntp_time(). See the header for why zero is
+ * the wrong default. */
+static int64_t    s_last_ntp_epoch;
+static int64_t    s_last_ntp_boot_us;
+
+
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
 /*
@@ -208,6 +219,63 @@ bool settings_wifi_enabled(void) { return s_wifi_enabled; }
  * on purpose -- see the header. */
 bool settings_ntp_enabled(void) { return s_wifi_enabled && s_ntp_enabled; }
 bool settings_ntp_pref(void)    { return s_ntp_enabled; }
+
+int64_t settings_last_ntp_epoch(void)   { return s_last_ntp_epoch; }
+int64_t settings_last_ntp_boot_us(void) { return s_last_ntp_boot_us; }
+
+/*
+ * The clock only ever moves forward.
+ *
+ * Not a window around an expected value -- a floor. The stored belief is
+ * max(what we already knew, what was just claimed), where "what we
+ * already knew" is the last accepted epoch carried forward by monotonic
+ * time since it was accepted:
+ *
+ *     floor = s_last_ntp_epoch + (boot_us - s_last_ntp_boot_us) / 1e6
+ *
+ * A claim at or above the floor is taken. A claim below it is refused
+ * and the floor stands.
+ *
+ * WHY A FLOOR RATHER THAN A WINDOW. The attack worth stopping is a jump
+ * BACKWARD: to a date when a since-revoked certificate was still valid,
+ * which is how forged NTP defeats the TLS check that NTP exists here to
+ * enable. Real time never goes backwards, so refusing every backward
+ * claim costs nothing legitimate and needs no tuned tolerance -- a
+ * symmetric window would have had a threshold chosen by feel, and would
+ * have accepted a backward jump of anything under it.
+ *
+ * Forward jumps are accepted without limit. A forged jump forward makes
+ * certificates expire early, which fails closed: a stream that will not
+ * open is a worse afternoon and not a security failure.
+ *
+ * The floor is why the build timestamp is the right seed. It is a true
+ * lower bound by construction -- this firmware cannot run before it was
+ * compiled -- so from the first boot onward there is always a floor,
+ * and a device that has never reached a network still refuses 1970.
+ */
+bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
+{
+    /* Every path in comes through here, including the build-time seed.
+     * A private setter that skipped the floor would be a second,
+     * unaudited way for a value to reach s_last_ntp_epoch. */
+    const int64_t elapsed_s = (boot_us - s_last_ntp_boot_us) / 1000000;
+    const int64_t floor_s   = s_last_ntp_epoch + elapsed_s;
+
+    if (epoch < floor_s) {
+        ESP_LOGW(TAG, "refusing time %lld: earlier than %lld, which is "
+                      "already known to have passed",
+                 (long long)epoch, (long long)floor_s);
+        return false;
+    }
+
+    if (epoch == s_last_ntp_epoch && boot_us == s_last_ntp_boot_us) return true;
+    s_last_ntp_epoch   = epoch;
+    s_last_ntp_boot_us = boot_us;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+    return true;
+}
+
 
 void settings_set_wifi_enabled(bool on)
 {
@@ -359,6 +427,30 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        /*
+         * Through the floor, like everything else.
+         *
+         * A card's record raises the floor if it is later than the build
+         * time and is ignored if it is earlier -- which is exactly right
+         * for the two ways it can be earlier: a card carried from a
+         * device running older firmware, and a card someone edited. The
+         * stored ntp_boot_us belongs to a previous power-on and has no
+         * meaning against this boot's monotonic clock, so the epoch is
+         * offered with the CURRENT reading; the pair is only ever
+         * compared within one session.
+         *
+         * Only the epoch is read for that reason. ntp_boot_us is written
+         * so a record is self-describing, and is deliberately not
+         * restored.
+         */
+        const cJSON *nte = cJSON_GetObjectItemCaseSensitive(root, "ntp_epoch");
+        if (take_settings && cJSON_IsNumber(nte)) {
+            if (settings_note_ntp_time((int64_t)nte->valuedouble,
+                                       esp_timer_get_time())) {
+                any = true;
+            }
+        }
+
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
         if (take_track && cJSON_IsString(t) && t->valuestring &&
             t->valuestring[0] && id < STORAGE_COUNT) {
@@ -418,6 +510,13 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
     if (strcmp(key, "ntp") == 0) {
         s_ntp_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
+    }
+    if (strcmp(key, "ntp_epoch") == 0 || strcmp(key, "ntp_boot_us") == 0) {
+        /* No legacy single-line form: this pair has never existed outside
+         * JSON records, so a hand-written line under either key is not a
+         * format this project produced and is refused rather than
+         * half-applied. */
+        return false;
     }
     ESP_LOGD(TAG, "unknown key '%s'", key);
     return false;
@@ -500,6 +599,12 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      * value would mean turning the radio off and on again silently
      * reset the clock preference to whatever it was gated to. */
     const char *const np = s_ntp_enabled ? "true" : "false";
+    /* Both fields or neither: a lone epoch with no boot offset cannot be
+     * checked against on the next boot and would be indistinguishable
+     * from an attacker's claim with no way to tell the two apart. */
+    char nte[24], ntb[24];
+    snprintf(nte, sizeof(nte), "%lld", (long long)s_last_ntp_epoch);
+    snprintf(ntb, sizeof(ntb), "%lld", (long long)s_last_ntp_boot_us);
 
     /*
      * One format string for the settings half, used by all three exits
@@ -510,9 +615,10 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
 #define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
                             "\"crossfade\":%u,\"crossfade_album\":%s," \
-                            "\"wifi\":%s,\"ntp\":%s"
+                            "\"wifi\":%s,\"ntp\":%s," \
+                            "\"ntp_epoch\":%s,\"ntp_boot_us\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
-                             wf, np
+                             wf, np, nte, ntb
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {
         return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",
@@ -842,8 +948,82 @@ static void settings_task(void *arg)
     }
 }
 
+/*
+ * Turn esp_app_desc_t's date/time text into a Unix epoch.
+ *
+ * "Sep  9 2026" / "10:38:28" -- __DATE__ / __TIME__ as the C standard
+ * defines them, which is what ties this to a fixed English locale and a
+ * fixed field width (a day below 10 is space-padded, hence "%2d" with a
+ * literal space allowed). Treated as UTC: there is no timezone in either
+ * string, the build machine's local offset is unknown to the firmware,
+ * and the plausibility check this seeds has a day of slack -- wider than
+ * any timezone offset on Earth, so treating the build machine as UTC
+ * costs at most a fraction of the margin already budgeted for real NTP
+ * drift.
+ *
+ * Failure returns 0, which settings_init() treats as "no seed" rather
+ * than as the epoch itself -- 0 is 1970-01-01 and would defeat the
+ * plausibility check it exists to seed.
+ */
+static int64_t parse_build_time(const char *date, const char *time_)
+{
+    static const char *const mon3[12] = {
+        "Jan","Feb","Mar","Apr","May","Jun",
+        "Jul","Aug","Sep","Oct","Nov","Dec",
+    };
+    if (!date || !time_) return 0;
+
+    char mon[4] = {0};
+    int day = 0, year = 0, hh = 0, mm = 0, ss = 0;
+    if (sscanf(date, "%3s %2d %4d", mon, &day, &year) != 3) return 0;
+    if (sscanf(time_, "%2d:%2d:%2d", &hh, &mm, &ss) != 3) return 0;
+
+    int mi = -1;
+    for (int i = 0; i < 12; i++) {
+        if (strncmp(mon, mon3[i], 3) == 0) { mi = i; break; }
+    }
+    if (mi < 0 || day < 1 || day > 31 || year < 2020 || year > 2200 ||
+        hh > 23 || mm > 59 || ss > 60) {
+        return 0;
+    }
+
+    struct tm t = {
+        .tm_year = year - 1900, .tm_mon = mi, .tm_mday = day,
+        .tm_hour = hh, .tm_min = mm, .tm_sec = ss,
+    };
+    /* timegm(), not mktime(): the fields above are being asserted as UTC
+     * by the comment above this function, and mktime() would reinterpret
+     * them through whatever TZ is set -- which, per settings.h, this
+     * project deliberately does not set anywhere.
+     *
+     * timegm() is a BSD/glibc extension, not POSIX, but ESP-IDF's newlib
+     * carries it -- confirmed by grep of that toolchain's headers rather
+     * than assumed. If a future toolchain ever drops it, the failure
+     * mode here is a link error, not a silent wrong answer, because
+     * nothing in this file works around its absence.
+     */
+    const time_t r = timegm(&t);
+    return r > 0 ? (int64_t)r : 0;
+}
+
 void settings_init(void)
 {
+    /*
+     * Seeded from the build timestamp, through the same checked entry
+     * point everything else uses. s_last_ntp_epoch is 0 here so the floor
+     * is 0 and this cannot be refused, which is the intent: it
+     * establishes the floor rather than being tested against one.
+     *
+     * Before load_file() rather than after, so that a record read from a
+     * card -- which may be older than this firmware, or may have been
+     * edited -- is itself subject to the floor rather than replacing it.
+     */
+    {
+        const esp_app_desc_t *d = esp_app_get_description();
+        const int64_t built = d ? parse_build_time(d->date, d->time) : 0;
+        if (built > 0) settings_note_ntp_time(built, esp_timer_get_time());
+    }
+
     /*
      * No search, and no early return.
      *

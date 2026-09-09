@@ -16,9 +16,11 @@
 #include "freertos/task.h"
 
 #include "esp_hosted.h"
+#include "esp_sntp.h"
 #include "esp_hosted_transport_config.h"
 
 #include "settings.h"
+#include <time.h>
 #include "wifi.h"
 
 static const char *TAG = "tab5_wifi";
@@ -74,6 +76,7 @@ static const char *TAG = "tab5_wifi";
 
 static bool s_powered;
 static bool s_up;
+static bool s_sntp_started;
 
 static esp_err_t wlan_power(i2c_master_dev_handle_t exp2, bool on)
 {
@@ -166,6 +169,64 @@ static esp_err_t scan_and_log(void)
     free(ap);
     esp_wifi_scan_stop();
     return err;
+}
+
+/*
+ * The sync callback. esp_netif_sntp fires this once per accepted reply,
+ * on the SNTP task, after settimeofday() has already been called with
+ * it -- so `tv` is what the system clock now holds, not a proposal.
+ *
+ * settings_note_ntp_time() is the plausibility gate, but by the time this
+ * runs the clock has already moved: esp_netif_sntp does not offer a
+ * pre-apply hook. So an implausible reply is rejected from the STORED
+ * belief -- s_last_ntp_epoch does not advance to match it, and the next
+ * boot's baseline stays the old, trusted value -- while the live
+ * system clock for THIS session accepts whatever NTP said, because
+ * nothing downstream (TLS validation, file timestamps) has a second
+ * clock to fall back to mid-session. The stored value is what protects
+ * the NEXT boot; this boot is protected by the day-wide slack being
+ * larger than any plausible legitimate drift, which bounds how far a
+ * single accepted reply can be wrong even though it was not blocked.
+ */
+static void on_sntp_sync(struct timeval *tv)
+{
+    if (!tv) return;
+    const bool ok = settings_note_ntp_time((int64_t)tv->tv_sec,
+                                           esp_timer_get_time());
+    ESP_LOGI(TAG, "NTP sync: %lld%s", (long long)(int64_t)tv->tv_sec,
+             ok ? "" : " (implausible vs. last known time; system clock "
+                       "moved anyway, stored baseline did not)");
+}
+
+/*
+ * Start SNTP, once. Idempotent for the same reason wifi_probe() is:
+ * whatever calls this runs at a track boundary, not once per boot.
+ *
+ * NOT CALLED YET. wifi_probe() ends at scan_and_log() -- there is no
+ * station join in this file, so there is no IP and nothing for an SNTP
+ * request to reach. This exists so the portal, when it lands, has
+ * exactly one function to call after a successful join rather than a
+ * second round of "where does NTP go" design. Until then it is dead
+ * code with a host-testable half (settings_note_ntp_time()) and an
+ * unreachable half (this).
+ */
+static void sntp_start(void)
+{
+    if (s_sntp_started || !settings_ntp_enabled()) return;
+
+    const esp_sntp_config_t cfg = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        3, ESP_SNTP_SERVER_LIST("pool.ntp.org", "time.cloudflare.com",
+                                "time.google.com"));
+    esp_netif_sntp_init(&cfg);
+    esp_sntp_set_time_sync_notification_cb(on_sntp_sync);
+    s_sntp_started = true;
+
+    /* Three servers so a single forged reply is not the only voice: see
+     * settings.h's note on why last-known-time exists at all. IDF's
+     * SNTP client does not itself cross-check servers against each
+     * other; settings_note_ntp_time() is the actual check, run against
+     * whichever reply lands first. */
+    ESP_LOGI(TAG, "SNTP started (3 servers)");
 }
 
 esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)

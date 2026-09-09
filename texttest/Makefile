@@ -33,7 +33,10 @@ CTRL_BIN := ctrltest
 # its own main(), and no overlap with the text path.
 WIFI_BIN := wifistoretest
 
-all: run run-ctrl run-wifi
+# The clock floor. Its own binary for the same reason the others are.
+CLOCK_BIN := clocktest
+
+all: run run-ctrl run-wifi run-clock
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -53,8 +56,14 @@ $(WIFI_BIN): wifistoretest.c ../main/wifistore.c ../main/wifistore.h fake/wifist
 run-wifi: $(WIFI_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(WIFI_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM
+$(CLOCK_BIN): clocktest.c
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ clocktest.c $(LDFLAGS)
 
-.PHONY: all run run-ctrl run-wifi clean
+run-clock: $(CLOCK_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CLOCK_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM
+
+.PHONY: all run run-ctrl run-wifi run-clock clean

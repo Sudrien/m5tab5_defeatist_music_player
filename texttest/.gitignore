@@ -2,3 +2,4 @@ texttest/texttest
 texttest/ctrltest
 *.dSYM/
 wifistoretest
+clocktest

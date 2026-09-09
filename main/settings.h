@@ -246,6 +246,54 @@ bool settings_ntp_pref(void);
 void settings_set_ntp_enabled(bool on);
 
 /*
+ * The last time this player believed, as a signed Unix epoch, and the
+ * matching monotonic reading -- what esp_timer_get_time() said at the
+ * moment that belief was formed, in microseconds since boot.
+ *
+ * int64_t, not time_t. This project's time_t may be 32-bit on this
+ * toolchain (unconfirmed; check sizeof before assuming either way), and
+ * a value that is going to be compared across reboots for years should
+ * not inherit a typedef that rolls over on 2038-01-19. Persisted in this
+ * wider type regardless of what time() returns; only the final
+ * settimeofday() call narrows, where the platform forces it.
+ *
+ * NOT SET BY NTP DIRECTLY.
+ *
+ * These exist to answer one question on the next boot: is a newly
+ * received time plausible, or is it a large jump that a forged NTP
+ * reply would produce -- most usefully, a jump backward to a date when a
+ * since-revoked certificate was still valid, which is the specific
+ * thing NTP exists here to protect against and so also the specific
+ * thing worth not trusting blindly. The comparison is
+ *
+ *     expected = last_epoch + (esp_timer_get_time() - last_boot_us) / 1e6
+ *
+ * against the newly claimed time -- monotonic time since the last belief
+ * was formed, which nothing on the network can move. A claim close to
+ * `expected` is accepted; a claim far from it is not, and the last good
+ * value keeps standing while wall-clock keeps advancing from it via the
+ * same monotonic arithmetic.
+ *
+ * DEFAULT: THE BUILD TIME, NOT ZERO OR 1970.
+ *
+ * Zero fails the plausibility check against everything, including a
+ * correct first sync -- "is this real time far from 1970" is true of
+ * every real time. The build timestamp is a lower bound that is true by
+ * construction: this firmware cannot be running before the moment it was
+ * compiled. It is parsed once, from esp_app_get_description(), by
+ * settings_init(), and used as the seed only until a real sync -- NTP or
+ * a plausible hand-set value -- replaces it. See settings.c for the
+ * parse; esp_app_desc_t's date and time fields are US-locale text
+ * ("Sep  9 2026", "10:38:28") with no timezone marker and are treated as
+ * UTC, which is wrong by whatever the builder's local offset was and
+ * right to within the same margin the plausibility check already
+ * tolerates.
+ */
+bool settings_note_ntp_time(int64_t epoch, int64_t boot_us);
+int64_t settings_last_ntp_epoch(void);
+int64_t settings_last_ntp_boot_us(void);
+
+/*
  * NO ZONE SETTING, DELIBERATELY.
  *
  * NTP answers in UTC and nothing here displays a local time: there is no
