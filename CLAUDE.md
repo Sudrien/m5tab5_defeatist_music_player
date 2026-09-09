@@ -3,7 +3,22 @@
 Notes for anyone (or anything) working on this repository. The README is
 the design document; this file is the set of things that are easy to get
 
-Claude should create git am-able patches as "Author: Claude <noreply@anthropic.com>". Don't hand back a rewritten path file, the should always be cumulative.
+Claude should create `git am`-able patches authored as
+`Claude <noreply@anthropic.com>`.
+
+**Patches are cumulative.** Each one applies on top of what is already
+here. Do not hand back a rewritten copy of a file, and do not reissue a
+corrected version of a patch that has been pushed -- send a follow-up
+that changes what needs changing. A patch already in the history is
+history: correcting it in place erases the reasoning that produced it,
+and which things turned out not to be tasks is the useful part of a
+record like this one.
+
+Within a patch, change the lines that must change and no others. No
+reflowing, no drive-by renames, no reorganising code being passed
+through. Restructuring an existing function is sometimes the smallest
+correct change -- when it is, say so in the commit message rather than
+letting it look like a small diff.
 
 ## Why two decoders
 
