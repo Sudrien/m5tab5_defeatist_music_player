@@ -234,31 +234,25 @@ bool settings_ntp_pref(void);
 void settings_set_ntp_enabled(bool on);
 
 /*
- * The zone the clock is displayed in, as a POSIX TZ string -- the thing
- * setenv("TZ", ...) takes, e.g. "EST5EDT,M3.2.0,M11.1.0". Defaults to
- * "UTC0".
+ * NO ZONE SETTING, DELIBERATELY.
  *
- * Here because NTP answers a question nobody asked. It returns UTC, and
- * a clock showing UTC is wrong everywhere except one meridian; the zone
- * is the other half of "what time is it" and storing one without the
- * other produces a player that knows the time and displays the wrong
- * one.
+ * NTP answers in UTC and nothing here displays a local time: there is no
+ * clock on screen and no control that names an hour. A zone would be a
+ * stored string with no reader.
  *
- * A POSIX string rather than a zone name because the alternative is
- * shipping a tzdata blob to resolve "America/New_York", and the rules it
- * would resolve to are the string. The cost is that a zone whose
- * government moves its DST dates needs the string edited -- which, on a
- * card that is already hand-editable by design, is a thing someone can
- * actually do.
+ * What the clock is actually for is TLS certificate validity -- every
+ * chain is notBefore-invalid at 1970, so an unset clock fails the
+ * handshake outright -- and FAT timestamps on the files this player
+ * writes to the card, which is a volume people put in a computer. Both
+ * want UTC and neither wants a zone.
  *
- * Validated on the way in against the characters POSIX TZ uses.
- * settings_set_tz() ignores anything else and returns false, so the
- * value reaching the file is always one that can be written into it
- * without escaping.
+ * When something does display a local time, the zone arrives with it:
+ * a `tz` key holding a POSIX TZ string, a generated name-to-rule table,
+ * and a picker, because there is no keyboard on this device. That is
+ * three pieces of work in service of one screen, and none of it is owed
+ * until the screen exists.
  */
-#define SETTINGS_TZ_MAX (40)
-const char *settings_tz(void);
-bool settings_set_tz(const char *tz);
+
 
 #ifdef __cplusplus
 }

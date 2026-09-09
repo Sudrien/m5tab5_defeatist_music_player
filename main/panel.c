@@ -453,18 +453,12 @@ static int draw_note(int y, const char *const *lines, int count)
  */
 #define NET_WIFI_NOTE_LINES (3)
 #define NET_NTP_NOTE_LINES  (3)
-#define NET_TZ_NOTE_LINES   (3)
 
 static int wifi_y(void) { return LIST_TOP; }
 static int ntp_y(void)  { return wifi_y() + AUDIO_SWITCH_H
                                  + AUDIO_NOTE_GAP
                                  + NET_WIFI_NOTE_LINES * AUDIO_NOTE_STEP
                                  + AUDIO_GAP; }
-static int tz_y(void)   { return ntp_y() + AUDIO_SWITCH_H
-                                 + AUDIO_NOTE_GAP
-                                 + NET_NTP_NOTE_LINES * AUDIO_NOTE_STEP
-                                 + AUDIO_GAP; }
-
 static void wifi_switch_box(int *x, int *y, int *w, int *h)
 {
     *x = 0; *y = wifi_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
@@ -540,44 +534,20 @@ static void draw_net(void)
     }
 
     static const char *const ntp_note[NET_NTP_NOTE_LINES] = {
-        "Sets the clock from the internet.",
-        "Greyed while Wi-Fi is off: the setting is",
-        "kept, it just has no way to happen.",
+        "Sets the clock, in UTC. Streams need it:",
+        "a certificate is invalid at an unset clock.",
+        "Greyed while Wi-Fi is off; the setting is kept.",
     };
-    draw_note(y + bh + AUDIO_NOTE_GAP, ntp_note, NET_NTP_NOTE_LINES);
+    const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, ntp_note,
+                                   NET_NTP_NOTE_LINES);
 
-    /* --- Zone, read-only -------------------------------------------- */
     /*
-     * A readout rather than a control, and it will stay one.
-     *
-     * A POSIX TZ string is up to forty characters of punctuation. There
-     * is no keyboard on this device and building one for a value edited
-     * once in the life of the player would be the largest thing on this
-     * panel by a wide margin, in service of the setting least often
-     * touched. The file is hand-editable on purpose -- that is the whole
-     * argument in settings.h -- so the note says where.
+     * No zone row, and see settings.h: nothing on this device displays a
+     * local time yet, so a zone would be a control with no consequence.
+     * The clock is here for TLS validity and FAT timestamps, both of
+     * which want UTC.
      */
-    y = tz_y();
-    gfx_fill_rect(0, y, w, ROW_H, C_ROW);
-    gfx_draw_text(24, y + (ROW_H - GFX_GLYPH_H(LABEL_SCALE)) / 2, "Zone",
-                  LABEL_SCALE, 300, C_DIM);
-    {
-        const char *tz = settings_tz();
-        const int avail = w - 260;
-        int tw = gfx_text_w(tz, LABEL_SCALE);
-        if (tw > avail) tw = avail;
-        gfx_draw_text_tail(w - 24 - tw,
-                           y + (ROW_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
-                           tz, LABEL_SCALE, avail, C_TEXT);
-    }
-
-    static const char *const tz_note[NET_TZ_NOTE_LINES] = {
-        "A POSIX TZ string, e.g. EST5EDT,M3.2.0,M11.1.0",
-        "Edit \"tz\" in .defeatist.dat on the card;",
-        "there is no keyboard to type it here.",
-    };
-    const int used = draw_note(y + ROW_H + AUDIO_NOTE_GAP, tz_note,
-                               NET_TZ_NOTE_LINES);
+    const int used = ntp_used;
 
     /* The same check draw_audio() ends with, and for the same reason. */
     if (used > gfx_h() - FOOT_H) {
