@@ -7,7 +7,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_event.h"
 #include "esp_log.h"
@@ -34,10 +33,6 @@ static const char *TAG = "tab5_wifi";
 
 #define I2C_TIMEOUT_MS          (100)
 
-/* SOC_EXTRF_RST -> the C6's EN pin, through R4 (1K), with R6 (10K) to
- * ground. High releases the module. */
-#define C6_EN_GPIO              (GPIO_NUM_15)
-
 /*
  * How long the rail is given before the module is released, and the
  * module before SDIO is spoken to.
@@ -49,7 +44,6 @@ static const char *TAG = "tab5_wifi";
  * with an opinion.
  */
 #define POWER_SETTLE_MS         (100)
-#define RESET_SETTLE_MS         (100)
 
 /* A scan long enough to hear a quiet AP and short enough not to look
  * hung. Active scan, all channels, IDF's own per-channel defaults. */
@@ -82,29 +76,6 @@ static esp_err_t wlan_power(i2c_master_dev_handle_t exp2, bool on)
 
     ESP_LOGI(TAG, "WLAN_3.3V %s (expander 0x44, P0)", on ? "on" : "off");
     s_powered = on;
-    return ESP_OK;
-}
-
-static esp_err_t c6_release(void)
-{
-    const gpio_config_t cfg = {
-        .pin_bit_mask = 1ULL << C6_EN_GPIO,
-        .mode         = GPIO_MODE_OUTPUT,
-        .pull_up_en   = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type    = GPIO_INTR_DISABLE,
-    };
-    ESP_RETURN_ON_ERROR(gpio_config(&cfg), TAG, "EN gpio");
-
-    /* Held low first rather than assumed low. The 10K pulldown does it at
-     * power-on, but this function can also be reached after a soft reset
-     * that left the pin driven, and a module that was never actually
-     * reset comes up in whatever state the last boot left it. */
-    ESP_RETURN_ON_ERROR(gpio_set_level(C6_EN_GPIO, 0), TAG, "EN low");
-    vTaskDelay(pdMS_TO_TICKS(10));
-    ESP_RETURN_ON_ERROR(gpio_set_level(C6_EN_GPIO, 1), TAG, "EN high");
-
-    ESP_LOGI(TAG, "C6 released (GPIO%d)", C6_EN_GPIO);
     return ESP_OK;
 }
 
@@ -183,9 +154,16 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
     ESP_RETURN_ON_ERROR(wlan_power(exp2, true), TAG, "power");
     vTaskDelay(pdMS_TO_TICKS(POWER_SETTLE_MS));
 
-    ESP_RETURN_ON_ERROR(c6_release(), TAG, "release");
-    vTaskDelay(pdMS_TO_TICKS(RESET_SETTLE_MS));
-
+    /*
+     * The C6's reset is not ours to drive. RF_C6_RST is the module's EN
+     * pin from GPIO15, and esp_hosted toggles it itself as part of
+     * bringing the transport up -- which is why the board preset in
+     * idf_component.yml matters: with the wrong preset it resets GPIO54,
+     * a pin that goes nowhere on this board, and then finds nothing.
+     *
+     * Driving it here as well would mean two owners of one pin, and the
+     * loser would be whichever ran second.
+     */
     /*
      * Called here, by hand, because cmake/hosted.cmake removed the
      * constructor that would otherwise have called it before app_main().
@@ -196,9 +174,9 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
     esp_err_t err = esp_hosted_init();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(err));
-        ESP_LOGE(TAG, "a timeout here with the pins logging fine is the "
-                      "slave, not the host: check WLAN_PWR_EN and GPIO%d, "
-                      "then the C6's own firmware over J1", C6_EN_GPIO);
+        ESP_LOGE(TAG, "check the SDIO pins esp_hosted logged: this board is "
+                      "CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, reset 15. "
+                      "Anything else is the wrong board preset.");
         wlan_power(exp2, false);
         return err;
     }

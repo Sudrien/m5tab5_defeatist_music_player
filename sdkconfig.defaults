@@ -192,3 +192,27 @@ CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576
 # the registration source, not the archive member, so the duplicate
 # symbols survive it. minimp3_prefix.h is what actually fixes that.
 CONFIG_AUDIO_DECODER_MP3_SUPPORT=n
+
+# --- the radio, which is a C6 on the other end of SDIO2 ----------------
+#
+# DEFER ESP-HOSTED'S INIT UNTIL app_main().
+#
+# esp_hosted otherwise brings the transport up from a pre-main hook, and
+# on this board that cannot work: WLAN_3.3V is a load switch enabled by
+# P0 of the expander at 0x44, and nothing writes that bit until app_main()
+# has an I2C handle to write it with. The log of an unpatched build is
+# unambiguous -- the transport starts at 1092 ms, main_task at 1096, and
+# every sdmmc_card_init that follows fails against a module with no power.
+#
+# It also makes the Wi-Fi switch honest. settings_wifi_enabled() defaults
+# false and claims that with it off nothing starts the radio; a pre-main
+# hook runs before settings_init() has read the file, so the claim would
+# be false the moment this dependency was added. The first build proved
+# it: "Wi-Fi is off; C6 left unpowered" was logged while SDIO retried for
+# another three seconds.
+#
+# This is upstream's own switch for the problem -- their
+# mcu_transport_config example sets it for the same reason -- which is
+# why the cmake patch that used to edit the constructor out of
+# managed_components/ is gone. wifi.c calls esp_hosted_init() itself.
+CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n

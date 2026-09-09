@@ -20,14 +20,24 @@
  * that bit is written the C6 is not merely uninitialised, it is
  * unpowered, and SDIO finds nothing on the other end.
  *
- * Then RF_C6_RST, which is the C6's EN pin, driven from P4 GPIO15
- * (SOC_EXTRF_RST) through 1K with a 10K pulldown. So the P4 also holds
- * the module in reset independently of its power.
+ Then RF_C6_RST, the C6's EN pin from GPIO15 (SOC_EXTRF_RST) through 1K
+ * against a 10K pulldown -- but that one is esp_hosted's to drive, as
+ * part of bringing the transport up. This file does the power only; two
+ * owners of one reset pin would be decided by whichever ran second.
  *
- * Both, in that order. The failure when the first is missed looks
- * exactly like a host-side fault -- sdmmc_init_ocr returns
- * ESP_ERR_TIMEOUT while every pin on this side logs correctly -- which
- * is a long way to go to find an unwritten expander bit.
+ * The failure when the power is missed looks exactly like a host-side
+ * fault -- sdmmc_card_init failing over and over while every pin on this
+ * side logs correctly -- which is a long way to go to find an unwritten
+ * expander bit.
+ *
+ * THE PINS COME FROM A BOARD PRESET, NOT FROM HERE
+ *
+ * esp_hosted >= 3.0.2 carries per-board GPIO defaults and the Tab5 is one
+ * of them. Without the preset it uses the P4-Function-EV-Board pins --
+ * CLK 18, CMD 19, D0-D3 14-17, reset 54 -- none of which are wired to
+ * the C6 on this board. Tab5 is CLK 12, CMD 13, D0 11, D1 10, D2 9,
+ * D3 8, reset 15. Check what esp_hosted logs against those numbers
+ * before believing any other explanation.
  *
  * PI4IOE2_IO_DIR is already 0xB9 and bit 0 is set, so P0 has been
  * configured as an output since the first boot of this program. Nothing

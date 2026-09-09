@@ -21,16 +21,6 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/dpi_instrument.cmake)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(m5tab5_defeatist_music_player)
 
-# Remove esp_hosted's auto-init constructor, which would bring SDIO up
-# against an unpowered C6 before app_main() -- and before settings.c has
-# read whether the radio is meant to be on at all.
-#
-# AFTER project(), unlike the three above, and hosted.cmake explains why:
-# managed_components/ does not exist until the component manager resolves
-# dependencies, which happens during project.cmake. Running earlier would
-# find nothing on a fresh clone.
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/hosted.cmake)
-
 # esp_driver_sdmmc greets every mount attempt with
 #
 #   I (nnn) SD_HOST: src_freq_hz: 160000000

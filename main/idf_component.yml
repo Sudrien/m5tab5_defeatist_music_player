@@ -58,8 +58,19 @@ dependencies:
   # The M5 slave firmware reports no version, so the transport logs
   # "Version mismatch: Host [x] > Co-proc [0.0.0]" and works anyway. That
   # warning is upstream's and is not a fault.
+  # >=3.0.2 is not caution: that release added per-board GPIO defaults and
+  # M5Stack Tab5 is one of the boards. Without a board preset the
+  # transport uses the P4-Function-EV-Board pins -- CLK 18, CMD 19,
+  # D0-D3 14-17, reset 54 -- which is what the first build on this
+  # hardware logged, and none of them are wired to the C6 here. The Tab5
+  # is CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, with the C6's EN on
+  # GPIO15.
+  #
+  # Select it under menuconfig:
+  #   Component config -> ESP-Hosted -> Configure host -> Host transport
+  # and check the GPIOs against the numbers above before building.
   espressif/esp_wifi_remote: "*"
-  espressif/esp_hosted: "*"
+  espressif/esp_hosted: ">=3.0.2"
 
   espressif/esp_lcd_touch_st7123: "*"
   espressif/esp_lcd_touch_gt911: "*"
