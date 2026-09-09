@@ -7779,6 +7779,10 @@ static void restore_last_track(void)
         audio_out_set_volume((uint8_t)s_volume);
         ESP_LOGI(TAG, "volume %d from settings", s_volume);
 
+        /* The radio is one of the things the file decides, so it belongs
+         * to this push and not to app_main(). See wifi.h. */
+        wifi_probe(s_exp2);
+
         s_restored = true;
 
         const char *last = settings_track();
@@ -8029,6 +8033,7 @@ static void player_loop(void)
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
             ESP_LOGI(TAG, "volume %d from settings", s_volume);
+            wifi_probe(s_exp2);
         }
 
         ESP_LOGI(TAG, "playing %s", s_path);
@@ -8323,7 +8328,8 @@ void app_main(void)
     /*
      * NVS, and the saved networks in it.
      *
-     * Before wifi_probe(), which is the only thing that will want them,
+     * Before the first wifi_probe(), which is the only thing that will
+     * want them,
      * and after settings_init() only because nothing here depends on the
      * order -- the two stores are unrelated and live in different media.
      *
@@ -8348,22 +8354,6 @@ void app_main(void)
         ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
     }
     wifistore_init();
-
-    /*
-     * The radio, which lives on the C6 over SDIO2 and is off unless the
-     * NET tab says otherwise.
-     *
-     * After settings_init(), because there has to be a setting to read.
-     * After storage_init(), because the card and the C6 share the SDMMC
-     * host driver and the one that gets there first initialises it --
-     * the card is the one with deadlines, so it goes first.
-     *
-     * Not ESP_ERROR_CHECK'd, for the same reason uac_init() is not: a
-     * player that will not boot because its radio did not is worse than
-     * one that plays the card in silence. wifi.c logs every failure and
-     * powers the module back down on its way out.
-     */
-    wifi_probe(s_exp2);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the

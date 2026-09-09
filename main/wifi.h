@@ -78,17 +78,30 @@ extern "C" {
  *
  * `exp2` is the expander at 0x44, the same handle usbhost_init() takes.
  *
- * Returns without doing anything, and without an error, when
+ Returns without doing anything, and without an error, when
  * settings_wifi_enabled() is false. That is the whole point of the
  * switch: with it off nothing here powers the module, initialises
  * ESP-Hosted or starts a driver, so "does this still behave like
  * v0.3.0" stays a one-bit question rather than an audit.
  *
- * Call after storage_init(), for the shared-host reason above, and after
- * settings_init(), so there is a setting to read. Not ESP_ERROR_CHECK
- * material at the call site: a player that will not boot because its
- * radio did not is worse than one that plays the card in silence. Every
- * failure path here logs and returns.
+ CALL IT FROM THE SETTINGS PUSH, NOT FROM app_main().
+ *
+ * settings_init() starts the writer task and loads nothing: which volume
+ * the settings live on is not known until a volume turns up, so the file
+ * is read by the first settings_note_path() that adopts one. Its own
+ * header says the caller then has to push the values wherever they are
+ * acted on, because nothing reads them by itself -- and the radio is one
+ * of those values, beside the volume.
+ *
+ * Called from app_main() instead, this read the built-in default and
+ * nothing else, forever: on the board that was `wifi=true` in the file at
+ * 1960 ms and the file being read at 2232.
+ *
+ * Idempotent, because that push runs at the start of every track.
+ *
+ * Not ESP_ERROR_CHECK material at the call site: a player that will not
+ * boot because its radio did not is worse than one that plays the card
+ * in silence. Every failure path here logs and returns.
  */
 esp_err_t wifi_probe(i2c_master_dev_handle_t exp2);
 

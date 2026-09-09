@@ -50,6 +50,7 @@ static const char *TAG = "tab5_wifi";
 #define SCAN_MAX_AP             (32)
 
 static bool s_powered;
+static bool s_up;
 
 static esp_err_t wlan_power(i2c_master_dev_handle_t exp2, bool on)
 {
@@ -146,8 +147,20 @@ static esp_err_t scan_and_log(void)
 
 esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
 {
+    /* Idempotent, because the caller is the settings push and that runs
+     * at the start of every track. Bringing the transport up a second
+     * time is not a no-op -- esp_wifi_init() on an initialised driver
+     * returns an error and esp_hosted_init() would reset the C6 out from
+     * under a live association. */
+    if (s_up) return ESP_OK;
+
     if (!settings_wifi_enabled()) {
-        ESP_LOGI(TAG, "Wi-Fi is off; C6 left unpowered");
+        /* Once, not once per track. */
+        static bool said;
+        if (!said) {
+            ESP_LOGI(TAG, "Wi-Fi is off; C6 left unpowered");
+            said = true;
+        }
         return ESP_OK;
     }
 
@@ -198,6 +211,8 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
         ESP_LOGI(TAG, "radio up, station MAC %02X:%02X:%02X:%02X:%02X:%02X",
                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
     }
+
+    s_up = true;
 
     err = scan_and_log();
     if (err != ESP_OK) ESP_LOGE(TAG, "scan: %s", esp_err_to_name(err));

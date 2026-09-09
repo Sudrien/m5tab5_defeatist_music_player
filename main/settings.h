@@ -200,10 +200,22 @@ void settings_set_crossfade_album(bool on);
  * of them is no business of this module: one switch governs the radio
  * whether there is one saved network or nine.
  *
- * Takes effect immediately. Unlike the audio settings there is no ring
- * of already-decoded samples to make a mid-flight change incoherent;
- * turning it off tears the connection down now, which is what someone
- * reaching for it means.
+ TAKES EFFECT AT THE NEXT START, WHICH IS NOT WHAT IT SHOULD DO.
+ *
+ * This header used to promise the change applied immediately, on the
+ * grounds that there is no ring of decoded samples to make a mid-flight
+ * change incoherent. That is still the right behaviour and it is not the
+ * behaviour: the only reader is wifi_probe(), which runs from the
+ * settings push at the start of a track, so a switch thrown while the
+ * panel is open is stored and acted on at the next boot.
+ *
+ * Recorded rather than quietly fixed because it is the shape this
+ * project already has a rule about -- a request needs a reader, and a
+ * request with no reader is lost rather than pending. Closing it needs
+ * wifi_start()/wifi_stop() and a teardown that unwinds esp_wifi and
+ * esp_hosted in order without blocking ui_task while the C6 comes up.
+ * That is worth doing once the radio has been seen to work, and is not
+ * worth writing before then.
  */
 bool settings_wifi_enabled(void);
 void settings_set_wifi_enabled(bool on);
