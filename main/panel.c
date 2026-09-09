@@ -75,10 +75,22 @@ typedef enum {
     TAB_USB,
     TAB_BUILD,
     TAB_AUDIO,
+    /*
+     * Last, and next to USB rather than next to AUDIO, because the tab
+     * strip already reads as "what is attached, what this is, what it
+     * sounds like". The radio is another thing that is attached.
+     *
+     * "NET" rather than "NETWORK": 42 px against 98 in a 144 px tab at
+     * five tabs across 720. NETWORK fits too, but it fits with 23 px
+     * either side, and the strip's other labels all sit in a third of
+     * their tab.
+     */
+    TAB_NET,
     TAB_COUNT
 } panel_tab_t;
 
-static const char *const k_tab_name[TAB_COUNT] = { "SD", "USB", "BUILD", "AUDIO" };
+static const char *const k_tab_name[TAB_COUNT] = { "SD", "USB", "BUILD",
+                                                   "AUDIO", "NET" };
 
 /*
  * A drag on the crossfade slider.
@@ -431,6 +443,149 @@ static int draw_note(int y, const char *const *lines, int count)
     return y;
 }
 
+/*
+ * The NET tab: two switches and a readout.
+ *
+ * Same shape as AUDIO -- controls in a column with a note under each,
+ * y positions counted from the constants rather than written down -- so
+ * the two tabs stay editable by the same hands. See the comment on
+ * AUDIO_SWITCH_H for why the heights are per-control.
+ */
+#define NET_WIFI_NOTE_LINES (3)
+#define NET_NTP_NOTE_LINES  (3)
+#define NET_TZ_NOTE_LINES   (3)
+
+static int wifi_y(void) { return LIST_TOP; }
+static int ntp_y(void)  { return wifi_y() + AUDIO_SWITCH_H
+                                 + AUDIO_NOTE_GAP
+                                 + NET_WIFI_NOTE_LINES * AUDIO_NOTE_STEP
+                                 + AUDIO_GAP; }
+static int tz_y(void)   { return ntp_y() + AUDIO_SWITCH_H
+                                 + AUDIO_NOTE_GAP
+                                 + NET_NTP_NOTE_LINES * AUDIO_NOTE_STEP
+                                 + AUDIO_GAP; }
+
+static void wifi_switch_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0; *y = wifi_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
+}
+
+static void ntp_switch_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0; *y = ntp_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
+}
+
+/*
+ * The NTP pill has three states, not two, which is why it does not go
+ * through draw_pill().
+ *
+ * With the radio off the clock cannot be set however this is set, and
+ * the honest thing to draw is the stored preference in the disabled
+ * colours -- the same grey the USB switch uses for IN USE and the
+ * chooser uses for an absent volume. Drawing OFF instead would be a
+ * switch that reads back something other than what was put into it, and
+ * drawing ON would promise a clock that is not being set.
+ */
+static void draw_state_pill(int px, int py, int pw, int ph, const char *text,
+                            bool on, bool enabled, int scale)
+{
+    gfx_fill_rect(px, py, pw, ph,
+                  !enabled ? C_TAB_OFF : on ? C_ON : C_BTN);
+    const int tw = gfx_text_w(text, scale);
+    gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(scale)) / 2,
+                  text, scale, pw - 8,
+                  !enabled ? C_DISABLED : on ? C_BG : C_DIM);
+}
+
+static void draw_net(void)
+{
+    const int w = gfx_w();
+    int x, y, bw, bh;
+    const bool wifi = settings_wifi_enabled();
+
+    /* --- Wi-Fi ------------------------------------------------------ */
+    wifi_switch_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Wi-Fi",
+                  NAME_SCALE, 400, C_TEXT);
+    {
+        const int pw = 132, ph = 56;
+        draw_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                  wifi ? "ON" : "OFF", wifi, NAME_SCALE);
+    }
+
+    /*
+     * What it is for and what it costs, in that order, because the
+     * second is the reason someone would leave it off. This is a player
+     * that has never needed a network and still does not need one to
+     * play a card.
+     */
+    static const char *const wifi_note[NET_WIFI_NOTE_LINES] = {
+        "Needed for internet radio and the clock.",
+        "Off by default. Nothing on the card needs",
+        "it, and the radio draws power while on.",
+    };
+    draw_note(y + bh + AUDIO_NOTE_GAP, wifi_note, NET_WIFI_NOTE_LINES);
+
+    /* --- Network time ----------------------------------------------- */
+    ntp_switch_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Network time",
+                  NAME_SCALE, 400, wifi ? C_TEXT : C_DISABLED);
+    {
+        const bool pref = settings_ntp_pref();
+        const int pw = 132, ph = 56;
+        draw_state_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                        pref ? "ON" : "OFF", pref, wifi, NAME_SCALE);
+    }
+
+    static const char *const ntp_note[NET_NTP_NOTE_LINES] = {
+        "Sets the clock from the internet.",
+        "Greyed while Wi-Fi is off: the setting is",
+        "kept, it just has no way to happen.",
+    };
+    draw_note(y + bh + AUDIO_NOTE_GAP, ntp_note, NET_NTP_NOTE_LINES);
+
+    /* --- Zone, read-only -------------------------------------------- */
+    /*
+     * A readout rather than a control, and it will stay one.
+     *
+     * A POSIX TZ string is up to forty characters of punctuation. There
+     * is no keyboard on this device and building one for a value edited
+     * once in the life of the player would be the largest thing on this
+     * panel by a wide margin, in service of the setting least often
+     * touched. The file is hand-editable on purpose -- that is the whole
+     * argument in settings.h -- so the note says where.
+     */
+    y = tz_y();
+    gfx_fill_rect(0, y, w, ROW_H, C_ROW);
+    gfx_draw_text(24, y + (ROW_H - GFX_GLYPH_H(LABEL_SCALE)) / 2, "Zone",
+                  LABEL_SCALE, 300, C_DIM);
+    {
+        const char *tz = settings_tz();
+        const int avail = w - 260;
+        int tw = gfx_text_w(tz, LABEL_SCALE);
+        if (tw > avail) tw = avail;
+        gfx_draw_text_tail(w - 24 - tw,
+                           y + (ROW_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                           tz, LABEL_SCALE, avail, C_TEXT);
+    }
+
+    static const char *const tz_note[NET_TZ_NOTE_LINES] = {
+        "A POSIX TZ string, e.g. EST5EDT,M3.2.0,M11.1.0",
+        "Edit \"tz\" in .defeatist.dat on the card;",
+        "there is no keyboard to type it here.",
+    };
+    const int used = draw_note(y + ROW_H + AUDIO_NOTE_GAP, tz_note,
+                               NET_TZ_NOTE_LINES);
+
+    /* The same check draw_audio() ends with, and for the same reason. */
+    if (used > gfx_h() - FOOT_H) {
+        ESP_LOGW(TAG, "NET tab overflows: %d px against %d",
+                 used, gfx_h() - FOOT_H);
+    }
+}
+
 static void draw_audio(void)
 {
     const int w = gfx_w();
@@ -587,6 +742,8 @@ void panel_draw(void)
 
     if (s_tab == TAB_AUDIO) {
         draw_audio();
+    } else if (s_tab == TAB_NET) {
+        draw_net();
     } else {
         row_t rows[ROWS_MAX];
         memset(rows, 0, sizeof(rows));
@@ -690,6 +847,38 @@ bool panel_touch(bool down, int x, int y)
     if (y >= h - FOOT_H) {
         ESP_LOGI(TAG, "button: close");
         return true;
+    }
+
+    if (s_tab == TAB_NET) {
+        int bx, by, bw, bh;
+
+        /* Whole row, not the pill, for the reason the AUDIO switches
+         * give below. */
+        wifi_switch_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            const bool on = !settings_wifi_enabled();
+            settings_set_wifi_enabled(on);
+            ESP_LOGI(TAG, "wifi %s", on ? "on" : "off");
+            s_dirty = true;
+            return false;
+        }
+
+        /*
+         * Tappable with Wi-Fi off, exactly as the album crossfade switch
+         * is tappable with the length at zero. Greyed means "having no
+         * effect", not "unavailable": setting this before turning the
+         * radio on is a reasonable order to do two things in, and a row
+         * that swallows presses teaches nothing about why.
+         */
+        ntp_switch_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            const bool on = !settings_ntp_pref();
+            settings_set_ntp_enabled(on);
+            ESP_LOGI(TAG, "ntp %s%s", on ? "on" : "off",
+                     settings_wifi_enabled() ? "" : " (wifi off)");
+            s_dirty = true;
+        }
+        return false;
     }
 
     if (s_tab == TAB_USB) {
