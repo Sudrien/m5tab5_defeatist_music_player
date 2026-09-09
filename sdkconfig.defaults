@@ -237,26 +237,25 @@ CONFIG_ESP32P4_TAB5_C6_BOARD=y
 # reply from something that is not running.
 CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15
 
-# AND ITS POLARITY, WHICH IS THE OTHER HALF OF THE SAME FAULT.
+# AND ITS POLARITY, WHICH IS ACTIVE LOW -- upstream's default, and the
+# opposite of what this file briefly said.
 #
-# esp_hosted defaults to active-low, and its own Kconfig says why:
+# The port's reset pulses and then PARKS at the inactive level:
 #
-#   ESP modules' EN / RST pin is active-low by convention (pull LOW to
-#   assert reset, HIGH to run).  Boards with a transistor-buffered EN
-#   that inverts polarity need the explicit "Active high" override here.
+#     gpio_set_level(pin, RESET_VAL_INACTIVE);
+#     delay; gpio_set_level(pin, RESET_VAL_ACTIVE);      /* the pulse */
+#     delay; gpio_set_level(pin, RESET_VAL_INACTIVE);    /* parks here */
 #
-# This is one of those boards. With the default, GPIO15 is driven low to
-# "reset" the C6 and left there, so the module never runs: the SDIO
-# peripheral configures against pins wired to a chip that is off, the
-# transport reports itself up, and the first RPC waits out its timeout.
-# Correct pins and a correct reset GPIO were both necessary and neither
-# was sufficient.
+# GPIO15 is the C6's EN, and EN must be left HIGH for the module to run.
+# Active low gives active=0, inactive=1, so the pin parks high and the C6
+# runs. Active high parks it LOW, which switches the module off a
+# millisecond after pulsing it on -- fifteen sdmmc_card_init failures,
+# which is what that setting produced here.
 #
-# Taken from a build that works on this hardware. The map project's
-# sdkconfig.defaults carries CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y,
-# and its Arduino build brings the radio up on the same C6.
+# The override exists for boards whose EN is behind an inverting
+# transistor. This one is not: SOC_EXTRF_RST reaches EN through R4 with a
+# 10K pulldown and nothing in between.
 #
-# SDIO_ and not HOST_: ESP_HOSTED_HOST_RESET_ACTIVE_LOW is a derived
-# symbol with no prompt (`default y if ESP_HOSTED_SDIO_RESET_ACTIVE_LOW`),
-# so setting it directly does nothing. The choice is the SDIO one.
-CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_HIGH=y
+# Set explicitly rather than left to the default, because it was wrong
+# once and a comment on an absent line cannot say why.
+CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
