@@ -270,7 +270,16 @@ bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
     const int64_t floor_s   = s_last_ntp_epoch + elapsed_s;
 
     if (epoch < floor_s) {
-        ESP_LOGW(TAG, "refusing time %lld: earlier than %lld, which is "
+        /*
+         * Debug, not warning. The common refusal is a card whose newest
+         * record predates the running firmware -- an upgrade, or a card
+         * from another device -- which is the floor working exactly as
+         * intended and is not news. Every caller that wants a refusal
+         * surfaced logs it itself with the context to explain it:
+         * on_sntp_sync() says so at info level, because a refused NTP
+         * reply IS worth seeing.
+         */
+        ESP_LOGD(TAG, "refusing time %lld: earlier than %lld, which is "
                       "already known to have passed",
                  (long long)epoch, (long long)floor_s);
         return false;
@@ -371,6 +380,10 @@ static bool path_for(storage_id_t id, char *out, size_t out_len,
  * form any more; the first append after a load leaves a JSON record
  * below it, and the compaction eventually removes the rest.
  */
+/* The highest ntp_epoch seen while reading one file, applied once when
+ * the file is done. Reset by load_file() around each read. */
+static int64_t s_pending_epoch;
+
 static bool parse_line(char *line, storage_id_t id, bool take_settings,
                        bool take_track)
 {
@@ -451,12 +464,22 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
          * so a record is self-describing, and is deliberately not
          * restored.
          */
+        /*
+         * Collected, not applied. A file holds one record per save and
+         * every one of them carries a timestamp, so offering each to the
+         * floor meant a refusal per record -- eighteen warnings on one
+         * boot, saying the same thing eighteen times about a file whose
+         * newest record is the only one that could ever raise anything.
+         *
+         * The maximum is taken here and load_file() applies it once. Max
+         * rather than last, because records are appended in save order
+         * and nothing enforces that save order is time order: a card
+         * moved between devices can interleave them.
+         */
         const cJSON *nte = cJSON_GetObjectItemCaseSensitive(root, "ntp_epoch");
         if (take_settings && cJSON_IsNumber(nte)) {
-            if (settings_note_ntp_time((int64_t)nte->valuedouble,
-                                       esp_timer_get_time())) {
-                any = true;
-            }
+            const int64_t e = (int64_t)nte->valuedouble;
+            if (e > s_pending_epoch) s_pending_epoch = e;
         }
 
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
@@ -556,6 +579,8 @@ static bool load_file(storage_id_t id, const char *name, bool take_settings,
     int records = 0;
     bool any = false;
 
+    s_pending_epoch = 0;
+
     while (fgets(line, sizeof(line), f)) {
         total += strlen(line);
         if (total > SETTINGS_MAX_FILE_BYTES) {
@@ -577,6 +602,18 @@ static bool load_file(storage_id_t id, const char *name, bool take_settings,
         if (parse_line(line, id, take_settings, take_track)) any = true;
     }
     storage_io_close(f);
+
+    /*
+     * The file's newest timestamp, offered once now that the whole file
+     * has been seen. Refused in silence if it is behind -- which is the
+     * ordinary case for any card older than the running firmware, and
+     * says nothing a reader needs, since the load line that follows
+     * prints the floor that actually resulted either way.
+     */
+    if (s_pending_epoch > 0) {
+        (void)settings_note_ntp_time(s_pending_epoch, esp_timer_get_time());
+        s_pending_epoch = 0;
+    }
 
     s_bytes[id] = total;
     if (any) ESP_LOGD(TAG, "%s: %d records, %u bytes", name, records,
