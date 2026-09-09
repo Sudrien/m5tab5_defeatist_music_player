@@ -269,6 +269,36 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
         return hosted;
     }
 
+    /*
+     * Bringing the bus up and connecting to the slave are two calls, and
+     * the second is the one that resets the C6.
+     *
+     * esp_hosted_init() initialises the SDIO peripheral -- that is the
+     * "bus backend up" line. esp_hosted_connect_to_slave() is what
+     * reaches ensure_slave_bus_ready(), which toggles the reset GPIO and
+     * then runs the card init. The auto-init path calls both, which is
+     * why the very first build on this board logged
+     *
+     *     W eh_sdio: Reset co-processor using GPIO[54]
+     *
+     * and no build since did: deferring the init replaced two calls with
+     * one. The C6 was never reset and the card init was never attempted,
+     * so every failure after that was a module that had not been started
+     * -- and the reset GPIO and polarity fixes had nothing to apply to.
+     *
+     * Returns a negative errno rather than an esp_err_t: this is the
+     * compat wrapper over eh_host_connect_to_slave(), and -ETIMEDOUT
+     * here means the card init got no answer.
+     */
+    const int conn = esp_hosted_connect_to_slave();
+    if (conn != 0) {
+        ESP_LOGE(TAG, "esp_hosted_connect_to_slave: %d", conn);
+        ESP_LOGE(TAG, "the reset and card init happen here, so eh_sdio's own "
+                      "lines above this are the ones worth reading");
+        wlan_power(exp2, false);
+        return ESP_FAIL;
+    }
+
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
     if (!esp_netif_create_default_wifi_sta()) {
