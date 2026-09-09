@@ -216,3 +216,23 @@ CONFIG_AUDIO_DECODER_MP3_SUPPORT=n
 # why the cmake patch that used to edit the constructor out of
 # managed_components/ is gone. wifi.c calls esp_hosted_init() itself.
 CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n
+
+# THE BOARD. esp_hosted carries a Tab5 preset and it was not selected --
+# CONFIG_ESP_HOSTED_P4_DEV_BOARD_NONE=y in the sdkconfig of the build that
+# failed. Selecting it here rather than asking anyone to find it in a menu:
+# a board's wiring is not a choice on hardware that is already soldered.
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+
+# THE RESET LINE, WHICH IS NOT PART OF THE SDIO PIN CONFIG.
+#
+# This is the one wifi.c could not fix from code. esp_hosted_sdio_set_config()
+# carries a pin_reset field, but the port reads the reset line from
+# H_GPIO_PIN_RESET -- the Kconfig symbol -- not from that struct, so the
+# runtime override set every data pin correctly and left reset at 54.
+#
+# On this board the C6's EN is SOC_EXTRF_RST on GPIO15, with a 10K pulldown.
+# Left at 54 the module is never released: the SDIO peripheral configures
+# against pins that are wired to a chip held in reset, "bus backend up" is
+# logged, and the first RPC -- esp_wifi_init() -- waits five seconds for a
+# reply from something that is not running.
+CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15

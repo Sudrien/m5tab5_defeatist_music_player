@@ -239,6 +239,26 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
         return err;
     }
 
+    /*
+     * Read back what the transport will actually use.
+     *
+     * eh_sdio's own banner prints the compile-time Kconfig macros rather
+     * than the live configuration, unconditionally, whether or not an
+     * override was accepted. Three builds were diagnosed off that line
+     * as having the wrong pins when the pins were already right. This
+     * prints the struct the driver copies, so the log says what is true.
+     */
+    struct esp_hosted_sdio_config *live = NULL;
+    if (esp_hosted_sdio_get_config(&live) == ESP_OK && live) {
+        ESP_LOGI(TAG, "SDIO in use: slot %u, %u-bit, CLK %d CMD %d "
+                      "D0 %d D1 %d D2 %d D3 %d",
+                 (unsigned)live->slot, (unsigned)live->bus_width,
+                 live->pin_clk.pin, live->pin_cmd.pin, live->pin_d0.pin,
+                 live->pin_d1.pin, live->pin_d2.pin, live->pin_d3.pin);
+        ESP_LOGI(TAG, "the eh_sdio banner below prints build-time defaults, "
+                      "not this -- believe this line");
+    }
+
     esp_err_t hosted = esp_hosted_init();
     if (hosted != ESP_OK) {
         ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(hosted));
