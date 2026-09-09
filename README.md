@@ -57,7 +57,7 @@ Claude, do not touch this README unless explicitly asked to. Use your own file.
 - actually paying attention to gapless playback data
 
 ## v0.4.0 targets
-- Internet Radio. Either of these options is "power tether" territory.
+- Internet Radio. Though this is "power tether" territory.
   - https://www.radio-browser.info 
 - Sleep timer
 - NTP
