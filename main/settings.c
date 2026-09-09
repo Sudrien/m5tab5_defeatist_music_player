@@ -68,7 +68,16 @@ static const char *TAG = "tab5_settings";
  * question of what is special about it, and the answer would be
  * "nothing, it just collided once".
  */
-#define SETTINGS_MAX_LINE       (256)
+/*
+ * Raised from 256 when the network keys arrived. A record is now the
+ * four audio keys, three network keys including a TZ string of up to
+ * SETTINGS_TZ_MAX, and an escaped absolute path; 256 left the path
+ * around 150 bytes, which real libraries exceed. A line over the cap is
+ * treated as corrupt, and the failure that produces -- a resume track
+ * silently forgotten on deep folder trees -- is invisible enough to be
+ * worth the slack.
+ */
+#define SETTINGS_MAX_LINE       (384)
 
 /*
  * The file is append-only, and this is where it stops growing.
@@ -105,6 +114,15 @@ static bool       s_rg_enabled = true;
  * way they were cut. See settings_crossfade_sec(). */
 static uint8_t    s_crossfade_sec;
 static bool       s_crossfade_album;
+
+/* Off. The radio does not come up because a firmware update happened.
+ * See settings_wifi_enabled(). */
+static bool       s_wifi_enabled;
+/* On, but gated by the above on the way out. */
+static bool       s_ntp_enabled = true;
+/* UTC until told otherwise, which is at least a defined answer rather
+ * than a guess at where the device is. */
+static char       s_tz[SETTINGS_TZ_MAX + 1] = "UTC0";
 
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
@@ -184,6 +202,63 @@ void settings_set_crossfade_album(bool on)
 {
     if (on == s_crossfade_album) return;
     s_crossfade_album = on;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+bool settings_wifi_enabled(void) { return s_wifi_enabled; }
+
+/* The effective answer, and the gate is here rather than in each caller
+ * on purpose -- see the header. */
+bool settings_ntp_enabled(void) { return s_wifi_enabled && s_ntp_enabled; }
+bool settings_ntp_pref(void)    { return s_ntp_enabled; }
+
+const char *settings_tz(void) { return s_tz; }
+
+/*
+ * The characters a POSIX TZ string is made of: zone abbreviations,
+ * offsets, and the M-rules. Nothing here needs escaping in JSON, which
+ * is the point -- validating on the way in keeps record_line()'s single
+ * format string intact rather than adding a second cJSON round-trip
+ * beside the track's.
+ */
+static bool tz_char_ok(char c)
+{
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+           (c >= '0' && c <= '9') ||
+           c == '+' || c == '-' || c == ':' || c == ',' || c == '.' ||
+           c == '/' || c == '<' || c == '>';
+}
+
+bool settings_set_tz(const char *tz)
+{
+    if (!tz || !tz[0]) return false;
+
+    const size_t n = strlen(tz);
+    if (n > SETTINGS_TZ_MAX) return false;
+    for (size_t i = 0; i < n; i++) {
+        if (!tz_char_ok(tz[i])) return false;
+    }
+
+    if (strcmp(tz, s_tz) == 0) return true;
+    memcpy(s_tz, tz, n + 1);
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+    return true;
+}
+
+void settings_set_wifi_enabled(bool on)
+{
+    if (on == s_wifi_enabled) return;
+    s_wifi_enabled = on;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+void settings_set_ntp_enabled(bool on)
+{
+    if (on == s_ntp_enabled) return;
+    s_ntp_enabled = on;
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -310,6 +385,35 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        const cJSON *wf = cJSON_GetObjectItemCaseSensitive(root, "wifi");
+        if (take_settings && cJSON_IsBool(wf)) {
+            s_wifi_enabled = cJSON_IsTrue(wf);
+            any = true;
+        }
+
+        const cJSON *np = cJSON_GetObjectItemCaseSensitive(root, "ntp");
+        if (take_settings && cJSON_IsBool(np)) {
+            s_ntp_enabled = cJSON_IsTrue(np);
+            any = true;
+        }
+
+        /* Through the same validator as settings_set_tz(), because a
+         * hand-edited zone is exactly as untrusted as a hand-edited
+         * crossfade and for the stronger reason: this one goes back out
+         * into the file unescaped. A rejected string leaves the default
+         * standing rather than half-applying. */
+        const cJSON *tz = cJSON_GetObjectItemCaseSensitive(root, "tz");
+        if (take_settings && cJSON_IsString(tz) && tz->valuestring) {
+            char keep[sizeof(s_tz)];
+            snprintf(keep, sizeof(keep), "%s", s_tz);
+            if (settings_set_tz(tz->valuestring)) {
+                any = true;
+            } else {
+                ESP_LOGW(TAG, "ignoring unusable tz in settings file");
+                snprintf(s_tz, sizeof(s_tz), "%s", keep);
+            }
+        }
+
         const cJSON *t = cJSON_GetObjectItemCaseSensitive(root, "track");
         if (take_track && cJSON_IsString(t) && t->valuestring &&
             t->valuestring[0] && id < STORAGE_COUNT) {
@@ -357,6 +461,21 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
          * key, so it is read generously. */
         s_rg_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
+    }
+    /* No legacy form of the network keys exists -- they postdate the
+     * JSON records by a long way -- so they are read here only because a
+     * hand-written line is the one way they can appear in this form, and
+     * refusing it would be arbitrary. */
+    if (strcmp(key, "wifi") == 0) {
+        s_wifi_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
+        return true;
+    }
+    if (strcmp(key, "ntp") == 0) {
+        s_ntp_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
+        return true;
+    }
+    if (strcmp(key, "tz") == 0) {
+        return settings_set_tz(val);
     }
     ESP_LOGD(TAG, "unknown key '%s'", key);
     return false;
@@ -434,6 +553,11 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
     const char *const rg = s_rg_enabled ? "true" : "false";
     const char *const xa = s_crossfade_album ? "true" : "false";
+    const char *const wf = s_wifi_enabled ? "true" : "false";
+    /* The stored preference, not the effective one. Writing the gated
+     * value would mean turning the radio off and on again silently
+     * reset the clock preference to whatever it was gated to. */
+    const char *const np = s_ntp_enabled ? "true" : "false";
 
     /*
      * One format string for the settings half, used by all three exits
@@ -443,8 +567,10 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      * reverts it.
      */
 #define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
-                            "\"crossfade\":%u,\"crossfade_album\":%s"
-#define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa
+                            "\"crossfade\":%u,\"crossfade_album\":%s," \
+                            "\"wifi\":%s,\"ntp\":%s,\"tz\":\"%s\""
+#define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
+                             wf, np, s_tz
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {
         return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",

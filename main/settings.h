@@ -176,6 +176,90 @@ void settings_set_crossfade_sec(uint8_t sec);
 bool settings_crossfade_album(void);
 void settings_set_crossfade_album(bool on);
 
+/*
+ * Whether the radio is allowed to come up at all. Off by default, and
+ * that default is load-bearing.
+ *
+ * This is a music player that works with no network, and every previous
+ * version of it could not have one. Someone who upgrades and finds the
+ * radio associating with a saved access point they configured months ago
+ * has been surprised by their own device. Off until asked is the only
+ * defensible starting position for a transmitter.
+ *
+ * It is also the switch that makes the network side testable as a whole:
+ * with this false, nothing calls esp_wifi_start(), no scan runs, no SNTP
+ * client exists and no stream can be opened, so "does the player still
+ * work exactly as it did" has a one-bit answer rather than an audit.
+ *
+ * NO CREDENTIALS LIVE HERE.
+ *
+ * This file is plaintext on a card people pull out and read, and its
+ * design note says so approvingly -- a line saying `volume=35` is a
+ * feature. A PSK on that same line is not. The networks themselves live
+ * in wifistore, encrypted against the factory eFuse MAC, and the count
+ * of them is no business of this module: one switch governs the radio
+ * whether there is one saved network or nine.
+ *
+ * Takes effect immediately. Unlike the audio settings there is no ring
+ * of already-decoded samples to make a mid-flight change incoherent;
+ * turning it off tears the connection down now, which is what someone
+ * reaching for it means.
+ */
+bool settings_wifi_enabled(void);
+void settings_set_wifi_enabled(bool on);
+
+/*
+ * Whether to set the clock from the network.
+ *
+ * TWO GETTERS, DELIBERATELY.
+ *
+ * settings_ntp_enabled() is the effective answer and the one anything
+ * acting on it must use: it is false whenever the radio is off, because
+ * an SNTP client on a device with no network is not a time source, it is
+ * a task waking every few seconds to fail. settings_ntp_pref() is the
+ * stored preference, which is what the panel draws -- a switch that
+ * silently reads OFF because a different switch is off is a switch
+ * nobody can learn.
+ *
+ * The alternative was one getter and a note telling every caller to
+ * check the radio as well. Notes like that are correct until the second
+ * caller.
+ *
+ * On by default. Someone who has gone to the trouble of enabling the
+ * radio and saving a network has not done that in order to keep setting
+ * the clock by hand.
+ */
+bool settings_ntp_enabled(void);
+bool settings_ntp_pref(void);
+void settings_set_ntp_enabled(bool on);
+
+/*
+ * The zone the clock is displayed in, as a POSIX TZ string -- the thing
+ * setenv("TZ", ...) takes, e.g. "EST5EDT,M3.2.0,M11.1.0". Defaults to
+ * "UTC0".
+ *
+ * Here because NTP answers a question nobody asked. It returns UTC, and
+ * a clock showing UTC is wrong everywhere except one meridian; the zone
+ * is the other half of "what time is it" and storing one without the
+ * other produces a player that knows the time and displays the wrong
+ * one.
+ *
+ * A POSIX string rather than a zone name because the alternative is
+ * shipping a tzdata blob to resolve "America/New_York", and the rules it
+ * would resolve to are the string. The cost is that a zone whose
+ * government moves its DST dates needs the string edited -- which, on a
+ * card that is already hand-editable by design, is a thing someone can
+ * actually do.
+ *
+ * Validated on the way in against the characters POSIX TZ uses.
+ * settings_set_tz() ignores anything else and returns false, so the
+ * value reaching the file is always one that can be written into it
+ * without escaping.
+ */
+#define SETTINGS_TZ_MAX (40)
+const char *settings_tz(void);
+bool settings_set_tz(const char *tz);
+
 #ifdef __cplusplus
 }
 #endif
