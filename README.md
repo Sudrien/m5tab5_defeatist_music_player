@@ -56,23 +56,28 @@ Claude, do not touch this README unless explicitly asked to. Use your own file.
 - configurable crossfade
 - actually paying attention to gapless playback data
 
+## v0.4.0 targets
+- Internet Radio. Either of these options is "power tether" territory.
+  - https://www.radio-browser.info 
+- Sleep timer
+- NTP
+- captive portal wifi config (multiple routers)
+
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
 - build file lists faster
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
   - there's so much. So so much. 
-- Internet Radio? Conceivable. Either of these options is "power tether" territory.
-  - https://www.radio-browser.info 
 - Cue sheets - do people actually rip full albums? I just have seen tracks
 - m3u/m3u8 - playlists are significant potential UI
-- Sleep timer
 
 ## What could not happen with current published code
 - classic BT dongle support
 - per file resume
 - usb hubs - Can it tell you have plugged one in? yes. Can it use things plugged into them? Probably not. Will one save you if your device requires enough power to brownout the Tab5? Uh. Define save.
-- DRM'd files are no-go. 
+- DRM'd files are no-go.
+- DSD and APE require too much processing
 
 ## Potential issues
 
