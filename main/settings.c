@@ -747,6 +747,41 @@ static bool compact_file(storage_id_t id)
  * That is the whole of the crash safety this needs, and it is why the
  * rotation is not here.
  */
+/*
+ * An epoch as "YYYY-MM-DD HH:MM:SSZ", for the log.
+ *
+ * civil_from_days -- the inverse of the days_from_civil above, from the
+ * same source -- rather than gmtime_r(). gmtime_r() takes a time_t,
+ * which may be 32 bits here, so it would truncate exactly the values
+ * these fields are stored as int64_t to survive: a log that misreports
+ * the time past 2038 is worse than no log, because it would be believed.
+ *
+ * Always UTC, and says so with a trailing Z. There is no zone setting in
+ * this project (see settings.h) and this is the one place a reader could
+ * mistake one for the other.
+ */
+static void fmt_epoch(int64_t t, char *out, size_t out_len)
+{
+    int64_t days = t / 86400;
+    int64_t rem  = t % 86400;
+    if (rem < 0) { rem += 86400; days -= 1; }   /* floor, not truncate */
+
+    days += 719468;
+    const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const int64_t doe = days - era * 146097;                        /* 0..146096 */
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp  = (5 * doy + 2) / 153;
+    const int64_t d   = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t m   = mp + (mp < 10 ? 3 : -9);
+    const int64_t y   = yoe + era * 400 + (m <= 2);
+
+    snprintf(out, out_len, "%04lld-%02lld-%02lld %02lld:%02lld:%02lldZ",
+             (long long)y, (long long)m, (long long)d,
+             (long long)(rem / 3600), (long long)(rem % 3600 / 60),
+             (long long)(rem % 60));
+}
+
 static void write_file(storage_id_t id)
 {
     char dat[128];
@@ -791,8 +826,14 @@ static void write_file(storage_id_t id)
     if (s_bytes[id] == 0) storage_mark_hidden(dat);
 
     s_bytes[id] += (size_t)len;
-    ESP_LOGI(TAG, "saved %s (volume=%u, %u bytes)", dat, s_volume,
-             (unsigned)s_bytes[id]);
+
+    /* The time as written into this record, not a second reading: what
+     * is logged is what the file now says, so a wrong value on the card
+     * and a wrong value in the log cannot disagree. */
+    char when[32];
+    fmt_epoch(settings_now(), when, sizeof(when));
+    ESP_LOGI(TAG, "saved %s (volume=%u, %u bytes, %s)", dat, s_volume,
+             (unsigned)s_bytes[id], when);
 }
 
 /*
@@ -815,7 +856,14 @@ static bool load_volume(storage_id_t id, bool take_settings, bool take_track)
     s_bytes[id] = 0;
 
     if (load_file(id, SETTINGS_NAME, take_settings, take_track)) {
-        ESP_LOGI(TAG, "loaded %s/%s (volume=%u)", root, SETTINGS_NAME, s_volume);
+        /* After the load, so this is the floor the record raised us to --
+         * or the build stamp, if the record was behind and refused. The
+         * two cases are told apart by comparing against the banner's
+         * build time, which is the line above this in every log. */
+        char when[32];
+        fmt_epoch(settings_now(), when, sizeof(when));
+        ESP_LOGI(TAG, "loaded %s/%s (volume=%u, %s)",
+                 root, SETTINGS_NAME, s_volume, when);
         return true;
     }
     if (load_file(id, BACKUP_NAME, take_settings, take_track)) {

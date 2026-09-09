@@ -303,6 +303,77 @@ static void t_written_is_acceptable(void)
     }
 }
 
+/* fmt_epoch(), same source as settings.c. */
+static void fmt_epoch(int64_t t, char *out, size_t out_len)
+{
+    int64_t days = t / 86400;
+    int64_t rem  = t % 86400;
+    if (rem < 0) { rem += 86400; days -= 1; }
+
+    days += 719468;
+    const int64_t era = (days >= 0 ? days : days - 146096) / 146097;
+    const int64_t doe = days - era * 146097;
+    const int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    const int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    const int64_t mp  = (5 * doy + 2) / 153;
+    const int64_t d   = doy - (153 * mp + 2) / 5 + 1;
+    const int64_t m   = mp + (mp < 10 ? 3 : -9);
+    const int64_t y   = yoe + era * 400 + (m <= 2);
+
+    snprintf(out, out_len, "%04lld-%02lld-%02lld %02lld:%02lld:%02lldZ",
+             (long long)y, (long long)m, (long long)d,
+             (long long)(rem / 3600), (long long)(rem % 3600 / 60),
+             (long long)(rem % 60));
+}
+
+/*
+ * fmt_epoch against gmtime_r, and against the parser it inverts.
+ *
+ * The log is the only place a person sees any of this, so a formatter
+ * that is quietly wrong produces a log that is believed and misleads --
+ * which is worse than no log, and is why it is checked rather than
+ * eyeballed once.
+ */
+static void t_fmt(void)
+{
+    printf("fmt_epoch inverts the parse and matches gmtime_r\n");
+
+    char buf[32];
+
+    /* The build stamp from the board, formatted back. */
+    fmt_epoch(parse_build_time("Sep  9 2026", "15:20:47"), buf, sizeof(buf));
+    ck(strcmp(buf, "2026-09-09 15:20:47Z") == 0, "the real build stamp");
+
+    /* Round trip across the same span the parser was swept over, on an
+     * offset that lands on odd times of day. */
+    int mismatches = 0, tested = 0;
+    for (int64_t t = 1600000000; t < 7000000000LL; t += 999983) {
+        fmt_epoch(t, buf, sizeof(buf));
+
+        const time_t tt = (time_t)t;
+        struct tm g;
+        char ref[32];
+        gmtime_r(&tt, &g);
+        snprintf(ref, sizeof(ref), "%04d-%02d-%02d %02d:%02d:%02dZ",
+                 g.tm_year + 1900, g.tm_mon + 1, g.tm_mday,
+                 g.tm_hour, g.tm_min, g.tm_sec);
+
+        tested++;
+        if (strcmp(buf, ref) != 0) {
+            if (mismatches < 3) printf("  got %s want %s\n", buf, ref);
+            mismatches++;
+        }
+    }
+    ck(tested > 5000, "swept a real span");
+    ck(mismatches == 0, "agrees with gmtime_r everywhere, including past 2038");
+
+    /* Zero is 1970 and should print as such rather than as anything
+     * clever -- it is the value the floor refuses and wants to be
+     * recognisable in a log. */
+    fmt_epoch(0, buf, sizeof(buf));
+    ck(strcmp(buf, "1970-01-01 00:00:00Z") == 0, "the epoch itself");
+}
+
 /*
  * The civil-date arithmetic against timegm(), which the host has and the
  * target does not. Every day across a span that includes the leap-year
@@ -362,6 +433,7 @@ int main(void)
     t_2038();
     t_parse();
     t_civil();
+    t_fmt();
     t_seed_then_card();
     t_updated_at();
     t_written_is_acceptable();
