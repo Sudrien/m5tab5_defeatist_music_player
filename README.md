@@ -25,6 +25,8 @@ Claude, do not touch this README unless explicitly asked to. Use your own file.
 
 ## Here is what I was able to get working on ESP-IDF 5.5.5
 
+Note: the goal of this project is to max out the potential of this hardware without modifying it. No soldering, no accessories that can't be removed later.
+
 - MicroSD card and USB stick hotplug
   - The microsd card is preferred. It will use less power.
   - It will only auto-mount usb if no microsd is readable
