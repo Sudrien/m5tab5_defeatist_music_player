@@ -495,9 +495,33 @@ static void bring_up(void)
              name, s_ap_ip, s_seen_n);
 }
 
+/* What the scan said about `ssid`'s security, for portalweb_join_plan().
+ * s_seen is written before the server starts and not again while it
+ * runs, and this is the portal task, so no lock. Duplicates were folded
+ * to the strongest AP of each name, so that is the one asked. */
+static portalweb_net_t scanned_net(const char *ssid)
+{
+    for (int i = 0; i < s_seen_n; i++) {
+        if (strcmp(s_seen[i].ssid, ssid) != 0) continue;
+        switch ((wifi_auth_mode_t)s_seen[i].auth) {
+        case WIFI_AUTH_WPA3_PSK:
+        case WIFI_AUTH_WPA2_WPA3_PSK:
+            return PORTALWEB_NET_WPA3_CAPABLE;
+        case WIFI_AUTH_WPA_PSK:
+        case WIFI_AUTH_WPA2_PSK:
+        case WIFI_AUTH_WPA_WPA2_PSK:
+            return PORTALWEB_NET_WPA2_ONLY;
+        default:
+            return PORTALWEB_NET_UNKNOWN;
+        }
+    }
+    return PORTALWEB_NET_UNKNOWN;
+}
+
 /*
- * One submitted credential. PSK first, passphrase on refusal, and only
- * what worked is stored -- see portal.h.
+ * One submitted credential, tried in the order portalweb_join_plan()
+ * gives for what the scan saw, and only what worked is stored -- see
+ * portal.h and portalweb.h.
  */
 static bool try_join(void)
 {
@@ -510,19 +534,24 @@ static bool try_join(void)
     xSemaphoreGive(s_mu);
 
     const portalweb_check_t kind = portalweb_check(ssid, pass);
+    const portalweb_net_t net = scanned_net(ssid);
+    const portalweb_plan_t plan = portalweb_join_plan(kind, net);
     ESP_LOGI(TAG, "trying %.32s (%s)", ssid,
-             kind == PORTALWEB_OK_PSK ? "PSK as typed" : "passphrase");
+             plan == PORTALWEB_TRY_AS_TYPED        ? "PSK as typed" :
+             plan == PORTALWEB_TRY_PASSPHRASE_ONLY ? "passphrase only: WPA3-capable network" :
+             net  == PORTALWEB_NET_WPA2_ONLY       ? "PSK, then passphrase: WPA2 network" :
+                                                     "PSK, then passphrase: not in the scan");
 
     esp_err_t err = ESP_ERR_INVALID_ARG;
     const char *stored = NULL;
     bool is_psk = false;
     char hex[WIFISTORE_SECRET_MAX + 1] = { 0 };
 
-    if (kind == PORTALWEB_OK_PSK) {
+    if (plan == PORTALWEB_TRY_AS_TYPED) {
         err = wifi_join(ssid, pass, WIFI_JOIN_TIMEOUT_MS);
         stored = pass;
         is_psk = true;
-    } else if (kind == PORTALWEB_OK_PASSPHRASE) {
+    } else if (plan == PORTALWEB_TRY_PSK_THEN_PASSPHRASE) {
         uint8_t key[32];
         const int rc = mbedtls_pkcs5_pbkdf2_hmac_ext(
             MBEDTLS_MD_SHA1, (const unsigned char *)pass, strlen(pass),
@@ -545,6 +574,10 @@ static bool try_join(void)
             stored = pass;
             is_psk = false;
         }
+    } else if (plan == PORTALWEB_TRY_PASSPHRASE_ONLY) {
+        err = wifi_join(ssid, pass, WIFI_JOIN_TIMEOUT_MS);
+        stored = pass;
+        is_psk = false;
     }
 
     if (err == ESP_OK) {

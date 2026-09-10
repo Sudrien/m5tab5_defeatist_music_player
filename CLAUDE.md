@@ -6097,7 +6097,11 @@ What that run measured, beyond "it works":
   NTP 0.9 s after the address. Setup started while already connected to
   fivescore ran three attempts: PSK reason 2, PSK again reason 202,
   passphrase joined -- 11 s from submit to address. The PSK reaching
-  authentication has now been refused with 202 twice. 0014's pause was
+  authentication has now been refused with 202 twice. **0017** skips
+  the PSK on networks the scan shows as WPA3 or WPA2/WPA3 and tries the
+  passphrase alone; WPA2-only and unscanned networks keep PSK first,
+  because passphrase-first there would store a 64-hex key no join on
+  this C6 has used yet. Unflashed. 0014's pause was
   not exercised: nothing was playing when START was pressed, and play
   was not pressed during setup.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth

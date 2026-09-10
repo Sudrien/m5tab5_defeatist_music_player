@@ -286,3 +286,19 @@ void portalweb_non_ascii_hint(const char *secret, char *out, size_t out_size)
         i += n;
     }
 }
+
+portalweb_plan_t portalweb_join_plan(portalweb_check_t kind, portalweb_net_t net)
+{
+    switch (kind) {
+    case PORTALWEB_OK_PSK:
+        /* Typed as a key. Even on a WPA3 network that is what was given,
+         * and the refusal will say so. */
+        return PORTALWEB_TRY_AS_TYPED;
+    case PORTALWEB_OK_PASSPHRASE:
+        return net == PORTALWEB_NET_WPA3_CAPABLE
+             ? PORTALWEB_TRY_PASSPHRASE_ONLY
+             : PORTALWEB_TRY_PSK_THEN_PASSPHRASE;
+    default:
+        return PORTALWEB_TRY_NONE;
+    }
+}

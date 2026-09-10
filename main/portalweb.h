@@ -105,6 +105,40 @@ void portalweb_describe(const char *secret, char *out, size_t out_size);
  */
 void portalweb_non_ascii_hint(const char *secret, char *out, size_t out_size);
 
+/*
+ * WHICH SECRET TO TRY FIRST.
+ *
+ * PSK-first exists so that a WPA2 network stores a key and never the
+ * passphrase. On hardware, a WPA2/WPA3 transition network refused the
+ * derived PSK with reason 202 twice, and the passphrase was stored
+ * anyway -- the station offers SAE, and SAE cannot use a precomputed
+ * key. So on a network the scan shows as WPA3-capable, the PSK attempt
+ * only costs time: go straight to the passphrase.
+ *
+ * On a WPA2-only network, or one the scan did not see (hidden, typed
+ * by hand, out of range when the scan ran), PSK first stays. Trying the
+ * passphrase first there and storing a derived key afterwards would be
+ * as good -- if the passphrase joins, the PBKDF2 key is correct by
+ * construction -- but it would store a 64-hex key that no join on this
+ * C6 has ever used. That waits for a WPA2-only network to show
+ * "saved ... as PSK" and then join from it at the next boot.
+ */
+typedef enum {
+    PORTALWEB_NET_UNKNOWN = 0,      /* not in the scan, or an auth mode
+                                       this does not reason about */
+    PORTALWEB_NET_WPA2_ONLY,        /* WPA, WPA2, WPA/WPA2 */
+    PORTALWEB_NET_WPA3_CAPABLE,     /* WPA3, WPA2/WPA3 */
+} portalweb_net_t;
+
+typedef enum {
+    PORTALWEB_TRY_NONE = 0,             /* the pair did not check out */
+    PORTALWEB_TRY_AS_TYPED,             /* a 64-hex PSK: exactly that */
+    PORTALWEB_TRY_PSK_THEN_PASSPHRASE,  /* derive, try, fall back */
+    PORTALWEB_TRY_PASSPHRASE_ONLY,      /* WPA3-capable: skip the PSK */
+} portalweb_plan_t;
+
+portalweb_plan_t portalweb_join_plan(portalweb_check_t kind, portalweb_net_t net);
+
 /* Lower-case hex of `n` bytes into `out`, which needs 2n + 1. */
 void portalweb_hex(const uint8_t *in, size_t n, char *out);
 

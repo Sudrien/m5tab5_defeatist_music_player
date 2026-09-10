@@ -188,6 +188,26 @@ int main(void)
         CHECK(strlen(d) <= 23 && strcmp(d + strlen(d) - 3, "...") == 0, "cut short: '%s'", d);
     }
 
+    printf("the join plan: skip the PSK only where the scan shows WPA3\n");
+    CHECK(portalweb_join_plan(PORTALWEB_OK_PASSPHRASE, PORTALWEB_NET_WPA3_CAPABLE)
+          == PORTALWEB_TRY_PASSPHRASE_ONLY, "WPA3-capable");
+    CHECK(portalweb_join_plan(PORTALWEB_OK_PASSPHRASE, PORTALWEB_NET_WPA2_ONLY)
+          == PORTALWEB_TRY_PSK_THEN_PASSPHRASE, "WPA2 only keeps PSK first");
+    CHECK(portalweb_join_plan(PORTALWEB_OK_PASSPHRASE, PORTALWEB_NET_UNKNOWN)
+          == PORTALWEB_TRY_PSK_THEN_PASSPHRASE, "not scanned keeps PSK first");
+    for (int net = PORTALWEB_NET_UNKNOWN; net <= PORTALWEB_NET_WPA3_CAPABLE; net++) {
+        CHECK(portalweb_join_plan(PORTALWEB_OK_PSK, (portalweb_net_t)net)
+              == PORTALWEB_TRY_AS_TYPED, "typed PSK tried as typed, net %d", net);
+        CHECK(portalweb_join_plan(PORTALWEB_BAD_SECRET, (portalweb_net_t)net)
+              == PORTALWEB_TRY_NONE, "bad secret, net %d", net);
+        CHECK(portalweb_join_plan(PORTALWEB_NO_SECRET, (portalweb_net_t)net)
+              == PORTALWEB_TRY_NONE, "no secret, net %d", net);
+        CHECK(portalweb_join_plan(PORTALWEB_NON_ASCII, (portalweb_net_t)net)
+              == PORTALWEB_TRY_NONE, "non-ascii, net %d", net);
+        CHECK(portalweb_join_plan(PORTALWEB_BAD_SSID, (portalweb_net_t)net)
+              == PORTALWEB_TRY_NONE, "bad ssid, net %d", net);
+    }
+
     printf("hex is lower case and terminated\n");
     {
         const uint8_t b[3] = { 0x00, 0xAB, 0xff };

@@ -178,6 +178,12 @@
  * regardless of pmf_cfg, so the knob to withhold SAE is not obvious, and
  * a WPA2-only join to a transition AP is also a downgrade.
  *
+ * So since 0017 the PSK attempt is skipped where the scan shows WPA3 or
+ * WPA2/WPA3: the passphrase is tried alone and stored, which is what
+ * happened anyway, a few seconds sooner. WPA2-only and unscanned
+ * networks keep PSK first -- see portalweb_join_plan() for why the
+ * passphrase-first version of those waits on one more measurement.
+ *
  * ======================== STILL UNANSWERED ========================
  *
  * WHAT THE PHONE SEES DURING THE JOIN. One radio, one channel: joining
