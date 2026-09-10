@@ -366,30 +366,46 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
 
     /*
-     * ONE RETRY, AND ONLY FOR REASON 2 (AUTH_EXPIRE).
+     * ONE RETRY, AFTER A PAUSE, AND ONLY FOR REASON 2 (AUTH_EXPIRE).
      *
-     * Measured on hardware, fivescore, a WPA2/WPA3 transition network:
-     * the first attempt after boot with the SAVED PASSPHRASE failed with
-     * reason 2 after 6.6 s, and the same passphrase joined sixty seconds
-     * later on the worker's retry. In the portal the same thing had
-     * happened to the derived PSK, and the passphrase that followed
-     * joined -- which read as "the PSK was refused" and was very likely
-     * just the second attempt. Reason 2 is an authentication that timed
-     * out, not a secret that was wrong, so it gets a second try inside
-     * this call instead of a minute's wait or a wrong conclusion.
+     * Measured on hardware, fivescore, a WPA2/WPA3 network on channel 2,
+     * one secret throughout:
      *
-     * Why the first attempt expires is not known. Nothing else is
-     * retried: a wrong password must fail, and fail once.
+     *   boot, first attempt        reason 2 after 6.6 s
+     *   worker retry, +60 s        joined
+     *   boot, first attempt        reason 2 after 6.6 s
+     *   immediate retry (0011)     reason 205, rssi -128, after 2.4 s
+     *   portal, first attempt      reason 2 after 3.6 s (AP up on ch 1)
+     *   portal, second attempt     joined
+     *
+     * So reason 2 is a first attempt expiring with a correct secret, and
+     * retrying at once is too soon: 205 with rssi -128 is a connect that
+     * never reached the AP. A minute later is not. The pause between is
+     * an ESTIMATE; nothing has measured where between 0 and 60 s the
+     * retry starts working, and the log line below is how to find out.
+     *
+     * Also only an observation, not a cause: in all three logs, every
+     * reason-2 failure was preceded by "rx RPC WifiEventNoArgs id=43" a
+     * few seconds into the attempt, and neither success was. 43 is
+     * probably WIFI_EVENT_HOME_CHANNEL_CHANGE on the slave's IDF, which
+     * would fit a first connect that has to move the radio to channel 2
+     * -- but the slave's event numbering has not been checked.
+     *
+     * No esp_wifi_disconnect() before the retry: the driver has already
+     * reported the disconnect, and a second one just before connecting
+     * is a thing 0011 did that the 205 may have come from.
      */
+#define JOIN_RETRY_PAUSE_MS (5000)
+
     EventBits_t bits = 0;
     for (int attempt = 1; err == ESP_OK && attempt <= 2; attempt++) {
         if (attempt == 2) {
-            ESP_LOGI(TAG, "join %.32s: reason 2 (auth expired), trying once more", ssid);
-            esp_wifi_disconnect();
+            ESP_LOGI(TAG, "join %.32s: reason 2 (auth expired), trying once "
+                          "more in %d ms", ssid, JOIN_RETRY_PAUSE_MS);
+            vTaskDelay(pdMS_TO_TICKS(JOIN_RETRY_PAUSE_MS));
         }
-        /* The disconnect above can deliver its event late and would read
-         * as this attempt failing. Cleared after the config call or the
-         * disconnect, and immediately before the connect. */
+        /* A disconnect event can arrive late and would read as this
+         * attempt failing. Cleared immediately before the connect. */
         xEventGroupClearBits(s_join_bits, JOIN_GOT_IP | JOIN_FAILED);
         s_join_reason = 0;
         err = esp_wifi_connect();

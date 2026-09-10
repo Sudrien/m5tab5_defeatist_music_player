@@ -6083,8 +6083,14 @@ What that run measured, beyond "it works":
   that followed joined, which looked like "transition APs refuse a PSK".
   The second flash took that back: at boot the *saved passphrase* failed
   the same way after 6.6 s and joined on the retry a minute later.
-  0011 retries reason 2 once inside `wifi_join()`. Whether the PSK then
-  joins fivescore, and gets stored instead of the passphrase, is unread.
+  0011 retried reason 2 at once, and the third flash showed that is too
+  soon: the retry failed in 2.4 s with reason 205 and rssi -128, a
+  connect that never reached the AP. 0012 pauses 5 s first -- an
+  estimate between "at once fails" and "a minute later works". Every
+  reason-2 failure so far was preceded by event id 43 (probably
+  HOME_CHANNEL_CHANGE on the slave; unchecked) and no success was.
+  Whether the PSK joins fivescore, and gets stored instead of the
+  passphrase, is still unread.
 - **The "a track is playing" refusal fired with nothing playing.** Right
   after boot the player sits on "ready to resume" with `s_playing` at its
   initial true, and `s_ring_pct` is 0 from an empty ring, so
