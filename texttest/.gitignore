@@ -1,5 +1,12 @@
-texttest/texttest
-texttest/ctrltest
-*.dSYM/
-wifistoretest
-clocktest
+# Build output. The test binaries have no extension and are named after
+# their tests, so rather than a list every new test has to remember to
+# extend -- which this file was, and two of its five entries never
+# matched -- ignore everything here, then take back what has an
+# extension (sources, headers, this file, README), the Makefile and
+# fake/. macOS debug bundles have a dot in their name, so they are
+# ignored again last.
+/*
+!/*.*
+!/Makefile
+!/fake/
+/*.dSYM/
