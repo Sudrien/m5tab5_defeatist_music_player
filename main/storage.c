@@ -55,6 +55,30 @@ static const char *TAG = "tab5_storage";
  * decoder for the bus. */
 #define POLL_MS                 (1000)
 
+/*
+ * How often a mounted-but-unused volume is asked whether it is still
+ * there.
+ *
+ * A minute rather than the one second the card gets, and the difference
+ * is what the two checks are for. The card's poll is a REMOVAL detector:
+ * a pulled card has to be noticed before something tries to read it, so
+ * it runs every pass. This is a LIVENESS check on a volume nothing is
+ * using, and a volume nobody is reading can afford to be wrong about for
+ * up to a minute.
+ *
+ * Not faster, on purpose. A drive that has gone quiet went quiet because
+ * it was idle, and a probe every second would keep it awake -- which
+ * would hide the fault rather than find it, at the cost of holding a
+ * flash device out of low power all day on a battery player. A minute is
+ * long enough that the drive still idles the way it would have anyway.
+ *
+ * Observed here: writes five seconds apart always worked, a gap of 102
+ * seconds and a gap of 246 seconds both failed on the first access
+ * afterwards. So the threshold this is meant to catch is somewhere above
+ * twenty-odd seconds, and a minute lands past it deliberately.
+ */
+#define USB_PING_MS             (60000)
+
 /* Files a volume must hold open at once. The decoder holds one, the
  * album-art reader briefly holds a second, and the chooser's scan holds a
  * DIR. Five is the IDF default and is enough; it is stated rather than
@@ -70,6 +94,10 @@ static sd_pwr_ctrl_handle_t s_pwr;
 static volatile bool s_mounted[STORAGE_COUNT];
 static volatile uint32_t s_generation;
 static volatile int s_held = STORAGE_COUNT;
+
+/* When the USB liveness probe last ran. Set on mount as well, so a
+ * freshly attached drive is not probed a tick later for no reason. */
+static TickType_t s_usb_pinged;
 
 static msc_host_device_handle_t s_msc_dev;
 static msc_host_vfs_handle_t s_msc_vfs;
@@ -381,6 +409,7 @@ static void usb_attach(uint8_t addr)
     }
 
     s_mounted[STORAGE_USB] = true;
+    s_usb_pinged = xTaskGetTickCount();
     s_generation++;
     ESP_LOGI(TAG, "USB drive mounted at %s", STORAGE_USB_MOUNT);
 }
@@ -545,6 +574,8 @@ static void storage_task(void *arg)
     (void)arg;
 
     while (1) {
+        const TickType_t now = xTaskGetTickCount();
+
         msc_host_event_t ev;
         while (s_msc_events && xQueueReceive(s_msc_events, &ev, 0) == pdTRUE) {
             if (ev.event == MSC_DEVICE_CONNECTED) {
@@ -554,6 +585,50 @@ static void storage_task(void *arg)
                  * bookkeeping. A held volume is still torn down, because
                  * unlike the card there is nothing left to read from and
                  * the handle is invalid either way. */
+                usb_detach();
+            }
+        }
+
+        /*
+         * IS THE DRIVE STILL ANSWERING?
+         *
+         * Nothing else asks. The USB path is otherwise entirely
+         * event-driven -- usb_attach() and usb_detach() run off
+         * MSC_DEVICE_CONNECTED and MSC_DEVICE_DISCONNECTED -- and a
+         * device that stops responding while still enumerated never
+         * produces either event. Twice now that has left /usb mounted
+         * and every write to it failing for minutes, with two
+         * five-second transfer timeouts burned on each attempt, until
+         * the drive was physically pulled.
+         *
+         * msc_host_get_device_info() rather than a read through the
+         * filesystem: it goes to the device, where a stat() or an
+         * opendir() can be answered out of FatFs's window buffer and
+         * would say the volume is fine while the bus is dead.
+         *
+         * SKIPPED WHILE THE VOLUME IS HELD. "Unused" is the whole point
+         * -- a track playing from /usb is already exercising the device
+         * far harder than this would, so the probe would tell us nothing
+         * new while adding traffic underneath a decoder with a deadline.
+         * If the drive dies mid-track the read fails and the player
+         * finds out that way.
+         *
+         * A failure here unmounts. It does not attempt a port reset or a
+         * VBUS cycle, both of which might recover the device and neither
+         * of which has been tried on this hardware; unmounting at least
+         * stops the ten seconds of timeouts per save and lets a replug
+         * work. Recovery can come later, on top of a detector that
+         * exists.
+         */
+        if (s_mounted[STORAGE_USB] && s_msc_dev && s_held != STORAGE_USB &&
+            (now - s_usb_pinged) >= pdMS_TO_TICKS(USB_PING_MS)) {
+            s_usb_pinged = now;
+
+            msc_host_device_info_t info;
+            const esp_err_t alive = msc_host_get_device_info(s_msc_dev, &info);
+            if (alive != ESP_OK) {
+                ESP_LOGW(TAG, "USB drive stopped answering (%s); unmounting",
+                         esp_err_to_name(alive));
                 usb_detach();
             }
         }
