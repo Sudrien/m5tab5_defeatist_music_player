@@ -242,10 +242,10 @@ esp_err_t wifi_scan_log(void);
  *                          offered to an AP that only speaks SAE
  *   ESP_ERR_TIMEOUT        no answer either way
  *
- * Reason 2 (AUTH_EXPIRE) is retried once inside the call, after a five
- * second pause, because on hardware a first attempt expires with a
- * correct secret and an immediate retry does not reach the AP. Worst
- * case is two timeouts and the pause, about thirty-five seconds.
+ * Reason 2 (AUTH_EXPIRE) is retried once inside the call, as a whole new
+ * attempt from set_config, because on hardware a first attempt expires
+ * with a correct secret and a bare second connect never reaches the AP.
+ * Worst case is two timeouts, about thirty seconds.
  *   ESP_ERR_INVALID_STATE  the radio is not up
  *
  * Never logs the secret.

@@ -6083,14 +6083,17 @@ What that run measured, beyond "it works":
   that followed joined, which looked like "transition APs refuse a PSK".
   The second flash took that back: at boot the *saved passphrase* failed
   the same way after 6.6 s and joined on the retry a minute later.
-  0011 retried reason 2 at once, and the third flash showed that is too
-  soon: the retry failed in 2.4 s with reason 205 and rssi -128, a
-  connect that never reached the AP. 0012 pauses 5 s first -- an
-  estimate between "at once fails" and "a minute later works". Every
-  reason-2 failure so far was preceded by event id 43 (probably
-  HOME_CHANNEL_CHANGE on the slave; unchecked) and no success was.
-  Whether the PSK joins fivescore, and gets stored instead of the
-  passphrase, is still unread.
+  0011 retried with a bare `esp_wifi_connect()` at once, and 0012 after
+  a 5 s pause; both got reason 205 with rssi -128, a connect that never
+  reached the AP. Every success had a fresh `esp_wifi_set_config()`
+  first -- the worker's minute-later retry, and the portal's passphrase
+  13 ms after the PSK failed. 0013 makes the retry a whole attempt, no
+  pause. Every reason-2 failure followed event id 43 (probably
+  HOME_CHANNEL_CHANGE on the slave; unchecked).
+- **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
+  flash: reason 202, AUTH_FAIL, then the passphrase joined and was
+  stored. PSK-first keeps the passphrase off the device only on
+  WPA2-only networks. Withholding SAE for the PSK attempt is untried.
 - **The "a track is playing" refusal fired with nothing playing.** Right
   after boot the player sits on "ready to resume" with `s_playing` at its
   initial true, and `s_ring_pct` is 0 from an empty ring, so

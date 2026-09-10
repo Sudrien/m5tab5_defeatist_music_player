@@ -149,16 +149,25 @@
  * and the passphrase joined, so the passphrase was stored. That read as
  * "a transition AP negotiates SAE, which cannot use a PSK."
  *
- * The next boot contradicts it. The worker's first attempt, with the
- * SAVED PASSPHRASE, failed with reason 2 after 6.6 s; the same passphrase
- * joined sixty seconds later. So reason 2 is a first attempt expiring
- * whatever the secret, and the portal's passphrase probably joined
- * because it was the second try, not because it was the passphrase.
- * wifi_join() now retries reason 2 once. Whether the PSK then joins
- * fivescore -- and so keeps the passphrase off the device -- is the next
- * log to read: "saved fivescore as PSK" or "as passphrase". Running the
- * portal again for fivescore is enough; saving an SSID that is already
- * stored replaces its record, kind included.
+ * The next boot muddied it: the worker's first attempt, with the SAVED
+ * PASSPHRASE, also failed with reason 2, so reason 2 alone could not say
+ * the PSK was refused.
+ *
+ * The fourth flash answered it. In the portal the PSK failed with reason
+ * 202 -- AUTH_FAIL, a refused credential, not an expiry -- and the
+ * passphrase joined 13 ms later from a fresh set_config:
+ *
+ *   tab5_wifi: join fivescore failed: ESP_ERR_WIFI_PASSWORD (reason 202)
+ *   tab5_wifi: joined fivescore
+ *   tab5_portal: saved fivescore as passphrase
+ *
+ * So on a WPA2/WPA3 transition network, with SAE offered, the PSK is
+ * refused and the passphrase is what gets stored. That is the case
+ * portal.h's PSK-first decision was meant to avoid, and it is the common
+ * home router now. Whether withholding SAE for the PSK attempt would get
+ * the AP's WPA2 side to accept it is NOT tried: IDF 5.x keeps PMF capable
+ * regardless of pmf_cfg, so the knob to withhold SAE is not obvious, and
+ * a WPA2-only join to a transition AP is also a downgrade.
  *
  * ======================== STILL UNANSWERED ========================
  *
