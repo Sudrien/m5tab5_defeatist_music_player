@@ -27,6 +27,9 @@
 #include "settings.h"
 #include <time.h>
 #include "wifi.h"
+#include "wifistore.h"
+#include "portal.h"
+#include "freertos/event_groups.h"
 
 static const char *TAG = "tab5_wifi";
 
@@ -83,6 +86,29 @@ static bool s_powered;
 static bool s_up;
 static bool s_sntp_started;
 static esp_netif_t *s_sta_netif;
+
+/*
+ * Joining, and the AP the portal borrows.
+ *
+ * s_connected is "has an address", set from the event loop and read
+ * anywhere as a plain value, like s_up. The event group carries the one
+ * answer wifi_join() waits for; s_join_reason is the disconnect reason
+ * that came with a failure, kept because "refused" and "not there" lead
+ * to different next steps in the portal.
+ */
+static esp_netif_t *s_ap_netif;
+static volatile bool     s_connected;
+static volatile bool     s_ap_on;
+static volatile uint8_t  s_ap_clients;
+static volatile uint16_t s_join_reason;
+static char              s_sta_ssid[33];     /* under s_join_lock */
+static EventGroupHandle_t s_join_bits;
+static SemaphoreHandle_t  s_join_lock;
+static esp_event_handler_instance_t s_wifi_evt, s_ip_evt;
+static TickType_t         s_last_try;        /* worker only; 0 = never */
+
+#define JOIN_GOT_IP     (1u << 0)
+#define JOIN_FAILED     (1u << 1)
 
 /*
  * NIST, and three of them.
@@ -242,7 +268,6 @@ static void on_sntp_sync(struct timeval *tv)
  * warning that is expected on every build is a warning nobody reads.
  * Remove the attribute when the call site appears.
  */
-__attribute__((unused))
 static void sntp_start(void)
 {
     if (s_sntp_started || !settings_ntp_enabled()) return;
@@ -288,14 +313,245 @@ static SemaphoreHandle_t s_wake;
  * create the task before the reader exists in the file. */
 esp_err_t wifi_apply_settings(void);
 
+/*
+ * The event loop's half. Runs on the default event task, so it only
+ * records: values and bits, nothing that waits.
+ */
+static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg;
+    if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        const wifi_event_sta_disconnected_t *d = data;
+        s_join_reason = d ? d->reason : 0;
+        if (s_connected) ESP_LOGW(TAG, "disconnected, reason %u", (unsigned)s_join_reason);
+        s_connected = false;
+        if (s_join_bits) xEventGroupSetBits(s_join_bits, JOIN_FAILED);
+    } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *e = data;
+        if (e) ESP_LOGI(TAG, "address " IPSTR, IP2STR(&e->ip_info.ip));
+        s_connected = true;
+        if (s_join_bits) xEventGroupSetBits(s_join_bits, JOIN_GOT_IP);
+        /* The one call site NTP was waiting for. sntp_start() checks the
+         * setting and its own started flag, so a reconnect is a no-op. */
+        sntp_start();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        if (s_ap_clients < 255) s_ap_clients++;
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        if (s_ap_clients > 0) s_ap_clients--;
+    }
+}
+
+esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
+{
+    if (!s_up || !s_join_lock || !s_join_bits) return ESP_ERR_INVALID_STATE;
+    if (!ssid || !secret) return ESP_ERR_INVALID_ARG;
+    const size_t sl = strlen(ssid), pl = strlen(secret);
+    if (sl == 0 || sl > 32 || pl > 64) return ESP_ERR_INVALID_ARG;
+
+    xSemaphoreTake(s_join_lock, portMAX_DELAY);
+
+    wifi_config_t cfg = { 0 };
+    memcpy(cfg.sta.ssid, ssid, sl);
+    memcpy(cfg.sta.password, secret, pl);     /* 64 bytes, no NUL needed */
+    /* WPA2 as the floor, SAE allowed, PMF offered: the combination that
+     * joins WPA2, WPA3 and transition-mode APs alike. */
+    cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    cfg.sta.pmf_cfg.capable = true;
+    cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+
+    esp_wifi_disconnect();                     /* whatever it was doing */
+    s_connected = false;
+    s_sta_ssid[0] = '\0';
+
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    /* The disconnect above can deliver its event late and would read as
+     * this attempt failing. Cleared after the config call, which is
+     * synchronous with the driver, and immediately before the connect. */
+    xEventGroupClearBits(s_join_bits, JOIN_GOT_IP | JOIN_FAILED);
+    s_join_reason = 0;
+    if (err == ESP_OK) err = esp_wifi_connect();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "join %.32s: %s", ssid, esp_err_to_name(err));
+        xSemaphoreGive(s_join_lock);
+        return err;
+    }
+
+    const EventBits_t bits = xEventGroupWaitBits(
+        s_join_bits, JOIN_GOT_IP | JOIN_FAILED, pdFALSE, pdFALSE,
+        pdMS_TO_TICKS(timeout_ms));
+
+    if (bits & JOIN_GOT_IP) {
+        snprintf(s_sta_ssid, sizeof(s_sta_ssid), "%.32s", ssid);
+        err = ESP_OK;
+        ESP_LOGI(TAG, "joined %.32s", ssid);
+    } else {
+        /* Stop the driver retrying on its own, so a failed attempt does
+         * not keep hopping channels under an AP the portal is serving. */
+        esp_wifi_disconnect();
+        if (!(bits & JOIN_FAILED)) {
+            err = ESP_ERR_TIMEOUT;
+        } else if (s_join_reason == WIFI_REASON_NO_AP_FOUND) {
+            err = ESP_ERR_NOT_FOUND;
+        } else {
+            err = ESP_ERR_WIFI_PASSWORD;
+        }
+        /* The reason, never the secret -- see portal.h. */
+        ESP_LOGW(TAG, "join %.32s failed: %s (reason %u)", ssid,
+                 esp_err_to_name(err), (unsigned)s_join_reason);
+    }
+    xSemaphoreGive(s_join_lock);
+    return err;
+}
+
+bool wifi_connected(void) { return s_connected; }
+
+bool wifi_sta_ssid(char *out, size_t out_size)
+{
+    if (!out || !out_size) return false;
+    out[0] = '\0';
+    if (!s_connected || !s_join_lock) return false;
+    xSemaphoreTake(s_join_lock, portMAX_DELAY);
+    snprintf(out, out_size, "%s", s_sta_ssid);
+    xSemaphoreGive(s_join_lock);
+    return out[0] != '\0';
+}
+
+esp_err_t wifi_ap_begin(const char *ssid)
+{
+    if (!s_up) return ESP_ERR_INVALID_STATE;
+    if (s_ap_on) return ESP_OK;
+    if (!ssid || !*ssid || strlen(ssid) > 32) return ESP_ERR_INVALID_ARG;
+
+    if (!s_ap_netif) {
+        s_ap_netif = esp_netif_create_default_wifi_ap();
+        if (!s_ap_netif) {
+            ESP_LOGE(TAG, "no AP netif -- is CONFIG_ESP_WIFI_SOFTAP_SUPPORT set?");
+            return ESP_FAIL;
+        }
+    }
+
+    /*
+     * THE QUESTION portal.h LEFT OPEN, answered by whichever line below
+     * prints on the first flash. esp_hosted's own examples run APSTA on a
+     * P4 host, but M5's slave firmware on this C6 reports version 0.0.0
+     * and nothing on this board has ever asked it for AP mode.
+     */
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "APSTA refused: %s -- the slave firmware is the "
+                      "first suspect, not this code", esp_err_to_name(err));
+        return err;
+    }
+
+    wifi_config_t ap = { 0 };
+    const size_t sl = strlen(ssid);
+    memcpy(ap.ap.ssid, ssid, sl);
+    ap.ap.ssid_len = (uint8_t)sl;
+    ap.ap.authmode = WIFI_AUTH_OPEN;
+    ap.ap.max_connection = 4;
+    ap.ap.channel = 1;          /* follows the STA's channel if it joins */
+    err = esp_wifi_set_config(WIFI_IF_AP, &ap);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "AP config: %s", esp_err_to_name(err));
+        esp_wifi_set_mode(WIFI_MODE_STA);
+        return err;
+    }
+
+    s_ap_clients = 0;
+    s_ap_on = true;
+    ESP_LOGI(TAG, "APSTA up: %s is broadcasting", ssid);
+    return ESP_OK;
+}
+
+esp_err_t wifi_ap_end(void)
+{
+    if (!s_ap_on) return ESP_OK;
+    s_ap_on = false;
+    s_ap_clients = 0;
+    if (!s_up) return ESP_OK;
+    const esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    ESP_LOGI(TAG, "back to STA%s", err == ESP_OK ? "" : " (mode change failed)");
+    return err;
+}
+
+int wifi_ap_clients(void) { return s_ap_on ? s_ap_clients : 0; }
+
+esp_netif_t *wifi_ap_netif(void) { return s_ap_on ? s_ap_netif : NULL; }
+
+int wifi_scan_list(wifi_seen_t *out, int max)
+{
+    if (!s_up || !out || max <= 0) return -1;
+    if (esp_wifi_scan_start(NULL, true) != ESP_OK) return -1;
+
+    uint16_t n = 0;
+    esp_wifi_scan_get_ap_num(&n);
+    if (n > SCAN_MAX_AP) n = SCAN_MAX_AP;
+    wifi_ap_record_t *ap = n ? calloc(n, sizeof(*ap)) : NULL;
+    int got = 0;
+    if (ap && esp_wifi_scan_get_ap_records(&n, ap) == ESP_OK) {
+        for (uint16_t i = 0; i < n && got < max; i++) {
+            if (!ap[i].ssid[0]) continue;       /* hidden: nothing to show */
+            snprintf(out[got].ssid, sizeof(out[got].ssid), "%.32s",
+                     (const char *)ap[i].ssid);
+            out[got].rssi = ap[i].rssi;
+            out[got].auth = (uint8_t)ap[i].authmode;
+            ESP_LOGI(TAG, "  %4d dBm  ch%-3d  %-10s  %.32s", ap[i].rssi,
+                     ap[i].primary, authmode(ap[i].authmode), out[got].ssid);
+            got++;
+        }
+    }
+    free(ap);
+    esp_wifi_scan_stop();
+    return got;
+}
+
+const char *wifi_auth_name(uint8_t auth) { return authmode((wifi_auth_mode_t)auth); }
+
+/*
+ * Join the strongest saved network in range, if there is one and it is
+ * worth trying now. Worker task only.
+ */
+#define RETRY_MS    (60000)
+
+static void connect_saved(bool force)
+{
+    if (!s_up || s_connected || portal_running() || wifistore_count() == 0) return;
+    const TickType_t now = xTaskGetTickCount();
+    if (!force && s_last_try && (now - s_last_try) < pdMS_TO_TICKS(RETRY_MS)) return;
+    s_last_try = now ? now : 1;
+
+    wifi_seen_t *seen = calloc(SCAN_MAX_AP, sizeof(*seen));
+    if (!seen) return;
+    const int n = wifi_scan_list(seen, SCAN_MAX_AP);
+    if (n > 0) {
+        const char *names[SCAN_MAX_AP];
+        int8_t rssi[SCAN_MAX_AP];
+        for (int i = 0; i < n; i++) { names[i] = seen[i].ssid; rssi[i] = seen[i].rssi; }
+        const int best = wifistore_best(names, rssi, n);
+        wifistore_cred_t cred;
+        if (best >= 0 && wifistore_get(best, &cred)) {
+            wifi_join(cred.ssid, cred.secret, WIFI_JOIN_TIMEOUT_MS);
+            memset(&cred, 0, sizeof(cred));
+        } else {
+            ESP_LOGI(TAG, "none of %d saved network%s in range",
+                     wifistore_count(), wifistore_count() == 1 ? "" : "s");
+        }
+    }
+    free(seen);
+}
+
 static void wifi_task(void *arg)
 {
     (void)arg;
     for (;;) {
-        xSemaphoreTake(s_wake, portMAX_DELAY);
-        wifi_apply_settings();
+        /* A wake is a switch press or a radio that has just come up; a
+         * timeout is the retry for a player carried back into range. */
+        const bool woke = xSemaphoreTake(s_wake, pdMS_TO_TICKS(RETRY_MS)) == pdTRUE;
+        if (woke) wifi_apply_settings();
+        connect_saved(woke);
     }
 }
+
 
 void wifi_request_apply(void)
 {
@@ -311,6 +567,8 @@ void wifi_init(i2c_master_dev_handle_t exp2)
 
     s_lock = xSemaphoreCreateMutex();
     s_wake = xSemaphoreCreateBinary();
+    s_join_lock = xSemaphoreCreateMutex();
+    s_join_bits = xEventGroupCreate();
     if (!s_lock || !s_wake) {
         ESP_LOGE(TAG, "no lock or semaphore; the switch will only take "
                       "effect at a track boundary");
@@ -324,7 +582,7 @@ void wifi_init(i2c_master_dev_handle_t exp2)
      * radio has no deadline and audio does. 4 KB is what the call chain
      * below needs; esp_hosted and esp_wifi run on their own tasks.
      */
-    if (xTaskCreate(wifi_task, "wifi", 4096, NULL, 3, NULL) != pdPASS) {
+    if (xTaskCreate(wifi_task, "wifi", 6144, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "no wifi task; the switch will only take effect at a "
                       "track boundary");
     }
@@ -356,6 +614,18 @@ esp_err_t wifi_stop(void)
     esp_err_t first = ESP_OK;
     esp_err_t err;
 
+    if (s_wifi_evt) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, s_wifi_evt);
+        s_wifi_evt = NULL;
+    }
+    if (s_ip_evt) {
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, s_ip_evt);
+        s_ip_evt = NULL;
+    }
+    s_connected = false;
+    s_ap_on = false;
+    s_ap_clients = 0;
+
     if (s_sntp_started) {
         esp_netif_sntp_deinit();
         s_sntp_started = false;
@@ -370,6 +640,10 @@ esp_err_t wifi_stop(void)
     if (s_sta_netif) {
         esp_netif_destroy_default_wifi(s_sta_netif);
         s_sta_netif = NULL;
+    }
+    if (s_ap_netif) {
+        esp_netif_destroy_default_wifi(s_ap_netif);
+        s_ap_netif = NULL;
     }
 
     /*
@@ -527,6 +801,13 @@ esp_err_t wifi_start(void)
     err = esp_event_loop_create_default();
     if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
 
+    if (esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                            on_event, NULL, &s_wifi_evt) != ESP_OK ||
+        esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                            on_event, NULL, &s_ip_evt) != ESP_OK) {
+        ESP_LOGW(TAG, "no event handlers; joining will time out");
+    }
+
     s_sta_netif = esp_netif_create_default_wifi_sta();
     if (!s_sta_netif) {
         ESP_LOGE(TAG, "no STA netif");
@@ -605,17 +886,30 @@ esp_err_t wifi_apply_settings(void)
     const bool want = settings_wifi_enabled();
     esp_err_t err = ESP_OK;
 
+    /* The portal is running on this radio; it comes down first, so its
+     * server and its AP are not pulled out from under it. Outside the
+     * lock, because it waits for the portal's task. */
+    if (!want && s_up && portal_running()) {
+        if (s_lock) xSemaphoreGive(s_lock);
+        portal_stop();
+        if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+    }
+
+    const bool was_up = s_up;
     if (want != s_up) err = want ? wifi_start() : wifi_stop();
 
     if (s_lock) xSemaphoreGive(s_lock);
 
-    if (!want || err != ESP_OK) return err;
-    if (!s_up) return err;
-
-    /* Outside the lock: it takes several seconds and holding the lock
-     * across it would make a switch press wait for a scan. The scan is
-     * the spike's only visible output and the only way to see the radio
-     * working before the portal exists; it goes when the portal has its
-     * own. */
-    return wifi_scan_log();
+    /*
+     * The join is the worker's, never this caller's: this runs from the
+     * track loop's settings push too, and a fifteen-second join there is
+     * a stalled decode. A radio that has just come up wakes the worker;
+     * the worker's own call lands here with the radio already up and
+     * posts nothing, so this cannot loop.
+     */
+    if (want && err == ESP_OK && s_up && !was_up) {
+        s_last_try = 0;
+        wifi_request_apply();
+    }
+    return err;
 }

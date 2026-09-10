@@ -83,6 +83,7 @@
 #include "ui.h"
 #include "usbhost.h"
 #include "wifi.h"
+#include "portal.h"
 #include "wifistore.h"
 #include "waveform.h"
 
@@ -1765,6 +1766,17 @@ static void xfade_mix(int16_t *a, const int16_t *b, size_t frames)
 }
 
 static volatile bool s_playing;
+
+/*
+ * For portal_init(): "is a track playing". Paused is not playing, and no
+ * ring at all -- s_ring_pct at -1 -- is nothing loaded. The portal refuses
+ * to start on true; see portal.h for why the rare thing excludes the
+ * common one.
+ */
+static bool player_is_playing(void)
+{
+    return s_playing && s_ring_pct >= 0;
+}
 
 static void ring_publish(void);
 
@@ -8563,6 +8575,7 @@ void app_main(void)
     /* Just the expander handle; nothing is powered until
      * wifi_apply_settings() runs from the settings push below. */
     wifi_init(s_exp2);
+    portal_init(player_is_playing);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the

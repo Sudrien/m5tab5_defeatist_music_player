@@ -21,6 +21,8 @@
 #include "panel.h"
 #include "settings.h"
 #include "wifi.h"
+#include "wifistore.h"
+#include "portal.h"
 #include "storage.h"
 #include "uac.h"
 #include "usbhost.h"
@@ -470,6 +472,58 @@ static void ntp_switch_box(int *x, int *y, int *w, int *h)
     *x = 0; *y = ntp_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
 }
 
+#define NET_SETUP_NOTE_LINES (3)
+static int setup_y(void) { return ntp_y() + AUDIO_SWITCH_H
+                                  + AUDIO_NOTE_GAP
+                                  + NET_NTP_NOTE_LINES * AUDIO_NOTE_STEP
+                                  + AUDIO_GAP; }
+static void setup_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0; *y = setup_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
+}
+
+/*
+ * The setup row's three lines, from a copy of the portal's state and
+ * nothing else -- see portal.h on why it is a copy. `busy` is "a track is
+ * playing", which the panel learns from storage like the USB row does.
+ */
+static void setup_lines(const portal_state_t *st, bool wifi, bool running,
+                        char l[NET_SETUP_NOTE_LINES][64])
+{
+    for (int i = 0; i < NET_SETUP_NOTE_LINES; i++) l[i][0] = '\0';
+
+    if (running) {
+        snprintf(l[0], 64, "Join %s on a phone.", st->ap_ssid[0] ? st->ap_ssid : "the setup network");
+        switch (st->status) {
+        case PORTAL_STARTING: snprintf(l[1], 64, "Starting..."); break;
+        case PORTAL_TRYING:   snprintf(l[1], 64, "Trying %.32s...", st->last_ssid); break;
+        case PORTAL_FAILED:   snprintf(l[1], 64, "%.32s did not work. Try again.", st->last_ssid); break;
+        case PORTAL_SAVED:    snprintf(l[1], 64, "Saved %.32s.", st->last_ssid); break;
+        default:              snprintf(l[1], 64, "A sign-in page opens with the form."); break;
+        }
+        snprintf(l[2], 64, "%u phone%s joined, %u:%02u left", (unsigned)st->clients,
+                 st->clients == 1 ? "" : "s",
+                 (unsigned)(st->seconds_left / 60), (unsigned)(st->seconds_left % 60));
+        return;
+    }
+
+    char ssid[33];
+    if (wifi && wifi_sta_ssid(ssid, sizeof(ssid))) {
+        snprintf(l[0], 64, "Connected to %.32s.", ssid);
+    } else {
+        const int n = wifistore_count();
+        snprintf(l[0], 64, "Not connected. %d network%s saved.", n, n == 1 ? "" : "s");
+    }
+    switch (st->status) {
+    case PORTAL_SAVED:    snprintf(l[1], 64, "Saved %.32s.", st->last_ssid); break;
+    case PORTAL_TIMEDOUT: snprintf(l[1], 64, "Setup closed after five minutes."); break;
+    case PORTAL_ERROR:    snprintf(l[1], 64, "Setup could not start."); break;
+    default:              snprintf(l[1], 64, "A phone supplies the password."); break;
+    }
+    snprintf(l[2], 64, "%s", !wifi ? "Turn Wi-Fi on first."
+                                   : "Pause playback before starting.");
+}
+
 /*
  * The NTP pill has three states, not two, which is why it does not go
  * through draw_pill().
@@ -539,8 +593,26 @@ static void draw_net(void)
         "a certificate is invalid at an unset clock.",
         "Greyed while Wi-Fi is off; the setting is kept.",
     };
-    const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, ntp_note,
-                                   NET_NTP_NOTE_LINES);
+    (void)draw_note(y + bh + AUDIO_NOTE_GAP, ntp_note, NET_NTP_NOTE_LINES);
+
+    /* --- Network setup ---------------------------------------------- */
+    setup_box(&x, &y, &bw, &bh);
+    portal_state_t st;
+    portal_state(&st);
+    const bool running = portal_running();
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Add a network",
+                  NAME_SCALE, 400, wifi ? C_TEXT : C_DISABLED);
+    {
+        const int pw = 132, ph = 56;
+        draw_state_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                        running ? "STOP" : "START", running, wifi, NAME_SCALE);
+    }
+    char lines[NET_SETUP_NOTE_LINES][64];
+    setup_lines(&st, wifi, running, lines);
+    const char *setup_note[NET_SETUP_NOTE_LINES] = { lines[0], lines[1], lines[2] };
+    const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, setup_note,
+                                   NET_SETUP_NOTE_LINES);
 
     /*
      * No zone row, and see settings.h: nothing on this device displays a
@@ -850,6 +922,22 @@ bool panel_touch(bool down, int x, int y)
             settings_set_ntp_enabled(on);
             ESP_LOGI(TAG, "ntp %s%s", on ? "on" : "off",
                      settings_wifi_enabled() ? "" : " (wifi off)");
+            s_dirty = true;
+        }
+
+        /* Neither call waits: portal_start() hands the work to the
+         * portal's task, and the stop is a request. A refusal is logged
+         * and shows on the row's own lines at the next redraw. */
+        setup_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            if (portal_running()) {
+                ESP_LOGI(TAG, "network setup: stop");
+                portal_request_stop();
+            } else {
+                const esp_err_t err = portal_start();
+                ESP_LOGI(TAG, "network setup: start%s",
+                         err == ESP_OK ? "" : " refused");
+            }
             s_dirty = true;
         }
         return false;

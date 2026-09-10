@@ -123,14 +123,17 @@
  *
  * ======================== STILL UNANSWERED ========================
  *
- * HOW THE RADIO GETS INTO APSTA AND BACK. wifi.c brings the radio up as
- * STA and can take it down again -- wifi_start() and wifi_stop() exist
- * now -- but neither knows about AP mode. The portal needs APSTA on the
- * way in and STA back on the way out, which is a mode change on a radio
- * that is already up rather than a new lifecycle.
+ * WHETHER THIS C6'S FIRMWARE WILL DO APSTA. wifi_ap_begin() is written
+ * against esp_wifi as esp_hosted's own P4 examples use it, and those run
+ * APSTA. The slave on this board is M5's build and reports 0.0.0, and
+ * nothing has asked it for AP mode. The first flash answers it in one of
+ * two log lines: "APSTA up" or "APSTA refused".
  *
- * That is the remaining wifi.c work this header depends on and does not
- * describe.
+ * WHAT THE PHONE SEES DURING THE JOIN. One radio, one channel: joining
+ * the home network moves the AP to that network's channel, and a phone
+ * on the setup AP may drop for a moment. The result is always on the
+ * device's screen; the status page on the phone is a courtesy that may
+ * not arrive.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -224,11 +227,27 @@ typedef struct {
 esp_err_t portal_start(void);
 
 /*
+ * Called once at boot, before anything else here. `is_playing` answers
+ * "is a track playing right now" for the refusal above; the portal has
+ * no other way to ask the player, and the player has no header.
+ */
+void portal_init(bool (*is_playing)(void));
+
+/* Whether the portal is up or coming up. A value, safe anywhere. */
+bool portal_running(void);
+
+/*
+ * Ask for portal_stop() and return at once. The one ui_task calls.
+ */
+void portal_request_stop(void);
+
+/*
  * Take the AP down and return the radio to STA.
  *
- * Safe to call when not running. Blocks only as long as esp_wifi needs
- * to change mode, so it must not be called from ui_task; the panel asks
- * for a stop by some means that does not wait for it.
+ * Safe to call when not running. Waits for the portal's task to take the
+ * server and the AP down -- which can include the end of a join attempt
+ * in progress, so up to about twenty seconds -- and must not be called
+ * from ui_task. The panel uses portal_request_stop().
  */
 esp_err_t portal_stop(void);
 

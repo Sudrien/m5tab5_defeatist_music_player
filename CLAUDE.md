@@ -6061,25 +6061,64 @@ account to manage.
   posting to a worker -- `panel_touch()` runs on ui_task and must not
   block for two seconds over live audio.
 - **`wifistore`** holds up to eight networks in NVS, with 10072 host
-  checks under ASan. **It has no writer.** Nothing has ever called
-  `wifistore_save()`.
+  checks under ASan. Its writer is the portal's success path, below.
 - **The clock floor.** `.defeatist.dat` carries `ntp_epoch` and
   `ntp_boot_us`; the stored belief only ever moves forward, seeded from
   the build timestamp so a player that has never seen a network still
   refuses 1970. Written on every save, so uptime accumulates across
   reboots with no network at all.
 
+### Written, not built here, not flashed
+
+No device was available for any of this, and this patch has not been
+compiled against ESP-IDF where it was written. Build it before anything else.
+
+- **Joining.** `wifi_join()` joins one network and reports an address,
+  a refusal (`ESP_ERR_WIFI_PASSWORD`), an absence (`ESP_ERR_NOT_FOUND`)
+  or a timeout, and never retries on its own. The worker joins the
+  strongest saved network (`wifistore_best()`) when the radio comes up
+  and every minute after while it has no address. The track loop's
+  settings push never joins -- it only wakes the worker, because a
+  fifteen-second join on the decode task is a stall.
+- **NTP** is called from `IP_EVENT_STA_GOT_IP`. `sntp_start()` lost its
+  `unused` attribute.
+- **APSTA.** `wifi_ap_begin()` / `wifi_ap_end()` switch a running radio
+  between APSTA and STA. esp_hosted's own examples run APSTA with a P4
+  host, which is why this was written rather than probed first -- but
+  the C6 here runs M5's slave build (0.0.0) and has never been asked.
+  **The first flash answers it in one line: `APSTA up` or `APSTA
+  refused`.** If refused, nothing else in the portal matters yet.
+- **`portal.c`**, to `portal.h`'s settled decisions. Scan as a station,
+  raise `Defeatist-XXXX`, offer the AP as DNS in the DHCP lease, answer
+  every name with the AP (`dnsreply.c`), serve a form listing the scan
+  (`<datalist>`, so a hidden network can still be typed), and join
+  before storing: derived PSK first, passphrase on refusal. Five-minute
+  timeout, refused while a track plays, state copied out.
+  Everything that parses a byte from a phone -- form decoding, SSID
+  escaping, the credential lengths, the DNS parser -- is in
+  `portalweb.c` and `dnsreply.c`, host-tested in
+  `texttest/portalwebtest.c` (57 checks plus 200000 random packets).
+- **The NET tab** has an "Add a network" row: START/STOP, the AP name,
+  what the portal is doing, phones joined and time left; when idle, the
+  joined network or how many are saved.
+
+Known gaps, in the order a flash would hit them:
+
+- **The phone may lose the setup AP during the join.** One radio, one
+  channel: joining moves the AP to the home network's channel. The
+  player's screen shows the result either way.
+- **Open networks cannot be saved.** wifistore requires a secret. The
+  form says so rather than failing later.
+- **Turning Wi-Fi off from the track loop while the portal runs** waits
+  for the portal to come down, which blocks that caller. The portal
+  refuses to start while playing, so this needs playback started
+  during setup and then the switch thrown.
+- **No captive-portal DHCP option (114).** Phones find the page through
+  the DNS lie and the redirect; option 114 would be quicker on newer
+  Android and is a follow-up once the basic path is seen working.
+
 ### Open, in the order they unblock each other
 
-- **`portal.c`.** `portal.h` is landed with its decisions settled:
-  playback stops while the portal runs, the AP is `Defeatist-XXXX` from a
-  MAC hash, five-minute timeout, state copied never borrowed. The only
-  blocker is APSTA -- `wifi.c` can start and stop a station and knows
-  nothing about AP mode. That is a mode change on a running radio, not
-  new machinery.
-- **NTP.** `sntp_start()` is written, marked `__attribute__((unused))`
-  and never called, because nothing joins a network yet. Three NIST
-  servers. It becomes one call from the portal's success path.
 - **Whether the clock is load-bearing.** If radio-browser and the
   streams are HTTPS, an unset clock fails certificate validation and
   nothing plays -- which is the argument NTP was added on. If they are

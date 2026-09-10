@@ -9,8 +9,7 @@
  * The radio has a lifetime now rather than a single probe. wifi_start()
  * powers the C6, brings ESP-Hosted up and starts the driver in STA mode;
  * wifi_stop() unwinds all of it and cuts the power. Between them the
- * radio is on and nothing here joins anything yet -- the join belongs to
- * the portal, which is the next thing built on this.
+ * radio is on, and joins saved networks -- see "Joining" below.
  *
  * WHY A TEARDOWN EXISTS AT ALL
  *
@@ -89,6 +88,8 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
 
 #include "driver/i2c_master.h"
 #include "esp_err.h"
@@ -205,6 +206,78 @@ void wifi_request_apply(void);
  * Blocking, several seconds. Not from ui_task.
  */
 esp_err_t wifi_scan_log(void);
+
+/*
+ * ---- Joining ---------------------------------------------------------
+ *
+ * The radio joins a network in two ways. When it comes up, and every
+ * minute after while it has no address, the worker scans and joins the
+ * strongest network wifistore holds (wifistore_best()). And the portal
+ * joins a network somebody has just typed in, to find out whether the
+ * credential works before anything is stored.
+ *
+ * Neither retries in a loop. A failed join disconnects and reports, and
+ * retrying belongs to the worker's minute -- slow enough that a player
+ * carried out of range is not spending its radio hopping channels.
+ *
+ * The join always happens on the worker or the portal's task. The track
+ * loop's settings push only starts and stops the radio and wakes the
+ * worker; a fifteen-second join on the decode task would be a stall.
+ */
+#define WIFI_JOIN_TIMEOUT_MS    (15000)
+
+/*
+ * Join `ssid` with `secret` -- a passphrase, or 64 hex digits of PSK,
+ * which the driver tells apart by length. Blocks until an address, a
+ * refusal, or the timeout. Not from ui_task.
+ *
+ *   ESP_OK                 joined, address assigned; NTP started if on
+ *   ESP_ERR_NOT_FOUND      the AP was not seen (reason NO_AP_FOUND)
+ *   ESP_ERR_WIFI_PASSWORD  any other refusal -- a wrong secret, or a PSK
+ *                          offered to an AP that only speaks SAE
+ *   ESP_ERR_TIMEOUT        no answer either way
+ *   ESP_ERR_INVALID_STATE  the radio is not up
+ *
+ * Never logs the secret.
+ */
+esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms);
+
+/* Whether the station has an address. A value, safe anywhere. */
+bool wifi_connected(void);
+
+/* The joined network's SSID, copied out. False and "" when not joined. */
+bool wifi_sta_ssid(char *out, size_t out_size);
+
+/*
+ * The portal's access point: an open AP alongside the station, on the
+ * radio that is already up. wifi_ap_begin() switches to APSTA and
+ * configures the AP; wifi_ap_end() switches back to STA. Neither powers
+ * anything or touches ESP-Hosted, and wifi_stop() ends the AP too.
+ *
+ * Not from ui_task. wifi_ap_netif() is NULL while the AP is down.
+ */
+esp_err_t wifi_ap_begin(const char *ssid);
+esp_err_t wifi_ap_end(void);
+int wifi_ap_clients(void);
+struct esp_netif_obj *wifi_ap_netif(void);
+
+/* One scanned network, copied out. `auth` is a wifi_auth_mode_t. */
+typedef struct {
+    char    ssid[33];
+    int8_t  rssi;
+    uint8_t auth;
+} wifi_seen_t;
+
+/*
+ * Scan, and copy up to `max` named networks into `out`, strongest first
+ * as the driver sorts them. Hidden networks are skipped. Returns how
+ * many, or -1 if the radio is down or the scan failed. Blocking, a few
+ * seconds; logs each network as the old scan did.
+ */
+int wifi_scan_list(wifi_seen_t *out, int max);
+
+/* "WPA2", "WPA2/WPA3", ... for a wifi_seen_t's auth. */
+const char *wifi_auth_name(uint8_t auth);
 
 #ifdef __cplusplus
 }

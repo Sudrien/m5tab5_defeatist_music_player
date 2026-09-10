@@ -59,7 +59,11 @@ FADE_BIN := fadetest
 # itself and there is nothing to drift from.
 TAIL_BIN := tailplantest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail
+# The setup portal's form parsing, HTML escaping and DNS replies: the
+# code that reads bytes from anyone in radio range.
+PORTAL_BIN := portalwebtest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -100,8 +104,16 @@ $(TAIL_BIN): tailplantest.c ../main/tailplan.h
 run-tail: $(TAIL_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(TAIL_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM
+$(PORTAL_BIN): portalwebtest.c ../main/portalweb.c ../main/portalweb.h ../main/dnsreply.c ../main/dnsreply.h
+	$(CC) $(WARNCFLAGS) -c ../main/portalweb.c -o /dev/null
+	$(CC) $(WARNCFLAGS) -c ../main/dnsreply.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ portalwebtest.c ../main/portalweb.c ../main/dnsreply.c $(LDFLAGS)
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail clean
+run-portal: $(PORTAL_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(PORTAL_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
+
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal clean
