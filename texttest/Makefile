@@ -101,7 +101,7 @@ run-wifi: $(WIFI_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(WIFI_BIN)
 
 $(CLOCK_BIN): clocktest.c
-	$(CC) $(WARNCFLAGS) -fsyntax-only clocktest.c
+	$(CC) $(WARNCFLAGS) -c clocktest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ clocktest.c $(LDFLAGS)
 
 run-clock: $(CLOCK_BIN)
