@@ -374,13 +374,17 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
      *
      * The pause made no difference; what every success had and every 205
      * lacked is a fresh set_config before the connect. The last row is
-     * this code on hardware: joined 13.2 s after the radio came up,
-     * against 76 s when a reason-2 first attempt waited for the worker. The portal's
-     * passphrase attempt joined 13 ms after the PSK's failure, so no
-     * pause is needed either. Why a first attempt expires is not known;
-     * every reason-2 failure so far followed "rx RPC WifiEventNoArgs
-     * id=43" a few seconds in, and 43 is probably HOME_CHANNEL_CHANGE on
-     * the slave -- unchecked.
+     * this code on hardware: joined 13.2 s after the radio came up, twice,
+     * against 76 s when a reason-2 first attempt waited for the worker.
+     * The portal's passphrase attempt joined 13 ms after the PSK's
+     * failure, so no pause is needed either.
+     *
+     * Why a first attempt expires is not known. Four reason-2 failures
+     * followed "rx RPC WifiEventNoArgs id=43" a few seconds in, which
+     * looked like a channel change; the sixth flash had one that did not
+     * -- in the portal, joining while already connected, reason 8 (our
+     * own disconnect) then reason 2 with no 43 between. So 43 is not the
+     * explanation, or not the only one.
      *
      * Nothing else is retried: a wrong password must fail, and fail once.
      */

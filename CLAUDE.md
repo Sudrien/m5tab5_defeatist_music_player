@@ -6091,8 +6091,15 @@ What that run measured, beyond "it works":
   pause, and **the fifth flash confirmed it**: reason 2 at 13557, retry
   from set_config at 13570, address at 17564 -- 13.2 s after the radio
   came up, where the same boot took 76 s before. NTP synced 4.5 s after
-  the address. Every reason-2 failure followed event id 43 (probably
-  HOME_CHANNEL_CHANGE on the slave; unchecked).
+  the address. Four reason-2 failures followed event id 43, but the
+  sixth flash had one without it, so that is not the cause.
+- **Sixth flash (0014+0015):** boot join again 13.2 s from radio up,
+  NTP 0.9 s after the address. Setup started while already connected to
+  fivescore ran three attempts: PSK reason 2, PSK again reason 202,
+  passphrase joined -- 11 s from submit to address. The PSK reaching
+  authentication has now been refused with 202 twice. 0014's pause was
+  not exercised: nothing was playing when START was pressed, and play
+  was not pressed during setup.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on
