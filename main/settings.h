@@ -205,9 +205,10 @@ void settings_set_crossfade_album(bool on);
  * This header used to promise the change applied immediately, on the
  * grounds that there is no ring of decoded samples to make a mid-flight
  * change incoherent. That is still the right behaviour and it is not the
- * behaviour: the only reader is wifi_apply_settings(), which runs from
- * the settings push at the start of a track, so a switch thrown while
- * the panel is open is stored and acted on at the next track or boot.
+ * behaviour: the only reader is wifi_apply_settings(), which runs at the
+ * start of every track, so a switch thrown while the panel is open is
+ * stored and acted on when the next track begins -- immediately if
+ * something is playing, and not at all until then if nothing is.
  *
  * Recorded rather than quietly fixed because it is the shape this
  * project already has a rule about -- a request needs a reader, and a

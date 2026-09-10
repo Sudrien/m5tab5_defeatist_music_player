@@ -7785,7 +7785,9 @@ static void restore_last_track(void)
          * wifi_apply_settings() rather than a bare start: it reconciles
          * the setting against what the hardware is doing, so the same
          * call serves the boot push and a switch that has just been
-         * turned off. */
+         * turned off. This one IS inside the adoption gate, because at
+         * boot there is nothing to reconcile against yet -- the loop
+         * below picks up every change after it. */
         wifi_apply_settings();
 
         s_restored = true;
@@ -8038,8 +8040,39 @@ static void player_loop(void)
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
             ESP_LOGI(TAG, "volume %d from settings", s_volume);
-            wifi_apply_settings();
         }
+
+        /*
+         * OUTSIDE the note_path() gate, deliberately.
+         *
+         * settings_note_path() returns true only when it ADOPTS a
+         * volume -- the first track off a card, not every track. The
+         * volume and the resume path only need pushing at that moment,
+         * so the gate is right for them. The radio is different: the
+         * switch can be thrown at any point in a session, and gating on
+         * adoption meant the only chance to act on it was the first
+         * track after a card appeared. A switch turned off mid-session
+         * then did nothing until the next boot, which is precisely the
+         * behaviour wifi_stop() was written to end.
+         *
+         * Unconditional because wifi_apply_settings() is the comparison:
+         * it returns immediately when the setting already matches the
+         * hardware, which is every track but the one after a change.
+         *
+         * COSTS ABOUT TWO SECONDS ON THE TRACK AFTER THE SWITCH IS
+         * TURNED ON, and nothing on any other track. This is before
+         * play_file(), so that track starts late -- most of it is the
+         * C6's reset settle, waiting for a chip that was unpowered a
+         * moment ago.
+         *
+         * Accepted here rather than moved after the open. Doing it after
+         * would mean bringing a radio up while the decoder is filling
+         * its ring, which is the contention portal.h refuses outright,
+         * for a saving of two seconds on an action somebody has just
+         * deliberately taken and is watching happen. Turning it OFF is
+         * quick and always will be.
+         */
+        wifi_apply_settings();
 
         ESP_LOGI(TAG, "playing %s", s_path);
         history_push(s_path);
