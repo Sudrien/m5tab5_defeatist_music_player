@@ -76,7 +76,7 @@ int main(void)
 
     bool at_start = track_commit_due();
     int  released_at = -1;
-    for (uint32_t n = 0; g_xfade_pos < g_xfade_frames; n++) {
+    while (g_xfade_pos < g_xfade_frames) {
         xfade_advance(1024);
         if (released_at < 0 && track_commit_due()) released_at = (int)g_xfade_pos;
     }
