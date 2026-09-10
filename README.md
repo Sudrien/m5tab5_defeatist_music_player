@@ -29,7 +29,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 
 - MicroSD card and USB stick hotplug
   - The microsd card is preferred. It will use less power.
-  - It will only auto-mount usb if no microsd is readable
+  - It will auto-mount usb if available, though. 
 - exFAT support
   - SDHC & SDXC cards have been tested (even if the latter died after week, not the software's fault). SDUC has not. Will Blu-ray size audio files play? Hell if I know.
 - Auto switching from headset to built in speaker on unplug and vice versa
