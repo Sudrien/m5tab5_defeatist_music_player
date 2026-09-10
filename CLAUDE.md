@@ -6102,6 +6102,27 @@ compiled against ESP-IDF where it was written. Build it before anything else.
   what the portal is doing, phones joined and time left; when idle, the
   joined network or how many are saved.
 
+**0004** tightens three things 0003 left loose:
+
+- **The driver no longer writes credentials down.** `wifi_start()`
+  sets `esp_wifi_set_storage(WIFI_STORAGE_RAM)`. Without it every
+  `esp_wifi_set_config()` -- a mistyped attempt, the raw WPA3 passphrase
+  -- was saved in plain text in the driver's NVS, probably on the C6,
+  outside wifistore. Found by reading the map project, which does the
+  same with `WiFi.persistent(false)` on this board.
+- **Every saved network in range is tried**, strongest first, until one
+  joins (`wifistore_rank()`, copies not indices, 16 new host checks).
+  Up to eight are stored as before. A saved network whose password
+  changed no longer shadows the others.
+- **Autocorrect characters get their own answer.** A curly apostrophe,
+  en dash or no-break space is `PORTALWEB_NON_ASCII`, and the form names
+  it from a table ("a curly apostrophe (U+2019) -- the router probably
+  wants '") instead of claiming a length problem. Every submission logs
+  an encoding diagnosis: byte and character counts, whitespace at the
+  ends, a capital first letter, and the code points of anything
+  non-ASCII. Unlike the map project's line it gives no first or last
+  character and no key fingerprint.
+
 Known gaps, in the order a flash would hit them:
 
 - **The phone may lose the setup AP during the join.** One radio, one

@@ -336,6 +336,29 @@ static esp_err_t h_join(httpd_req_t *req)
     const portalweb_check_t c = (have_ssid && have_pass)
                               ? portalweb_check(ssid, pass)
                               : (have_ssid ? PORTALWEB_BAD_SECRET : PORTALWEB_BAD_SSID);
+
+    /* What was submitted, as far as encoding goes -- see portalweb.h.
+     * Every submission, accepted or not, because the refused ones are
+     * the ones this line exists for. */
+    if (have_ssid && have_pass) {
+        char d[160];
+        portalweb_describe(pass, d, sizeof(d));
+        ESP_LOGI(TAG, "submitted %.32s: password %s", ssid, d);
+    }
+
+    if (c == PORTALWEB_NON_ASCII) {
+        char hint[128], esc_hint[128 * 6 + 1];
+        portalweb_non_ascii_hint(pass, hint, sizeof(hint));
+        memset(pass, 0, sizeof(pass));
+        if (!portalweb_escape(hint, esc_hint, sizeof(esc_hint))) esc_hint[0] = '\0';
+        char msg[sizeof(esc_hint) + 200];
+        snprintf(msg, sizeof(msg),
+                 "The password contains %s. A Wi-Fi password is plain "
+                 "keyboard characters only; phones substitute these when "
+                 "autocorrect or smart punctuation is on. Retype it with "
+                 "that turned off.", esc_hint);
+        return send_form(req, msg);
+    }
     const char *problem =
         c == PORTALWEB_BAD_SSID  ? "A network name is 1 to 32 characters." :
         c == PORTALWEB_NO_SECRET ? "Open networks are not supported yet." :

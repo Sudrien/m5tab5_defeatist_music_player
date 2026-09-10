@@ -508,8 +508,12 @@ int wifi_scan_list(wifi_seen_t *out, int max)
 const char *wifi_auth_name(uint8_t auth) { return authmode((wifi_auth_mode_t)auth); }
 
 /*
- * Join the strongest saved network in range, if there is one and it is
- * worth trying now. Worker task only.
+ * Join a saved network in range: the strongest first, and on refusal the
+ * next, until one gives an address. Worker task only.
+ *
+ * Every saved network the scan saw is tried, not only the strongest. A
+ * saved network whose password has changed would otherwise shadow every
+ * other one in range for as long as it is the loudest.
  */
 #define RETRY_MS    (60000)
 
@@ -521,22 +525,33 @@ static void connect_saved(bool force)
     s_last_try = now ? now : 1;
 
     wifi_seen_t *seen = calloc(SCAN_MAX_AP, sizeof(*seen));
-    if (!seen) return;
+    wifistore_cred_t *cand = calloc(WIFISTORE_MAX, sizeof(*cand));
+    if (!seen || !cand) {
+        free(seen);
+        free(cand);
+        return;
+    }
+
     const int n = wifi_scan_list(seen, SCAN_MAX_AP);
     if (n > 0) {
         const char *names[SCAN_MAX_AP];
         int8_t rssi[SCAN_MAX_AP];
         for (int i = 0; i < n; i++) { names[i] = seen[i].ssid; rssi[i] = seen[i].rssi; }
-        const int best = wifistore_best(names, rssi, n);
-        wifistore_cred_t cred;
-        if (best >= 0 && wifistore_get(best, &cred)) {
-            wifi_join(cred.ssid, cred.secret, WIFI_JOIN_TIMEOUT_MS);
-            memset(&cred, 0, sizeof(cred));
-        } else {
+        const int k = wifistore_rank(names, rssi, n, cand, WIFISTORE_MAX);
+        if (k == 0) {
             ESP_LOGI(TAG, "none of %d saved network%s in range",
                      wifistore_count(), wifistore_count() == 1 ? "" : "s");
         }
+        for (int i = 0; i < k; i++) {
+            /* The portal may have started while an earlier one timed out;
+             * it owns the radio from then on. */
+            if (!s_up || portal_running()) break;
+            ESP_LOGI(TAG, "saved network %d of %d in range: %.32s", i + 1, k, cand[i].ssid);
+            if (wifi_join(cand[i].ssid, cand[i].secret, WIFI_JOIN_TIMEOUT_MS) == ESP_OK) break;
+        }
     }
+    memset(cand, 0, WIFISTORE_MAX * sizeof(*cand));
+    free(cand);
     free(seen);
 }
 
@@ -836,6 +851,22 @@ esp_err_t wifi_start(void)
                       "set in sdkconfig.defaults and wifi.c. Only after all "
                       "three does the slave firmware become the suspect.");
         goto fail;
+    }
+
+    /*
+     * RAM, not flash: the driver's own copy of the station config is
+     * never written down. Without this every esp_wifi_set_config() --
+     * including a failed attempt with a mistyped password, and the raw
+     * passphrase on the WPA3 fallback -- lands in the driver's NVS in
+     * plain text, and with ESP-Hosted that is probably the C6's flash,
+     * outside everything wifistore.h promises. wifistore is the one
+     * place credentials are kept. The map project does the same on this
+     * board via WiFi.persistent(false).
+     */
+    err = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_wifi_set_storage(RAM): %s -- joins may be "
+                      "persisted by the driver", esp_err_to_name(err));
     }
 
     err = esp_wifi_set_mode(WIFI_MODE_STA);

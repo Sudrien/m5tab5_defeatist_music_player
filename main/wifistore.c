@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -308,4 +309,46 @@ int wifistore_best(const char *const *seen, const int8_t *rssi, int n)
     UNLOCK();
 
     return best;
+}
+
+int wifistore_rank(const char *const *seen, const int8_t *rssi, int n,
+                   wifistore_cred_t *out, int max)
+{
+    if (!seen || !rssi || !out || n <= 0 || max <= 0) return 0;
+
+    /* The strongest reading per saved slot; one SSID on several APs
+     * counts once, at its best. INT8_MIN marks "not seen". */
+    int8_t strongest[WIFISTORE_MAX];
+    for (int k = 0; k < WIFISTORE_MAX; k++) strongest[k] = INT8_MIN;
+
+    LOCK();
+    int present = 0;
+    for (int i = 0; i < n; i++) {
+        if (!seen[i]) continue;
+        const int slot = find_locked(seen[i]);
+        if (slot < 0) continue;
+        if (strongest[slot] == INT8_MIN) present++;
+        /* Strictly greater, for the same deterministic-tie reason
+         * wifistore_best() gives. */
+        if (strongest[slot] == INT8_MIN || rssi[i] > strongest[slot]) {
+            strongest[slot] = rssi[i] == INT8_MIN ? (int8_t)(INT8_MIN + 1) : rssi[i];
+        }
+    }
+
+    /* Selection by strength, ties to the earlier slot. Eight entries;
+     * nothing cleverer is worth its lines. */
+    int got = 0;
+    while (got < max && got < present) {
+        int pick = -1;
+        for (int k = 0; k < s_count; k++) {
+            if (strongest[k] == INT8_MIN) continue;
+            if (pick < 0 || strongest[k] > strongest[pick]) pick = k;
+        }
+        if (pick < 0) break;
+        out[got++] = s_net[pick];
+        strongest[pick] = INT8_MIN;
+    }
+    UNLOCK();
+
+    return got;
 }

@@ -211,10 +211,15 @@ esp_err_t wifi_scan_log(void);
  * ---- Joining ---------------------------------------------------------
  *
  * The radio joins a network in two ways. When it comes up, and every
- * minute after while it has no address, the worker scans and joins the
- * strongest network wifistore holds (wifistore_best()). And the portal
+ * minute after while it has no address, the worker scans and tries every
+ * saved network it sees, strongest first, until one joins
+ * (wifistore_rank()). And the portal
  * joins a network somebody has just typed in, to find out whether the
  * credential works before anything is stored.
+ *
+ * The driver keeps its station config in RAM only
+ * (esp_wifi_set_storage), so wifistore is the one place a credential is
+ * ever written down.
  *
  * Neither retries in a loop. A failed join disconnects and reports, and
  * retrying belongs to the worker's minute -- slow enough that a player

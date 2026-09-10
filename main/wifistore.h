@@ -46,7 +46,10 @@
  * WPA2 runs PBKDF2-HMAC-SHA1(passphrase, ssid, 4096) to get a 256-bit
  * PSK, and wpa_supplicant takes that directly as 64 hex characters. So
  * on WPA2 the passphrase -- which people reuse across services -- never
- * has to be stored, and is not.
+ * has to be stored, and is not. That includes the Wi-Fi driver's own
+ * copy: wifi.c sets esp_wifi_set_storage(WIFI_STORAGE_RAM), without which
+ * every join attempt would be written to the driver's NVS as well, raw
+ * passphrase and mistyped attempts included.
  *
  * WPA3-SAE derives its key by a different route and has no precomputable
  * equivalent, so on SAE networks the passphrase itself is what must be
@@ -167,6 +170,25 @@ esp_err_t wifistore_clear(void);
  * the logic in it and it needs no radio to run.
  */
 int wifistore_best(const char *const *seen, const int8_t *rssi, int n);
+
+/*
+ * Every saved network the scan saw, strongest first, COPIED into `out`
+ * (up to `max`). Returns how many.
+ *
+ * wifistore_best() answers "which one", and a single answer is not enough
+ * once more than one saved network is in range: if the strongest refuses
+ * -- its password changed, or it is a guest network that has expired --
+ * the next one should be tried rather than nothing until the next scan.
+ *
+ * Copies rather than indices, because the join that follows takes
+ * seconds per network and the portal can save in the middle of it. An
+ * index taken before an eviction names a different network after it.
+ *
+ * One SSID seen on several APs counts once, at its strongest reading.
+ * Ties go to the earlier record, as in wifistore_best().
+ */
+int wifistore_rank(const char *const *seen, const int8_t *rssi, int n,
+                   wifistore_cred_t *out, int max);
 
 #ifdef __cplusplus
 }

@@ -122,6 +122,72 @@ int main(void)
     CHECK(portalweb_check("123456789012345678901234567890123", "12345678") == PORTALWEB_BAD_SSID, "33-byte ssid");
     CHECK(portalweb_check("12345678901234567890123456789012", "12345678") == PORTALWEB_OK_PASSPHRASE, "32-byte ssid");
 
+    printf("autocorrect characters are their own answer, not a length problem\n");
+    CHECK(portalweb_check("home", "Dave\xE2\x80\x99s pass") == PORTALWEB_NON_ASCII, "curly apostrophe");
+    CHECK(portalweb_check("home", "ab\xE2\x80\x99") == PORTALWEB_NON_ASCII, "short and curly: not BAD_SECRET");
+    CHECK(portalweb_check("home", "caf\xC3\xA9" "caf\xC3\xA9") == PORTALWEB_NON_ASCII, "accented letter");
+    CHECK(portalweb_check("home", "abc\xFF" "defgh") == PORTALWEB_NON_ASCII, "invalid UTF-8");
+
+    printf("the hint names the character from a table, never from the input\n");
+    {
+        char hint[160];
+        portalweb_non_ascii_hint("Dave\xE2\x80\x99s pass", hint, sizeof hint);
+        CHECK(strstr(hint, "curly apostrophe") && strstr(hint, "U+2019") && strstr(hint, "wants '"),
+              "got '%s'", hint);
+        CHECK(strstr(hint, "\xE2\x80\x99") == NULL && strstr(hint, "Dave") == NULL,
+              "echoes the input: '%s'", hint);
+        portalweb_non_ascii_hint("a\xE2\x80\x93" "b", hint, sizeof hint);
+        CHECK(strstr(hint, "en dash") && strstr(hint, "wants -"), "got '%s'", hint);
+        portalweb_non_ascii_hint("pass\xC2\xA0word", hint, sizeof hint);
+        CHECK(strstr(hint, "no-break space") != NULL, "got '%s'", hint);
+        portalweb_non_ascii_hint("\xE6\x97\xA5\xE6\x9C\xAC", hint, sizeof hint);
+        CHECK(strstr(hint, "U+65E5") != NULL, "unlisted: '%s'", hint);
+        portalweb_non_ascii_hint("ab\xC0\xAF", hint, sizeof hint);
+        CHECK(strstr(hint, "not valid text (0xC0)") != NULL, "overlong: '%s'", hint);
+        portalweb_non_ascii_hint("ab\xED\xA0\x80", hint, sizeof hint);
+        CHECK(strstr(hint, "not valid text") != NULL, "surrogate: '%s'", hint);
+        portalweb_non_ascii_hint("plainascii", hint, sizeof hint);
+        CHECK(hint[0] == '\0', "ascii gives no hint: '%s'", hint);
+        portalweb_non_ascii_hint("ab\xE2\x80", hint, sizeof hint);
+        CHECK(strstr(hint, "not valid text") != NULL, "truncated sequence: '%s'", hint);
+    }
+
+    printf("the log line diagnoses encoding and names no typed ASCII\n");
+    {
+        char d[160];
+        portalweb_describe(" Hunter7\xE2\x80\x99 ", d, sizeof d);
+        CHECK(strstr(d, "12 bytes, 10 chars") != NULL, "counts: '%s'", d);
+        CHECK(strstr(d, "leading space") && strstr(d, "trailing space"), "spaces: '%s'", d);
+        CHECK(strstr(d, "U+2019 curly apostrophe") != NULL, "code point: '%s'", d);
+        CHECK(strstr(d, "capital") == NULL, "leading space means no capital: '%s'", d);
+        CHECK(strchr(d, 'H') == NULL && strstr(d, "unter") == NULL && strchr(d, '7') == NULL,
+              "an ASCII character of the input leaked: '%s'", d);
+        portalweb_describe("Password1", d, sizeof d);
+        CHECK(strcmp(d, "9 bytes, 9 chars, first letter capital") == 0, "got '%s'", d);
+        portalweb_describe("tab\there", d, sizeof d);
+        CHECK(strstr(d, "control U+0009") != NULL, "control: '%s'", d);
+        portalweb_describe("x", d, sizeof d);
+        CHECK(strcmp(d, "1 byte, 1 char") == 0, "singular: '%s'", d);
+        portalweb_describe("", d, sizeof d);
+        CHECK(strcmp(d, "0 bytes, 0 chars") == 0, "empty: '%s'", d);
+
+        /* Every length of buffer: terminated, never past its end. */
+        const char *hard = " \xE2\x80\x98\xE2\x80\x99\xE2\x80\x9C\xE2\x80\x9D\xC2\xA0\xFF\x01 ";
+        int bad = 0;
+        for (size_t size = 1; size < 160; size++) {
+            char b[160];
+            memset(b, 'Z', sizeof b);
+            portalweb_describe(hard, b, size);
+            size_t len = 0;
+            while (len < size && b[len]) len++;
+            if (len >= size) bad++;
+            if (size < sizeof b && b[size] != 'Z') bad++;
+        }
+        CHECK(bad == 0, "%d buffer sizes overran or went unterminated", bad);
+        portalweb_describe(hard, d, 24);
+        CHECK(strlen(d) <= 23 && strcmp(d + strlen(d) - 3, "...") == 0, "cut short: '%s'", d);
+    }
+
     printf("hex is lower case and terminated\n");
     {
         const uint8_t b[3] = { 0x00, 0xAB, 0xff };

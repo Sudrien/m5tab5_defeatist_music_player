@@ -16,6 +16,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include <assert.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -258,6 +259,104 @@ static void t_best(void)
     }
 }
 
+static void t_rank(void)
+{
+    printf("every saved network in range, in the order to try them\n");
+    fresh();
+
+    wifistore_save("home", PSK, true);
+    wifistore_save("cafe", "correcthorse", false);
+    wifistore_save("work", PSK, true);
+
+    wifistore_cred_t out[WIFISTORE_MAX];
+
+    {
+        const char *seen[] = { "stranger", "work", "neighbour", "home" };
+        const int8_t r[] = { -30, -70, -40, -50 };
+        const int n = wifistore_rank(seen, r, 4, out, WIFISTORE_MAX);
+        ck(n == 2, "two of three saved are in range");
+        ck(n == 2 && strcmp(out[0].ssid, "home") == 0 &&
+           strcmp(out[1].ssid, "work") == 0, "strongest first");
+    }
+
+    /* One SSID on two APs counts once, at its best, and can outrank a
+     * network it would lose to on its weaker AP. */
+    {
+        const char *seen[] = { "cafe", "home", "cafe" };
+        const int8_t r[] = { -80, -60, -45 };
+        const int n = wifistore_rank(seen, r, 3, out, WIFISTORE_MAX);
+        ck(n == 2, "a repeated SSID is one entry");
+        ck(n == 2 && strcmp(out[0].ssid, "cafe") == 0, "at its strongest AP");
+        ck(n == 2 && !out[0].is_psk && strcmp(out[0].secret, "correcthorse") == 0,
+           "the copy carries the record");
+    }
+
+    /* `max` is honoured, and the ones kept are the strongest. */
+    {
+        const char *seen[] = { "home", "cafe", "work" };
+        const int8_t r[] = { -70, -40, -55 };
+        const int n = wifistore_rank(seen, r, 3, out, 2);
+        ck(n == 2 && strcmp(out[0].ssid, "cafe") == 0 &&
+           strcmp(out[1].ssid, "work") == 0, "top two of three");
+    }
+
+    /* Ties go to the earlier record, every time. */
+    {
+        const char *seen[] = { "work", "home" };
+        const int8_t r[] = { -50, -50 };
+        const int n = wifistore_rank(seen, r, 2, out, WIFISTORE_MAX);
+        ck(n == 2 && strcmp(out[0].ssid, "home") == 0, "tie to the earlier record");
+    }
+
+    /* The very weakest reading is still a reading. */
+    {
+        const char *seen[] = { "home" };
+        const int8_t r[] = { INT8_MIN };
+        ck(wifistore_rank(seen, r, 1, out, WIFISTORE_MAX) == 1, "-128 dBm counts");
+    }
+
+    /* A copy is a copy: forgetting after ranking does not change it. */
+    {
+        const char *seen[] = { "work" };
+        const int8_t r[] = { -50 };
+        const int n = wifistore_rank(seen, r, 1, out, WIFISTORE_MAX);
+        wifistore_forget("work");
+        ck(n == 1 && strcmp(out[0].ssid, "work") == 0, "copy outlives the record");
+    }
+
+    /* All eight, in range at once. */
+    {
+        fresh();
+        char names[WIFISTORE_MAX][8];
+        const char *seen[WIFISTORE_MAX];
+        int8_t r[WIFISTORE_MAX];
+        for (int i = 0; i < WIFISTORE_MAX; i++) {
+            snprintf(names[i], sizeof(names[i]), "net%d", i);
+            wifistore_save(names[i], PSK, true);
+            seen[i] = names[i];
+            r[i] = (int8_t)(-90 + i * 5);           /* last saved is strongest */
+        }
+        const int n = wifistore_rank(seen, r, WIFISTORE_MAX, out, WIFISTORE_MAX);
+        int ordered = 1;
+        for (int i = 0; i < n; i++) {
+            if (strcmp(out[i].ssid, names[WIFISTORE_MAX - 1 - i]) != 0) ordered = 0;
+        }
+        ck(n == WIFISTORE_MAX && ordered, "eight saved, eight ranked, in order");
+    }
+
+    /* Degenerate arguments. */
+    {
+        const char *seen[] = { NULL, "net0" };
+        const int8_t r[] = { -40, -60 };
+        ck(wifistore_rank(seen, r, 2, out, WIFISTORE_MAX) == 1, "null entry skipped");
+        ck(wifistore_rank(NULL, r, 2, out, WIFISTORE_MAX) == 0, "null list");
+        ck(wifistore_rank(seen, NULL, 2, out, WIFISTORE_MAX) == 0, "null rssi");
+        ck(wifistore_rank(seen, r, 2, NULL, WIFISTORE_MAX) == 0, "null out");
+        ck(wifistore_rank(seen, r, 0, out, WIFISTORE_MAX) == 0, "empty scan");
+        ck(wifistore_rank(seen, r, 2, out, 0) == 0, "no room");
+    }
+}
+
 static void t_persistence(void)
 {
     printf("what survives a reboot\n");
@@ -339,6 +438,7 @@ int main(void)
     t_eviction();
     t_forget();
     t_best();
+    t_rank();
     t_persistence();
     t_churn();
 
