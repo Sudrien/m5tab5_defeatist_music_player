@@ -3379,6 +3379,35 @@ trailing silence reads as unknown, not as silence. Host-tested in
 no bars or reverb -- the `fade:` and `silence after the audio:` lines on
 a real library are the check that matters. **Not flashed.**
 
+### What a boundary does with that ending
+
+`main/tailplan.h` turns the `fade` section into what the boundary does,
+as pure functions so `texttest/tailplantest.c` can test the rules
+themselves. `player.c` only applies the answers.
+
+- **Recorded silence is cut to 3 s.** The decode stops at
+  `audio_end_ms + TAIL_SILENCE_KEEP_MS` and the track ends there as an
+  ordinary end, so the crossfade countdown, the dip and the plain
+  handoff all see the shorter ending without knowing why. Never on a
+  pass that is measuring, and a cut play does not file a length or a
+  seek table, since both would describe a shortened file.
+- **Perceived silence (1 s or more, no fade) gets no fade in.** The
+  writer disarms the overlap and the next track starts at full level
+  after the gap. At a rate change the dip is skipped both ways.
+- **A recorded fade is not faded again.** The outgoing track plays at
+  unity -- the level match never attenuates it mid-fade -- while the
+  incoming one fades in over half the configured crossfade or the fade's
+  own length, whichever is shorter. The overlap is placed to finish where
+  the outgoing audio does, so the silence kept after the fade is dropped
+  by the overlap's end rather than heard. At a rate change the dip has
+  no down half and its up half is shortened the same way.
+- **Anything else is the crossfade as before**, including every track
+  not yet examined.
+
+A fade followed by silence is a fade. 1 s and 3 s are estimates, not
+measurements. Known cost: a cut track ends before its seek bar reaches
+the end. Not compiled against ESP-IDF here. **Not flashed.**
+
 ### The seek table is harvested, not scanned for (0703)
 
 An MP3 with no Xing header states nothing about its own length, so

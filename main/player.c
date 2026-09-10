@@ -70,6 +70,7 @@
 #include "decoder.h"
 #include "framewalk.h"
 #include "loudness.h"
+#include "tailplan.h"
 #include "replaygain.h"
 #include "hid.h"
 #include "panel.h"
@@ -1335,6 +1336,16 @@ static int32_t eqpower_q15(uint32_t t, bool out)
 static volatile float s_ring_lufs[PCM_RINGS];
 static volatile bool  s_ring_lufs_known[PCM_RINGS];
 
+/*
+ * How the track in each ring ends, from its sidecar -- see tailplan.h.
+ * Published beside the loudness for the same reason: the writer decides
+ * the overlap and needs it per ring. Plain until a track has been
+ * examined, which is the crossfade as it always was.
+ */
+static volatile uint8_t  s_ring_tail[PCM_RINGS];
+static volatile uint32_t s_ring_fade_ms[PCM_RINGS];
+static volatile uint32_t s_ring_after_ms[PCM_RINGS];
+
 /* Never trim by more than this. A 12 dB gap between two tracks is a
  * mastering difference the listener can hear across the whole song, not
  * something a three-second overlap should hide -- and pulling one track
@@ -1389,6 +1400,7 @@ static uint32_t s_xfade_pos;        /* frames into the overlap */
 static uint32_t s_xfade_frames;     /* its length */
 static int32_t  s_xfade_gain_a;     /* match trims, Q15 */
 static int32_t  s_xfade_gain_b;
+static bool     s_xfade_in_only;    /* recorded fade: outgoing at unity */
 
 /* For xfade_stall_check(). Set with s_xfade_active, and writer-only like
  * everything else here. s_xfade_expect_ms is the overlap's intended
@@ -1704,8 +1716,10 @@ static void xfade_mix(int16_t *a, const int16_t *b, size_t frames)
 
     /* Match trim folded in here, so the mix loop stays two multiplies
      * and an add per sample. */
-    const int32_t ga0 = (eqpower_q15(t0, true)  * s_xfade_gain_a) >> 15;
-    const int32_t ga1 = (eqpower_q15(t1, true)  * s_xfade_gain_a) >> 15;
+    const int32_t ga0 = s_xfade_in_only ? s_xfade_gain_a
+                      : (eqpower_q15(t0, true)  * s_xfade_gain_a) >> 15;
+    const int32_t ga1 = s_xfade_in_only ? s_xfade_gain_a
+                      : (eqpower_q15(t1, true)  * s_xfade_gain_a) >> 15;
     const int32_t gb0 = (eqpower_q15(t0, false) * s_xfade_gain_b) >> 15;
     const int32_t gb1 = (eqpower_q15(t1, false) * s_xfade_gain_b) >> 15;
 
@@ -2092,10 +2106,33 @@ static void i2s_writer_task(void *arg)
 
             if (!s_xfade_active) {
                 const uint32_t rate = s_frames_rate[play];
-                const uint32_t want = rate
-                    ? (uint32_t)(((uint64_t)rate * s_xfade_ms) / 1000u) : 0;
-                if (want && xfade_can_start(play, fill, avail_a, avail_b, want)) {
-                    const uint32_t fit = xfade_fit(want, avail_a, rate);
+                /*
+                 * The outgoing track's ending decides the shape, and it
+                 * is only final once the decode has moved to the other
+                 * ring -- before that nothing can start anyway.
+                 */
+                const tail_xfade_t plan = tail_xfade(
+                    (tail_kind_t)s_ring_tail[play], s_ring_fade_ms[play],
+                    s_ring_after_ms[play], s_xfade_ms);
+                if (fill != play && !plan.allow) {
+                    s_xfade_armed = false;
+                    if (s_ring_tail[play] == TAIL_SILENCE) {
+                        ESP_LOGI(TAG, "no crossfade: the outgoing track ends "
+                                      "in %" PRIu32 " ms of recorded silence",
+                                 s_ring_after_ms[play]);
+                    }
+                }
+                const uint32_t want = (rate && plan.allow)
+                    ? (uint32_t)(((uint64_t)rate * plan.overlap_ms) / 1000u) : 0;
+                /* Outgoing frames after the overlap: the silence kept
+                 * after a recorded fade, which the overlap's end drops. */
+                const uint32_t lead = rate
+                    ? (uint32_t)(((uint64_t)rate * plan.lead_ms) / 1000u) : 0;
+                const size_t lead_bytes = (size_t)lead * PCM_BYTES_PER_FRAME;
+                if (want && s_xfade_armed &&
+                    xfade_can_start(play, fill, avail_a, avail_b, want + lead)) {
+                    const uint32_t fit = xfade_fit(
+                        want, avail_a > lead_bytes ? avail_a - lead_bytes : 0, rate);
                     if (fit == 0) {
                         /* Too little left to be worth it. Disarm rather
                          * than keep testing: the ring only shrinks from
@@ -2115,9 +2152,12 @@ static void i2s_writer_task(void *arg)
                         s_xfade_warned = false;
                         s_xexit[XEXIT_START]++;
                         xfade_match(play, fill);
+                        s_xfade_in_only = plan.out_unity;
+                        if (s_xfade_in_only) s_xfade_gain_a = 32768;
                         ESP_LOGI(TAG, "crossfade: %" PRIu32 " ms"
-                                      "%s, trim out %d%% in %d%%",
+                                      "%s%s, trim out %d%% in %d%%",
                                  fit * 1000u / rate,
+                                 s_xfade_in_only ? " fade-in over a recorded fade" : "",
                                  fit < want ? " (tail was shorter)" : "",
                                  (int)((s_xfade_gain_a * 100) / 32768),
                                  (int)((s_xfade_gain_b * 100) / 32768));
@@ -2201,8 +2241,8 @@ static void i2s_writer_task(void *arg)
 
                     const uint32_t t = (uint32_t)
                         (((uint64_t)s_xfade_pos << 16) / s_xfade_frames);
-                    const int32_t g =
-                        (eqpower_q15(t, true) * s_xfade_gain_a) >> 15;
+                    const int32_t g = s_xfade_in_only ? s_xfade_gain_a
+                        : (eqpower_q15(t, true) * s_xfade_gain_a) >> 15;
 
                     int16_t *pcm = (int16_t *)buf;
                     const size_t n_s = (solo / PCM_BYTES_PER_FRAME) * 2;
@@ -5183,6 +5223,9 @@ static char s_prev_path[512];
  * decoder_read() reports it, not decoder_open().
  */
 static uint32_t       s_prev_len_sec;
+/* How the previous track ended, for the rate-change dip. Plain unless it
+ * reached its end: a track skipped out of never got to its tail. */
+static tail_t         s_prev_tail;
 static decoder_trim_t s_prev_trim = DECODER_TRIM_UNKNOWN;
 
 /*
@@ -5503,6 +5546,10 @@ static track_end_t play_file(const char *path)
      * track's own level, so the answer is the same either way.
      */
     bool fade_measuring = false;
+    /* This track's ending, and whether the recorded silence after it was
+     * cut short by stopping the decode -- see tailplan.h. */
+    tail_t track_tail = { TAIL_PLAIN, 0, 0, 0 };
+    bool   tail_cut = false;
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
 
     /*
@@ -5595,6 +5642,21 @@ static track_end_t play_file(const char *path)
         /* The branches below reset the accumulator when they measure;
          * a pass that is only looking for a fade has to do it here. */
         if (fade_measuring && !measuring) loudness_reset(&s_loud);
+
+        if (got) {
+            track_tail = tail_from_record(have->fade.present,
+                                          have->fade.has_fade,
+                                          have->fade.start_ms,
+                                          have->fade.audio_end_ms,
+                                          have->fade.total_ms);
+        }
+        /*
+         * Never cut a pass that is measuring. The loudness gate ignores
+         * the silence anyway, but the envelope would stop short of the
+         * length it is drawn across, and a pass looking for the fade
+         * would be looking at a file with its ending removed.
+         */
+        if (measuring || fade_measuring) track_tail.cut_ms = 0;
 
         if (got) {
             /* Seed the RAM caches so load_tags() and do_art() find
@@ -6226,7 +6288,7 @@ static track_end_t play_file(const char *path)
         const TickType_t t_read = xTaskGetTickCount();
 
         decoder_info_t info;
-        const int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
+        int n = decoder_read(dec, pcm, DECODER_MAX_INT16, &info);
         /*
          * A FAILED DECODE IS NOT THE END OF THE TRACK, AND THE
          * DIFFERENCE IS WHAT GETS WRITTEN TO THE CARD.
@@ -6246,6 +6308,27 @@ static track_end_t play_file(const char *path)
         }
         if (n == 0) break;
         track_info = info;
+
+        /*
+         * Recorded silence past TAIL_SILENCE_KEEP_MS is not decoded into
+         * the ring at all. Ending the track here, as an ordinary end, is
+         * what makes every boundary mechanism -- the crossfade countdown,
+         * the dip, the plain handoff -- see the shortened ending without
+         * any of them knowing why.
+         */
+        if (track_tail.cut_ms && info.sample_rate > 0 && info.channels > 0) {
+            const uint64_t cut = (uint64_t)track_tail.cut_ms *
+                                 (uint64_t)info.sample_rate / 1000u;
+            if (frames_out >= cut) {
+                tail_cut = true;
+                break;
+            }
+            const uint64_t room = cut - frames_out;
+            if ((uint64_t)(n / info.channels) > room) {
+                n = (int)room * info.channels;
+                tail_cut = true;
+            }
+        }
 
         const uint32_t read_ms =
             (uint32_t)pdTICKS_TO_MS(xTaskGetTickCount() - t_read);
@@ -6473,18 +6556,26 @@ static track_end_t play_file(const char *path)
                      * whole path exists because of.
                      */
                     const uint32_t half_ms = settings_crossfade_sec() * 500u;
-                    if (half_ms) {
+                    /* The outgoing track's recorded ending shortens or
+                     * removes either half; see tail_dip(). */
+                    const tail_dip_t dip = tail_dip(s_prev_tail.kind,
+                                                    s_prev_tail.fade_ms,
+                                                    half_ms);
+                    if (dip.down_ms || dip.up_ms) {
                         const uint32_t out_rate = audio_out_rate()
                                                 ? audio_out_rate() : 44100;
                         s_dip_dir = 0;
                         s_dip_pos = 0;
                         s_dip_arm = (uint32_t)((uint64_t)out_rate *
-                                               half_ms / 1000u);
+                                               dip.down_ms / 1000u);
                         s_dip_in_frames = (uint32_t)
-                            ((uint64_t)info.sample_rate * half_ms / 1000u);
+                            ((uint64_t)info.sample_rate * dip.up_ms / 1000u);
                         ESP_LOGI(TAG, "rate change: dipping %" PRIu32
                                       " ms down, %" PRIu32 " ms up",
-                                 half_ms, half_ms);
+                                 dip.down_ms, dip.up_ms);
+                    } else if (half_ms) {
+                        ESP_LOGI(TAG, "rate change: no dip, the outgoing "
+                                      "track ends in recorded silence");
                     }
                 }
 
@@ -7017,6 +7108,9 @@ static track_end_t play_file(const char *path)
              * to match two tracks against each other. See s_ring_lufs. */
             s_ring_lufs[s_ring_fill] = track_lufs;
             s_ring_lufs_known[s_ring_fill] = track_lufs_known;
+            s_ring_tail[s_ring_fill]     = (uint8_t)track_tail.kind;
+            s_ring_fade_ms[s_ring_fill]  = track_tail.fade_ms;
+            s_ring_after_ms[s_ring_fill] = track_tail.after_ms;
             /* The handoff can happen while this call is parked on a
              * full ring, which with decode-ahead is most of a track. */
             VISUALS_GATE();
@@ -7377,7 +7471,7 @@ static track_end_t play_file(const char *path)
      * track ended and depends on nothing but that: played to the end,
      * with no seek in it, on a rate that was known.
      */
-    if (complete && !seeked && cur_rate && rg_holding(path) &&
+    if (complete && !seeked && !tail_cut && cur_rate && rg_holding(path) &&
         (!s_rg.format.present || !s_rg.format.sec)) {
         /*
          * Rounded, not truncated. The count is frames that reached the
@@ -7417,7 +7511,7 @@ static track_end_t play_file(const char *path)
                  tbl_n);
     }
 
-    if (complete && !seeked && tbl_rec && tbl_n > 1 &&
+    if (complete && !seeked && !tail_cut && tbl_rec && tbl_n > 1 &&
         rg_holding(path)) {
         s_rg.index.present = true;
         s_rg.index.count = tbl_n;
@@ -7433,6 +7527,11 @@ static track_end_t play_file(const char *path)
     /* For the next boundary's arming decision and its trim gate. Both
      * are about this file and both are asked after it has closed. */
     s_prev_len_sec = s_len_sec;
+    s_prev_tail    = (why == TRACK_ENDED) ? track_tail
+                                          : (tail_t){ TAIL_PLAIN, 0, 0, 0 };
+    if (tail_cut) {
+        ESP_LOGI(TAG, "recorded silence cut to %u ms", TAIL_SILENCE_KEEP_MS);
+    }
     s_prev_trim    = track_info.trim;
 
     /*

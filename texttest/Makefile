@@ -55,7 +55,11 @@ CLOCK_BIN := clocktest
 # stops before the optimiser that the -O2-only warnings come out of.
 FADE_BIN := fadetest
 
-all: run run-ctrl run-wifi run-clock run-fade
+# The track-boundary rules. Header-only, so this compiles tailplan.h
+# itself and there is nothing to drift from.
+TAIL_BIN := tailplantest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -89,8 +93,15 @@ $(FADE_BIN): fadetest.c ../main/loudness.c ../main/loudness.h
 run-fade: $(FADE_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FADE_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM
+$(TAIL_BIN): tailplantest.c ../main/tailplan.h
+	$(CC) $(WARNCFLAGS) -c tailplantest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ tailplantest.c $(LDFLAGS)
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade clean
+run-tail: $(TAIL_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(TAIL_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM
+
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail clean
