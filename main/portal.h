@@ -143,15 +143,22 @@
  * start -- once for the AP coming up, once for dhcp_offer_dns()
  * restarting it -- and that is expected.
  *
- * WHAT THE FIRST ATTEMPT SHOWED ABOUT PSK-FIRST. fivescore is a WPA2/WPA3
- * transition network. The derived PSK was refused with reason 2
- * (AUTH_EXPIRE) after 3.6 s and the passphrase joined, so the passphrase
- * is what was stored. The station config offers SAE (sae_pwe_h2e, PMF
- * capable), and a transition AP apparently gets SAE, which cannot use a
- * precomputed key. Whether a PSK attempt with SAE withheld would join the
- * same AP's WPA2 side -- and so keep the passphrase off the device for
- * transition networks too -- is NOT answered. It is the next thing to
- * try, and it should be a log first.
+ * WHAT THE FIRST ATTEMPT SHOWED ABOUT PSK-FIRST -- AND WHAT THE SECOND
+ * FLASH TOOK BACK. fivescore is a WPA2/WPA3 transition network. In the
+ * portal, the derived PSK failed with reason 2 (AUTH_EXPIRE) after 3.6 s
+ * and the passphrase joined, so the passphrase was stored. That read as
+ * "a transition AP negotiates SAE, which cannot use a PSK."
+ *
+ * The next boot contradicts it. The worker's first attempt, with the
+ * SAVED PASSPHRASE, failed with reason 2 after 6.6 s; the same passphrase
+ * joined sixty seconds later. So reason 2 is a first attempt expiring
+ * whatever the secret, and the portal's passphrase probably joined
+ * because it was the second try, not because it was the passphrase.
+ * wifi_join() now retries reason 2 once. Whether the PSK then joins
+ * fivescore -- and so keeps the passphrase off the device -- is the next
+ * log to read: "saved fivescore as PSK" or "as passphrase". Running the
+ * portal again for fivescore is enough; saving an SSID that is already
+ * stored replaces its record, kind included.
  *
  * ======================== STILL UNANSWERED ========================
  *

@@ -364,21 +364,46 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
     s_sta_ssid[0] = '\0';
 
     esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    /* The disconnect above can deliver its event late and would read as
-     * this attempt failing. Cleared after the config call, which is
-     * synchronous with the driver, and immediately before the connect. */
-    xEventGroupClearBits(s_join_bits, JOIN_GOT_IP | JOIN_FAILED);
-    s_join_reason = 0;
-    if (err == ESP_OK) err = esp_wifi_connect();
+
+    /*
+     * ONE RETRY, AND ONLY FOR REASON 2 (AUTH_EXPIRE).
+     *
+     * Measured on hardware, fivescore, a WPA2/WPA3 transition network:
+     * the first attempt after boot with the SAVED PASSPHRASE failed with
+     * reason 2 after 6.6 s, and the same passphrase joined sixty seconds
+     * later on the worker's retry. In the portal the same thing had
+     * happened to the derived PSK, and the passphrase that followed
+     * joined -- which read as "the PSK was refused" and was very likely
+     * just the second attempt. Reason 2 is an authentication that timed
+     * out, not a secret that was wrong, so it gets a second try inside
+     * this call instead of a minute's wait or a wrong conclusion.
+     *
+     * Why the first attempt expires is not known. Nothing else is
+     * retried: a wrong password must fail, and fail once.
+     */
+    EventBits_t bits = 0;
+    for (int attempt = 1; err == ESP_OK && attempt <= 2; attempt++) {
+        if (attempt == 2) {
+            ESP_LOGI(TAG, "join %.32s: reason 2 (auth expired), trying once more", ssid);
+            esp_wifi_disconnect();
+        }
+        /* The disconnect above can deliver its event late and would read
+         * as this attempt failing. Cleared after the config call or the
+         * disconnect, and immediately before the connect. */
+        xEventGroupClearBits(s_join_bits, JOIN_GOT_IP | JOIN_FAILED);
+        s_join_reason = 0;
+        err = esp_wifi_connect();
+        if (err != ESP_OK) break;
+
+        bits = xEventGroupWaitBits(s_join_bits, JOIN_GOT_IP | JOIN_FAILED,
+                                   pdFALSE, pdFALSE, pdMS_TO_TICKS(timeout_ms));
+        if (!(bits & JOIN_FAILED) || s_join_reason != WIFI_REASON_AUTH_EXPIRE) break;
+    }
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "join %.32s: %s", ssid, esp_err_to_name(err));
         xSemaphoreGive(s_join_lock);
         return err;
     }
-
-    const EventBits_t bits = xEventGroupWaitBits(
-        s_join_bits, JOIN_GOT_IP | JOIN_FAILED, pdFALSE, pdFALSE,
-        pdMS_TO_TICKS(timeout_ms));
 
     if (bits & JOIN_GOT_IP) {
         snprintf(s_sta_ssid, sizeof(s_sta_ssid), "%.32s", ssid);

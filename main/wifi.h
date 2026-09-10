@@ -241,6 +241,10 @@ esp_err_t wifi_scan_log(void);
  *   ESP_ERR_WIFI_PASSWORD  any other refusal -- a wrong secret, or a PSK
  *                          offered to an AP that only speaks SAE
  *   ESP_ERR_TIMEOUT        no answer either way
+ *
+ * Reason 2 (AUTH_EXPIRE) is retried once inside the call, because on
+ * hardware the first attempt after boot expires with a correct secret;
+ * so a worst case is two timeouts, about thirty seconds.
  *   ESP_ERR_INVALID_STATE  the radio is not up
  *
  * Never logs the secret.

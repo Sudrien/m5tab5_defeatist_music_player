@@ -6078,11 +6078,13 @@ came down after the SAVED linger. The log is quoted in `portal.h`.
 
 What that run measured, beyond "it works":
 
-- **PSK-first did not work on a WPA2/WPA3 transition network.** The
-  derived PSK was refused with reason 2 (AUTH_EXPIRE) in 3.6 s; the
-  passphrase joined and was stored. The station config offers SAE, and
-  a transition AP evidently takes it. Whether withholding SAE for the
-  PSK attempt joins the WPA2 side is the open question -- log first.
+- **Reason 2 (AUTH_EXPIRE) on a first attempt, whatever the secret.**
+  In the portal the derived PSK failed with reason 2 and the passphrase
+  that followed joined, which looked like "transition APs refuse a PSK".
+  The second flash took that back: at boot the *saved passphrase* failed
+  the same way after 6.6 s and joined on the retry a minute later.
+  0011 retries reason 2 once inside `wifi_join()`. Whether the PSK then
+  joins fivescore, and gets stored instead of the passphrase, is unread.
 - **The "a track is playing" refusal fired with nothing playing.** Right
   after boot the player sits on "ready to resume" with `s_playing` at its
   initial true, and `s_ring_pct` is 0 from an empty ring, so
@@ -6096,8 +6098,12 @@ What that run measured, beyond "it works":
   prints at every radio start and changes nothing. Do not OTA the C6;
   see the manifest.
 
-Not yet seen on hardware: joining the saved network at the next boot,
-the one-minute retry, more than one saved network, a refused password
+Second flash (0010): **the saved network joins at boot without the
+portal**, but only on the one-minute retry, because the first attempt
+hit reason 2; NTP synced 1.9 s after the address. That run therefore
+also showed the retry working.
+
+Not yet seen on hardware: more than one saved network, a refused password
 on the phone's page, the non-ASCII hint, and whether the phone's
 sign-in sheet opened by itself or the page was opened by hand.
 
