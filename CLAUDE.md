@@ -5971,6 +5971,75 @@ package, the chip parameters and magic value are not.
   cable, no bridge -- would settle the enum spellings it is most likely
   to have got wrong.
 
+## Where v0.4.0 is going (the network series)
+
+v0.4.0 is internet radio, and everything below it is scaffolding for
+that. Station data from https://www.radio-browser.info -- an open API
+with no key, which is why it was picked: no credential to store, no
+account to manage.
+
+### Landed and running on hardware
+
+- **The radio comes up.** The P4 has none of its own; the C6 beside it
+  speaks ESP-Hosted over SDIO2. `wifi_start()` powers the module through
+  P0 of the expander at 0x44, sets the SDIO pins from the schematic,
+  connects to the slave and starts esp_wifi as a station. About two
+  seconds, most of it the C6's reset settle. `wifi_stop()` unwinds it in
+  order and cuts the rail, ~140 ms.
+- **The NET tab's switch acts when pressed**, via `wifi_request_apply()`
+  posting to a worker -- `panel_touch()` runs on ui_task and must not
+  block for two seconds over live audio.
+- **`wifistore`** holds up to eight networks in NVS, with 10072 host
+  checks under ASan. **It has no writer.** Nothing has ever called
+  `wifistore_save()`.
+- **The clock floor.** `.defeatist.dat` carries `ntp_epoch` and
+  `ntp_boot_us`; the stored belief only ever moves forward, seeded from
+  the build timestamp so a player that has never seen a network still
+  refuses 1970. Written on every save, so uptime accumulates across
+  reboots with no network at all.
+
+### Open, in the order they unblock each other
+
+- **`portal.c`.** `portal.h` is landed with its decisions settled:
+  playback stops while the portal runs, the AP is `Defeatist-XXXX` from a
+  MAC hash, five-minute timeout, state copied never borrowed. The only
+  blocker is APSTA -- `wifi.c` can start and stop a station and knows
+  nothing about AP mode. That is a mode change on a running radio, not
+  new machinery.
+- **NTP.** `sntp_start()` is written, marked `__attribute__((unused))`
+  and never called, because nothing joins a network yet. Three NIST
+  servers. It becomes one call from the portal's success path.
+- **Whether the clock is load-bearing.** If radio-browser and the
+  streams are HTTPS, an unset clock fails certificate validation and
+  nothing plays -- which is the argument NTP was added on. If they are
+  plain HTTP, NTP drops to "nice for file timestamps". Worth checking
+  before treating it as a dependency.
+- **The sleep timer.** Relative ("for 45 minutes") needs no clock and
+  should ship first. "Until 07:00" needs the wall clock and has the
+  DST/step problems written up in settings.h -- resolve the deadline to
+  a monotonic reading once, at set time, or an NTP step silently changes
+  its length.
+- **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
+  "this path is a track and its folder is the playlist", which a stream
+  has no answer for, so it needs its own kind and somewhere in player.c
+  for it to land.
+
+### Two things that cost a session each, so that they do not again
+
+- **A hub is a real failure mode, exactly like the cable.** A USB drive
+  that fails enumeration (`CHECK_SHORT_DEV_DESC FAILED`), or mounts and
+  then wedges with `scsi_cmd_read10 failed` and ten seconds of transfer
+  timeouts per settings save, was a hub delivering 4.64 V at 0.15 A.
+  Direct connection: 4.95 V at 0.4 A, and every symptom vanished. None
+  of those errors say "hub", which is why this is written down. Two
+  sessions went into idle thresholds, current ceilings and expander
+  races first.
+- **"bus backend up" is not a connection**, and `eh_sdio`'s pin banner
+  prints compile-time Kconfig defaults rather than the live
+  configuration. Three builds were diagnosed off that line as having
+  wrong pins when the pins were already right. `wifi.c` logs the struct
+  the driver actually copies, and says which line to believe.
+
 ## Where v0.3.0 got to (the 1000 series)
 
 **Read this first if you are picking this up cold.** The 1000 series was
