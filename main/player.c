@@ -5487,8 +5487,22 @@ static track_end_t play_file(const char *path)
      * and nothing else may touch it, which is the same single-owner
      * rule the ring follows.
      */
-    static loudness_t s_loud;      /* static only because it is ~4 KB */
+    static loudness_t s_loud;      /* static only because it is ~6 KB */
     bool measuring = false;
+    /*
+     * Looking for a fade already in the file. Rides the same pass and
+     * the same accumulator, but is its own flag because it is wanted by
+     * tracks that are already measured: every sidecar written before
+     * the fade section existed has a loudness and no fade.
+     *
+     * It does NOT force `measuring`, and must not. Measuring means
+     * playing at unity, and re-measuring a whole library at unity to
+     * add one section would be a play of every track at the wrong
+     * level. A fade does not need unity: loudness_process() is fed
+     * before the gain is applied, and a fade is a fall relative to the
+     * track's own level, so the answer is the same either way.
+     */
+    bool fade_measuring = false;
     float rg_scale = 1.0f;         /* linear; 1.0 is unity */
 
     /*
@@ -5577,6 +5591,10 @@ static track_end_t play_file(const char *path)
          * goes back on, the library is already measured.
          */
         measuring = !known;
+        fade_measuring = !(got && have->fade.present);
+        /* The branches below reset the accumulator when they measure;
+         * a pass that is only looking for a fade has to do it here. */
+        if (fade_measuring && !measuring) loudness_reset(&s_loud);
 
         if (got) {
             /* Seed the RAM caches so load_tags() and do_art() find
@@ -6080,6 +6098,12 @@ static track_end_t play_file(const char *path)
                     s_rg_dirty = true;
                 }
             }
+            /* A fade is found in the last minute of the pass, and a seek
+             * means that minute may not be the last minute of the file. */
+            if (fade_measuring) {
+                loudness_invalidate(&s_loud);
+                fade_measuring = false;
+            }
 
             const int pct = s_seek_pct;
             const uint32_t waited =
@@ -6231,7 +6255,7 @@ static track_end_t play_file(const char *path)
 
         /* The whole cost of measuring: two biquads and a running sum
          * per sample, over a buffer that has already been decoded. */
-        if (measuring) {
+        if (measuring || fade_measuring) {
             loudness_process(&s_loud, pcm, n, info.channels,
                              (uint32_t)info.sample_rate);
         }
@@ -7567,6 +7591,49 @@ static track_end_t play_file(const char *path)
                        (size_t)s_rg.waveform.columns);
                 s_rg_dirty = true;
                 ESP_LOGI(TAG, "envelope from playback: %d columns", cols);
+            }
+        }
+    }
+
+    /*
+     * The fade and the end of the audio, from the same pass. Written for
+     * any complete play that was looking, measured or not, and written
+     * as an answer either way: "examined, no fade" is what stops the
+     * next play looking again.
+     *
+     * loudness_finish() is asked again rather than its answer carried
+     * down from the block above, because on a pass that was only looking
+     * for a fade that block did not run. It reads the histogram and
+     * changes nothing, so asking twice costs a 750-bucket loop.
+     */
+    if (fade_measuring && complete && rg_holding(path)) {
+        float lufs = 0.0f;
+        uint32_t gated = 0;
+        loudness_fade_t fd;
+        if (loudness_finish(&s_loud, &lufs, NULL, &gated) && gated &&
+            loudness_fade(&s_loud, lufs, &fd)) {
+            s_rg.fade.present  = true;
+            s_rg.fade.has_fade = fd.has_fade;
+            s_rg.fade.start_ms = fd.start_ms;
+            s_rg.fade.end_ms   = fd.end_ms;
+            s_rg.fade.total_ms = fd.total_ms;
+            s_rg.fade.audio_end_ms = fd.audio_end_ms;
+            s_rg.fade.depth_lu = fd.depth_lu;
+            s_rg_dirty = true;
+            if (fd.has_fade) {
+                ESP_LOGI(TAG, "fade: %" PRIu32 ".%01" PRIu32 " s to %" PRIu32
+                              ".%01" PRIu32 " s of %" PRIu32 ".%01" PRIu32
+                              " s, %.1f LU",
+                         fd.start_ms / 1000, (fd.start_ms / 100) % 10,
+                         fd.end_ms / 1000, (fd.end_ms / 100) % 10,
+                         fd.total_ms / 1000, (fd.total_ms / 100) % 10,
+                         (double)fd.depth_lu);
+            } else {
+                ESP_LOGI(TAG, "fade: none");
+            }
+            if (fd.total_ms > fd.audio_end_ms) {
+                ESP_LOGI(TAG, "silence after the audio: %" PRIu32 " ms",
+                         fd.total_ms - fd.audio_end_ms);
             }
         }
     }

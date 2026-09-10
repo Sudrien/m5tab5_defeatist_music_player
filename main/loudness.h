@@ -90,6 +90,11 @@ extern "C" {
  * and should not invalidate each other. */
 #define LOUDNESS_VERSION        (1)
 
+/* The same, for what loudness_fade() means by a fade. Separate because
+ * retuning a threshold there says nothing about the integrated figure,
+ * and should re-examine fades without re-measuring every track. */
+#define LOUDNESS_FADE_VERSION   (1)
+
 /* BS.1770 reference: the loudness a track is normalised towards. -18
  * LUFS is the ReplayGain 2.0 convention (EBU R128 broadcast uses -23);
  * the gain to apply is REFERENCE minus the measured integrated value. */
@@ -163,6 +168,23 @@ typedef struct {
     uint32_t abs_gated_blocks;
 
     uint32_t blocks_total;      /* every complete block, gated or not */
+
+    /*
+     * The last LOUDNESS_TAIL_BLOCKS blocks' momentary loudness, as a
+     * ring indexed by block number, for loudness_fade(). Centi-LU in an
+     * int16 and floored at LOUDNESS_TAIL_FLOOR_CLU, so silence is a
+     * number rather than -inf. Every block goes in, gated or not: the
+     * gate is exactly the part of a fade that matters.
+     *
+     * `tail_smooth` is loudness_fade()'s scratch, kept here rather than
+     * on the stack because the decode loop's stack is not the place for
+     * another 1.2 KB and this struct is already a static.
+     */
+#define LOUDNESS_TAIL_BLOCKS    (600)       /* 60 s at one block per 100 ms */
+#define LOUDNESS_TAIL_FLOOR_CLU (-8000)     /* -80 LUFS */
+    int16_t  tail_clu[LOUDNESS_TAIL_BLOCKS];
+    int16_t  tail_smooth[LOUDNESS_TAIL_BLOCKS];
+    uint64_t frames_seen;       /* for the track length the fade is placed in */
 
     /* Sample peak, as a normalised magnitude 0..1 over all channels. */
     float    peak;
@@ -250,6 +272,94 @@ bool loudness_finish(loudness_t *l, float *out_lufs, float *out_peak_dbfs,
  * caller decides whether a partial envelope is worth storing.
  */
 void loudness_envelope(const loudness_t *l, uint8_t *dst, int *out_cols);
+
+/*
+ * A FADE THAT IS ALREADY IN THE FILE
+ *
+ * The crossfade ramps the outgoing track down whatever the track is
+ * doing, so a song mastered with its own fade gets faded twice: the
+ * software ramp is laid over a recording that is already going quiet,
+ * and the end of the song drops out early. Before anything can decline
+ * to do that, something has to know which tracks fade and where. This
+ * is that something, and it answers from the same pass as the loudness.
+ *
+ * What counts as a fade, all measured in LU against this track's own
+ * integrated loudness, so the answer does not move with ReplayGain or
+ * with how loud the file was mastered:
+ *
+ *   1. The end of the audio is the last block above
+ *      max(-70 LUFS, integrated - LOUDNESS_FADE_AUDIBLE_LU). Digital
+ *      silence or dither after that is trailing silence, not fade.
+ *   2. The level is smoothed over +-1 s of blocks, averaged in LU
+ *      rather than in power. A power mean over a decay that is straight
+ *      in dB is dominated by its loud edge and reads the fade as
+ *      starting late; a mean of LU values does not.
+ *   3. The start is found by walking back from the end for as long as
+ *      the level keeps climbing -- while the LOUDNESS_FADE_LOOK_BLOCKS
+ *      before a point hold something LOUDNESS_FADE_RISE_LU louder than
+ *      anything after it. Walking from the end rather than from where
+ *      the song was last at its own level is what lets a quiet outro
+ *      fade from the outro, and what finds the start of a
+ *      linear-amplitude fade, whose first seconds fall by barely a dB.
+ *   4. A walk that is still climbing when it runs out of kept blocks
+ *      has not found the start, and reports no fade.
+ *   5. It is a fade if it drops at least LOUDNESS_FADE_MIN_DEPTH_LU and
+ *      lasts at least LOUDNESS_FADE_MIN_MS.
+ *
+ * There is no "downhill all the way" test, and that is not an omission.
+ * The walk in 3 already stops at anything the song climbs back up from,
+ * so a quiet bridge followed by more song never reaches 5. What a
+ * running-minimum check would add is refusing a fade with a late drum
+ * hit in it -- which is still a recording going quiet on its own, and
+ * exactly what should not be faded a second time.
+ *
+ * A long natural decay -- a held chord ringing out -- passes all five
+ * and is reported as a fade. That is deliberate: for anything deciding
+ * whether to ramp a track down, a recording that is already decaying to
+ * nothing is the same problem whether a fader or a piano did it.
+ *
+ * Only the last LOUDNESS_TAIL_BLOCKS are kept, so a fade that starts
+ * more than a minute before the end is not seen, and is reported as no
+ * fade rather than as a fade with a wrong start.
+ */
+typedef struct {
+    bool     has_fade;
+    uint32_t start_ms;      /* where the level starts falling */
+    uint32_t end_ms;        /* where it is no longer audible */
+    uint32_t total_ms;      /* decoded length */
+    /*
+     * Where the audio ends, fade or not: the end of the last block that
+     * passes the audible test in 1 above. total_ms - audio_end_ms is the
+     * silence recorded after it. Equal to total_ms when that is unknown
+     * -- nothing audible in the kept tail -- so an unknown reads as no
+     * silence rather than as a minute of it. With a fade, end_ms is the
+     * same number.
+     */
+    uint32_t audio_end_ms;
+    float    depth_lu;      /* how far it falls, start to end */
+} loudness_fade_t;
+
+#define LOUDNESS_FADE_AUDIBLE_LU     (40.0f)
+#define LOUDNESS_FADE_RISE_LU        (0.5f)
+#define LOUDNESS_FADE_LOOK_BLOCKS    (20)       /* 2 s */
+#define LOUDNESS_FADE_MIN_DEPTH_LU   (10.0f)
+#define LOUDNESS_FADE_MIN_MS         (1500u)
+#define LOUDNESS_FADE_SMOOTH_BLOCKS  (10)       /* either side: +-1 s */
+
+/*
+ * Look for a fade at the end of what was fed.
+ *
+ * Returns false when there is no answer to give -- invalidated, never
+ * started, or nothing past the absolute gate -- and true when it looked,
+ * with out->has_fade saying what it found. A track too short to judge
+ * is true with has_fade false: that is an answer, and recording it stops
+ * the next play looking again.
+ *
+ * `integrated_lufs` is loudness_finish()'s answer for the same pass.
+ * Uses the struct's scratch, so like everything else here it belongs to
+ * the one task feeding the measurement.
+ */
+bool loudness_fade(loudness_t *l, float integrated_lufs, loudness_fade_t *out);
 
 #ifdef __cplusplus
 }

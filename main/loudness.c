@@ -113,9 +113,15 @@ static void close_block(loudness_t *l)
         ms += sum / (double)per_ch;      /* weight 1.0 */
     }
 
-    l->blocks_total++;
-
     const float lufs = ms_to_lufs(ms);
+
+    /* Into the tail before the gate, so a fade's quiet end is kept. */
+    long clu = lrintf(lufs * 100.0f);
+    if (!(lufs * 100.0f > (float)LOUDNESS_TAIL_FLOOR_CLU)) clu = LOUDNESS_TAIL_FLOOR_CLU;
+    if (clu > INT16_MAX) clu = INT16_MAX;
+    l->tail_clu[l->blocks_total % LOUDNESS_TAIL_BLOCKS] = (int16_t)clu;
+
+    l->blocks_total++;
 
     /* Absolute gate. Below -70 LUFS a block is silence as far as the
      * standard is concerned and takes no part in the answer. */
@@ -234,6 +240,7 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
             for (int c = 0; c < ch; c++) l->quarter_sq[c][l->quarter_idx] = 0.0;
         }
     }
+    l->frames_seen += (uint64_t)frames;
 }
 
 bool loudness_finish(loudness_t *l, float *out_lufs, float *out_peak_dbfs,
@@ -314,4 +321,109 @@ void loudness_envelope(const loudness_t *l, uint8_t *dst, int *out_cols)
      * env_span samples is not worth a visible artefact.
      */
     if (out_cols) *out_cols = n;
+}
+
+/* Momentary loudness of the i'th block of the last n, oldest first. */
+static float tail_at(const loudness_t *l, uint32_t first, int i)
+{
+    return (float)l->tail_clu[(first + (uint32_t)i) % LOUDNESS_TAIL_BLOCKS] / 100.0f;
+}
+
+/* Block k starts at k quarters; this is a sample offset -> ms. */
+static uint32_t block_ms(const loudness_t *l, uint64_t quarters)
+{
+    return (uint32_t)((quarters * l->quarter_len * 1000u) / l->rate);
+}
+
+bool loudness_fade(loudness_t *l, float integrated_lufs, loudness_fade_t *out)
+{
+    if (!l || !out || !l->active || !l->started || !l->rate) return false;
+    if (!l->abs_gated_blocks || !(integrated_lufs > LOUDNESS_HIST_MIN_LUFS)) {
+        return false;
+    }
+
+    memset(out, 0, sizeof(*out));
+    out->total_ms = (uint32_t)((l->frames_seen * 1000u) / l->rate);
+
+    out->audio_end_ms = out->total_ms;     /* until something says otherwise */
+
+    const uint32_t total = l->blocks_total;
+    if (!total) return true;
+    const int n = total < LOUDNESS_TAIL_BLOCKS ? (int)total : LOUDNESS_TAIL_BLOCKS;
+    const uint32_t first = total - (uint32_t)n;   /* block number of i = 0 */
+
+    /* 1. The end of the audio. Found before the short-track refusal
+     * below, because trailing silence is worth knowing about on a track
+     * of any length. Nothing audible in the whole tail is a minute or
+     * more of silence, and says nothing about where the audio stopped;
+     * audio_end_ms stays at the total rather than guessing. */
+    float audible = integrated_lufs - LOUDNESS_FADE_AUDIBLE_LU;
+    if (audible < LOUDNESS_HIST_MIN_LUFS) audible = LOUDNESS_HIST_MIN_LUFS;
+    int e = -1;
+    for (int i = n - 1; i >= 0; i--) {
+        if (tail_at(l, first, i) >= audible) { e = i; break; }
+    }
+    if (e < 0) return true;
+    {
+        const uint32_t end = block_ms(l, (uint64_t)(first + (uint32_t)e) + 4);
+        out->audio_end_ms = end < out->total_ms ? end : out->total_ms;
+    }
+
+    /* Under ten seconds there is no song level to fall from that a
+     * +-1 s smoother and a 1.5 s minimum could tell from the fade. */
+    if (total < 100 || e < 1) return true;
+
+    /* 2. Smoothed, in LU, never reaching past the end of the audio --
+     * the trailing silence would drag the last second down and make
+     * every hard ending look like the bottom of a fade. */
+    for (int i = 0; i <= e; i++) {
+        const int lo = i - LOUDNESS_FADE_SMOOTH_BLOCKS < 0 ? 0 : i - LOUDNESS_FADE_SMOOTH_BLOCKS;
+        const int hi = i + LOUDNESS_FADE_SMOOTH_BLOCKS > e ? e : i + LOUDNESS_FADE_SMOOTH_BLOCKS;
+        float sum = 0.0f;
+        for (int j = lo; j <= hi; j++) sum += tail_at(l, first, j);
+        l->tail_smooth[i] = (int16_t)lrintf(sum * 100.0f / (float)(hi - lo + 1));
+    }
+#define SM(i) ((float)l->tail_smooth[(i)] / 100.0f)
+
+    /*
+     * 3. Walk back from the end for as long as the level keeps
+     * climbing: while the LOOK_BLOCKS before a point hold something at
+     * least RISE_LU louder than anything after it. Where that stops is
+     * where the fall began.
+     *
+     * Against the running maximum rather than point to point, so a beat
+     * that survives the smoothing cannot end the walk early; and walked
+     * from the end rather than from where the song was last at its own
+     * level, because a fade does not have to start from there -- a
+     * quiet outro fades from the outro.
+     */
+    int s = e;
+    float after = SM(e);                   /* max over [s, e] */
+    for (;;) {
+        const int back = s - LOUDNESS_FADE_LOOK_BLOCKS;
+        /* Still climbing at the edge of what was kept: the start is
+         * out of reach, and a start guessed at the edge is wrong. */
+        if (back < 0) return true;
+        float before = SM(back);
+        for (int i = back + 1; i < s; i++) if (SM(i) > before) before = SM(i);
+        if (before - after < LOUDNESS_FADE_RISE_LU) break;
+        s--;
+        if (SM(s) > after) after = SM(s);
+    }
+    if (s >= e) return true;
+
+    /* 5. Deep enough and long enough. */
+    const float depth = SM(s) - SM(e);
+    const uint32_t start_ms = block_ms(l, (uint64_t)(first + (uint32_t)s) + 2);
+    const uint32_t end_ms = out->audio_end_ms;
+
+    if (depth < LOUDNESS_FADE_MIN_DEPTH_LU) return true;
+    if (end_ms <= start_ms || end_ms - start_ms < LOUDNESS_FADE_MIN_MS) return true;
+#undef SM
+
+    out->has_fade = true;
+    out->start_ms = start_ms;
+    out->end_ms   = end_ms;
+    out->depth_lu = depth;
+    return true;
 }

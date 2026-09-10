@@ -3337,6 +3337,48 @@ crashes: ragged offset/sample arrays (pairing an offset with the wrong
 sample seeks to the wrong place), and any offset past the end of the file
 (a record about a different file that happened to match size and mtime).
 
+### A fade in the recording, and the silence after it
+
+The crossfade ramps the outgoing track down whatever the track is
+doing, so a song mastered with its own fade was faded twice. Before
+anything can decline to do that, something has to know which tracks
+fade. The sidecar's `fade` section is that record.
+
+It comes from the loudness pass. `loudness_t` keeps the last 60 s of
+400 ms block loudness in a ring, gated or not, and `loudness_fade()`
+reads it when the track ends:
+
+- **The end of the audio** is the last block within 40 LU of the
+  track's integrated loudness (floor -70 LUFS). Everything after it is
+  recorded silence, and `audio_end_ms` is stored whether or not there
+  is a fade. Relative, so a quiet room tone after a loud master counts
+  as the silence it is at normalised volume.
+- **The start of a fade** is found by walking back from the end for as
+  long as the level keeps climbing. That finds a linear-amplitude fade,
+  whose first seconds barely move, and lets a quiet outro fade from the
+  outro.
+- **A fade** falls at least 10 LU over at least 1.5 s. A held chord
+  ringing out qualifies, deliberately: for anything deciding whether to
+  ramp a track down it is the same problem.
+
+All of it is relative to the track's own level, so ReplayGain does not
+move the answer -- which is why a track already measured is examined on
+its next complete play at its normal gain, not re-measured at unity.
+`fade_measuring` is its own flag for that reason. A seek abandons it.
+
+Not a `REPLAYGAIN_FORMAT_VERSION` bump: a bump discards every line on
+the card, and an absent section already means "nobody looked". The
+section carries `LOUDNESS_FADE_VERSION` instead.
+
+Limits worth knowing: start times land about half a second early on
+clean fades and late on fades that start very slowly (a quarter-sine
+fade reads as starting where it steepens); a fade starting more than a
+minute before the end is reported as none; more than a minute of
+trailing silence reads as unknown, not as silence. Host-tested in
+`texttest/fadetest.c` against the real `loudness.c`, on noise, which has
+no bars or reverb -- the `fade:` and `silence after the audio:` lines on
+a real library are the check that matters. **Not flashed.**
+
 ### The seek table is harvested, not scanned for (0703)
 
 An MP3 with no Xing header states nothing about its own length, so

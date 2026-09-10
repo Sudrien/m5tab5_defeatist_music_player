@@ -76,7 +76,10 @@
  *    "filesize":8760320,"mtime":1735500000,
  *    "waveform":{"sec":273,"columns":426,"level":"<base64>"},
  *    "loudness":{"version":1,"integrated_lufs":-18.4,
- *                "sample_peak_dbfs":-1.2,"blocks":2711}}
+ *                "sample_peak_dbfs":-1.2,"blocks":2711},
+ *    "fade":{"version":1,"has_fade":true,"total_ms":273000,
+ *            "audio_end_ms":270800,"start_ms":261300,"end_ms":270800,
+ *            "depth_lu":31.2}}
  *
  * Either section may be absent. `columns` is what was actually filled,
  * NOT always REPLAYGAIN_COLUMNS: a track too short to produce a full
@@ -265,6 +268,39 @@ typedef struct {
     uint32_t abandoned;
 } replaygain_attempts_t;
 
+/*
+ * A fade that is already in the recording, from loudness_fade().
+ *
+ * `present` is "somebody looked", as with art: present with has_fade
+ * false is a track that was examined and ends without one, which is the
+ * answer a crossfade most needs to be able to trust. Absent, or written
+ * by a different LOUDNESS_FADE_VERSION, means nobody has looked by the
+ * current rules and the next uninterrupted play will.
+ *
+ * All times are milliseconds of decoded audio from the start of the
+ * track. `total_ms` is stored with them so a consumer can work in time
+ * remaining -- which is how the crossfade counts -- without trusting a
+ * duration from somewhere else to agree with the pass that measured it.
+ *
+ * NOT A REPLAYGAIN_FORMAT_VERSION BUMP. parse_line() rejects a whole
+ * line whose format_version differs, so a bump for an optional section
+ * would throw away every loudness, index and envelope on the card to add
+ * one that an old record simply does not have. Absent already means
+ * "nobody looked"; nothing about the existing sections changed shape.
+ * The cost runs the other way and is accepted: firmware from before this
+ * section rewrites a record without it, and the next play here looks
+ * again.
+ */
+typedef struct {
+    bool     present;
+    bool     has_fade;
+    uint32_t start_ms;
+    uint32_t end_ms;
+    uint32_t total_ms;
+    uint32_t audio_end_ms;  /* always written; see loudness_fade_t */
+    float    depth_lu;
+} replaygain_fade_t;
+
 typedef struct {
     uint32_t filesize;
     int64_t  mtime;
@@ -275,6 +311,7 @@ typedef struct {
     replaygain_tags_t     tags;
     replaygain_index_t    index;
     replaygain_attempts_t attempts;
+    replaygain_fade_t     fade;
 } replaygain_t;
 
 /*

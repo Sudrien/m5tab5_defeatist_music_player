@@ -50,7 +50,12 @@ WIFI_BIN := wifistoretest
 # The clock floor. Its own binary for the same reason the others are.
 CLOCK_BIN := clocktest
 
-all: run run-ctrl run-wifi run-clock
+# Fade and end-of-audio detection. Links the real loudness.c, and builds
+# it once more at -O2 -Werror as an object -- not -fsyntax-only, which
+# stops before the optimiser that the -O2-only warnings come out of.
+FADE_BIN := fadetest
+
+all: run run-ctrl run-wifi run-clock run-fade
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -77,8 +82,15 @@ $(CLOCK_BIN): clocktest.c
 run-clock: $(CLOCK_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CLOCK_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM
+$(FADE_BIN): fadetest.c ../main/loudness.c ../main/loudness.h
+	$(CC) $(WARNCFLAGS) -D_GNU_SOURCE -I../main -c ../main/loudness.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ fadetest.c ../main/loudness.c $(LDFLAGS)
 
-.PHONY: all run run-ctrl run-wifi run-clock clean
+run-fade: $(FADE_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FADE_BIN)
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM
+
+.PHONY: all run run-ctrl run-wifi run-clock run-fade clean

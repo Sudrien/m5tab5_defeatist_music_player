@@ -6,6 +6,7 @@
 #include "replaygain.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -299,10 +300,52 @@ static bool parse_line(const char *line, uint32_t filesize, int64_t mtime,
         }
     }
 
+    const cJSON *fd = cJSON_GetObjectItemCaseSensitive(root, "fade");
+    if (cJSON_IsObject(fd)) {
+        const cJSON *ver = cJSON_GetObjectItemCaseSensitive(fd, "version");
+        const cJSON *hf  = cJSON_GetObjectItemCaseSensitive(fd, "has_fade");
+        const cJSON *st  = cJSON_GetObjectItemCaseSensitive(fd, "start_ms");
+        const cJSON *en  = cJSON_GetObjectItemCaseSensitive(fd, "end_ms");
+        const cJSON *tt  = cJSON_GetObjectItemCaseSensitive(fd, "total_ms");
+        const cJSON *dp  = cJSON_GetObjectItemCaseSensitive(fd, "depth_lu");
+
+        /* A different LOUDNESS_FADE_VERSION is dropped for the same
+         * reason a different LOUDNESS_VERSION is: a fade found by other
+         * rules. Nothing else in the record goes with it. */
+        if (cJSON_IsNumber(ver) && ver->valueint == LOUDNESS_FADE_VERSION &&
+            cJSON_IsBool(hf)) {
+            out->fade.present  = true;
+            out->fade.has_fade = cJSON_IsTrue(hf);
+            out->fade.total_ms = cJSON_IsNumber(tt) ? (uint32_t)tt->valuedouble : 0;
+            const cJSON *ae = cJSON_GetObjectItemCaseSensitive(fd, "audio_end_ms");
+            /* Missing or past the end reads as "no silence after it",
+             * which is what the writer means by an unknown. */
+            out->fade.audio_end_ms = cJSON_IsNumber(ae) ? (uint32_t)ae->valuedouble
+                                                        : out->fade.total_ms;
+            if (out->fade.audio_end_ms > out->fade.total_ms) {
+                out->fade.audio_end_ms = out->fade.total_ms;
+            }
+            if (out->fade.has_fade) {
+                out->fade.start_ms = cJSON_IsNumber(st) ? (uint32_t)st->valuedouble : 0;
+                out->fade.end_ms   = cJSON_IsNumber(en) ? (uint32_t)en->valuedouble : 0;
+                out->fade.depth_lu = cJSON_IsNumber(dp) ? (float)dp->valuedouble : 0.0f;
+                /* A fade that ends before it starts, or past the end of
+                 * the track, is a damaged record, not a fade. Demoted to
+                 * absent rather than to "no fade", so the next play looks
+                 * again instead of the crossfade believing a definite no. */
+                if (!cJSON_IsNumber(st) || !cJSON_IsNumber(en) ||
+                    out->fade.end_ms <= out->fade.start_ms ||
+                    out->fade.end_ms > out->fade.total_ms) {
+                    memset(&out->fade, 0, sizeof(out->fade));
+                }
+            }
+        }
+    }
+
     ok = out->waveform.present || out->loudness.present ||
          out->art.present || out->format.present ||
          out->tags.present || out->index.present ||
-         out->attempts.present;
+         out->attempts.present || out->fade.present;
 
 done:
     cJSON_Delete(root);
@@ -511,6 +554,25 @@ static esp_err_t append_record(const char *path, const replaygain_t *rg,
             cJSON_AddNumberToObject(ld, "sample_peak_dbfs",
                                     (double)rg->loudness.sample_peak_dbfs);
             cJSON_AddNumberToObject(ld, "blocks", (double)rg->loudness.blocks);
+        }
+    }
+
+    if (rg->fade.present) {
+        cJSON *fd = cJSON_AddObjectToObject(root, "fade");
+        if (fd) {
+            cJSON_AddNumberToObject(fd, "version", LOUDNESS_FADE_VERSION);
+            cJSON_AddBoolToObject(fd, "has_fade", rg->fade.has_fade);
+            cJSON_AddNumberToObject(fd, "total_ms", (double)rg->fade.total_ms);
+            cJSON_AddNumberToObject(fd, "audio_end_ms", (double)rg->fade.audio_end_ms);
+            if (rg->fade.has_fade) {
+                cJSON_AddNumberToObject(fd, "start_ms", (double)rg->fade.start_ms);
+                cJSON_AddNumberToObject(fd, "end_ms", (double)rg->fade.end_ms);
+                /* One decimal. The detector's own resolution is a
+                 * 100 ms block and 0.01 LU, and cJSON would otherwise
+                 * print a float's full double expansion. */
+                cJSON_AddNumberToObject(fd, "depth_lu",
+                                        (double)lrintf(rg->fade.depth_lu * 10.0f) / 10.0);
+            }
         }
     }
 
