@@ -43,32 +43,39 @@ dependencies:
   # none of its own. esp_wifi_remote makes the C6 look like a local
   # esp_wifi; esp_hosted is the transport underneath it.
   #
-  # DELIBERATELY UNPINNED, following usb_host_msc's reasoning: a guessed
-  # pin that the registry cannot satisfy stops the project configuring
-  # entirely, so a feature nobody is using breaks a build that has
-  # nothing to do with it.
+  # esp_wifi_remote is DELIBERATELY UNPINNED, following usb_host_msc's
+  # reasoning: a guessed pin that the registry cannot satisfy stops the
+  # project configuring entirely. It follows whatever esp_hosted allows.
   #
-  # If what the registry resolves does not work, the known-good pure-IDF
-  # pairing on this board is esp_hosted 1.4.0 with esp_wifi_remote 0.8.5,
-  # from BufferRoot/M5STACK-TAB5-DEMO-CLEAN. That pairing cannot be used
-  # in a tree containing arduino-esp32, which pins esp_wifi_remote ^1.2.2
-  # and conflicts -- but this project has no Arduino core, so the
-  # conflict does not arise here.
+  # esp_hosted IS PINNED, and the floor is not caution. 3.0.2 is the
+  # release that added per-board presets with M5Stack Tab5 among them, and
+  # sdkconfig.defaults selects that preset (CONFIG_ESP32P4_TAB5_C6_BOARD)
+  # and sets the reset line through Kconfig, which is the one pin wifi.c
+  # cannot set from code -- see the note on CONFIG_ESP_HOSTED_HOST_RESET_GPIO
+  # there. Everything in wifi.c has only ever been built and run against
+  # 3.x.
+  #
+  # NO OLDER FALLBACK. This comment used to offer esp_hosted 1.4.0 with
+  # esp_wifi_remote 0.8.5, a pairing from BufferRoot/M5STACK-TAB5-DEMO-CLEAN,
+  # as known-good. The pin below excludes it, and nothing in this tree has
+  # been built against it since the pin went in. If a newer release breaks
+  # the radio, pin back to the last pair that worked, which
+  # dependencies.lock records -- esp_hosted 3.0.7 with esp_wifi_remote
+  # 1.6.4 when this was written -- not to a 1.x.
   #
   # The M5 slave firmware reports no version, so the transport logs
   # "Version mismatch: Host [x] > Co-proc [0.0.0]" and works anyway. That
   # warning is upstream's and is not a fault.
-  # >=3.0.2 is not caution: that release added per-board GPIO defaults and
-  # M5Stack Tab5 is one of the boards. Without a board preset the
-  # transport uses the P4-Function-EV-Board pins -- CLK 18, CMD 19,
-  # D0-D3 14-17, reset 54 -- which is what the first build on this
-  # hardware logged, and none of them are wired to the C6 here. The Tab5
-  # is CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, with the C6's EN on
-  # GPIO15.
   #
-  # Select it under menuconfig:
-  #   Component config -> ESP-Hosted -> Configure host -> Host transport
-  # and check the GPIOs against the numbers above before building.
+  # NOTHING TO SELECT IN MENUCONFIG. sdkconfig.defaults selects the board
+  # and sets reset GPIO 15 and its polarity; wifi.c sets the data pins
+  # (CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8) and logs the struct the
+  # driver actually copied as "SDIO in use", which is the line to believe
+  # -- eh_sdio's own banner prints build-time defaults. A build that logs
+  # the P4-Function-EV-Board pins instead (CLK 18, CMD 19, D0-D3 14-17,
+  # reset 54) is using an sdkconfig generated before those defaults
+  # existed: sdkconfig.defaults does not override an existing sdkconfig,
+  # so delete it or run `idf.py fullclean`.
   espressif/esp_wifi_remote: "*"
   espressif/esp_hosted: ">=3.0.2"
 
