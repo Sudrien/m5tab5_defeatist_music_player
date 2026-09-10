@@ -370,9 +370,12 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
      *   bare connect again after 5 s (0012)  reason 205, rssi -128
      *   worker, whole attempt, +60 s         joined
      *   portal, PSK then whole attempt       joined  (twice)
+     *   boot, whole attempt at once (0013)   joined, address 4.0 s later
      *
      * The pause made no difference; what every success had and every 205
-     * lacked is a fresh set_config before the connect. The portal's
+     * lacked is a fresh set_config before the connect. The last row is
+     * this code on hardware: joined 13.2 s after the radio came up,
+     * against 76 s when a reason-2 first attempt waited for the worker. The portal's
      * passphrase attempt joined 13 ms after the PSK's failure, so no
      * pause is needed either. Why a first attempt expires is not known;
      * every reason-2 failure so far followed "rx RPC WifiEventNoArgs

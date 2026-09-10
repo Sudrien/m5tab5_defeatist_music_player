@@ -6088,7 +6088,10 @@ What that run measured, beyond "it works":
   reached the AP. Every success had a fresh `esp_wifi_set_config()`
   first -- the worker's minute-later retry, and the portal's passphrase
   13 ms after the PSK failed. 0013 makes the retry a whole attempt, no
-  pause. Every reason-2 failure followed event id 43 (probably
+  pause, and **the fifth flash confirmed it**: reason 2 at 13557, retry
+  from set_config at 13570, address at 17564 -- 13.2 s after the radio
+  came up, where the same boot took 76 s before. NTP synced 4.5 s after
+  the address. Every reason-2 failure followed event id 43 (probably
   HOME_CHANNEL_CHANGE on the slave; unchecked).
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
