@@ -431,10 +431,9 @@ esp_err_t wifi_ap_begin(const char *ssid)
     }
 
     /*
-     * THE QUESTION portal.h LEFT OPEN, answered by whichever line below
-     * prints on the first flash. esp_hosted's own examples run APSTA on a
-     * P4 host, but M5's slave firmware on this C6 reports version 0.0.0
-     * and nothing on this board has ever asked it for AP mode.
+     * M5's 0.0.0 slave firmware accepts APSTA: "APSTA up" on the first
+     * flash, with esp_hosted 3.0.7. The refusal branch stays, because a
+     * different C6 firmware is a different answer. See portal.h.
      */
     esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
     if (err != ESP_OK) {

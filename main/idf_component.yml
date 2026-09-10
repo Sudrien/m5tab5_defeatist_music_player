@@ -63,9 +63,13 @@ dependencies:
   # dependencies.lock records -- esp_hosted 3.0.7 with esp_wifi_remote
   # 1.6.4 when this was written -- not to a 1.x.
   #
-  # The M5 slave firmware reports no version, so the transport logs
-  # "Version mismatch: Host [x] > Co-proc [0.0.0]" and works anyway. That
-  # warning is upstream's and is not a fault.
+  # The M5 slave firmware reports no version, so esp_hosted 3.0.7 logs
+  #   E eh_init_evt: major version mismatch — OTA coprocessor from host
+  # at every radio start, and works anyway: scan, APSTA, join and NTP all
+  # ran on hardware with that line printed above them. It is upstream's
+  # advice, not a fault. DO NOT act on it without a reason: an OTA would
+  # replace M5's C6 firmware with a stock slave build, which has never been
+  # tried on this board, and this tree has nothing that writes one.
   #
   # NOTHING TO SELECT IN MENUCONFIG. sdkconfig.defaults selects the board
   # and sets reset GPIO 15 and its polarity; wifi.c sets the data pins

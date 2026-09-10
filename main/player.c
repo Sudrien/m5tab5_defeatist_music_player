@@ -1767,17 +1767,6 @@ static void xfade_mix(int16_t *a, const int16_t *b, size_t frames)
 
 static volatile bool s_playing;
 
-/*
- * For portal_init(): "is a track playing". Paused is not playing, and no
- * ring at all -- s_ring_pct at -1 -- is nothing loaded. The portal refuses
- * to start on true; see portal.h for why the rare thing excludes the
- * common one.
- */
-static bool player_is_playing(void)
-{
-    return s_playing && s_ring_pct >= 0;
-}
-
 static void ring_publish(void);
 
 /*
@@ -2574,6 +2563,21 @@ static const char *volatile s_seek_why = "";
  * track ended, then serviced when an unrelated folder was started.
  */
 static volatile bool s_decoding;
+
+/*
+ * For portal_init(): "is a track playing". Paused is not playing, and
+ * neither is a track that is only loaded.
+ *
+ * The first version was s_playing && s_ring_pct >= 0, and hardware
+ * refused the portal with nothing audible: after boot the player sits on
+ * "ready to resume" with s_playing still at its initial true, and
+ * s_ring_pct is refreshed from an empty ring to 0 whether or not anything
+ * is decoding. s_decoding is the flag that means a decode loop exists.
+ */
+static bool player_is_playing(void)
+{
+    return s_decoding && s_playing;
+}
 
 static void request_seek(int pct, const char *why)
 {

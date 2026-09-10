@@ -121,13 +121,39 @@
  * can say what happened rather than appearing to have done nothing.
  *
  *
- * ======================== STILL UNANSWERED ========================
+ * ======================== ANSWERED ON HARDWARE ========================
  *
- * WHETHER THIS C6'S FIRMWARE WILL DO APSTA. wifi_ap_begin() is written
- * against esp_wifi as esp_hosted's own P4 examples use it, and those run
- * APSTA. The slave on this board is M5's build and reports 0.0.0, and
- * nothing has asked it for AP mode. The first flash answers it in one of
- * two log lines: "APSTA up" or "APSTA refused".
+ * THIS C6'S FIRMWARE DOES APSTA. First flash, esp_hosted 3.0.7 against
+ * M5's 0.0.0 slave:
+ *
+ *   eh_wifi: set_config iface=AP ssid="Defeatist-3E78" (14 bytes)
+ *   tab5_wifi: APSTA up: Defeatist-3E78 is broadcasting
+ *   esp_netif_lwip: DHCP server started on interface WIFI_AP_DEF ...
+ *   esp_netif_lwip: DHCP server assigned IP to a client, IP is: 192.168.4.2
+ *   tab5_portal: submitted fivescore: password 14 bytes, 14 chars
+ *   tab5_portal: trying fivescore (passphrase)
+ *   tab5_wifi: join fivescore failed: ESP_ERR_WIFI_PASSWORD (reason 2)
+ *   tab5_wifi: address 192.168.5.62
+ *   tab5_portal: saved fivescore as passphrase
+ *   tab5_wifi: NTP sync: 1789079956
+ *   tab5_portal: dns: stopped after 86 answers
+ *
+ * The whole path works: AP, lease, DNS lie, form, join, save, NTP 1.4 s
+ * after the address, AP down. "DHCP server started" prints twice per
+ * start -- once for the AP coming up, once for dhcp_offer_dns()
+ * restarting it -- and that is expected.
+ *
+ * WHAT THE FIRST ATTEMPT SHOWED ABOUT PSK-FIRST. fivescore is a WPA2/WPA3
+ * transition network. The derived PSK was refused with reason 2
+ * (AUTH_EXPIRE) after 3.6 s and the passphrase joined, so the passphrase
+ * is what was stored. The station config offers SAE (sae_pwe_h2e, PMF
+ * capable), and a transition AP apparently gets SAE, which cannot use a
+ * precomputed key. Whether a PSK attempt with SAE withheld would join the
+ * same AP's WPA2 side -- and so keep the passphrase off the device for
+ * transition networks too -- is NOT answered. It is the next thing to
+ * try, and it should be a log first.
+ *
+ * ======================== STILL UNANSWERED ========================
  *
  * WHAT THE PHONE SEES DURING THE JOIN. One radio, one channel: joining
  * the home network moves the AP to that network's channel, and a phone

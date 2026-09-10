@@ -6068,10 +6068,38 @@ account to manage.
   refuses 1970. Written on every save, so uptime accumulates across
   reboots with no network at all.
 
-### Written, not built here, not flashed
+### Built, and flashed once (0003-0009, then 0010)
 
-No device was available for any of this, and this patch has not been
-compiled against ESP-IDF where it was written. Build it before anything else.
+First hardware run, 0003-0009 on v0.3.0-53: **the portal works end to
+end on this board.** APSTA came up on M5's 0.0.0 slave, a phone got a
+lease and 86 DNS answers, the form was submitted, the join succeeded,
+the network was saved, NTP synced 1.4 s after the address, and the AP
+came down after the SAVED linger. The log is quoted in `portal.h`.
+
+What that run measured, beyond "it works":
+
+- **PSK-first did not work on a WPA2/WPA3 transition network.** The
+  derived PSK was refused with reason 2 (AUTH_EXPIRE) in 3.6 s; the
+  passphrase joined and was stored. The station config offers SAE, and
+  a transition AP evidently takes it. Whether withholding SAE for the
+  PSK attempt joins the WPA2 side is the open question -- log first.
+- **The "a track is playing" refusal fired with nothing playing.** Right
+  after boot the player sits on "ready to resume" with `s_playing` at its
+  initial true, and `s_ring_pct` is 0 from an empty ring, so
+  `s_playing && s_ring_pct >= 0` was true. 0010 uses `s_decoding`, which
+  is true only while a decode loop exists.
+- **Radio off and on again from the NET tab** tears ESP-Hosted down and
+  brings it back cleanly, same MAC, twice in one session.
+- **`esp_wifi_set_storage(RAM)`** returned OK -- no warning printed. That
+  shows the call was accepted, not that the C6 honours it.
+- **The E-level `major version mismatch -- OTA coprocessor from host`**
+  prints at every radio start and changes nothing. Do not OTA the C6;
+  see the manifest.
+
+Not yet seen on hardware: joining the saved network at the next boot,
+the one-minute retry, more than one saved network, a refused password
+on the phone's page, the non-ASCII hint, and whether the phone's
+sign-in sheet opened by itself or the page was opened by hand.
 
 - **Joining.** `wifi_join()` joins one network and reports an address,
   a refusal (`ESP_ERR_WIFI_PASSWORD`), an absence (`ESP_ERR_NOT_FOUND`)
@@ -6083,11 +6111,8 @@ compiled against ESP-IDF where it was written. Build it before anything else.
 - **NTP** is called from `IP_EVENT_STA_GOT_IP`. `sntp_start()` lost its
   `unused` attribute.
 - **APSTA.** `wifi_ap_begin()` / `wifi_ap_end()` switch a running radio
-  between APSTA and STA. esp_hosted's own examples run APSTA with a P4
-  host, which is why this was written rather than probed first -- but
-  the C6 here runs M5's slave build (0.0.0) and has never been asked.
-  **The first flash answers it in one line: `APSTA up` or `APSTA
-  refused`.** If refused, nothing else in the portal matters yet.
+  between APSTA and STA. **Answered on hardware: M5's 0.0.0 C6 firmware
+  accepts it** (`APSTA up`, twice in one session).
 - **`portal.c`**, to `portal.h`'s settled decisions. Scan as a station,
   raise `Defeatist-XXXX`, offer the AP as DNS in the DHCP lease, answer
   every name with the AP (`dnsreply.c`), serve a form listing the scan
