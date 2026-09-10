@@ -200,23 +200,23 @@ void settings_set_crossfade_album(bool on);
  * of them is no business of this module: one switch governs the radio
  * whether there is one saved network or nine.
  *
- * TAKES EFFECT AT THE NEXT START, WHICH IS NOT WHAT IT SHOULD DO.
+ * TAKES EFFECT WHEN PRESSED.
  *
- * This header used to promise the change applied immediately, on the
- * grounds that there is no ring of decoded samples to make a mid-flight
- * change incoherent. That is still the right behaviour and it is not the
- * behaviour: the only reader is wifi_apply_settings(), which runs at the
- * start of every track, so a switch thrown while the panel is open is
- * stored and acted on when the next track begins -- immediately if
- * something is playing, and not at all until then if nothing is.
+ * There is no ring of already-decoded samples to make a mid-flight
+ * change incoherent, so turning the radio off means off now, and on
+ * means the C6 starts coming up now.
  *
- * Recorded rather than quietly fixed because it is the shape this
- * project already has a rule about -- a request needs a reader, and a
- * request with no reader is lost rather than pending. Closing it needs
- * wifi_start()/wifi_stop() and a teardown that unwinds esp_wifi and
- * esp_hosted in order without blocking ui_task while the C6 comes up.
- * That is worth doing once the radio has been seen to work, and is not
- * worth writing before then.
+ * Not directly, though: panel_touch() runs on ui_task, which is the
+ * single writer of the framebuffer, and bringing the C6 up takes about
+ * two seconds. So the press calls wifi_request_apply(), which posts to a
+ * worker and returns. See wifi.h.
+ *
+ * This header twice said something untrue about that. It first promised
+ * immediate effect when the only reader ran at a track boundary; it was
+ * then corrected to say the next track, when in fact the call sat inside
+ * a gate that fired only when a volume was first adopted, so a switch
+ * thrown mid-session did nothing until a reboot. Both were found on
+ * hardware rather than by reading.
  */
 bool settings_wifi_enabled(void);
 void settings_set_wifi_enabled(bool on);

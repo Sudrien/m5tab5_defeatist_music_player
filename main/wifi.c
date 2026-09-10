@@ -18,6 +18,7 @@
 #include "esp_netif_sntp.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 #include "esp_hosted.h"
@@ -268,9 +269,65 @@ static void sntp_start(void)
 
 static i2c_master_dev_handle_t s_exp2;
 
+/*
+ * The worker, and the lock that keeps it away from the settings push.
+ *
+ * wifi_apply_settings() can now be reached from two places -- the track
+ * loop and this worker -- so the start/stop it wraps needs a mutex.
+ * Without one, a switch pressed as a track begins could run a stop
+ * inside a start, and the second half of the start would then be
+ * configuring a driver whose power had just been cut.
+ *
+ * The notification is a binary semaphore rather than a queue: presses
+ * coalesce. See wifi_request_apply() in the header.
+ */
+static SemaphoreHandle_t s_lock;
+static SemaphoreHandle_t s_wake;
+
+/* Defined below; the worker is declared here because wifi_init() has to
+ * create the task before the reader exists in the file. */
+esp_err_t wifi_apply_settings(void);
+
+static void wifi_task(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        xSemaphoreTake(s_wake, portMAX_DELAY);
+        wifi_apply_settings();
+    }
+}
+
+void wifi_request_apply(void)
+{
+    /* Never blocks and never fails in a way worth reporting: if the
+     * semaphore is already given, a run is pending and this press is
+     * already covered by it. */
+    if (s_wake) xSemaphoreGive(s_wake);
+}
+
 void wifi_init(i2c_master_dev_handle_t exp2)
 {
     s_exp2 = exp2;
+
+    s_lock = xSemaphoreCreateMutex();
+    s_wake = xSemaphoreCreateBinary();
+    if (!s_lock || !s_wake) {
+        ESP_LOGE(TAG, "no lock or semaphore; the switch will only take "
+                      "effect at a track boundary");
+        return;
+    }
+
+    /*
+     * Its own task because everything it does blocks: about two seconds
+     * to bring the C6 up, and however long esp_wifi takes to change mode
+     * on the way down. Priority below the decoder and the arbiter -- the
+     * radio has no deadline and audio does. 4 KB is what the call chain
+     * below needs; esp_hosted and esp_wifi run on their own tasks.
+     */
+    if (xTaskCreate(wifi_task, "wifi", 4096, NULL, 3, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "no wifi task; the switch will only take effect at a "
+                      "track boundary");
+    }
 }
 
 bool wifi_up(void) { return s_up; }
@@ -504,17 +561,27 @@ esp_err_t wifi_scan_log(void)
 
 esp_err_t wifi_apply_settings(void)
 {
+    /* Two callers now -- the track loop and the worker -- so the whole
+     * comparison-and-act is one critical section. Reading the setting
+     * inside it as well, so a press landing between the read and the act
+     * is applied by whichever call gets the lock second rather than
+     * lost. */
+    if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+
     const bool want = settings_wifi_enabled();
+    esp_err_t err = ESP_OK;
 
-    if (want == s_up) return ESP_OK;
+    if (want != s_up) err = want ? wifi_start() : wifi_stop();
 
-    if (!want) return wifi_stop();
+    if (s_lock) xSemaphoreGive(s_lock);
 
-    const esp_err_t err = wifi_start();
-    if (err != ESP_OK) return err;
+    if (!want || err != ESP_OK) return err;
+    if (!s_up) return err;
 
-    /* The scan is the spike's only visible output and the only way to
-     * see the radio working before the portal exists. It goes when the
-     * portal has its own. */
+    /* Outside the lock: it takes several seconds and holding the lock
+     * across it would make a switch press wait for a scan. The scan is
+     * the spike's only visible output and the only way to see the radio
+     * working before the portal exists; it goes when the portal has its
+     * own. */
     return wifi_scan_log();
 }

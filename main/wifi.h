@@ -168,6 +168,28 @@ bool wifi_up(void);
 esp_err_t wifi_apply_settings(void);
 
 /*
+ * Ask for wifi_apply_settings() to be run soon, and return at once.
+ *
+ * THIS is the one a switch press calls. It is the only entry point here
+ * safe from ui_task: it posts to a worker and does not wait, so the
+ * framebuffer's owner never blocks on a radio.
+ *
+ * Needed because the alternatives are both wrong. Calling
+ * wifi_apply_settings() from panel_touch() would freeze the screen for
+ * about two seconds over live audio while the C6 comes up. Leaving it to
+ * the settings push means the switch does nothing until the next track
+ * begins -- which on a five-minute piece is five minutes, and on a
+ * paused player is never.
+ *
+ * Coalescing, not queueing. Several presses while the worker is busy
+ * collapse into one more run afterwards, because what is being applied
+ * is a current value rather than a sequence of events: turning the
+ * switch off and on again quickly should leave the radio on, not make
+ * it stop and start twice.
+ */
+void wifi_request_apply(void);
+
+/*
  * Scan and log what is in the air. Requires the radio to be up.
  *
  * What the spike did, kept because it is the only way to see that the

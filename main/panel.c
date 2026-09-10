@@ -20,6 +20,7 @@
 #include "gfx.h"
 #include "panel.h"
 #include "settings.h"
+#include "wifi.h"
 #include "storage.h"
 #include "uac.h"
 #include "usbhost.h"
@@ -829,6 +830,9 @@ bool panel_touch(bool down, int x, int y)
             const bool on = !settings_wifi_enabled();
             settings_set_wifi_enabled(on);
             ESP_LOGI(TAG, "wifi %s", on ? "on" : "off");
+            /* Posts and returns. Doing the work here would block
+             * ui_task, and this is the only writer of the framebuffer. */
+            wifi_request_apply();
             s_dirty = true;
             return false;
         }
