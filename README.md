@@ -83,7 +83,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 
 ## Potential issues
 
-- Charging from usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. It's got too much power, cap'n. Or not enough. You got the wrong amout of power, cap'n. 
+- Charging from underpowered usb C + inserted battery + display on can lead to what seems like a speaker whine, but is not. Get a better usb cord, a better hub, a direct connection to the charger. You are under-ampere-aged.
 - file selection is a little slower than I'd like because selecting the first song under your thumb is not what you want
 - Aux cables are not necessarily shielded enough against everything you might have around them. Electromanetics "move your phone further away" applies.
 
