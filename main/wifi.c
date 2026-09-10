@@ -372,7 +372,41 @@ esp_err_t wifi_stop(void)
         s_sta_netif = NULL;
     }
 
-    /* Whatever happened above, the chip goes quiet. */
+    /*
+     * ESP-HOSTED HAS TO COME DOWN TOO, AND BEFORE THE POWER.
+     *
+     * Leaving it up was a crash. esp_hosted_init() starts sdio_write_task
+     * and the rx task, and they outlive esp_wifi_deinit() -- they belong
+     * to the transport, not to the driver above it. Cutting the rail
+     * under them leaves a write task issuing CMD53 to a chip that is no
+     * longer powered, and the next wifi_start() lands in the middle of
+     * that:
+     *
+     *     E sdmmc_io_rw_extended: sdmmc_send_cmd returned 0x107
+     *     E eh_sdio: Unrecoverable host sdio state
+     *     W eh_host_xport: TRANSPORT_FAILURE: forcing host reset
+     *     abort() at eh_host_port_restart_host
+     *
+     * eh_host_port_restart_host() is abort(). The component's answer to
+     * a transport it cannot recover is to reboot the device, so a
+     * teardown that misses this step does not degrade, it panics -- and
+     * it panics on the NEXT start rather than at the stop, which is why
+     * a stop on its own looked clean.
+     *
+     * eh_host_deinit() stops the feature tasks, the RPC layer and the
+     * serial transport, and posts TRANSPORT_DOWN. It explicitly does not
+     * touch the default event loop, which is shared -- the same reason
+     * this function leaves esp_netif_init() alone.
+     *
+     * Returns a negative errno, like connect_to_slave().
+     */
+    const int hosted = esp_hosted_deinit();
+    if (hosted != 0) {
+        ESP_LOGW(TAG, "esp_hosted_deinit: %d", hosted);
+        if (first == ESP_OK) first = ESP_FAIL;
+    }
+
+    /* Only now, with nothing left holding the bus. */
     err = wlan_power(s_exp2, false);
     if (err != ESP_OK && first == ESP_OK) first = err;
 

@@ -116,10 +116,15 @@ void wifi_init(i2c_master_dev_handle_t exp2);
  * Roughly two seconds. Idempotent: ESP_OK and no work if already up.
  *
  * wifi_stop() reverses it in order -- esp_wifi_stop, esp_wifi_deinit,
- * the netif, esp_hosted, then the power bit -- and is safe to call when
- * already down. Order matters: cutting power under a running driver
- * leaves esp_wifi waiting on RPCs to a chip that is gone, and the
- * timeouts are seconds each.
+ * the netif, esp_hosted_deinit, then the power bit -- and is safe to
+ * call when already down.
+ *
+ * ORDER IS NOT A PREFERENCE HERE. esp_hosted owns tasks that outlive
+ * esp_wifi_deinit(), so cutting the rail before esp_hosted_deinit()
+ * leaves a write task talking to an unpowered chip. The component's
+ * response to a transport it cannot recover is abort() -- see
+ * eh_host_port_restart_host() -- so the device reboots, and it reboots
+ * on the next wifi_start() rather than at the stop that caused it.
  *
  * Neither may be called from ui_task. See above.
  *
