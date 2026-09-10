@@ -63,7 +63,24 @@ TAIL_BIN := tailplantest
 # code that reads bytes from anyone in radio range.
 PORTAL_BIN := portalwebtest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal
+# Fourteen older checks, written alongside the patches they cover and
+# never added here, so nothing ran them after the session that wrote
+# them. Each has its own main() and reports "all passed" or "FAILURES",
+# returning non-zero on the second.
+#
+# Only cachetest compiles a file the firmware builds (mediacache.c, with
+# shim.c for heap_caps_*). The rest TRANSCRIBE a rule out of player.c --
+# the release gate, the ring order, the crossfade exits -- or, for
+# pooltest, arithmetic out of esp_jpeg's tjpgd.c. They can drift from the
+# code they describe; running them at least keeps them from drifting from
+# themselves unnoticed.
+OLD_STANDALONE := committest exittest kepttest orderingtest pooltest \
+                  postest releasetest ringwaittest setstest stalltest \
+                  tailtest trimtest xfadetest
+CACHE_BIN := cachetest
+OLD_BINS  := $(CACHE_BIN) $(OLD_STANDALONE)
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -112,8 +129,25 @@ $(PORTAL_BIN): portalwebtest.c ../main/portalweb.c ../main/portalweb.h ../main/d
 run-portal: $(PORTAL_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(PORTAL_BIN)
 
-clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN)
-	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
+$(OLD_STANDALONE): %: %.c
+	$(CC) $(WARNCFLAGS) -c $< -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -pthread -o $@ $< $(LDFLAGS) -pthread
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal clean
+$(CACHE_BIN): cachetest.c ../main/mediacache.c ../main/mediacache.h shim.c shim.h
+	$(CC) $(WARNCFLAGS) -c cachetest.c -o /dev/null
+	$(CC) $(WARNCFLAGS) -c ../main/mediacache.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ cachetest.c ../main/mediacache.c shim.c $(LDFLAGS)
+
+# One target for the fourteen, stopping at the first that fails.
+run-old: $(OLD_BINS)
+	@for t in $(OLD_BINS); do \
+		echo "ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$$t"; \
+		ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$$t || exit 1; \
+	done
+
+clean:
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS)
+	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
+	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
+
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old clean

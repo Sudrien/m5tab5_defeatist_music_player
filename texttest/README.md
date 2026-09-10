@@ -105,6 +105,37 @@ freeing on timeout gives
 `AddressSanitizer: heap-use-after-free ... WRITE of size 4`, freed by the
 waiter, written by the completion thread.
 
+## The rest of `make`
+
+`make` runs every host test here. Besides the text layout and
+`ctrltest` above:
+
+| Target | Covers | Compiles the real file? |
+| --- | --- | --- |
+| `run-wifi` | `wifistore.c`: saving, eviction, ranking saved networks | yes |
+| `run-clock` | the clock floor | no, transcribed |
+| `run-fade` | `loudness.c`: fades and the end of the audio | yes |
+| `run-tail` | `tailplan.h`: silence and fades at a boundary | yes |
+| `run-portal` | `portalweb.c`, `dnsreply.c`: the setup portal's input | yes |
+| `run-old` | fourteen older checks, below | one of fourteen |
+
+`run-old` is fourteen programs that were written with the patches they
+cover and then never added to the Makefile, so nothing ran them again:
+`cachetest` (the shared cover buffers in `mediacache.c`, compiled for
+real), `pooltest` (TJpgDec's scratch pool, arithmetic transcribed from
+`tjpgd.c`), and twelve that transcribe a rule out of `player.c` --
+`committest`, `exittest`, `kepttest`, `orderingtest`, `postest`,
+`releasetest`, `ringwaittest`, `setstest`, `stalltest`, `tailtest`,
+`trimtest` and `xfadetest`. Each prints `all passed` or `FAILURES` and
+returns non-zero on the second; `run-old` stops at the first failure.
+
+The transcribed ones can drift from `player.c` without failing. That is
+a real weakness, the same one `ctrltest` owns up to above. Running them
+does not fix it; it only stops them drifting from themselves unseen.
+
+Any one of them can be built and run on its own, e.g.
+`make trimtest && ./trimtest`.
+
 ## What it does *not* verify
 
 Everything `CLAUDE.md` says host testing cannot see, which has been right

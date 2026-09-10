@@ -327,7 +327,7 @@ static void t_rank(void)
     /* All eight, in range at once. */
     {
         fresh();
-        char names[WIFISTORE_MAX][8];
+        char names[WIFISTORE_MAX][16];
         const char *seen[WIFISTORE_MAX];
         int8_t r[WIFISTORE_MAX];
         for (int i = 0; i < WIFISTORE_MAX; i++) {
