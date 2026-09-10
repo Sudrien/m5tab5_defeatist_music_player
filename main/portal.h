@@ -124,14 +124,13 @@
  * ======================== STILL UNANSWERED ========================
  *
  * HOW THE RADIO GETS INTO APSTA AND BACK. wifi.c brings the radio up as
- * STA once and scans; wifi_probe() is a one-shot spike with no teardown
- * and an s_up that never clears. The portal needs a known mode on the
- * way in and STA on the way out, and neither exists yet.
+ * STA and can take it down again -- wifi_start() and wifi_stop() exist
+ * now -- but neither knows about AP mode. The portal needs APSTA on the
+ * way in and STA back on the way out, which is a mode change on a radio
+ * that is already up rather than a new lifecycle.
  *
- * That is wifi.c work this header depends on and does not describe. It
- * is the same work the NET tab's switch needs in order to take effect
- * when it is pressed rather than at the next boot -- see settings.h --
- * so wifi_start()/wifi_stop() lands before portal.c rather than after.
+ * That is the remaining wifi.c work this header depends on and does not
+ * describe.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -208,7 +207,7 @@ typedef struct {
 /*
  * Bring the AP up. Returns as soon as the attempt is under way.
  *
- Requires the radio: settings_wifi_enabled() must be true and wifi.c
+ * Requires the radio: settings_wifi_enabled() must be true and wifi.c
  * must have it up. Returns ESP_ERR_INVALID_STATE otherwise rather than
  * turning the radio on as a side effect -- the Wi-Fi switch means what
  * it says, and a portal that silently enables a transmitter would make

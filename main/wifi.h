@@ -6,11 +6,34 @@
  * `esp_wifi_remote` component makes that look like an ordinary esp_wifi
  * on this side. Everything below is about getting the C6 to exist.
  *
- * This is the spike, not the feature. It powers the module, releases it,
- * brings the transport up, scans, and logs what it heard. It does not
- * join anything, and there is nothing here for wifistore to talk to yet.
- * The point is to answer one question that cannot be answered on a host:
- * does the radio come up on this board under plain ESP-IDF.
+ * The radio has a lifetime now rather than a single probe. wifi_start()
+ * powers the C6, brings ESP-Hosted up and starts the driver in STA mode;
+ * wifi_stop() unwinds all of it and cuts the power. Between them the
+ * radio is on and nothing here joins anything yet -- the join belongs to
+ * the portal, which is the next thing built on this.
+ *
+ * WHY A TEARDOWN EXISTS AT ALL
+ *
+ * Two callers need one and neither could have it before.
+ *
+ * The Wi-Fi switch on the NET tab is documented in settings.h as taking
+ * effect at the next boot, which it should not: the only reader ran at a
+ * track boundary, so a switch thrown with the panel open did nothing
+ * visible until a power cycle. Turning the radio off has to mean off
+ * now.
+ *
+ * And the portal needs the radio in a known state on the way in and back
+ * to STA on the way out. A one-shot spike whose s_up never cleared could
+ * not give it either.
+ *
+ * WHAT IS SAFE TO CALL FROM WHERE
+ *
+ * Neither of these may be called from ui_task. wifi_start() takes about
+ * two seconds -- most of it CONFIG_ESP_HOSTED_HOST_CP_RESET_SETTLE_MS
+ * waiting for the C6 to come up -- and wifi_stop() blocks as long as
+ * esp_wifi needs to change mode. ui_task is the single writer of the
+ * framebuffer, so either one blocks the transport bar over live audio.
+ * The panel asks for a change; something else performs it.
  *
  * TWO GATES, IN ORDER, AND NEITHER IS OPTIONAL
  *
@@ -20,7 +43,7 @@
  * that bit is written the C6 is not merely uninitialised, it is
  * unpowered, and SDIO finds nothing on the other end.
  *
- Then RF_C6_RST, the C6's EN pin from GPIO15 (SOC_EXTRF_RST) through 1K
+ * Then RF_C6_RST, the C6's EN pin from GPIO15 (SOC_EXTRF_RST) through 1K
  * against a 10K pulldown -- but that one is esp_hosted's to drive, as
  * part of bringing the transport up. This file does the power only; two
  * owners of one reset pin would be decided by whichever ran second.
@@ -32,9 +55,9 @@
  *
  * THE PINS ARE SET HERE, NOT IN A MENU
  *
- esp_hosted >= 3.0.2 carries per-board GPIO defaults and the Tab5 is
+ * esp_hosted >= 3.0.2 carries per-board GPIO defaults and the Tab5 is
  * among them, but this file sets the pins itself with
- * esp_hosted_sdio_set_config() before esp_hosted_init(). A board'''s
+ * esp_hosted_sdio_set_config() before esp_hosted_init(). A board's
  * wiring is not a build option: it cannot be chosen wrongly by anyone
  * holding this hardware, and a project that asks someone to pick it in a
  * menu has invented a way to get it wrong. Three builds went out with
@@ -75,17 +98,54 @@ extern "C" {
 #endif
 
 /*
- * Power the C6, bring the transport up, and scan once.
+ * The expander the power switch is on, remembered for later.
  *
- * `exp2` is the expander at 0x44, the same handle usbhost_init() takes.
+ * `exp2` is the device at 0x44, the same handle usbhost_init() takes.
+ * Called once at boot, before any of the rest of this is used. Passing it
+ * to every call instead would mean the panel had to hold an I2C handle in
+ * order to ask for the radio to go off, which is a bus detail leaking
+ * into a settings screen.
+ */
+void wifi_init(i2c_master_dev_handle_t exp2);
+
+/*
+ * Bring the radio up in STA mode, or take it down.
  *
- Returns without doing anything, and without an error, when
- * settings_wifi_enabled() is false. That is the whole point of the
- * switch: with it off nothing here powers the module, initialises
- * ESP-Hosted or starts a driver, so "does this still behave like
- * v0.3.0" stays a one-bit question rather than an audit.
+ * wifi_start() powers the C6, sets the SDIO pins, initialises
+ * ESP-Hosted, connects to the slave, and starts esp_wifi as a station.
+ * Roughly two seconds. Idempotent: ESP_OK and no work if already up.
  *
- CALL IT FROM THE SETTINGS PUSH, NOT FROM app_main().
+ * wifi_stop() reverses it in order -- esp_wifi_stop, esp_wifi_deinit,
+ * the netif, esp_hosted, then the power bit -- and is safe to call when
+ * already down. Order matters: cutting power under a running driver
+ * leaves esp_wifi waiting on RPCs to a chip that is gone, and the
+ * timeouts are seconds each.
+ *
+ * Neither may be called from ui_task. See above.
+ *
+ * wifi_up() is the question the panel actually asks, and is a plain
+ * value read rather than a call into the driver, so it is safe anywhere.
+ */
+esp_err_t wifi_start(void);
+esp_err_t wifi_stop(void);
+bool wifi_up(void);
+
+/*
+ * Apply settings_wifi_enabled(): start the radio if it should be up,
+ * stop it if it should not, do nothing if it already matches.
+ *
+ * This is the one the settings push calls, and the one a switch press
+ * should end up at. Keeping the comparison here rather than at each call
+ * site means there is a single place where "what the setting says" and
+ * "what the hardware is doing" are reconciled, and no caller can forget
+ * half of it.
+ *
+ * With the setting false this stops the radio if it was running and
+ * otherwise does nothing at all -- no power, no ESP-Hosted, no driver --
+ * so "does this still behave like v0.3.0" stays a one-bit question
+ * rather than an audit.
+ *
+ * CALL IT FROM THE SETTINGS PUSH, NOT FROM app_main().
  *
  * settings_init() starts the writer task and loads nothing: which volume
  * the settings live on is not known until a volume turns up, so the file
@@ -98,13 +158,26 @@ extern "C" {
  * nothing else, forever: on the board that was `wifi=true` in the file at
  * 1960 ms and the file being read at 2232.
  *
- * Idempotent, because that push runs at the start of every track.
+ * Idempotent, because that push runs at the start of every track and
+ * because a switch press calls it too.
  *
  * Not ESP_ERROR_CHECK material at the call site: a player that will not
  * boot because its radio did not is worse than one that plays the card
  * in silence. Every failure path here logs and returns.
  */
-esp_err_t wifi_probe(i2c_master_dev_handle_t exp2);
+esp_err_t wifi_apply_settings(void);
+
+/*
+ * Scan and log what is in the air. Requires the radio to be up.
+ *
+ * What the spike did, kept because it is the only way to see that the
+ * radio works without a portal, and because the authmode column is how
+ * the WPA2-versus-WPA3 split that wifistore is built around stops being
+ * hypothetical. It will become the scan the portal's page is built from.
+ *
+ * Blocking, several seconds. Not from ui_task.
+ */
+esp_err_t wifi_scan_log(void);
 
 #ifdef __cplusplus
 }

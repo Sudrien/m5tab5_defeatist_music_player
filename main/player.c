@@ -7780,8 +7780,13 @@ static void restore_last_track(void)
         ESP_LOGI(TAG, "volume %d from settings", s_volume);
 
         /* The radio is one of the things the file decides, so it belongs
-         * to this push and not to app_main(). See wifi.h. */
-        wifi_probe(s_exp2);
+         * to this push and not to app_main(). See wifi.h.
+         *
+         * wifi_apply_settings() rather than a bare start: it reconciles
+         * the setting against what the hardware is doing, so the same
+         * call serves the boot push and a switch that has just been
+         * turned off. */
+        wifi_apply_settings();
 
         s_restored = true;
 
@@ -8033,7 +8038,7 @@ static void player_loop(void)
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
             ESP_LOGI(TAG, "volume %d from settings", s_volume);
-            wifi_probe(s_exp2);
+            wifi_apply_settings();
         }
 
         ESP_LOGI(TAG, "playing %s", s_path);
@@ -8328,8 +8333,9 @@ void app_main(void)
     /*
      * NVS, and the saved networks in it.
      *
-     * Before the first wifi_probe(), which is the only thing that will
-     * want them,
+     * Before wifi_init(), and before the first wifi_apply_settings()
+     * that could bring the radio up -- the store is the only thing that
+     * will want them,
      * and after settings_init() only because nothing here depends on the
      * order -- the two stores are unrelated and live in different media.
      *
@@ -8354,6 +8360,10 @@ void app_main(void)
         ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
     }
     wifistore_init();
+
+    /* Just the expander handle; nothing is powered until
+     * wifi_apply_settings() runs from the settings push below. */
+    wifi_init(s_exp2);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the

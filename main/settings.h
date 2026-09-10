@@ -200,14 +200,14 @@ void settings_set_crossfade_album(bool on);
  * of them is no business of this module: one switch governs the radio
  * whether there is one saved network or nine.
  *
- TAKES EFFECT AT THE NEXT START, WHICH IS NOT WHAT IT SHOULD DO.
+ * TAKES EFFECT AT THE NEXT START, WHICH IS NOT WHAT IT SHOULD DO.
  *
  * This header used to promise the change applied immediately, on the
  * grounds that there is no ring of decoded samples to make a mid-flight
  * change incoherent. That is still the right behaviour and it is not the
- * behaviour: the only reader is wifi_probe(), which runs from the
- * settings push at the start of a track, so a switch thrown while the
- * panel is open is stored and acted on at the next boot.
+ * behaviour: the only reader is wifi_apply_settings(), which runs from
+ * the settings push at the start of a track, so a switch thrown while
+ * the panel is open is stored and acted on at the next track or boot.
  *
  * Recorded rather than quietly fixed because it is the shape this
  * project already has a rule about -- a request needs a reader, and a

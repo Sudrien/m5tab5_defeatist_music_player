@@ -81,6 +81,7 @@ static const char *TAG = "tab5_wifi";
 static bool s_powered;
 static bool s_up;
 static bool s_sntp_started;
+static esp_netif_t *s_sta_netif;
 
 /*
  * NIST, and three of them.
@@ -224,12 +225,12 @@ static void on_sntp_sync(struct timeval *tv)
 }
 
 /*
- * Start SNTP, once. Idempotent for the same reason wifi_probe() is:
- * whatever calls this runs at a track boundary, not once per boot.
+ * Start SNTP, once. Idempotent for the same reason wifi_apply_settings()
+ * is: whatever calls this may run at every track boundary.
  *
- * NOT CALLED YET. wifi_probe() ends at scan_and_log() -- there is no
- * station join in this file, so there is no IP and nothing for an SNTP
- * request to reach. This exists so the portal, when it lands, has
+ * NOT CALLED YET. Nothing in this file joins a network, so there is no
+ * IP and nothing for an SNTP request to reach. wifi_stop() does undo it,
+ * so the pairing is already right for when it is called. This exists so the portal, when it lands, has
  * exactly one function to call after a successful join rather than a
  * second round of "where does NTP go" design. Until then it is dead
  * code with a host-testable half (settings_note_ntp_time()) and an
@@ -265,48 +266,75 @@ static void sntp_start(void)
     ESP_LOGI(TAG, "SNTP started (%d servers)", NTP_SERVER_COUNT);
 }
 
-esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
-{
-    /* Idempotent, because the caller is the settings push and that runs
-     * at the start of every track. Bringing the transport up a second
-     * time is not a no-op -- esp_wifi_init() on an initialised driver
-     * returns an error and esp_hosted_init() would reset the C6 out from
-     * under a live association. */
-    if (s_up) return ESP_OK;
+static i2c_master_dev_handle_t s_exp2;
 
-    if (!settings_wifi_enabled()) {
-        /* Once, not once per track. */
-        static bool said;
-        if (!said) {
-            ESP_LOGI(TAG, "Wi-Fi is off; C6 left unpowered");
-            said = true;
-        }
-        return ESP_OK;
+void wifi_init(i2c_master_dev_handle_t exp2)
+{
+    s_exp2 = exp2;
+}
+
+bool wifi_up(void) { return s_up; }
+
+/*
+ * Unwind, in the reverse of the order things were brought up.
+ *
+ * Order is the whole content of this function. Cutting the power first
+ * leaves esp_wifi issuing RPCs to a chip that is no longer there, and
+ * each of those waits out its own timeout -- seconds apiece, on whatever
+ * task called this. Every step is attempted even if an earlier one
+ * failed: a half-torn-down radio that still holds the power rail is
+ * worse than one that reports an error on the way down, and the last
+ * step is the one that actually makes the chip quiet.
+ *
+ * The netif and the default event loop are deliberately NOT destroyed.
+ * esp_netif_init() and esp_event_loop_create_default() are process-wide
+ * and are not meaningfully undoable -- esp_netif_deinit() is documented
+ * as unsupported -- so they are created once and left. Only the STA
+ * netif object, which is ours, is destroyed.
+ */
+esp_err_t wifi_stop(void)
+{
+    if (!s_up) return ESP_OK;
+
+    esp_err_t first = ESP_OK;
+    esp_err_t err;
+
+    if (s_sntp_started) {
+        esp_netif_sntp_deinit();
+        s_sntp_started = false;
     }
 
-    ESP_RETURN_ON_ERROR(wlan_power(exp2, true), TAG, "power");
+    err = esp_wifi_stop();
+    if (err != ESP_OK && first == ESP_OK) first = err;
+
+    err = esp_wifi_deinit();
+    if (err != ESP_OK && first == ESP_OK) first = err;
+
+    if (s_sta_netif) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
+
+    /* Whatever happened above, the chip goes quiet. */
+    err = wlan_power(s_exp2, false);
+    if (err != ESP_OK && first == ESP_OK) first = err;
+
+    s_up = false;
+    ESP_LOGI(TAG, "radio down");
+    return first;
+}
+
+esp_err_t wifi_start(void)
+{
+    if (s_up) return ESP_OK;
+    if (!s_exp2) {
+        ESP_LOGE(TAG, "wifi_init() was never called");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_RETURN_ON_ERROR(wlan_power(s_exp2, true), TAG, "power");
     vTaskDelay(pdMS_TO_TICKS(POWER_SETTLE_MS));
 
-    /*
-     * The C6's reset is not ours to drive. RF_C6_RST is the module's EN
-     * pin from GPIO15, and esp_hosted toggles it itself as part of
-     * bringing the transport up -- which is why the board preset in
-     * idf_component.yml matters: with the wrong preset it resets GPIO54,
-     * a pin that goes nowhere on this board, and then finds nothing.
-     *
-     * Driving it here as well would mean two owners of one pin, and the
-     * loser would be whichever ran second.
-     */
-    /*
-     * Called here, by hand, because sdkconfig.defaults sets
-     * CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n. A pre-main
-     * init cannot be after a power-up that happens once a volume is
-     * mounted, and it would also make the switch above unenforceable.
-     *
-     * Succeeding here means the SDIO peripheral was configured. It does
-     * NOT mean anything answered: "bus backend up" is logged either way,
-     * and the first call that needs a reply is esp_wifi_init() below.
-     */
     /*
      * The pins, before the transport is brought up.
      *
@@ -316,6 +344,12 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
      * the failure is quiet in the worst way: the SDIO peripheral
      * configures fine, "bus backend up" is logged, and nothing goes
      * wrong until esp_wifi_init() waits five seconds for an answer.
+     *
+     * The C6's reset is not set here even so. RF_C6_RST is the module's
+     * EN pin on GPIO15, and esp_hosted drives it itself from
+     * CONFIG_ESP_HOSTED_HOST_RESET_GPIO as part of connecting to the
+     * slave -- pin_reset in this struct is not the field it reads. Two
+     * owners of one pin would be decided by whichever ran second.
      */
     struct esp_hosted_sdio_config sdio = INIT_DEFAULT_HOST_SDIO_CONFIG();
     sdio.pin_clk.pin   = SDIO_PIN_CLK;
@@ -332,8 +366,7 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
          * ahead would bring the transport up on the wrong pins and spend
          * five seconds proving it. */
         ESP_LOGE(TAG, "esp_hosted_sdio_set_config: %s", esp_err_to_name(err));
-        wlan_power(exp2, false);
-        return err;
+        goto fail;
     }
 
     /*
@@ -356,14 +389,19 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
                       "not this -- believe this line");
     }
 
-    esp_err_t hosted = esp_hosted_init();
-    if (hosted != ESP_OK) {
-        ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(hosted));
-        ESP_LOGE(TAG, "check the SDIO pins esp_hosted logged: this board is "
-                      "CLK 12, CMD 13, D0 11, D1 10, D2 9, D3 8, reset 15. "
-                      "Anything else is the wrong board preset.");
-        wlan_power(exp2, false);
-        return hosted;
+    /*
+     * Called by hand because sdkconfig.defaults sets
+     * CONFIG_ESP_HOSTED_AUTO_CALL_INIT_BEFORE_APP_MAIN=n. A pre-main
+     * init cannot follow a power-up that happens once a volume is
+     * mounted, and it would make the Wi-Fi switch unenforceable.
+     *
+     * Succeeding here means the SDIO peripheral was configured. It does
+     * NOT mean anything answered.
+     */
+    err = esp_hosted_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "esp_hosted_init: %s", esp_err_to_name(err));
+        goto fail;
     }
 
     /*
@@ -371,49 +409,45 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
      * the second is the one that resets the C6.
      *
      * esp_hosted_init() initialises the SDIO peripheral -- that is the
-     * "bus backend up" line. esp_hosted_connect_to_slave() is what
-     * reaches ensure_slave_bus_ready(), which toggles the reset GPIO and
-     * then runs the card init. The auto-init path calls both, which is
-     * why the very first build on this board logged
+     * "bus backend up" line. esp_hosted_connect_to_slave() reaches
+     * ensure_slave_bus_ready(), which toggles the reset GPIO and runs
+     * the card init. The auto-init path calls both; deferring it
+     * replaced two calls with one, and for six builds the C6 was never
+     * reset and the card init never attempted.
      *
-     *     W eh_sdio: Reset co-processor using GPIO[54]
-     *
-     * and no build since did: deferring the init replaced two calls with
-     * one. The C6 was never reset and the card init was never attempted,
-     * so every failure after that was a module that had not been started
-     * -- and the reset GPIO and polarity fixes had nothing to apply to.
-     *
-     * Returns a negative errno rather than an esp_err_t: this is the
-     * compat wrapper over eh_host_connect_to_slave(), and -ETIMEDOUT
-     * here means the card init got no answer.
+     * Returns a negative errno rather than an esp_err_t: it is the
+     * compat wrapper over eh_host_connect_to_slave(), so -ETIMEDOUT here
+     * means the card init got no answer.
      */
     const int conn = esp_hosted_connect_to_slave();
     if (conn != 0) {
         ESP_LOGE(TAG, "esp_hosted_connect_to_slave: %d", conn);
         ESP_LOGE(TAG, "the reset and card init happen here, so eh_sdio's own "
                       "lines above this are the ones worth reading");
-        wlan_power(exp2, false);
-        return ESP_FAIL;
+        err = ESP_FAIL;
+        goto fail;
     }
 
-    ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "netif");
-    ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "event loop");
-    if (!esp_netif_create_default_wifi_sta()) {
+    /* Process-wide and created once; see wifi_stop() on why these are
+     * never undone. Both return ESP_ERR_INVALID_STATE when already done,
+     * which is not an error here. */
+    err = esp_netif_init();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
+    err = esp_event_loop_create_default();
+    if (err != ESP_OK && err != ESP_ERR_INVALID_STATE) goto fail;
+
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (!s_sta_netif) {
         ESP_LOGE(TAG, "no STA netif");
-        return ESP_FAIL;
+        err = ESP_FAIL;
+        goto fail;
     }
 
     /*
      * esp_wifi_init() is the first call that talks to the C6 rather than
-     * to the driver on this side. esp_hosted_init() installing the bus
-     * says only that the SDIO peripheral was configured; whether
-     * anything answers on those pins is not known until here.
-     *
-     * So this is where a wrong pin map surfaces, several seconds after
-     * the transport reported itself up, as an RPC that never gets a
-     * reply. It is worth spelling out at the failure rather than in a
-     * header, because the log line above it says "bus backend up" and
-     * that reads like success.
+     * to the driver on this side, so a slave that is not running
+     * surfaces here -- several seconds after every transport line has
+     * reported success.
      */
     const wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     err = esp_wifi_init(&cfg);
@@ -425,20 +459,19 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
                       "report success against a module that is not running.");
         ESP_LOGE(TAG, "three things have to be right before the C6 runs: the "
                       "SDIO pins (logged above as 'SDIO in use'), the reset "
-                      "GPIO (15), and the reset polarity (active HIGH on this "
-                      "board). All three are set in sdkconfig.defaults and "
-                      "wifi.c. Only after all three does the slave firmware "
-                      "become the suspect.");
-        wlan_power(exp2, false);
-        return err;
+                      "GPIO (15), and the reset polarity (active LOW, so the "
+                      "pin parks high and EN stays asserted). All three are "
+                      "set in sdkconfig.defaults and wifi.c. Only after all "
+                      "three does the slave firmware become the suspect.");
+        goto fail;
     }
 
     err = esp_wifi_set_mode(WIFI_MODE_STA);
     if (err == ESP_OK) err = esp_wifi_start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "esp_wifi_start: %s", esp_err_to_name(err));
-        wlan_power(exp2, false);
-        return err;
+        esp_wifi_deinit();
+        goto fail;
     }
 
     uint8_t mac[6] = { 0 };
@@ -448,8 +481,40 @@ esp_err_t wifi_probe(i2c_master_dev_handle_t exp2)
     }
 
     s_up = true;
+    return ESP_OK;
 
-    err = scan_and_log();
+fail:
+    /* Everything above this point either did not power the module or has
+     * just been undone; the rail is the last thing left holding it. */
+    if (s_sta_netif) {
+        esp_netif_destroy_default_wifi(s_sta_netif);
+        s_sta_netif = NULL;
+    }
+    wlan_power(s_exp2, false);
+    return err;
+}
+
+esp_err_t wifi_scan_log(void)
+{
+    if (!s_up) return ESP_ERR_INVALID_STATE;
+    const esp_err_t err = scan_and_log();
     if (err != ESP_OK) ESP_LOGE(TAG, "scan: %s", esp_err_to_name(err));
     return err;
+}
+
+esp_err_t wifi_apply_settings(void)
+{
+    const bool want = settings_wifi_enabled();
+
+    if (want == s_up) return ESP_OK;
+
+    if (!want) return wifi_stop();
+
+    const esp_err_t err = wifi_start();
+    if (err != ESP_OK) return err;
+
+    /* The scan is the spike's only visible output and the only way to
+     * see the radio working before the portal exists. It goes when the
+     * portal has its own. */
+    return wifi_scan_log();
 }
