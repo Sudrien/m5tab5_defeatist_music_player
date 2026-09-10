@@ -83,38 +83,55 @@
  * temptation is strongest.
  *
  *
- * ========================== OPEN QUESTIONS ==========================
+ * ======================= SETTLED DECISIONS =======================
  *
- * These are decisions, not oversights, and each is written where it has
- * to be answered rather than settled quietly in the implementation.
+ * PLAYBACK STOPS. The portal refuses to start while a track is playing,
+ * and the panel says so rather than stopping the music underneath
+ * somebody.
  *
- * Q1. WHAT HAPPENS TO PLAYBACK WHILE THE PORTAL IS UP? The C6 is a
- * separate chip on SDIO2 and the card is SDIO1, so there is no bus
- * contention -- storage_io's leases are untouched. But softAP plus HTTP
- * is real CPU and real PSRAM. My assumption below is that playback
- * continues untouched and the portal is simply another task. If the
- * decoder starves, storage_io_stats()' worst PLAYBACK wait is the number
- * that shows it, and the answer would be to refuse to start the portal
- * while playing rather than to throttle anything.
+ * Not because of the bus -- the C6 is on SDIO2 and the card on SDIO1, so
+ * storage_io's leases never see the radio. Because softAP plus an HTTP
+ * server plus a join attempt is real CPU and real PSRAM alongside a
+ * decoder with a deadline, and the failure if that is wrong is a
+ * starved ring: audible, intermittent, and blamed on the card. Setting
+ * up a network is a deliberate act that takes a minute and happens once
+ * per place; playing music is what the device is for. Making the rare
+ * thing exclude the common one is cheaper than making them coexist and
+ * discovering later that they mostly do.
  *
- * Q2. WHAT IS THE AP CALLED? The map uses "Tab5-Map-Setup". A fixed name
- * means two of these devices in one room are indistinguishable. Adding
- * the last two MAC octets fixes that and makes the name uglier. Fixed
- * name assumed below; the MAC is available by then if it should change.
+ * THE AP IS NAMED "Defeatist-XXXX", where XXXX is derived from the
+ * station MAC. Two of these in one room have to be distinguishable --
+ * a fixed name means picking blind on a phone -- and the MAC is
+ * available by the time the AP is configured, since wifi.c already logs
+ * it. Derived rather than the raw octets: the last two bytes of a MAC
+ * are printed on nothing a person can see, so the hex is no more
+ * meaningful to them than a hash and the hash does not publish the
+ * address to everyone in range. It is a label, not an identifier, and it
+ * only has to differ between two devices standing next to each other.
  *
- * Q3. TIMEOUT. The map takes it as an argument. Here the portal is
- * started deliberately from a settings tab rather than at boot, so it
- * could simply run until stopped. But an open AP left up because someone
- * walked away is a real if minor exposure, and an unattended device
- * broadcasting an open network indefinitely is worse than one that gives
- * up. A timeout is assumed, with the value below as a placeholder.
+ * FIVE MINUTES, then the AP comes down on its own.
  *
- * Q4. DOES THE RADIO SURVIVE? Starting an AP means esp_wifi in
- * APSTA mode. wifi.c currently brings the radio up as STA and scans
- * once, and has no teardown at all -- wifi_probe() is a one-shot spike
- * with s_up that never clears. The portal needs the radio in a known
- * state on the way in and back to STA on the way out. That is wifi.c
- * work that this header depends on and does not describe.
+ * The portal is started deliberately from the NET tab, so it could
+ * simply run until stopped -- but the case that matters is the one where
+ * nobody stops it: someone opens it, is interrupted, and walks away
+ * leaving an unattended device broadcasting an open network with a form
+ * on it. Five minutes is long enough to find the phone, join, mistype
+ * the passphrase once and retry, and short enough that walking away ends
+ * it. PORTAL_TIMEDOUT is a distinct status from PORTAL_OFF so the panel
+ * can say what happened rather than appearing to have done nothing.
+ *
+ *
+ * ======================== STILL UNANSWERED ========================
+ *
+ * HOW THE RADIO GETS INTO APSTA AND BACK. wifi.c brings the radio up as
+ * STA once and scans; wifi_probe() is a one-shot spike with no teardown
+ * and an s_up that never clears. The portal needs a known mode on the
+ * way in and STA on the way out, and neither exists yet.
+ *
+ * That is wifi.c work this header depends on and does not describe. It
+ * is the same work the NET tab's switch needs in order to take effect
+ * when it is pressed rather than at the next boot -- see settings.h --
+ * so wifi_start()/wifi_stop() lands before portal.c rather than after.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -131,6 +148,12 @@ extern "C" {
 
 /* 32 bytes plus a terminator, matching wifistore. */
 #define PORTAL_SSID_MAX     (32)
+
+/*
+ * Five minutes. See the note above: the case this exists for is the one
+ * where nobody comes back.
+ */
+#define PORTAL_TIMEOUT_S    (300)
 
 /*
  * What the portal is doing, as one value.
@@ -159,8 +182,9 @@ typedef enum {
 typedef struct {
     portal_status_t status;
 
-    /* The AP this device is broadcasting, for the panel to display so
-     * someone knows what to look for on their phone. */
+    /* The AP this device is broadcasting -- "Defeatist-XXXX" -- for the
+     * panel to display, so someone knows which network to look for on a
+     * phone that may be showing several. */
     char ap_ssid[PORTAL_SSID_MAX + 1];
 
     /* The network last submitted, for PORTAL_TRYING / FAILED / SAVED.
@@ -174,18 +198,27 @@ typedef struct {
      * that a person can act on. */
     uint8_t clients;
 
-    /* Seconds until the portal gives itself up, 0 if not running. */
+    /* Seconds until the portal gives itself up, counting down from
+     * PORTAL_TIMEOUT_S; 0 if not running. Shown, because a countdown is
+     * the difference between a portal that appears to have hung and one
+     * that is visibly waiting. */
     uint16_t seconds_left;
 } portal_state_t;
 
 /*
  * Bring the AP up. Returns as soon as the attempt is under way.
  *
- * Requires the radio: settings_wifi_enabled() must be true and wifi.c
+ Requires the radio: settings_wifi_enabled() must be true and wifi.c
  * must have it up. Returns ESP_ERR_INVALID_STATE otherwise rather than
  * turning the radio on as a side effect -- the Wi-Fi switch means what
  * it says, and a portal that silently enables a transmitter would make
  * that switch a lie in the one place it matters most.
+ *
+ * Also ESP_ERR_INVALID_STATE while a track is playing. The caller is
+ * expected to have said so already: the panel greys the button and
+ * explains, rather than presenting a control that fails when pressed.
+ * The check is here as well because a greyed control is a courtesy and
+ * this is the guarantee.
  *
  * Safe to call when already running: returns ESP_OK and changes nothing.
  */
