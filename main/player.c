@@ -2579,6 +2579,18 @@ static bool player_is_playing(void)
     return s_decoding && s_playing;
 }
 
+/*
+ * For portal_init(): pause, exactly as the play/pause button does. Called
+ * from portal_start(), which runs on ui_task -- the task that owns
+ * s_playing and s_pause_epoch -- so there is no second writer.
+ */
+static void player_force_pause(void)
+{
+    if (!s_playing) return;
+    s_playing = false;
+    s_pause_epoch++;
+}
+
 static void request_seek(int pct, const char *why)
 {
     /*
@@ -4993,6 +5005,16 @@ static void ui_task(void *arg)
 
         switch (act.kind) {
         case UI_ACTION_PLAY_PAUSE:
+            /*
+             * Network setup holds playback paused -- see portal.h. A press
+             * while it runs changes nothing, and says why in the log; the
+             * NET tab says it on screen.
+             */
+            if (portal_running()) {
+                ESP_LOGI(TAG, "play refused: network setup is running");
+                player_force_pause();
+                break;
+            }
             /*
              * With nothing decoding, this is the press that starts the
              * restored track rather than a pause toggle. s_playing is
@@ -8579,7 +8601,7 @@ void app_main(void)
     /* Just the expander handle; nothing is powered until
      * wifi_apply_settings() runs from the settings push below. */
     wifi_init(s_exp2);
-    portal_init(player_is_playing);
+    portal_init(player_is_playing, player_force_pause);
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the

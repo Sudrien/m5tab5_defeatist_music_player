@@ -81,6 +81,7 @@ static SemaphoreHandle_t s_stopped;             /* signalled on teardown */
 static volatile bool     s_dns_run;
 static SemaphoreHandle_t s_dns_done;
 static bool            (*s_is_playing)(void);
+static void            (*s_pause)(void);
 
 static void set_status(portal_status_t st, const char *last_ssid)
 {
@@ -625,9 +626,10 @@ static void portal_task(void *arg)
     }
 }
 
-void portal_init(bool (*is_playing)(void))
+void portal_init(bool (*is_playing)(void), void (*pause)(void))
 {
     s_is_playing = is_playing;
+    s_pause = pause;
     s_mu = xSemaphoreCreateMutex();
     s_kick = xSemaphoreCreateBinary();
     s_stopped = xSemaphoreCreateBinary();
@@ -647,9 +649,9 @@ esp_err_t portal_start(void)
         ESP_LOGW(TAG, "not starting: the radio is off");
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_is_playing && s_is_playing()) {
-        ESP_LOGW(TAG, "not starting: a track is playing");
-        return ESP_ERR_INVALID_STATE;
+    if (s_is_playing && s_is_playing() && s_pause) {
+        ESP_LOGI(TAG, "pausing playback for network setup");
+        s_pause();
     }
 
     xSemaphoreTake(s_mu, portMAX_DELAY);

@@ -6094,6 +6094,10 @@ What that run measured, beyond "it works":
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on
   WPA2-only networks. Withholding SAE for the PSK attempt is untried.
+- **Playback and setup (0014).** Setup no longer refuses to start
+  while a track plays: it pauses the track, play is refused while setup
+  runs, and nothing resumes afterwards. Next, prev and the chooser still
+  change the track, which loads paused. Unflashed.
 - **The "a track is playing" refusal fired with nothing playing.** Right
   after boot the player sits on "ready to resume" with `s_playing` at its
   initial true, and `s_ring_pct` is 0 from an empty ring, so
@@ -6133,7 +6137,7 @@ sign-in sheet opened by itself or the page was opened by hand.
   every name with the AP (`dnsreply.c`), serve a form listing the scan
   (`<datalist>`, so a hidden network can still be typed), and join
   before storing: derived PSK first, passphrase on refusal. Five-minute
-  timeout, refused while a track plays, state copied out.
+  timeout, playback paused while it runs, state copied out.
   Everything that parses a byte from a phone -- form decoding, SSID
   escaping, the credential lengths, the DNS parser -- is in
   `portalweb.c` and `dnsreply.c`, host-tested in
@@ -6171,9 +6175,9 @@ Known gaps, in the order a flash would hit them:
 - **Open networks cannot be saved.** wifistore requires a secret. The
   form says so rather than failing later.
 - **Turning Wi-Fi off from the track loop while the portal runs** waits
-  for the portal to come down, which blocks that caller. The portal
-  refuses to start while playing, so this needs playback started
-  during setup and then the switch thrown.
+  for the portal to come down, which blocks that caller. Setup holds
+  playback paused, so this needs a track changed with next or prev
+  during setup and the switch then thrown.
 - **No captive-portal DHCP option (114).** Phones find the page through
   the DNS lie and the redirect; option 114 would be quicker on newer
   Android and is a follow-up once the basic path is seen working.

@@ -85,9 +85,18 @@
  *
  * ======================= SETTLED DECISIONS =======================
  *
- * PLAYBACK STOPS. The portal refuses to start while a track is playing,
- * and the panel says so rather than stopping the music underneath
- * somebody.
+ * PLAYBACK IS PAUSED WHILE THE PORTAL IS ACTIVE. Starting setup pauses a
+ * playing track, play is refused until setup ends, and nothing resumes
+ * afterwards: the music comes back when somebody presses play, not when a
+ * timer or a join decides to.
+ *
+ * This replaced a first rule that refused to start setup at all while a
+ * track played, which only moved the pause onto the person: a control
+ * that says "not now" until you go and press something else. Starting
+ * setup is already the deliberate act, so it takes the pause with it.
+ *
+ * Next, previous and the chooser still change the track while setup
+ * runs; it loads paused. What cannot happen is sound.
  *
  * Not because of the bus -- the C6 is on SDIO2 and the card on SDIO1, so
  * storage_io's leases never see the radio. Because softAP plus an HTTP
@@ -258,11 +267,10 @@ typedef struct {
  * it says, and a portal that silently enables a transmitter would make
  * that switch a lie in the one place it matters most.
  *
- * Also ESP_ERR_INVALID_STATE while a track is playing. The caller is
- * expected to have said so already: the panel greys the button and
- * explains, rather than presenting a control that fails when pressed.
- * The check is here as well because a greyed control is a courtesy and
- * this is the guarantee.
+ * A playing track is paused here, through the hook given to
+ * portal_init(), before anything else starts. That hook writes the
+ * player's pause state, which ui_task owns, so portal_start() is called
+ * from ui_task -- the panel is its only caller.
  *
  * Safe to call when already running: returns ESP_OK and changes nothing.
  */
@@ -270,10 +278,10 @@ esp_err_t portal_start(void);
 
 /*
  * Called once at boot, before anything else here. `is_playing` answers
- * "is a track playing right now" for the refusal above; the portal has
- * no other way to ask the player, and the player has no header.
+ * "is a track playing right now"; `pause` pauses it. The portal has no
+ * other way to reach the player, and the player has no header.
  */
-void portal_init(bool (*is_playing)(void));
+void portal_init(bool (*is_playing)(void), void (*pause)(void));
 
 /* Whether the portal is up or coming up. A value, safe anywhere. */
 bool portal_running(void);

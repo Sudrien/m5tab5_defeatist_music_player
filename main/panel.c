@@ -521,7 +521,7 @@ static void setup_lines(const portal_state_t *st, bool wifi, bool running,
     default:              snprintf(l[1], 64, "A phone supplies the password."); break;
     }
     snprintf(l[2], 64, "%s", !wifi ? "Turn Wi-Fi on first."
-                                   : "Pause playback before starting.");
+                                   : "Playback pauses while setup runs.");
 }
 
 /*
@@ -936,7 +936,7 @@ bool panel_touch(bool down, int x, int y)
             } else {
                 const esp_err_t err = portal_start();
                 ESP_LOGI(TAG, "network setup: start%s",
-                         err == ESP_OK ? "" : " refused");
+                         err == ESP_OK ? "" : " refused (radio off)");
             }
             s_dirty = true;
         }
