@@ -7,16 +7,33 @@
  * internal heap, and what the SDIO-attached C6 actually delivers in bytes
  * per second. The first stream anyone plans to use is WNZK on Zeno.FM.
  *
- * Once per boot, a few seconds after the station first gets an address,
- * this connects to STREAMPROBE_URL, follows redirects by hand so each hop
- * is logged, requests ICY metadata, and reads the body for
- * STREAMPROBE_SECONDS, logging throughput every five seconds, what the
- * first bytes are, and the first stream titles. Then it closes and ends.
+ * IT NO LONGER OPENS A CONNECTION (0105)
+ *
+ * netstream.c does that now, and this file's job has changed from
+ * measuring the network to **saying whether netstream handles it
+ * correctly.** It asks netstream to play STREAMPROBE_URL and then drains
+ * the ring exactly as phase 2's decoder will -- netstream_read() with a
+ * timeout, in a loop -- for STREAMPROBE_SECONDS.
+ *
+ * That moves the measurement to the far side of the parts that are new
+ * and unproven. The old probe counted ADTS frames off the socket and saw
+ * zero bytes lost hunting for a sync; this one counts them after the ICY
+ * demultiplexer and after the ring, so a desynchronised demuxer, a ring
+ * that drops, or a reconnect that loses its place all show up as lost
+ * bytes and a falling x-real-time ratio against a figure we already have
+ * for the same station.
+ *
+ * It also logs what only this side can see: every state transition with
+ * its timing, how full the ring gets, how often a reader that is faster
+ * than the network finds it empty, and how long netstream_stop_wait()
+ * takes -- which is the number phase 3 needs for its pause.
+ *
  * It decodes nothing and draws nothing, and playback carries on beside it
  * -- which is part of what is being measured.
  *
  * Empty STREAMPROBE_URL compiles it to nothing. It goes when the stream
- * path exists.
+ * path lands; until then it is the only thing that exercises netstream
+ * on hardware.
  *
  * SPDX-License-Identifier: MIT
  */

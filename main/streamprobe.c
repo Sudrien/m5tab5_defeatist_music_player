@@ -7,98 +7,24 @@
 
 #include <inttypes.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 #include <time.h>
 
-#include "esp_crt_bundle.h"
 #include "esp_heap_caps.h"
-#include "esp_http_client.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "netstream.h"
 #include "streamsniff.h"
 
 static const char *TAG = "tab5_probe";
 
-#define HOPS_MAX        (5)
 #define READ_CHUNK      (2048)
-#define SNIFF_BYTES     (2048)
-#define TITLES_MAX      (3)
 
 static bool s_started;
-
-/* Headers worth seeing, captured as they arrive on each hop. The Location
- * is copied whole: the first probe cut it at 160 characters, in the middle
- * of the token that says how long the redirect is good for. */
-static int  s_metaint;
-static char s_location[1024];
-
-static esp_err_t on_event(esp_http_client_event_t *e)
-{
-    if (e->event_id != HTTP_EVENT_ON_HEADER || !e->header_key) return ESP_OK;
-    const char *k = e->header_key, *v = e->header_value ? e->header_value : "";
-    if (strcasecmp(k, "location") == 0) {
-        snprintf(s_location, sizeof(s_location), "%s", v);
-        return ESP_OK;          /* printed whole after the hop, in pieces */
-    }
-    if (strcasecmp(k, "content-type") == 0 ||
-        strcasecmp(k, "server") == 0 || strcasecmp(k, "transfer-encoding") == 0 ||
-        strncasecmp(k, "icy-", 4) == 0 || strncasecmp(k, "ice-", 4) == 0) {
-        ESP_LOGI(TAG, "  %s: %.160s", k, v);
-    }
-    if (strcasecmp(k, "icy-metaint") == 0) s_metaint = atoi(v);
-    return ESP_OK;
-}
-
-/* A long string in log-sized pieces. */
-static void log_long(const char *label, const char *str)
-{
-    const size_t n = strlen(str);
-    for (size_t i = 0; i < n; i += 120) {
-        ESP_LOGI(TAG, "  %s[%u]: %.120s", label, (unsigned)(i / 120), str + i);
-    }
-}
-
-/*
- * The redirect's token, if it has one: a query value that is a JWT. Its
- * payload is logged, and its exp against the clock, which answers how long
- * a redirected URL can be reused -- and so whether a reconnect can skip
- * the first hop.
- */
-static void log_token(const char *url)
-{
-    const char *q = strchr(url, '?');
-    while (q && *q) {
-        const char *val = strchr(q, '=');
-        if (!val) break;
-        val++;
-        const char *end = strchr(val, '&');
-        const size_t n = end ? (size_t)(end - val) : strlen(val);
-        static char payload[512];
-        if (jwt_payload(val, n, payload, sizeof(payload))) {
-            log_long("token", payload);
-            int64_t exp = 0, iat = 0;
-            const time_t now = time(NULL);
-            if (json_int(payload, "exp", &exp)) {
-                ESP_LOGI(TAG, "  token exp %lld: %lld s from now",
-                         (long long)exp, (long long)(exp - (int64_t)now));
-            } else {
-                ESP_LOGI(TAG, "  token has no exp");
-            }
-            if (json_int(payload, "iat", &iat)) {
-                ESP_LOGI(TAG, "  token iat %lld: %lld s ago", (long long)iat,
-                         (long long)((int64_t)now - iat));
-            }
-            return;
-        }
-        q = end;
-    }
-}
 
 static void heap_line(const char *when)
 {
@@ -110,12 +36,35 @@ static void heap_line(const char *when)
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
+/*
+ * What the probe is for now. It no longer opens a connection: netstream
+ * does that, and the point of this file is to say whether netstream does
+ * it correctly. So it drains the ring exactly as phase 2's decoder will
+ * -- netstream_read() with a timeout, in a loop -- and reports the three
+ * things that would tell us phase 1 is wrong:
+ *
+ *   1. Whether the stream comes up at all, and how the state moves.
+ *      Every transition is logged by netstream itself; this logs the
+ *      times, because CONNECTING -> BUFFERING -> PLAYING with the right
+ *      shape and the wrong timings is a different bug from never
+ *      reaching PLAYING.
+ *
+ *   2. Whether the bytes that come out of the ring are the bytes that
+ *      went in. adts_count_bytes() over the drained side gives audio
+ *      milliseconds per wall millisecond, the same x-real-time figure
+ *      the old probe logged off the socket -- but now measured after the
+ *      ICY demultiplexer and after the ring, which is where a
+ *      desynchronised demuxer or a dropping ring would show up as lost
+ *      bytes and a falling ratio.
+ *
+ *   3. Whether the ring's occupancy is sane. A reader this fast should
+ *      keep it near empty; a ring sitting near full means netstream is
+ *      dropping, and a ring that empties to nothing repeatedly at 0.97x
+ *      is what phase 3's watermarks will have to ride.
+ */
 static void probe_task(void *arg)
 {
     (void)arg;
-    /* Let the join settle -- the address arrives before routes and DNS
-     * have been used once. Deliberately not waiting for NTP: whether TLS
-     * needs the clock is one of the questions. */
     ESP_LOGI(TAG, "starting in %d s -- start a track from the card now to "
                   "measure the download beside playback", STREAMPROBE_DELAY_S);
     vTaskDelay(pdMS_TO_TICKS(STREAMPROBE_DELAY_S * 1000));
@@ -130,196 +79,156 @@ static void probe_task(void *arg)
 #endif
     heap_line("before");
 
-    esp_http_client_config_t cfg = {
-        .url = STREAMPROBE_URL,
-        .event_handler = on_event,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .disable_auto_redirect = true,
-        .timeout_ms = 10000,
-        .buffer_size = 4096,
-        .buffer_size_tx = 1024,
-        .user_agent = "DefeatistMusicPlayer/0.4 (stream probe)",
-    };
-    esp_http_client_handle_t c = esp_http_client_init(&cfg);
-    if (!c) {
-        ESP_LOGE(TAG, "esp_http_client_init failed");
-        goto out;
+    /* Idempotent, and it moves to app_main() at phase 3, when something
+     * other than the probe wants a stream. */
+    if (!netstream_init()) {
+        ESP_LOGE(TAG, "netstream_init failed; nothing to probe");
+        vTaskDelete(NULL);
+        return;
     }
-    esp_http_client_set_header(c, "Icy-MetaData", "1");
 
-    int status = 0;
-    int64_t length = -1;
-    for (int hop = 1; hop <= HOPS_MAX; hop++) {
-        char url[256];
-        if (esp_http_client_get_url(c, url, sizeof(url)) != ESP_OK) url[0] = '\0';
-        ESP_LOGI(TAG, "hop %d: %s", hop, url);
-        s_metaint = 0;
-        s_location[0] = '\0';
+    const int64_t start = esp_timer_get_time();
+    if (!netstream_play(STREAMPROBE_URL, "probe")) {
+        ESP_LOGE(TAG, "netstream_play refused the URL");
+        vTaskDelete(NULL);
+        return;
+    }
 
-        const int64_t t0 = esp_timer_get_time();
-        esp_err_t err = esp_http_client_open(c, 0);
-        const int64_t t1 = esp_timer_get_time();
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "hop %d: open failed after %lld ms: %s", hop,
-                     (long long)((t1 - t0) / 1000), esp_err_to_name(err));
-            heap_line("after a failed open");
-            goto cleanup;
+    static uint8_t buf[READ_CHUNK];
+    static adts_count_t adts;
+    memset(&adts, 0, sizeof(adts));
+
+    static uint8_t sniff[2048];
+    size_t sniffed = 0;
+    bool   sniff_logged = false;
+
+    int64_t  last = start, total = 0, window = 0;
+    uint64_t last_audio_ms = 0;
+    int      empties = 0, window_empties = 0;
+    unsigned ring_max_pct = 0;
+    char     title[ICY_TITLE_MAX], name[NETSTREAM_NAME_MAX];
+    char     last_title[ICY_TITLE_MAX] = "";
+    netstream_state_t last_state = NETSTREAM_IDLE;
+    int64_t  first_byte_us = 0;
+
+    while (esp_timer_get_time() - start < (int64_t)STREAMPROBE_SECONDS * 1000000) {
+        const netstream_state_t st = netstream_state();
+        if (st != last_state) {
+            ESP_LOGI(TAG, "%lld ms: state %s (status %d, failures %d)",
+                     (long long)((esp_timer_get_time() - start) / 1000),
+                     netstream_state_name(st), netstream_last_status(),
+                     netstream_failures());
+            last_state = st;
         }
-        length = esp_http_client_fetch_headers(c);
-        const int64_t t2 = esp_timer_get_time();
-        status = esp_http_client_get_status_code(c);
-        ESP_LOGI(TAG, "hop %d: HTTP %d, connect+TLS %lld ms, headers %lld ms, length %lld",
-                 hop, status, (long long)((t1 - t0) / 1000),
-                 (long long)((t2 - t1) / 1000), (long long)length);
-        heap_line("connected");
-
-        if (s_location[0]) {
-            log_long("Location", s_location);
-            log_token(s_location);
+        if (st == NETSTREAM_FAILED) {
+            ESP_LOGE(TAG, "netstream gave up after %d failures, last status %d",
+                     netstream_failures(), netstream_last_status());
+            break;
         }
 
-        if (status >= 300 && status < 400) {
-            if (esp_http_client_set_redirection(c) != ESP_OK) {
-                ESP_LOGE(TAG, "hop %d: redirect with no usable Location", hop);
-                goto cleanup;
-            }
-            esp_http_client_close(c);
+        const unsigned pct = (unsigned)netstream_ring_pct();
+        if (pct > ring_max_pct) ring_max_pct = pct;
+
+        /* 200 ms: long enough that an empty read means the ring really
+         * was empty, short enough that a stall is noticed in the window
+         * it happened in. */
+        const size_t n = netstream_read(buf, sizeof(buf), 200);
+        if (n == 0) {
+            empties++;
+            window_empties++;
             continue;
         }
-        break;
-    }
-    if (status != 200) {
-        ESP_LOGE(TAG, "no stream: last status %d", status);
-        goto cleanup;
-    }
+        if (!first_byte_us) {
+            first_byte_us = esp_timer_get_time();
+            ESP_LOGI(TAG, "first audio byte out of the ring at %lld ms",
+                     (long long)((first_byte_us - start) / 1000));
+        }
+        total += (int64_t)n;
+        window += (int64_t)n;
+        adts_count_bytes(&adts, buf, n);
 
-    {
-        /* Static, not on the stack: esp_http_client runs the TLS handshake
-         * and record layer on this task, and that wants the stack. */
-        static char buf[READ_CHUNK];
-        static uint8_t sniff[SNIFF_BYTES];
-        static char meta[16 * 255 + 1];
-        static char title[128];
-        size_t sniffed = 0;
-        int titles = 0;
-
-        /* ICY framing: `metaint` audio bytes, a length byte L, 16*L bytes
-         * of metadata, repeat. Tracked across reads byte by byte. */
-        int64_t audio_left = s_metaint > 0 ? s_metaint : -1;
-        int meta_left = -1, meta_len = 0;
-
-        const int64_t start = esp_timer_get_time();
-        int64_t last = start, total = 0, window = 0, audio_total = 0;
-        static adts_count_t adts;
-        memset(&adts, 0, sizeof(adts));
-        uint64_t last_audio_ms = 0;
-        static uint8_t aud[READ_CHUNK];
-        size_t aud_n;
-        int zero_reads = 0;
-
-        while (esp_timer_get_time() - start < (int64_t)STREAMPROBE_SECONDS * 1000000) {
-            const int n = esp_http_client_read(c, buf, sizeof(buf));
-            if (n < 0) {
-                ESP_LOGE(TAG, "read failed after %lld bytes", (long long)total);
-                break;
-            }
-            if (n == 0) {
-                if (++zero_reads > 50) {
-                    ESP_LOGW(TAG, "stream ended after %lld bytes", (long long)total);
-                    break;
-                }
-                vTaskDelay(pdMS_TO_TICKS(20));
-                continue;
-            }
-            zero_reads = 0;
-            total += n;
-            window += n;
-
-            aud_n = 0;
-            for (int i = 0; i < n; i++) {
-                const uint8_t byte = (uint8_t)buf[i];
-                if (meta_left < 0 && audio_left != 0) {
-                    /* Audio. */
-                    if (sniffed < sizeof(sniff)) sniff[sniffed++] = byte;
-                    aud[aud_n++] = byte;
-                    audio_total++;
-                    if (audio_left > 0) audio_left--;
-                } else if (meta_left < 0) {
-                    /* The length byte. */
-                    meta_left = byte * 16;
-                    meta_len = 0;
-                    if (meta_left == 0) { meta_left = -1; audio_left = s_metaint; }
-                } else {
-                    if (meta_len < (int)sizeof(meta) - 1) meta[meta_len++] = (char)byte;
-                    if (--meta_left == 0) {
-                        meta_left = -1;
-                        audio_left = s_metaint;
-                        if (titles < TITLES_MAX &&
-                            icy_stream_title(meta, (size_t)meta_len, title, sizeof(title))) {
-                            ESP_LOGI(TAG, "stream title: \"%s\"", title);
-                            titles++;
-                        }
-                    }
-                }
-            }
-            adts_count_bytes(&adts, aud, aud_n);
-
-            if (sniffed == sizeof(sniff) && sniffed != SIZE_MAX) {
-                ESP_LOGI(TAG, "first audio bytes look like: %s",
+        if (!sniff_logged && sniffed < sizeof(sniff)) {
+            const size_t take = (sizeof(sniff) - sniffed) < n
+                              ? (sizeof(sniff) - sniffed) : n;
+            memcpy(sniff + sniffed, buf, take);
+            sniffed += take;
+            if (sniffed == sizeof(sniff)) {
+                ESP_LOGI(TAG, "first bytes out of the ring look like: %s",
                          sniff_name(sniff_bytes(sniff, sniffed)));
-                sniffed = SIZE_MAX;             /* once */
+                sniff_logged = true;
             }
+        }
 
-            const int64_t t = esp_timer_get_time();
-            if (t - last >= 5000000) {
-                /* Audio seconds received against wall seconds: 1.0x is a
-                 * server pacing to real time, more is a server sending
-                 * ahead, less is a link that cannot keep up. */
-                const uint64_t ams = adts_ms(&adts);
-                const int64_t wall = (t - last) / 1000;
-                const uint64_t got = ams - last_audio_ms;
-                ESP_LOGI(TAG, "%lld s: %lld KB/s, %llu ms of audio in %lld ms (%llu.%02llux), %lld KB so far",
-                         (long long)((t - start) / 1000000),
-                         (long long)(window * 1000 / wall / 1024),
-                         (unsigned long long)got, (long long)wall,
-                         (unsigned long long)(got / (uint64_t)wall),
-                         (unsigned long long)((got * 100 / (uint64_t)wall) % 100),
-                         (long long)(total / 1024));
-                /* Beside every window, so an "eh_sdio: mempool OOM" can be
-                 * read against what internal RAM was doing at the time. */
-                ESP_LOGI(TAG, "   internal free %u, min %u, largest %u",
-                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
-                         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
-                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
-                last_audio_ms = ams;
-                window = 0;
-                last = t;
-            }
+        netstream_title(title, sizeof(title));
+        if (strcmp(title, last_title) != 0) {
+            ESP_LOGI(TAG, "stream title: \"%s\"%s", title,
+                     netstream_has_title() ? "" : " (station sent none)");
+            snprintf(last_title, sizeof(last_title), "%s", title);
         }
-        if (sniffed != SIZE_MAX && sniffed > 0) {
-            ESP_LOGI(TAG, "first audio bytes look like: %s",
-                     sniff_name(sniff_bytes(sniff, sniffed)));
+
+        const int64_t t = esp_timer_get_time();
+        if (t - last >= 5000000) {
+            const uint64_t ams = adts_ms(&adts);
+            const int64_t wall = (t - last) / 1000;
+            const uint64_t got = ams - last_audio_ms;
+            /* The same x-real-time figure as before, but measured after
+             * the demuxer and the ring rather than off the socket. A
+             * ratio that was 0.97x on the wire and is lower here is
+             * netstream losing bytes, which is the failure this rewrite
+             * exists to be able to see. */
+            ESP_LOGI(TAG, "%lld s: %lld KB/s out, %llu ms of audio in %lld ms (%llu.%02llux), ring %u%%, %d empty reads",
+                     (long long)((t - start) / 1000000),
+                     (long long)(window * 1000 / wall / 1024),
+                     (unsigned long long)got, (long long)wall,
+                     (unsigned long long)(got / (uint64_t)wall),
+                     (unsigned long long)((got * 100 / (uint64_t)wall) % 100),
+                     (unsigned)netstream_ring_pct(), window_empties);
+            ESP_LOGI(TAG, "   netstream says %d kbit/s in; internal free %u, min %u, largest %u",
+                     netstream_kbps(),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+            last_audio_ms = ams;
+            window = 0;
+            window_empties = 0;
+            last = t;
         }
-        const int64_t secs_ms = (esp_timer_get_time() - start) / 1000;
-        if (adts.frames) {
-            ESP_LOGI(TAG, "ADTS: %u frames, AAC profile %u, %u Hz core, %u ch, frame %u-%u bytes, %llu bytes lost hunting",
-                     (unsigned)adts.frames, adts.profile, adts.rate, adts.channels,
-                     adts.min_len, adts.max_len, (unsigned long long)adts.lost);
-            ESP_LOGI(TAG, "ADTS: %llu ms of audio in %lld ms, bitrate %llu kbit/s",
-                     (unsigned long long)adts_ms(&adts), (long long)secs_ms,
-                     adts_ms(&adts) ? (unsigned long long)(audio_total * 8 / adts_ms(&adts)) : 0ULL);
-        }
-        ESP_LOGI(TAG, "done: %lld KB in %lld ms, %lld kbit/s of audio, ICY every %d bytes, %d title%s",
-                 (long long)(total / 1024), (long long)secs_ms,
-                 secs_ms ? (long long)(audio_total * 8 / secs_ms) : 0LL,
-                 s_metaint, titles, titles == 1 ? "" : "s");
     }
 
-cleanup:
-    esp_http_client_close(c);
-    esp_http_client_cleanup(c);
+    if (!sniff_logged && sniffed) {
+        ESP_LOGI(TAG, "first bytes out of the ring look like: %s",
+                 sniff_name(sniff_bytes(sniff, sniffed)));
+    }
+
+    netstream_name(name, sizeof(name));
+    const int64_t secs_ms = (esp_timer_get_time() - start) / 1000;
+    if (adts.frames) {
+        ESP_LOGI(TAG, "ADTS: %u frames, AAC profile %u, %u Hz core, %u ch, frame %u-%u bytes, %llu bytes lost hunting",
+                 (unsigned)adts.frames, adts.profile, adts.rate, adts.channels,
+                 adts.min_len, adts.max_len, (unsigned long long)adts.lost);
+        /* Bytes lost hunting for a sync is the demultiplexer's report
+         * card. On the wire the old probe saw 0; anything above 0 here,
+         * with the same station, is icydemux or the ring and not the
+         * network. */
+        ESP_LOGI(TAG, "ADTS: %llu ms of audio in %lld ms, bitrate %llu kbit/s",
+                 (unsigned long long)adts_ms(&adts), (long long)secs_ms,
+                 adts_ms(&adts) ? (unsigned long long)(total * 8 / (int64_t)adts_ms(&adts)) : 0ULL);
+    }
+    ESP_LOGI(TAG, "done: %lld KB drained in %lld ms from \"%s\", first byte %lld ms, ring peak %u%%, %d empty reads",
+             (long long)(total / 1024), (long long)secs_ms, name,
+             (long long)(first_byte_us ? (first_byte_us - start) / 1000 : -1),
+             ring_max_pct, empties);
+
+    /* The stop path matters as much as the start: nothing may leave a
+     * TLS session open, and how long this takes is the number phase 3
+     * needs for its pause. */
+    const int64_t t_stop = esp_timer_get_time();
+    const bool stopped = netstream_stop_wait(5000);
+    ESP_LOGI(TAG, "stop %s after %lld ms, state %s",
+             stopped ? "completed" : "TIMED OUT",
+             (long long)((esp_timer_get_time() - t_stop) / 1000),
+             netstream_state_name(netstream_state()));
     heap_line("after");
-out:
     vTaskDelete(NULL);
 }
 
@@ -327,7 +236,7 @@ void streamprobe_kick(void)
 {
     if (s_started || !STREAMPROBE_URL[0]) return;
     s_started = true;
-    if (xTaskCreate(probe_task, "probe", 8192, NULL, 2, NULL) != pdPASS) {
+    if (xTaskCreate(probe_task, "probe", 6144, NULL, 2, NULL) != pdPASS) {
         ESP_LOGE(TAG, "no task for the probe");
     }
 }
