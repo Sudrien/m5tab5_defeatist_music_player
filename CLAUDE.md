@@ -6495,6 +6495,29 @@ Known gaps, in the order a flash would hit them:
   is pacing to real time and the average holds. What a stream player
   needs from that is a buffer of a few seconds that rides the dips, not
   a faster link. Beside playback, on this build, it was 0.93x.
+  **Beside playback on 0045 (v0.3.0-90, a card track from 5871):** 58.5 s
+  of audio in 60.2 s, 0.97x; windows 0.86, 0.89, 0.83, 1.06, 1.04, 0.93,
+  0.91, 1.03, 1.03, 1.05, 1.05x; internal minimum 53 KB; no OOMs. So the
+  settled numbers for WNZK's 512 kbit/s are **1.05x idle and 0.97x beside
+  MP3 playback off the card**, with swings of 0.83-1.31x in 5 s windows.
+  A stream player replaces the card track rather than running beside it,
+  so its real figure sits between the two.
+  **What the stream path takes from this:**
+  - A pre-buffer before sound, and a buffer deep enough to ride
+    five-second dips to 0.83x: 10 s of 512 kbit/s AAC is 640 KB, which
+    is PSRAM's business, not internal RAM's.
+  - A rebuffer policy for when it drains anyway -- at 0.97x it would,
+    slowly -- that says so on screen instead of stuttering.
+  - Internal RAM stays the constraint: one TLS session costs 13 KB even
+    with mbedTLS in PSRAM, lwIP must not be given a large window
+    (0044), and the free figure with a track playing and the stream up
+    was 53-63 KB.
+  - WNZK is an unusually heavy stream. Most stations send 64-128 kbit/s,
+    a quarter or less, and have margin this link does not give WNZK.
+  For scale, internal RAM at boot (heap_init): 256 KB main, 71 KB
+  retention, 31 KB RTC, 18 KB and 7 KB more -- about 383 KB, of which
+  about 98 KB is free once the player is up. Where the rest goes has not
+  been audited.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
