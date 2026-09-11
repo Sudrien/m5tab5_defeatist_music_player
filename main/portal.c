@@ -500,6 +500,20 @@ static void bring_up(void)
         free(seen);
     }
 
+    /*
+     * A stop that arrived during the scan. The scan is the long part --
+     * about four seconds at 0018's dwell, and it can wait on a join -- and
+     * on hardware STOP was pressed during it: the AP, DHCP and web server
+     * then all came up only to be torn down half a second later. Checked
+     * here, before anything is started; the task loop answers the stop
+     * itself on its next pass.
+     */
+    if (s_want_stop) {
+        ESP_LOGI(TAG, "stopped during the scan; not raising the AP");
+        teardown(PORTAL_OFF);
+        return;
+    }
+
     uint8_t mac[6] = { 0 };
     esp_wifi_get_mac(WIFI_IF_STA, mac);
     char name[PORTAL_SSID_MAX + 1];

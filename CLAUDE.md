@@ -6125,10 +6125,11 @@ What that run measured, beyond "it works":
   the stored PSK and the ranking. Seventh flash: both scans came back exactly 32 networks with
   16-17 hidden -- the old cap, full, cutting the weakest -- and still no
   hotspot. 0020 raises the cap to 64 and warns when a scan is cut.
-  **With 0020 flashed the scan still came back exactly 32, and no
-  warning** -- so the driver reported 32 heard, and the limit is below
-  this code: the C6's scan list or the ESP-Hosted RPC, not checked. The
-  weakest networks in a crowded room still do not appear. The
+  With 0020 flashed one scan still came back exactly 32 with no
+  warning, and 0033 wrote that down as a limit below this code. **The
+  next flash took that back:** 42 networks (23 hidden) and 38 (18
+  hidden), the weakest at -94 dBm. There is no 32 cap underneath; that
+  room just had 32 that time. The
   same flash had the first boot-time-style join that worked on the
   first attempt (after Wi-Fi off/on, no reason 2, id=43 present), so a
   first attempt does not always expire. 0014's pause was
@@ -6146,6 +6147,12 @@ What that run measured, beyond "it works":
   on ui_task, took the same lock, which a join holds for up to thirty
   seconds -- a join begun while connected could freeze the screen. The
   SSID has its own short lock now.
+- **STOP during setup's scan (v0.3.0-77, fixed in 0034).** The scan is
+  about four seconds; STOP pressed in it was only acted on after the AP,
+  DHCP and the web server had all come up, half a second before they
+  were torn down. `bring_up()` now checks for a stop after the scan and
+  raises nothing. 0033's scan-waits-for-join could not be seen on that
+  flash: setup was started with the station already joined.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on
