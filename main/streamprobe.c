@@ -106,8 +106,8 @@ static void probe_task(void *arg)
     uint64_t last_audio_ms = 0;
     int      empties = 0, window_empties = 0;
     unsigned ring_max_pct = 0;
-    char     title[ICY_TITLE_MAX], name[NETSTREAM_NAME_MAX];
-    char     last_title[ICY_TITLE_MAX] = "";
+    char     title[NETSTREAM_TITLE_MAX], name[NETSTREAM_NAME_MAX];
+    char     last_title[NETSTREAM_TITLE_MAX] = "";
     netstream_state_t last_state = NETSTREAM_IDLE;
     int64_t  first_byte_us = 0;
 

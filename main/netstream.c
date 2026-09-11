@@ -26,6 +26,13 @@
 
 static const char *TAG = "tab5_netstream";
 
+/* netstream.h publishes NETSTREAM_TITLE_MAX so callers need not include
+ * icydemux.h to size a buffer. The two must agree: a caller's buffer
+ * smaller than the demuxer's title would truncate on the way out, which
+ * is a wrong title on screen and not a diagnostic. */
+_Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
+               "NETSTREAM_TITLE_MAX must match ICY_TITLE_MAX");
+
 /* Read chunk. The probe used 2048 and measured 50-64 KB/s through it,
  * which is 25-32 reads a second; no reason to change what was measured. */
 #define READ_CHUNK          (2048)
@@ -82,7 +89,7 @@ static volatile uint32_t s_buffered;    /* the task's last reading */
 
 /* Under s_lock. */
 static char s_name[NETSTREAM_NAME_MAX];     /* icy-name, else the list's */
-static char s_title[ICY_TITLE_MAX];
+static char s_title[NETSTREAM_TITLE_MAX];
 static bool s_has_title;
 
 /* Per-connection, owned by the task alone. */

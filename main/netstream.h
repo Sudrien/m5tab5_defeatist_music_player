@@ -112,6 +112,22 @@ extern "C" {
 #define NETSTREAM_NAME_MAX      (96)
 
 /*
+ * The ICY title, as much of it as a caller needs a buffer for.
+ *
+ * This is netstream's own number and not icydemux.h's, deliberately.
+ * The first version left callers to use ICY_TITLE_MAX, which meant
+ * anyone calling netstream_title() had to include the demultiplexer's
+ * header to size a buffer -- and the demultiplexer is this file's
+ * business, not its callers'. streamprobe.c did not include it, and
+ * should not have had to; it failed to compile, which is the good
+ * outcome of the two available.
+ *
+ * netstream.c checks at compile time that this matches what the
+ * demuxer actually produces, so the two cannot drift apart silently.
+ */
+#define NETSTREAM_TITLE_MAX     (256)
+
+/*
  * Allocates the ring and starts the task. Call once from app_main(),
  * before anything can ask for a stream. Returns false if the PSRAM
  * allocation or the task creation failed, after which every
