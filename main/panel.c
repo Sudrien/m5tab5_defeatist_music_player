@@ -803,11 +803,13 @@ void panel_draw(void)
 
     /* One button, and it is the way out. Everything else on this screen
      * is either a tab or the switch. */
-    gfx_fill_rect(w / 2 - 90, fy + 16, 180, FOOT_H - 32, C_BTN);
+    /* Greyed while setup runs -- panel_touch() refuses it then. */
+    const bool can_close = !portal_running();
+    gfx_fill_rect(w / 2 - 90, fy + 16, 180, FOOT_H - 32, can_close ? C_BTN : C_TAB_OFF);
     const int cw = gfx_text_w("CLOSE", LABEL_SCALE);
     gfx_draw_text(w / 2 - cw / 2,
                   fy + 16 + (FOOT_H - 32 - GFX_GLYPH_H(LABEL_SCALE)) / 2,
-                  "CLOSE", LABEL_SCALE, 172, C_TEXT);
+                  "CLOSE", LABEL_SCALE, 172, can_close ? C_TEXT : C_DISABLED);
 
     gfx_blit(0, h);
 }
@@ -888,6 +890,14 @@ bool panel_touch(bool down, int x, int y)
     }
 
     if (y >= h - FOOT_H) {
+        /* Not while setup runs. It pauses playback and refuses play,
+         * and a panel closed over it leaves the listener with a player
+         * that will not play and nothing on screen saying why. STOP on
+         * the NET tab is the way out of setup, and then CLOSE works. */
+        if (portal_running()) {
+            ESP_LOGI(TAG, "button: close refused -- network setup is running");
+            return false;
+        }
         ESP_LOGI(TAG, "button: close");
         return true;
     }

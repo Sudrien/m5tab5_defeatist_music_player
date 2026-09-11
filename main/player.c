@@ -7281,6 +7281,23 @@ static track_end_t play_file(const char *path)
         const uint32_t pause_epoch_before = s_pause_epoch;
         while (remain) {
             if (s_seek_pct >= 0 || s_pending_ready) break;
+            /*
+             * A repaint asked for while this send is parked.
+             *
+             * Paused mid-track, the ring fills and the loop lives right
+             * here, a slice at a time, for as long as the pause lasts --
+             * so the repaint at the top of the loop, which the comment
+             * there says is "ahead of the pause wait", never ran. On
+             * hardware the settings panel was closed while setup had
+             * paused playback, and the NET tab stayed painted above the
+             * transport bar. Serviced in place rather than by breaking
+             * out, because this block is half sent and breaking would
+             * drop the rest of it.
+             */
+            if (s_repaint_art && !visuals_pending) {
+                s_repaint_art = false;
+                load_track_visuals(path);
+            }
             const size_t sent = xStreamBufferSend(s_pcm, src, remain,
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             src += sent;

@@ -3405,7 +3405,13 @@ themselves. `player.c` only applies the answers.
   not yet examined.
 
 A fade followed by silence is a fade. 1 s and 3 s are estimates, not
-measurements. Known cost: a cut track ends before its seek bar reaches
+measurements.
+
+**Seen on hardware (v0.3.0-78):** the Bach track ended `recorded
+silence cut to 3000 ms`, and the next boundary logged `crossfade: 2600
+ms fade-in over a recorded fade, trim out 100% in 100%` -- the outgoing
+track at unity, the fade-in at half the configured crossfade. Whether
+it sounds right was not reported. Known cost: a cut track ends before its seek bar reaches
 the end. Not compiled against ESP-IDF here. **Not flashed.**
 
 ### The seek table is harvested, not scanned for (0703)
@@ -6153,6 +6159,18 @@ What that run measured, beyond "it works":
   were torn down. `bring_up()` now checks for a stop after the scan and
   raises nothing. 0033's scan-waits-for-join could not be seen on that
   flash: setup was started with the station already joined.
+- **Closing the panel while paused left it on screen (v0.3.0-78, fixed
+  in 0035).** CLOSE brought the transport bar back but the NET tab
+  stayed painted above it, with setup running or not -- because setup
+  had paused playback. Paused mid-track, the ring fills and the decode
+  loop sits in its send loop a slice at a time; the repaint it services
+  is at the top of the loop, which it never reaches until play resumes.
+  The send loop now services `s_repaint_art` in place (not by breaking
+  out, which would drop the half-sent block). The chooser's cancel
+  while paused mid-track had the same path. Also in 0035: the panel's
+  CLOSE is greyed and refused while setup runs, since setup holds
+  playback paused and a hidden setup is a player that will not play
+  with nothing saying why. STOP first.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on
