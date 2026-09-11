@@ -113,7 +113,12 @@ NETPLAN_BIN := netplantest
 # is a wider input and a worse one.
 STATION_BIN := stationlisttest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations
+# When a stream is allowed to make a sound. Two thresholds and not one,
+# because a single one flaps at the watermark and that is heard as
+# chopping rather than as a pause.
+BUFPLAN_BIN := bufferplantest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -179,7 +184,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -225,10 +230,17 @@ $(STATION_BIN): stationlisttest.c ../main/stationlist.h
 run-stations: $(STATION_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STATION_BIN)
 
+$(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
+	$(CC) $(WARNCFLAGS) -c bufferplantest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ bufferplantest.c $(LDFLAGS)
+
+run-bufplan: $(BUFPLAN_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan clean

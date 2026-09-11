@@ -14,19 +14,24 @@ history: correcting it in place erases the reasoning that produced it,
 and which things turned out not to be tasks is the useful part of a
 record like this one.
 
-**There is one number, and it is the patch number.** A patch's series
-number, its subject prefix and its filename are the same number. The
-next patch after 0108 is 0109, in a file named `0109-...patch`. Not
-`0001-0109-...`, which is what `git format-patch` gives by default when
-it is handed a range it thinks starts a new series -- it numbers from
-the range, not from the project. Pass `--start-number`:
+**A patch has one number, and it is written down once.** The next patch
+after 0108 is 0109 and its file is `0109-<subject>.patch`. The number is
+supplied by `--start-number`, which counts from the project rather than
+from whatever range a session happens to hand over:
 
     git format-patch --start-number 109 -1 -o out/
 
-Two numbers on one patch means the filenames sort against the series
-after ten of them and nobody can say which patch `0003` is without
-opening it. The series is the history of this project, not of one
-session's range, and it does not restart because a session did.
+**So the subject line does not carry the number too.** `git format-patch`
+builds the filename from the number *and* the subject, so a commit
+subjected `0109: CLAUDE.md ...` comes out as `0109-0109-CLAUDE.md...`.
+Write the subject as the subject: `CLAUDE.md -- one number per patch`.
+
+Both halves of this were got wrong in one session -- first
+`0001-0109-...` from letting format-patch number the range, then
+`0109-0109-...` from fixing that while leaving the number in the
+subject. Two numbers on one patch means the filenames stop sorting with
+the series after ten of them, and nobody can say which patch `0003` is
+without opening it.
 
 Within a patch, change the lines that must change and no others. No
 reflowing, no drive-by renames, no reorganising code being passed
@@ -6700,6 +6705,42 @@ nothing had ever tried to call it from outside.
 
 So item 1 of "what a flash would settle" is closed and items 2-5 are
 untouched. Every remaining unknown in phase 1 needs a board.
+
+**0110, `bufferplan.h`.** Phase 3's one question that is not a
+measurement: given the PCM ring's fill level, does the writer run? A
+file never asks -- the card is faster than playback and the ring is
+always full -- and a live stream at 0.97x asks several times an evening.
+
+Two thresholds and not one. `if (buffered < 1s) stop;` flaps at the
+watermark, the writer stops and starts milliseconds apart, and that is
+heard as chopping rather than as a pause. Stop below 1 s, do not start
+again until 4 s, first sound at 4 s. **The numbers are guesses from the
+probe's 0.83x five-second windows and a flash will move them; the
+machine will not**, which is why they are constants in a tested file
+rather than numbers in `player.c`.
+
+The edges are the content. A stream that ends with eighteen seconds
+still in the ring plays them out rather than going silent on the socket
+close. A rebuffer whose source has given up drains instead of waiting
+behind a "Buffering" message that is a lie. A station too slow for this
+link gives up after 30 s rather than sitting on that message all
+evening, and 30 s is deliberately longer than netplan's whole 15 s
+backoff schedule so a source still working through its retries is never
+cut off by it -- `bufferplantest` asserts that relationship rather than
+leaving the two constants to drift.
+
+20153 checks, including 20000 random walks asserting the invariants that
+matter: never audible with an empty buffer, never a return to PLAYING
+below RESUME_MS, ENDED is terminal, and audible and finished are never
+both true.
+
+The walks found a real one. `PLAYING` with a dead source only became
+`DRAINING` once the level fell below LOW_MS, so the machine reported
+"playing" for up to eighteen seconds after the stream was over. The
+audible behaviour was identical either way -- both keep the writer
+running -- which is exactly why it would have survived listening to it;
+what was wrong was the phase, which is what the screen and the log read.
+It enters `DRAINING` the moment no more bytes are coming.
 
 **Where the series stands.** Phase 1 written, compiled, unflashed. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
