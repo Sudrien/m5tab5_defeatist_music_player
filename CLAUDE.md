@@ -6109,7 +6109,13 @@ What that run measured, beyond "it works":
   `<select>` of the scan (name, security, dBm, channel) plus a text
   field for a hidden or unheard network; a typed name wins. Unflashed:
   whether the hotspot then appears is the question it was built to
-  answer. It has not: the phone hotspot has still never appeared.
+  answer. **Answered, and not by the scan:** the phone's hotspot is set
+  to "prefer 2.4 GHz", but a Wi-Fi analyser shows it only ever on 5 GHz
+  -- the phone falls back when 2.4 GHz is crowded, and 32+ networks per
+  scan says it is. The C6 is a 2.4 GHz radio and will never hear it.
+  The longer dwell, the hidden entries and 0020's larger cap all stay:
+  they are what made "not heard" distinguishable from "not kept". A
+  phone's "preferred" band is not a setting to rely on.
 - **Eighth flash: the first join with a derived PSK.** `Suscore` is a
   WPA2-only guest network on the same router as `fivescore` (both on
   channel 10 that day). The portal took the WPA2 path, joined with the
