@@ -288,24 +288,20 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 # ---------------------------------------------------------------------------
-# LWIP TCP RECEIVE TUNING -- THE NEXT EXPERIMENT, FROM THE STREAM PROBE.
+# NOT HERE: LWIP TCP RECEIVE TUNING. 0044 raised CONFIG_LWIP_TCP_WND_DEFAULT
+# to 65534, the TCP and TCPIP receive mailboxes to 64 and turned on
+# SACK_OUT, from ESP-Hosted's iperf host defaults. On hardware, idle, the
+# stream's first burst took internal free from 86 KB to 44.5 KB at connect,
+# and then:
 #
-# With network memory in PSRAM (above) the probe reached 1.08x real time
-# idle on a 512 kbit/s stream, but 0.93x beside a card track, and IDF's
-# small default TCP window and receive mailboxes were never raised here.
-# These are the receive half of ESP-Hosted's own throughput-tuned iperf
-# host defaults (examples/wifi/iperf/mcu_host). Deliberately NOT taken from
-# that file: disabled watchdogs and raised task priorities (benchmark-only,
-# and a TCP/IP task at 23 would preempt the audio writer), the send buffer
-# (this only downloads), CONFIG_LWIP_IRAM_OPTIMIZATION (it moves lwIP code
-# into internal RAM, which is the resource the last three flashes were
-# about), and the WIFI_RMT_* settings (they configure a coprocessor built
-# with them; M5's 0.0.0 C6 firmware is not).
+#   W eh_sdio: dma_alloc(9216) failed; dropping read
+#   W eh_sdio: rx_get_buffer(8736) failed; skipping read
+#   E transport_base: esp_tls_conn_read error, errno=No more processes
 #
-# The window's pbufs land in PSRAM through TRY_ALLOCATE_WIFI_LWIP. Watch the
-# probe's internal heap lines and for "eh_sdio: mempool OOM" coming back.
-# `rm sdkconfig` before building.
-CONFIG_LWIP_TCP_WND_DEFAULT=65534
-CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
-CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
-CONFIG_LWIP_TCP_SACK_OUT=y
+# -- 0.06x, then the connection died. ESP-Hosted's SDIO receive path takes
+# a DMA buffer from internal RAM per read and holds it until lwIP has taken
+# the packet, so a window that lets the server send 64 KB ahead, and
+# mailboxes that let 64 packets wait, spend internal RAM the transport
+# needs. The iperf example can afford it; a player with a display, a
+# decoder and a card cannot. Taken back out in 0045. Do not re-add without
+# the transport's buffers somewhere other than internal RAM.

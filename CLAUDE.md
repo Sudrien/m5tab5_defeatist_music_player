@@ -6465,6 +6465,22 @@ Known gaps, in the order a flash would hit them:
   If it does not reach a steady 1.0x beside playback, M5's 0.0.0 C6
   firmware ("CP without SDIO SW_AGGR; compatible streaming mode") is the
   next suspect.
+  **0044 was worse, and 0045 takes it out.** Idle, hop 2 connected with
+  internal free down from 86 KB to 44.5 KB, and 70 ms later
+  `eh_sdio: dma_alloc(9216) failed; dropping read` and `rx_get_buffer(8736)
+  failed; skipping read`, then nothing for ten seconds, `esp_tls_conn_read
+  error`, and the probe's read failed: 618 ms of audio in 20 s, 0.06x.
+  ESP-Hosted's SDIO receive path takes a DMA buffer from internal RAM for
+  each read and holds it until lwIP takes the packet, so a 64 KB window
+  and 64-deep mailboxes let the server's opening burst pile up in exactly
+  the RAM the transport needs, and a dropped read inside a TLS stream is
+  fatal to the connection. The receive-side knobs that would absorb bursts
+  belong to the transport, not to lwIP: the esp-hosted-mcu main branch has
+  `ESP_HOSTED_HOST_SDIO_RX_Q_SIZE` and `ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS`,
+  but whether 3.0.7 has them, and whether its pool can live in PSRAM
+  (ESPHome's esp32_hosted component exposes a use_psram for it), is not
+  checked -- grep managed_components/espressif__esp_hosted for Kconfig
+  options before trying either.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
