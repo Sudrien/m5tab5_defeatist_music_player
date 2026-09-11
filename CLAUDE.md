@@ -6518,10 +6518,88 @@ Known gaps, in the order a flash would hit them:
   retention, 31 KB RTC, 18 KB and 7 KB more -- about 383 KB, of which
   about 98 KB is free once the player is up. Where the rest goes has not
   been audited.
-- **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
-  "this path is a track and its folder is the playlist", which a stream
-  has no answer for, so it needs its own kind and somewhere in player.c
-  for it to land.
+- **The stream path itself.** Nothing exists yet; the plan is below.
+
+### The stream path: plan
+
+Written after the probe, from what it measured. Each phase is its own
+patch series, flashed and read before the next starts.
+
+**The shape.** Three stages, two of which already exist:
+
+    netstream task --> compressed ring --> decode loop --> PCM ring --> writer
+    (new: HTTP, TLS,   (new, PSRAM,        (play_stream,     (exists)    (exists)
+     redirects, ICY)    small)              new, in player.c)
+
+The PCM ring is the important reuse. It is PCM_RING_BYTES, about twenty
+seconds at 44.1/16/2 and eighteen at 48 kHz, and it lives in PSRAM. A
+stream decoded as fast as the network delivers fills it ahead of the
+writer exactly as a file does, so it already is the stream's jitter
+buffer: the watermarks below are its fill level, not a second big
+buffer. The compressed ring only decouples TLS reads from decoding and
+absorbs a few seconds of burst -- 256 KB is four seconds of WNZK.
+
+**Phase 1 -- netstream, no audio.** `netstream.c`: its own task, one
+connection at a time. Open the station URL, follow redirects by hand
+(Zeno's token lives 60 s, so every reconnect starts from the station URL,
+never a stored redirect), strip ICY metadata into titles, write audio
+bytes to the compressed ring, and reconnect on error or EOF with backoff
+(1, 2, 4, 8 s, then give up and say so). States published as values: idle,
+connecting, buffering, playing, retrying, failed. Pure and host-tested:
+the ICY demultiplexer as a byte-at-a-time state machine (the probe's
+inline loop, lifted out), the redirect/reconnect decisions, and the
+backoff schedule. The probe is rewritten on top of it and still logs
+KB/s and x-real-time, so phase 1 is proven on hardware before any audio.
+
+**Phase 2 -- decode from the ring.** A decoder backend that reads a
+callback instead of a FILE*. ADTS AAC through esp_audio_simple_dec, as
+decoder.c already does for .aac files (its esp_codec path reads into
+`inbuf` with storage_io_fread today; the stream variant blocks on the
+compressed ring with a timeout). MP3 through minimp3's frame decoder, not
+mp3dec_ex, which needs seeking. The first bytes, sniffed by
+`streamsniff.h`, choose the codec; Content-Type is a hint, not an
+answer. Measure what the AAC decoder costs in internal RAM before
+anything else -- that is the resource with no slack.
+
+**Phase 3 -- play_stream() in player.c.** Beside play_file(), not inside
+it: a stream has no length, no seek, no sidecar, no gapless, no tail rules
+and no measuring pass, and folding "unless it is a stream" into each of
+those would make play_file() worse for files. What it shares: the PCM
+ring, ring switching, the writer, sample-rate reconfiguration, volume,
+ReplayGain's absence handled as unity, the sleep timer (it only writes
+the output volume), and the portal's pause. Decisions it has to make:
+  - *Watermarks.* Sound starts when the PCM ring holds 4 s; below 1 s it
+    stops the writer and shows "Buffering", and resumes at 4 s. Estimates;
+    the probe's 0.83x five-second windows are what they must ride.
+  - *Pause.* A live stream cannot be paused and resumed where it was. Pause
+    disconnects and drops what is buffered; play reconnects. Holding the
+    connection open while paused would fill both rings and then stall the
+    server anyway.
+  - *Next and previous* move through the station list.
+  - *The screen.* Station name (icy-name, else the list's name), the ICY
+    title when it is not empty (WNZK's is " - "), no seek bar, a LIVE mark,
+    and the netstream state when it is not playing. Non-Latin titles are
+    ark12's coverage question, to be seen rather than assumed.
+  - *Wi-Fi off, portal, sleep timer* all end or pause the stream through
+    the paths that exist; none of them may leave a TLS session open.
+  - *Internal RAM.* One TLS session at a time, ever: the probe goes when
+    this lands, and nothing else opens HTTPS while a stream plays.
+
+**Phase 4 -- choosing a station.** `stations.m3u` at the card's root,
+`#EXTINF:-1,Name` then a URL per station, shown as a RADIO entry in the
+chooser and played with a new BROWSER_PLAY_STREAM kind. It needs no
+keyboard and can be edited anywhere. Searching radio-browser from the
+setup portal's page on a phone comes after, reusing the portal's web
+server and saving into the same file.
+
+**Not in scope yet:** HLS (.m3u8), resolving .pls or .m3u playlists
+served *by* a station, Ogg/Opus streams, recording, and any timeshift.
+
+**Numbers the plan rests on** are all in the probe entries above: WNZK
+is 512 kbit/s ADTS AAC-LC at 48 kHz stereo behind a 302 whose token
+lives 60 s; first audio about 2.8 s after connecting; the link gives
+1.05x idle and 0.97x beside card playback; one TLS session costs 13 KB
+of internal RAM with mbedTLS in PSRAM; lwIP must keep its default window.
 
 ### Two things that cost a session each, so that they do not again
 
