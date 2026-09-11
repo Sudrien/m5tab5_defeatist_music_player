@@ -27,7 +27,13 @@ extern "C" {
 #endif
 
 #define STREAMPROBE_URL      "https://stream.zeno.fm/erunhwj5lekvv"
-#define STREAMPROBE_SECONDS  (30)
+#define STREAMPROBE_SECONDS  (60)
+/*
+ * Seconds after the first address before the probe starts. Long enough
+ * to start a track from the card by hand, so the second run measures the
+ * download beside playback, which is what the stream path will have to do.
+ */
+#define STREAMPROBE_DELAY_S  (45)
 
 /* Called when the station has an address. Starts the probe the first
  * time only; cheap and safe from the event task. */

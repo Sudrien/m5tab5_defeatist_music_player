@@ -6381,6 +6381,14 @@ Known gaps, in the order a flash would hit them:
   - *ESP-Hosted:* `eh_sdio: mempool OOM start (RX)` twice at 50 KB/s,
     each recovering within a millisecond. Nothing was lost that the log
     shows, but it is the host's RX pool running dry at a modest rate.
+  **0039 changes the probe** to answer what that left open: it starts 45 s
+  after the address (time to start a track from the card, so the
+  download is measured beside playback) and reads for 60 s; it logs the
+  redirect's Location whole and decodes its token (`zt=` is a JWT) to
+  print `exp` and `iat` against the clock; and it counts ADTS frames
+  (`adts_count_bytes()`, tested) to log audio milliseconds received per
+  wall milliseconds every 5 s, plus profile, core rate, channels, frame
+  sizes, bytes lost hunting for a sync, and the real bitrate.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c

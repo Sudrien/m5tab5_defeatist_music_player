@@ -113,6 +113,61 @@ int main(void)
     const char m7[] = "StreamTitle='unterminated";
     CHECK(icy_stream_title(m7, sizeof m7 - 1, t, sizeof t) && strcmp(t, "unterminated") == 0, "runs to the end: '%s'", t);
 
+    printf("ADTS counting: frames, samples, rate, in pieces of any size\n");
+    {
+        size_t len = adts_frames(b, 0, 10, 300);          /* 44.1 kHz (index 4), LC, stereo */
+        adts_count_t c; memset(&c, 0, sizeof c);
+        adts_count_bytes(&c, b, len);
+        CHECK(c.frames == 10 && c.samples == 10240 && c.lost == 0, "whole: %u frames, %llu samples, %llu lost",
+              c.frames, (unsigned long long)c.samples, (unsigned long long)c.lost);
+        CHECK(c.rate == 44100 && c.channels == 2 && c.profile == 2, "rate %u ch %u profile %u", c.rate, c.channels, c.profile);
+        CHECK(adts_ms(&c) == 232, "ms %llu", (unsigned long long)adts_ms(&c));
+        CHECK(c.min_len == 300 && c.max_len == 300, "lengths");
+
+        adts_count_t d; memset(&d, 0, sizeof d);
+        for (size_t i = 0; i < len; i++) adts_count_bytes(&d, b + i, 1);
+        CHECK(d.frames == 10 && d.samples == c.samples, "byte at a time: %u", d.frames);
+
+        adts_count_t e; memset(&e, 0, sizeof e);
+        uint8_t j[4000];
+        memset(j, 0x12, 37);
+        memcpy(j + 37, b, len);
+        adts_count_bytes(&e, j, 37 + len);
+        CHECK(e.frames == 10 && e.lost == 37, "joined mid-stream: %u frames, %llu lost", e.frames, (unsigned long long)e.lost);
+
+        /* A frame with a bad rate index is skipped and counted as lost. */
+        adts_count_t f; memset(&f, 0, sizeof f);
+        uint8_t k[4000];
+        memcpy(k, b, len);
+        k[300 + 2] = (uint8_t)((k[300 + 2] & ~0x3C) | (15 << 2));
+        adts_count_bytes(&f, k, len);
+        CHECK(f.frames < 10 && f.lost >= 7, "bad header: %u frames, %llu lost", f.frames, (unsigned long long)f.lost);
+
+        adts_count_t g; memset(&g, 0, sizeof g);
+        adts_count_bytes(&g, NULL, 10);
+        CHECK(g.frames == 0 && adts_ms(&g) == 0, "null is nothing");
+        CHECK(adts_ms(NULL) == 0, "null counter");
+    }
+
+    printf("JWT payload and its exp\n");
+    {
+        /* {"alg":"HS256"} . {"stream":"x","exp":1789097000} . sig */
+        const char tok[] = "eyJhbGciOiJIUzI1NiJ9.eyJzdHJlYW0iOiJ4IiwiZXhwIjoxNzg5MDk3MDAwfQ.c2ln";
+        char pl[128];
+        CHECK(jwt_payload(tok, sizeof tok - 1, pl, sizeof pl) &&
+              strcmp(pl, "{\"stream\":\"x\",\"exp\":1789097000}") == 0, "payload '%s'", pl);
+        int64_t exp = 0;
+        CHECK(json_int(pl, "exp", &exp) && exp == 1789097000LL, "exp %lld", (long long)exp);
+        CHECK(!json_int(pl, "iat", &exp), "absent field");
+        CHECK(!json_int("{\"expiry\":5}", "exp", &exp), "prefix of another key");
+        CHECK(json_int("{\"exp\" : -3}", "exp", &exp) && exp == -3, "spaces and sign");
+        CHECK(!jwt_payload("nodots", 6, pl, sizeof pl), "not a JWT");
+        CHECK(!jwt_payload("a..b", 4, pl, sizeof pl), "empty payload");
+        CHECK(!jwt_payload("a.b$c.d", 7, pl, sizeof pl), "bad character");
+        char tiny[4];
+        CHECK(!jwt_payload(tok, sizeof tok - 1, tiny, sizeof tiny) && strlen(tiny) < sizeof tiny, "does not overrun");
+    }
+
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
