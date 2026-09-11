@@ -6481,6 +6481,20 @@ Known gaps, in the order a flash would hit them:
   (ESPHome's esp32_hosted component exposes a use_psram for it), is not
   checked -- grep managed_components/espressif__esp_hosted for Kconfig
   options before trying either.
+  **Checked:** 3.0.7 has `ESP_HOSTED_HOST_SDIO_RX_Q_SIZE` (20),
+  `ESP_HOSTED_HOST_SDIO_RX_STAGING_SLOTS` (2, range 2-8) and
+  `ESP_HOSTED_DFLT_TASK_FROM_SPIRAM`, and no PSRAM placement for the SDIO
+  pool. The first two buy burst headroom with more DMA RAM -- internal
+  RAM here, the thing 0044 ran out of -- so they are not the next step.
+  **0045 flashed, idle:** 63.3 s of audio in 60.1 s, 1.05x; windows 0.93,
+  1.01, 0.96, 1.01, 0.91, 1.10, 0.87, 1.19, 1.22, 0.97, 1.31x; internal
+  minimum 69 KB; no OOMs. The 0040-0043 behaviour is back. It also
+  corrects a reading two entries up: the windows above 1.0x are not only
+  the server's opening backlog. Here they came at 41-56 s, after dips --
+  the link falls behind for a few seconds and catches up, so the server
+  is pacing to real time and the average holds. What a stream player
+  needs from that is a buffer of a few seconds that rides the dips, not
+  a faster link. Beside playback, on this build, it was 0.93x.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
