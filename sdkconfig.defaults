@@ -286,3 +286,26 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=3
 # TRY_ALLOCATE_WIFI_LWIP unset, and so measured nothing.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+
+# ---------------------------------------------------------------------------
+# LWIP TCP RECEIVE TUNING -- THE NEXT EXPERIMENT, FROM THE STREAM PROBE.
+#
+# With network memory in PSRAM (above) the probe reached 1.08x real time
+# idle on a 512 kbit/s stream, but 0.93x beside a card track, and IDF's
+# small default TCP window and receive mailboxes were never raised here.
+# These are the receive half of ESP-Hosted's own throughput-tuned iperf
+# host defaults (examples/wifi/iperf/mcu_host). Deliberately NOT taken from
+# that file: disabled watchdogs and raised task priorities (benchmark-only,
+# and a TCP/IP task at 23 would preempt the audio writer), the send buffer
+# (this only downloads), CONFIG_LWIP_IRAM_OPTIMIZATION (it moves lwIP code
+# into internal RAM, which is the resource the last three flashes were
+# about), and the WIFI_RMT_* settings (they configure a coprocessor built
+# with them; M5's 0.0.0 C6 firmware is not).
+#
+# The window's pbufs land in PSRAM through TRY_ALLOCATE_WIFI_LWIP. Watch the
+# probe's internal heap lines and for "eh_sdio: mempool OOM" coming back.
+# `rm sdkconfig` before building.
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCP_SACK_OUT=y

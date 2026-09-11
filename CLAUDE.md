@@ -6445,6 +6445,26 @@ Known gaps, in the order a flash would hit them:
     pressure showing, so the next suspect is lwIP's TCP window
     (IDF's defaults are small and nothing here raises them), then the
     SDIO link itself.
+  **Idle on the same build:** 64.8 s of audio in 60.1 s, 1.08x; windows
+  0.94, 1.15, 1.30, 1.13, 1.11, 1.10, 1.23, 1.14, 0.99, 0.90, 0.82x at up
+  to 81 KB/s; internal minimum 67.8 KB; no OOMs. Windows above 1.0x are
+  the server's backlog for a new listener arriving faster than live, so
+  the link can carry more than 64 KB/s. Once it was drained the rate
+  fell to 0.82-0.99x. So playback costs about 15%, and neither case holds
+  1.0x steadily after the backlog.
+  **External measurements, for scale:** a P4 + C6 over ESP-Hosted SDIO
+  test measured about 36 Mbps UDP with the C6's single core as the
+  limit (github.com/r4d10n/esp32p4-c6-wifi-test, slave firmware
+  v2.11.7); an esp-hosted-mcu issue measured 7.5-13 Mbps TCP on the
+  same pairing (issue #121). This stream needs 0.51 Mbps. The shortfall
+  is configuration or the C6 firmware, not the hardware.
+  **0044** takes the receive half of ESP-Hosted's throughput-tuned iperf
+  host defaults: `LWIP_TCP_WND_DEFAULT=65534`, TCP and TCPIP receive
+  mailboxes 64, `LWIP_TCP_SACK_OUT`. Not the watchdog, priority or
+  IRAM-optimisation settings from the same file; see sdkconfig.defaults.
+  If it does not reach a steady 1.0x beside playback, M5's 0.0.0 C6
+  firmware ("CP without SDIO SW_AGGR; compatible streaming mode") is the
+  next suspect.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
