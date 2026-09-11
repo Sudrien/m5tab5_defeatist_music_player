@@ -1,0 +1,46 @@
+/*
+ * sleeppage.h -- the page behind the moon on the transport bar.
+ *
+ * The moon used to turn the screen off in one tap. It now opens this
+ * page, whose first option is exactly that, because the sleep timer
+ * needs somewhere to live and the moon is where somebody going to sleep
+ * already reaches. A tap more for the screen, and a place for the timer
+ * that does not add an icon to a bar that has run out of room.
+ *
+ * Shaped like panel.c, on purpose and for panel.c's reason: one writer
+ * to the framebuffer, so the same open/draw/touch triple, driven from
+ * ui_task, with the same footer and the same edge detection. The palette
+ * is copied rather than shared, as panel.c copies browser.c's.
+ *
+ * The page does not act. It reports what was chosen and player.c does
+ * it, so the screen state keeps exactly one owner.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#pragma once
+
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+    SLEEPPAGE_NONE = 0,     /* nothing for the caller to do */
+    SLEEPPAGE_CLOSE,        /* CLOSE pressed */
+    SLEEPPAGE_SCREEN_OFF,   /* "Screen off" pressed: close, then turn it off */
+} sleeppage_result_t;
+
+void sleeppage_open(void);
+void sleeppage_close(void);
+bool sleeppage_is_open(void);
+
+/* Repaint if a touch dirtied it. Cheap every frame. */
+void sleeppage_draw(void);
+
+/* A press, same edge detection as panel_touch(). */
+sleeppage_result_t sleeppage_touch(bool down, int x, int y);
+
+#ifdef __cplusplus
+}
+#endif

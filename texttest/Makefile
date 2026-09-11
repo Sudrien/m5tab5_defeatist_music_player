@@ -80,7 +80,12 @@ OLD_STANDALONE := committest exittest kepttest orderingtest pooltest \
 CACHE_BIN := cachetest
 OLD_BINS  := $(CACHE_BIN) $(OLD_STANDALONE)
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old
+# Screens that cannot run on a host but can be compiled against the real
+# gfx.h and the fake headers here, so a -Werror at -O2 is caught before
+# idf.py -- the error 0018 shipped was exactly that kind.
+UI_CHECK := ../main/sleeppage.c
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -150,4 +155,10 @@ clean:
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old clean
+check-ui:
+	@for f in $(UI_CHECK); do \
+		echo "$(CC) -c $$f"; \
+		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
+	done
+
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui clean

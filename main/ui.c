@@ -193,7 +193,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_PLAY_PAUSE:  return "play/pause";
     case UI_ACTION_CHOOSE_FILE: return "folder";
     case UI_ACTION_SETTINGS:    return "gear (settings)";
-    case UI_ACTION_SCREEN_OFF:  return "moon (screen off)";
+    case UI_ACTION_SCREEN_OFF:  return "moon (sleep page)";
     case UI_ACTION_SCREEN_ON:   return "wake";
     case UI_ACTION_PREV:        return "prev";
     case UI_ACTION_PREV_AGAIN:  return "prev x2";

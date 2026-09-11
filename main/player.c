@@ -84,6 +84,7 @@
 #include "usbhost.h"
 #include "wifi.h"
 #include "portal.h"
+#include "sleeppage.h"
 #include "wifistore.h"
 #include "waveform.h"
 
@@ -2519,6 +2520,7 @@ static volatile bool     s_open_chooser;
  * iteration that has already sampled a touch, and the screen change has
  * to happen at the top of the next one. */
 static volatile bool     s_open_panel;
+static volatile bool     s_open_sleep;   /* the moon: see sleeppage.h */
 
 /*
  * The gain in effect for the track playing now, and whether there is
@@ -2787,7 +2789,7 @@ static void wave_clear(void)
  */
 static bool screen_covered(void)
 {
-    return browser_is_open() || panel_is_open();
+    return browser_is_open() || panel_is_open() || sleeppage_is_open();
 }
 
 /*
@@ -4806,6 +4808,41 @@ static void ui_task(void *arg)
             continue;
         }
 
+        /*
+         * The sleep page, on the panel's terms exactly: opened from the
+         * transport bar, so never at the same time as the panel or the
+         * chooser, and closed with the same swallow and repaint.
+         *
+         * SCREEN_OFF closes the page first and swallows the press, so
+         * the finger that chose "Screen off" cannot be the touch that
+         * wakes it -- the same trap ui.c's screen-off branch guards.
+         */
+        if (s_open_sleep) {
+            s_open_sleep = false;
+            touch_swallow();
+            sleeppage_open();
+            sleeppage_draw();
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        if (sleeppage_is_open()) {
+            const sleeppage_result_t r = sleeppage_touch(bdown, bx, by);
+            if (r != SLEEPPAGE_NONE) {
+                sleeppage_close();
+                touch_swallow();
+                s_repaint_art = true;
+                if (r == SLEEPPAGE_SCREEN_OFF) {
+                    s_screen_off = true;
+                    backlight_set(0);
+                }
+            } else {
+                sleeppage_draw();
+            }
+            vTaskDelay(pdMS_TO_TICKS(bdown ? 20 : 100));
+            continue;
+        }
+
         if (panel_is_open()) {
             if (panel_touch(bdown, bx, by)) {
                 panel_close();
@@ -5137,8 +5174,9 @@ static void ui_task(void *arg)
             s_open_panel = true;
             break;
         case UI_ACTION_SCREEN_OFF:
-            s_screen_off = true;
-            backlight_set(0);
+            /* The moon opens the sleep page; "Screen off" is its first
+             * option, handled where the page is touched above. */
+            s_open_sleep = true;
             break;
         case UI_ACTION_SCREEN_ON:
             s_screen_off = false;

@@ -6229,11 +6229,14 @@ Known gaps, in the order a flash would hit them:
   nothing plays -- which is the argument NTP was added on. If they are
   plain HTTP, NTP drops to "nice for file timestamps". Worth checking
   before treating it as a dependency.
-- **The sleep timer.** Relative ("for 45 minutes") needs no clock and
-  should ship first. "Until 07:00" needs the wall clock and has the
-  DST/step problems written up in settings.h -- resolve the deadline to
-  a monotonic reading once, at set time, or an NTP step silently changes
-  its length.
+- **The sleep timer.** It has a home now (0024): the moon on the
+  transport bar opens a Sleep page (`sleeppage.c`), and its first option
+  is the old one-tap screen off. The timer's options go below it.
+  Relative ("for 45 minutes") needs no clock and should ship first.
+  "Until 07:00" needs the wall clock; resolve the deadline to a
+  monotonic reading once, at set time, or an NTP step silently changes
+  its length. (This entry used to point at a DST write-up in
+  settings.h. There is none.)
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
