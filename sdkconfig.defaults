@@ -266,3 +266,20 @@ CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
 # succeeds with one source instead of three. Keep in step with
 # NTP_SERVER_COUNT in wifi.c.
 CONFIG_LWIP_SNTP_MAX_SERVERS=3
+
+# ---------------------------------------------------------------------------
+# NETWORK MEMORY OUT OF INTERNAL RAM -- AN EXPERIMENT, FROM THE STREAM PROBE.
+#
+# Internal RAM is about 100 KB free once the player is up. One TLS session
+# took 45 KB of it, and with a 512 kbit/s AAC stream running the ESP-Hosted
+# host logged "mempool OOM start (RX)" every second or so, twice stalled for
+# about ten seconds with TX and RX both starved, and delivered 0.15-0.73x
+# real time. Internal free was 46 KB with the session up and its minimum
+# fell to 38 KB. The hypothesis is that TLS and lwIP buffers are crowding
+# out the transport's own; these two move the first two to PSRAM, and the
+# probe logs internal heap every five seconds to say whether it helped.
+#
+# sdkconfig.defaults does not override an existing sdkconfig: delete it or
+# run `idf.py fullclean` for these to take effect.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

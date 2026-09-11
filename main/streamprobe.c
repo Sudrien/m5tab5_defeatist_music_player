@@ -285,6 +285,12 @@ static void probe_task(void *arg)
                          (unsigned long long)(got / (uint64_t)wall),
                          (unsigned long long)((got * 100 / (uint64_t)wall) % 100),
                          (long long)(total / 1024));
+                /* Beside every window, so an "eh_sdio: mempool OOM" can be
+                 * read against what internal RAM was doing at the time. */
+                ESP_LOGI(TAG, "   internal free %u, min %u, largest %u",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
                 last_audio_ms = ams;
                 window = 0;
                 last = t;

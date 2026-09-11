@@ -6389,6 +6389,27 @@ Known gaps, in the order a flash would hit them:
   (`adts_count_bytes()`, tested) to log audio milliseconds received per
   wall milliseconds every 5 s, plus profile, core rate, channels, frame
   sizes, bytes lost hunting for a sync, and the real bitrate.
+  **0039's run answered all three, and found the real problem:**
+  - *The stream really is 512 kbit/s.* AAC-LC, 48 kHz stereo, frames
+    1365-1366 bytes, 0 bytes lost. For an AM talk station, absurd; but
+    real, and 64 KB/s is what it needs.
+  - *The link could not deliver it.* 0.72x, 0.73x, 0.15x, 0.50x, 0.68x,
+    0.63x, 0.66x, 0.68x, 0.28x of real time -- 30 s of audio in 64 s.
+    The first probe's 433 kbit/s was also only 0.85x.
+  - *ESP-Hosted's host ran out of buffers constantly:* `mempool OOM
+    start (RX)` roughly every second, and twice `(TX)` then `(RX)`
+    together with nothing for about ten seconds (79514-88525,
+    120475-129998). Internal free was 46 KB with the session up; the
+    minimum reached 38 KB.
+  - *The token:* `"iat":1789097220,"exp":1789097280,"rttl":5` -- the
+    redirected URL is good for 60 seconds. A reconnect inside that could
+    reuse it and skip 0.8 s; after it, Zeno again.
+  - Whether a card track was playing during this run is not in the log.
+  **0040** puts mbedTLS and lwIP/Wi-Fi buffers in PSRAM
+  (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`)
+  on the hypothesis that they crowd the transport's buffers out of
+  internal RAM, and the probe now logs internal heap every window. Needs
+  a deleted sdkconfig or fullclean to take effect.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
