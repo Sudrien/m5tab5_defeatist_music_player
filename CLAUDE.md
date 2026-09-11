@@ -6124,12 +6124,28 @@ What that run measured, beyond "it works":
   result. Two saved networks now, both in range; the next boot tests
   the stored PSK and the ranking. Seventh flash: both scans came back exactly 32 networks with
   16-17 hidden -- the old cap, full, cutting the weakest -- and still no
-  hotspot. 0020 raises the cap to 64 and warns when a scan is cut. The
+  hotspot. 0020 raises the cap to 64 and warns when a scan is cut.
+  **With 0020 flashed the scan still came back exactly 32, and no
+  warning** -- so the driver reported 32 heard, and the limit is below
+  this code: the C6's scan list or the ESP-Hosted RPC, not checked. The
+  weakest networks in a crowded room still do not appear. The
   same flash had the first boot-time-style join that worked on the
   first attempt (after Wi-Fi off/on, no reason 2, id=43 present), so a
   first attempt does not always expire. 0014's pause was
-  not exercised: nothing was playing when START was pressed, and play
-  was not pressed during setup.
+  not exercised on that flash; on v0.3.0-76 it was: `pausing playback
+  for network setup`, then the amplifier went idle. The refused play
+  press is still unseen.
+- **Setup started during the boot join (v0.3.0-76, fixed in 0033).**
+  START four seconds into the worker's join of fivescore gave `portal
+  up ... (0 networks listed)`: the driver refuses a scan while the
+  station is connecting, and the failure was silent. The worker's join
+  also carried on under the running portal and retried into it.
+  `wifi_scan_list()` now takes the join lock, so the portal's scan waits
+  for the attempt to end, and a refused scan is logged. Reading that
+  code turned up a worse one: `wifi_sta_ssid()`, called by the NET tab
+  on ui_task, took the same lock, which a join holds for up to thirty
+  seconds -- a join begun while connected could freeze the screen. The
+  SSID has its own short lock now.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on

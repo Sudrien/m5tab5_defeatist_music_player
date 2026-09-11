@@ -108,7 +108,16 @@ static volatile bool     s_connected;
 static volatile bool     s_ap_on;
 static volatile uint8_t  s_ap_clients;
 static volatile uint16_t s_join_reason;
-static char              s_sta_ssid[33];     /* under s_join_lock */
+/*
+ * The joined SSID, under its own short lock. It used to share s_join_lock,
+ * which wifi_join() holds for a whole attempt -- up to thirty seconds with
+ * the reason-2 retry -- and wifi_sta_ssid() is called by the NET tab on
+ * ui_task. A join that started while the station was connected (setup run
+ * for the network already joined does exactly that) could freeze the
+ * screen for the length of the join.
+ */
+static char              s_sta_ssid[33];     /* under s_ssid_lock */
+static SemaphoreHandle_t  s_ssid_lock;
 static EventGroupHandle_t s_join_bits;
 static SemaphoreHandle_t  s_join_lock;
 static esp_event_handler_instance_t s_wifi_evt, s_ip_evt;
@@ -404,7 +413,9 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
         }
         esp_wifi_disconnect();                 /* whatever it was doing */
         s_connected = false;
+        xSemaphoreTake(s_ssid_lock, portMAX_DELAY);
         s_sta_ssid[0] = '\0';
+        xSemaphoreGive(s_ssid_lock);
 
         err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
         /* The disconnect above can deliver its event late and would read
@@ -426,7 +437,9 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
     }
 
     if (bits & JOIN_GOT_IP) {
+        xSemaphoreTake(s_ssid_lock, portMAX_DELAY);
         snprintf(s_sta_ssid, sizeof(s_sta_ssid), "%.32s", ssid);
+        xSemaphoreGive(s_ssid_lock);
         err = ESP_OK;
         ESP_LOGI(TAG, "joined %.32s", ssid);
     } else {
@@ -454,10 +467,10 @@ bool wifi_sta_ssid(char *out, size_t out_size)
 {
     if (!out || !out_size) return false;
     out[0] = '\0';
-    if (!s_connected || !s_join_lock) return false;
-    xSemaphoreTake(s_join_lock, portMAX_DELAY);
+    if (!s_connected || !s_ssid_lock) return false;
+    xSemaphoreTake(s_ssid_lock, portMAX_DELAY);
     snprintf(out, out_size, "%s", s_sta_ssid);
-    xSemaphoreGive(s_join_lock);
+    xSemaphoreGive(s_ssid_lock);
     return out[0] != '\0';
 }
 
@@ -532,15 +545,39 @@ esp_netif_t *wifi_ap_netif(void) { return s_ap_on ? s_ap_netif : NULL; }
 #define SCAN_ACTIVE_MIN_MS  (100)
 #define SCAN_ACTIVE_MAX_MS  (300)
 
+static int scan_list_locked(wifi_seen_t *out, int max);
+
 int wifi_scan_list(wifi_seen_t *out, int max)
 {
     if (!s_up || !out || max <= 0) return -1;
+
+    /*
+     * Not during a join. The driver refuses a scan while the station is
+     * connecting, and on hardware setup started four seconds into the
+     * worker's boot join got "portal up ... (0 networks listed)": a
+     * silently failed scan and an empty page. Taking the join lock makes
+     * the scan wait for the attempt to finish instead. That can be most
+     * of thirty seconds; the panel says "Starting..." meanwhile.
+     */
+    if (!s_join_lock) return -1;
+    xSemaphoreTake(s_join_lock, portMAX_DELAY);
+    const int got = scan_list_locked(out, max);
+    xSemaphoreGive(s_join_lock);
+    return got;
+}
+
+static int scan_list_locked(wifi_seen_t *out, int max)
+{
     wifi_scan_config_t sc = { 0 };
     sc.show_hidden = true;
     sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
     sc.scan_time.active.min = SCAN_ACTIVE_MIN_MS;
     sc.scan_time.active.max = SCAN_ACTIVE_MAX_MS;
-    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return -1;
+    const esp_err_t serr = esp_wifi_scan_start(&sc, true);
+    if (serr != ESP_OK) {
+        ESP_LOGW(TAG, "scan refused: %s", esp_err_to_name(serr));
+        return -1;
+    }
 
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
@@ -669,6 +706,7 @@ void wifi_init(i2c_master_dev_handle_t exp2)
     s_lock = xSemaphoreCreateMutex();
     s_wake = xSemaphoreCreateBinary();
     s_join_lock = xSemaphoreCreateMutex();
+    s_ssid_lock = xSemaphoreCreateMutex();
     s_join_bits = xEventGroupCreate();
     if (!s_lock || !s_wake) {
         ESP_LOGE(TAG, "no lock or semaphore; the switch will only take "
