@@ -748,6 +748,30 @@ static esp_err_t backlight_set(int percent)
     return ledc_update_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CHANNEL);
 }
 
+/*
+ * Take the backlight from `from` percent to 0 over about `ms`, blocking.
+ *
+ * For the Sleep page's Screen switch: without a fade the switch's OFF is
+ * never seen, because the backlight goes with it in the same frame.
+ * Squared rather than linear, because a PWM duty that falls in straight
+ * steps looks like it holds and then drops at the end. ui_task waits
+ * through it -- under a second, during which nobody is about to tap a
+ * screen they have just switched off -- and the decoder does not.
+ */
+#define SCREEN_FADE_MS  (800)
+
+static void backlight_fade_out(int from, int ms)
+{
+    const int step_ms = 20;
+    const int steps = ms / step_ms > 0 ? ms / step_ms : 1;
+    for (int i = 1; i <= steps; i++) {
+        const int left = steps - i;               /* steps..0 */
+        backlight_set((from * left * left) / (steps * steps));
+        vTaskDelay(pdMS_TO_TICKS(step_ms));
+    }
+    backlight_set(0);
+}
+
 static esp_err_t panel_init(void)
 {
     esp_ldo_channel_handle_t phy_ldo = NULL;
@@ -4813,9 +4837,11 @@ static void ui_task(void *arg)
          * transport bar, so never at the same time as the panel or the
          * chooser, and closed with the same swallow and repaint.
          *
-         * SCREEN_OFF closes the page first and swallows the press, so
-         * the finger that chose "Screen off" cannot be the touch that
-         * wakes it -- the same trap ui.c's screen-off branch guards.
+         * SCREEN_OFF: the page has already flipped its switch to OFF;
+         * it is drawn, the backlight fades so that OFF is actually seen,
+         * and only then is the page closed. The press is swallowed so the
+         * finger on the switch cannot be the touch that wakes it -- the
+         * same trap ui.c's screen-off branch guards.
          */
         if (s_open_sleep) {
             s_open_sleep = false;
@@ -4829,13 +4855,14 @@ static void ui_task(void *arg)
         if (sleeppage_is_open()) {
             const sleeppage_result_t r = sleeppage_touch(bdown, bx, by);
             if (r != SLEEPPAGE_NONE) {
+                if (r == SLEEPPAGE_SCREEN_OFF) {
+                    sleeppage_draw();
+                    backlight_fade_out(LCD_BRIGHTNESS_PERCENT, SCREEN_FADE_MS);
+                    s_screen_off = true;
+                }
                 sleeppage_close();
                 touch_swallow();
                 s_repaint_art = true;
-                if (r == SLEEPPAGE_SCREEN_OFF) {
-                    s_screen_off = true;
-                    backlight_set(0);
-                }
             } else {
                 sleeppage_draw();
             }

@@ -16,6 +16,7 @@ static const char *TAG = "tab5_sleep";
 #define C_TEXT      RGB(0xEE, 0xEE, 0xEE)
 #define C_DIM       RGB(0x77, 0x77, 0x77)
 #define C_BTN       RGB(0x26, 0x26, 0x26)
+#define C_ON        RGB(0x3C, 0xB3, 0x71)
 #define C_RULE      RGB(0x33, 0x33, 0x33)
 
 #define HEAD_H      (96)            /* where panel.c has its tab strip */
@@ -31,6 +32,14 @@ static const char *TAG = "tab5_sleep";
 static bool s_open;
 static bool s_dirty;
 static bool s_was_down;
+/*
+ * What the Screen switch shows. Always ON when the page opens -- a page
+ * you can see is a screen that is on -- and OFF from the tap until the
+ * caller has faded the backlight out and closed the page. Nothing else
+ * can switch it back, so there is no OFF-to-ON path here: waking is a
+ * touch on a dark screen, which ui.c owns.
+ */
+static bool s_screen_on = true;
 
 bool sleeppage_is_open(void) { return s_open; }
 
@@ -39,6 +48,7 @@ void sleeppage_open(void)
     s_open = true;
     s_dirty = true;
     s_was_down = false;
+    s_screen_on = true;
 }
 
 void sleeppage_close(void)
@@ -51,7 +61,7 @@ void sleeppage_close(void)
  * it, which is why this is a list of boxes counted from LIST_TOP and not
  * one box.
  */
-static void screen_off_box(int *x, int *y, int *w, int *h)
+static void screen_box(int *x, int *y, int *w, int *h)
 {
     *x = 0; *y = LIST_TOP; *w = gfx_w(); *h = OPTION_H;
 }
@@ -69,13 +79,23 @@ void sleeppage_draw(void)
     gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
 
     int x, y, bw, bh;
-    screen_off_box(&x, &y, &bw, &bh);
+    screen_box(&x, &y, &bw, &bh);
     gfx_fill_rect(x, y, bw, bh, C_ROW);
-    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Screen off",
-                  NAME_SCALE, w - 48, C_TEXT);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Screen",
+                  NAME_SCALE, 400, C_TEXT);
+    {
+        /* panel.c's pill, same size and place. */
+        const int pw = 132, ph = 56;
+        const int px = w - 24 - pw, py = y + (bh - ph) / 2;
+        const char *text = s_screen_on ? "ON" : "OFF";
+        gfx_fill_rect(px, py, pw, ph, s_screen_on ? C_ON : C_BTN);
+        const int tw = gfx_text_w(text, NAME_SCALE);
+        gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(NAME_SCALE)) / 2,
+                      text, NAME_SCALE, pw - 8, s_screen_on ? C_BG : C_DIM);
+    }
     {
         static const char *const note[] = {
-            "Turns the backlight off. Playback carries on.",
+            "Off fades the backlight out. Playback carries on.",
             "Touch anywhere to wake it.",
         };
         int ny = y + bh + NOTE_GAP;
@@ -113,9 +133,11 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
     int bx, by, bw, bh;
     /* Whole row, not a pill, for panel.c's reason: a row is the target a
      * thumb actually hits. */
-    screen_off_box(&bx, &by, &bw, &bh);
-    if (y >= by && y < by + bh) {
-        ESP_LOGI(TAG, "button: screen off");
+    screen_box(&bx, &by, &bw, &bh);
+    if (y >= by && y < by + bh && s_screen_on) {
+        ESP_LOGI(TAG, "screen off");
+        s_screen_on = false;
+        s_dirty = true;
         return SLEEPPAGE_SCREEN_OFF;
     }
     return SLEEPPAGE_NONE;

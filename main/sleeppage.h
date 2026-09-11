@@ -2,7 +2,8 @@
  * sleeppage.h -- the page behind the moon on the transport bar.
  *
  * The moon used to turn the screen off in one tap. It now opens this
- * page, whose first option is exactly that, because the sleep timer
+ * page, whose first row is a switch, "Screen [ON]", in the settings
+ * panel's shape. Switching it off is exactly what the moon used to do, because the sleep timer
  * needs somewhere to live and the moon is where somebody going to sleep
  * already reaches. A tap more for the screen, and a place for the timer
  * that does not add an icon to a bar that has run out of room.
@@ -28,7 +29,10 @@ extern "C" {
 typedef enum {
     SLEEPPAGE_NONE = 0,     /* nothing for the caller to do */
     SLEEPPAGE_CLOSE,        /* CLOSE pressed */
-    SLEEPPAGE_SCREEN_OFF,   /* "Screen off" pressed: close, then turn it off */
+    SLEEPPAGE_SCREEN_OFF,   /* the Screen switch went to OFF. The page has
+                               already drawn OFF; the caller fades the
+                               backlight, so the switch is seen to move,
+                               then closes the page */
 } sleeppage_result_t;
 
 void sleeppage_open(void);

@@ -6230,8 +6230,11 @@ Known gaps, in the order a flash would hit them:
   plain HTTP, NTP drops to "nice for file timestamps". Worth checking
   before treating it as a dependency.
 - **The sleep timer.** It has a home now (0024): the moon on the
-  transport bar opens a Sleep page (`sleeppage.c`), and its first option
-  is the old one-tap screen off. The timer's options go below it.
+  transport bar opens a Sleep page (`sleeppage.c`), and its first row is
+  a settings-style switch, "Screen [ON]". Switching it off fades the
+  backlight out over 800 ms (0025), squared, so the OFF is seen before
+  the page closes; waking is a touch, instant. The timer's options go
+  below it.
   Relative ("for 45 minutes") needs no clock and should ship first.
   "Until 07:00" needs the wall clock; resolve the deadline to a
   monotonic reading once, at set time, or an NTP step silently changes
