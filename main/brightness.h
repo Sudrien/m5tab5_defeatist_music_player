@@ -66,6 +66,45 @@ static inline brightness_t brightness_map(int level)
     return b;
 }
 
+/*
+ * A fade to black, as backlight counts and a filter, at time t in 0..1.
+ *
+ * The screen-off fade used to step the backlight in whole percent. At
+ * the default that stair-stepped near the bottom, and at any setting
+ * whose duty was already the 1% floor it had nowhere to go: 1% to 0% is
+ * the cliff, so the screen just went black. This fades light, not duty:
+ * light(t) = light0 * (1 - t)^2, where light0 is duty0 times filter0.
+ * Above the floor that is all backlight, in counts rather than percent.
+ * At the floor the backlight holds and the filter takes the light the
+ * rest of the way down -- the same split brightness_map() makes -- so the
+ * last part of the fade is as smooth as the first. t >= 1 is off.
+ */
+typedef struct {
+    uint32_t duty;      /* backlight counts; 0 only at the end */
+    int      filter;    /* 0..256 -- a fade may go under FILTER_MIN */
+} brightness_raw_t;
+
+static inline brightness_raw_t brightness_fade_at(uint32_t duty0, int filter0,
+                                                  uint32_t floor_counts, double t)
+{
+    brightness_raw_t r = { 0, 0 };
+    if (t >= 1.0) return r;
+    if (t < 0.0) t = 0.0;
+    const double k = (1.0 - t) * (1.0 - t);
+    const double light = (double)duty0 * (double)filter0 / 256.0 * k;
+    if (light >= (double)floor_counts) {
+        r.duty = (uint32_t)(light + 0.5);
+        r.filter = BRIGHTNESS_FILTER_FULL;
+        return r;
+    }
+    r.duty = floor_counts;
+    int f = floor_counts ? (int)(256.0 * light / (double)floor_counts + 0.5) : 0;
+    if (f > BRIGHTNESS_FILTER_FULL) f = BRIGHTNESS_FILTER_FULL;
+    if (f < 0) f = 0;
+    r.filter = f;
+    return r;
+}
+
 /* One RGB565 pixel scaled by filter/256, channel by channel. */
 static inline uint16_t brightness_dim565(uint16_t c, int filter)
 {

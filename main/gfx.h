@@ -64,7 +64,9 @@ void gfx_blit(int y0, int y1);
 /*
  * A filter on everything sent to the panel: each pixel scaled by
  * filter/256 as it is blitted, the shadow buffer untouched. 256 is off.
- * For brightness below the backlight's floor -- see brightness.h.
+ * For brightness below the backlight's floor, and for the last part of
+ * the screen-off fade -- see brightness.h. 0..256; the setting's own
+ * minimum is brightness_map()'s business, not this one's.
  *
  * Takes effect at the next blit of each band, so a caller that changes
  * it and wants the whole screen to show it blits the whole screen.

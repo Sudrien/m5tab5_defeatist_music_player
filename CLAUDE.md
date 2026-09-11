@@ -6245,8 +6245,16 @@ Known gaps, in the order a flash would hit them:
   that with a pixel filter (`brightness.h`): under the floor the
   backlight holds at 1% and gfx.c scales every pixel by filter/256 as
   it blits, into a scratch band, leaving the shadow buffer alone. The
-  minimum is now 3 (1% duty, filter 11/256); RGB565 loses red and blue
-  below about 8/256. Crossover is at 13. The timer's options go below
+  minimum was 3 (1% duty, filter 11/256) and is 6 since 0029, as seen on
+  the device (filter 53/256); RGB565 loses red and blue below about
+  8/256. Crossover is at 13. **0029 also made the screen-off fade
+  smooth**: 0025's stepped whole percent, so it stair-stepped at the
+  bottom and did nothing at all from a setting on the 1% floor (1% to 0
+  is the cliff). It now fades light as (1-t)^2 -- backlight counts down
+  to the floor, then the pixel filter to black, against the clock --
+  and logs frames and reblits. A reblit is far slower than a backlight
+  write, so the filter end of a fade has few frames; the log says how
+  few. The timer's options go below
   it.
   Relative ("for 45 minutes") needs no clock and should ship first.
   "Until 07:00" needs the wall clock; resolve the deadline to a

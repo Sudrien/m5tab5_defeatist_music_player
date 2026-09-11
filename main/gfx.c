@@ -135,7 +135,7 @@ uint16_t *gfx_fb(void) { return s_fb; }
 
 void gfx_set_filter(int filter)
 {
-    if (filter < BRIGHTNESS_FILTER_MIN) filter = BRIGHTNESS_FILTER_MIN;
+    if (filter < 0) filter = 0;
     if (filter > BRIGHTNESS_FILTER_FULL) filter = BRIGHTNESS_FILTER_FULL;
     s_filter = filter;
 }

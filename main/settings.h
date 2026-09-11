@@ -164,14 +164,15 @@ void settings_set_crossfade_sec(uint8_t sec);
  *
  * Below the backlight's measured floor the slider carries on by dimming
  * the picture -- see brightness.h -- which is why the minimum went from
- * 5 to 3. It is still not 0: a slider that can reach a black screen is a
+ * 5 to 3, and then to 6 once seen on the device: below 6 the picture is
+ * too dark to be worth having. It is still not 0: a slider that can reach a black screen is a
  * slider that hides itself, and switching the screen off is the switch
  * above it on the same page. The default, 90, lands on the
  * duty the screen always had -- 90% through gamma 2.2 is 79% duty,
  * against the old fixed 80% -- so a card without the key looks the same
  * as before.
  */
-#define SETTINGS_BRIGHTNESS_MIN     (3)
+#define SETTINGS_BRIGHTNESS_MIN     (6)
 #define SETTINGS_BRIGHTNESS_MAX     (100)
 #define SETTINGS_BRIGHTNESS_DEFAULT (90)
 uint8_t settings_brightness(void);

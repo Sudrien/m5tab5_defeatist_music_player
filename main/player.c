@@ -750,17 +750,35 @@ static esp_err_t backlight_set(int percent)
     return ledc_update_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CHANNEL);
 }
 
+/* The backlight in counts, 0..LCD_LEDC_DUTY_MAX, for the fade, which
+ * needs finer steps than whole percent. */
+static esp_err_t backlight_set_counts(uint32_t duty)
+{
+    if (duty > LCD_LEDC_DUTY_MAX) duty = LCD_LEDC_DUTY_MAX;
+    ESP_RETURN_ON_ERROR(ledc_set_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CHANNEL, duty),
+                        TAG, "duty");
+    return ledc_update_duty(LEDC_LOW_SPEED_MODE, LCD_LEDC_CHANNEL);
+}
+
 /*
- * Take the backlight from `from` percent to 0 over about `ms`, blocking.
+ * The screen-off fade, about SCREEN_FADE_MS, blocking ui_task.
  *
- * For the Sleep page's Screen switch: without a fade the switch's OFF is
- * never seen, because the backlight goes with it in the same frame.
- * Squared rather than linear, because a PWM duty that falls in straight
- * steps looks like it holds and then drops at the end. ui_task waits
- * through it -- under a second, during which nobody is about to tap a
- * screen they have just switched off -- and the decoder does not.
+ * Without a fade the Screen switch's OFF is never seen. The first
+ * version stepped the backlight in whole percent and was not smooth:
+ * stair steps near the bottom, and at any setting already on the 1%
+ * floor, no fade at all, because 1% to 0 is the cliff. brightness_fade_at()
+ * fades light instead, in backlight counts and then through the pixel
+ * filter, and this drives it against the clock rather than a step count,
+ * because a step that reblits the screen takes longer than one that only
+ * moves the backlight.
+ *
+ * At the end the backlight is off, and the filter is put back to the
+ * setting's and the screen reblitted -- invisibly -- so a wake shows the
+ * right picture instead of the black one the fade left in the panel.
+ * The decoder is its own task and does not wait.
  */
-#define SCREEN_FADE_MS  (800)
+#define SCREEN_FADE_MS       (800)
+#define SCREEN_FADE_FRAME_MS (16)
 
 /* Where the backlight goes when the screen is on. ui_task only. */
 static int screen_on_duty(void)
@@ -790,16 +808,38 @@ static void log_brightness(void)
              (int)settings_brightness(), b.duty_pct, b.filter);
 }
 
-static void backlight_fade_out(int from, int ms)
+static void screen_fade_out(int ms)
 {
-    const int step_ms = 20;
-    const int steps = ms / step_ms > 0 ? ms / step_ms : 1;
-    for (int i = 1; i <= steps; i++) {
-        const int left = steps - i;               /* steps..0 */
-        backlight_set((from * left * left) / (steps * steps));
-        vTaskDelay(pdMS_TO_TICKS(step_ms));
+    const brightness_t start = brightness_map(settings_brightness());
+    const uint32_t duty0 = (uint32_t)((LCD_LEDC_DUTY_MAX * start.duty_pct) / 100);
+    const uint32_t floor_counts =
+        (uint32_t)((LCD_LEDC_DUTY_MAX * BRIGHTNESS_FLOOR_PCT) / 100);
+
+    const int64_t t0 = esp_timer_get_time();
+    int shown = gfx_filter();
+    int frames = 0, reblits = 0;
+    for (;;) {
+        const double t = (double)(esp_timer_get_time() - t0) / (ms * 1000.0);
+        if (t >= 1.0) break;
+        const brightness_raw_t r = brightness_fade_at(duty0, start.filter,
+                                                      floor_counts, t);
+        backlight_set_counts(r.duty);
+        if (r.filter != shown) {
+            gfx_set_filter(r.filter);
+            gfx_blit(0, gfx_h());
+            shown = r.filter;
+            reblits++;
+        }
+        frames++;
+        vTaskDelay(pdMS_TO_TICKS(SCREEN_FADE_FRAME_MS));
     }
-    backlight_set(0);
+    backlight_set_counts(0);
+
+    /* Dark now; ready the picture for the wake. */
+    gfx_set_filter(start.filter);
+    if (shown != start.filter) gfx_blit(0, gfx_h());
+    ESP_LOGI(TAG, "screen faded out: %d frames, %d reblits, %d ms",
+             frames, reblits, (int)((esp_timer_get_time() - t0) / 1000));
 }
 
 static esp_err_t panel_init(void)
@@ -4920,7 +4960,7 @@ static void ui_task(void *arg)
             } else if (r != SLEEPPAGE_NONE) {
                 if (r == SLEEPPAGE_SCREEN_OFF) {
                     sleeppage_draw();
-                    backlight_fade_out(screen_on_duty(), SCREEN_FADE_MS);
+                    screen_fade_out(SCREEN_FADE_MS);
                     s_screen_off = true;
                 }
                 sleeppage_close();
