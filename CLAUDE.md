@@ -6356,6 +6356,31 @@ Known gaps, in the order a flash would hit them:
   playback carries on beside it. `streamsniff.h` (pure, tested by
   `streamsnifftest`) does the byte sniffing and ICY title parsing.
   Remove it when the stream path lands.
+  **First run (v0.3.0-?, joined fivescore):**
+  - *Redirect:* `stream.zeno.fm` answers 302 to
+    `stream-285.surfernetwork.com/erunhwj5lekvv?zt=<JWT>`. The token in
+    the query string very likely expires, so a reconnect must go back to
+    the Zeno URL, never reuse the redirected one.
+  - *Timing:* hop 1 connect+TLS 706 ms, headers 102 ms; hop 2 connect+TLS
+    1531 ms, headers 416 ms. First audio byte about 2.8 s after starting.
+  - *Stream:* `content-type: audio/aac`, first bytes ADTS, `transfer-
+    encoding: chunked`, `icy-name: WNZK-AM`, `icy-metaint: 16000`, title
+    `" - "` (empty). ADTS AAC is within esp_audio_codec.
+  - *Clock:* NTP had synced 0.6 s before the probe, so a TLS connect with
+    no clock was not tested -- but mbedTLS here does not check
+    certificate dates, and both certificates validated from the bundle.
+  - *Heap:* internal free 101 KB before, 56 KB with one TLS session up
+    (about 45 KB a session), minimum seen 41 KB, largest internal block
+    32 KB throughout. PSRAM untouched: mbedTLS allocates internal. After
+    closing, 93.5 KB -- the 8 KB gap is most likely the probe task's own
+    stack, not yet freed when the line printed.
+  - *Throughput:* a steady 50-58 KB/s for 30 s, 433 kbit/s. Far more than
+    an AM talk station's AAC should need, and it did not settle, so the
+    server is sending faster than real time, or the stream really is
+    that rate. Counting ADTS frames would tell which; not done yet.
+  - *ESP-Hosted:* `eh_sdio: mempool OOM start (RX)` twice at 50 KB/s,
+    each recovering within a millisecond. Nothing was lost that the log
+    shows, but it is the host's RX pool running dry at a modest rate.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
