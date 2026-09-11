@@ -6612,6 +6612,76 @@ which is the thing that would prove this file on hardware. That is 0105
 and it should come before phase 2 -- decoding from a ring that has never
 been shown to fill correctly is two unknowns at once.
 
+*(0105 did it. The paragraph is kept because it is the reasoning that
+produced the patch.)*
+
+### 0105-0106: what got done with no board
+
+The device was unavailable for flashing, which changes what is worth
+writing. Both of these are chosen for that: one is the patch that will
+be run first when a board comes back, and the other is the piece of the
+plan that never needed one.
+
+**0105, the probe on top of netstream.** The probe's job changed rather
+than shrinking. It used to measure the network; it now measures
+netstream, and the difference is entirely where the ADTS counter sits.
+The old probe counted frames off the socket and reported **0 bytes lost
+hunting for a sync at 512 kbit/s** -- a figure we have for this exact
+station on this exact link. The new one counts them after the ICY
+demultiplexer and after the ring, so the same station giving a different
+answer is netstream losing bytes and nothing else. A desynchronised
+demuxer, a ring dropping under burst and a reconnect that loses its
+place all land in the same two numbers.
+
+Beside that it logs what only the draining side can see: every state
+transition with its timing, ring occupancy per window and its peak,
+empty reads per window, and how long `netstream_stop_wait()` takes --
+which is what phase 3's pause will cost.
+
+**When a board is free, this is the first thing to flash, and the log
+answers in this order:** does it compile; does the state reach PLAYING
+and how long did it take against the old probe's 2.8 s to first audio;
+is x-real-time still about 0.97x beside playback or has it fallen; is
+`bytes lost hunting` still 0; does the ring sit near empty (healthy),
+near full (netstream is dropping) or oscillate; and does the stop
+complete in well under 5 s.
+
+**0106, `stationlist.h`.** Phase 4's file format, out of order because
+phases 2 and 3 are both "flash and read the log" and this is not. 3067
+checks including 3000 random line-soup files, which must produce no
+station whose URL fails the scheme check and none with an empty label.
+
+It is the widest input in the whole network series. Everything else here
+reads bytes from a server; this reads bytes from a person with a text
+editor, so it takes a BOM, CRLF, bare pasted URLs, leftover `#EXT-X-`
+directives, names containing commas and a missing trailing newline, and
+refuses anything that is not `http://` or `https://` -- a `file://` line
+is a path into the card walked by a stream player that has no business
+there. Refusing at parse time means `netstream_play()` only ever sees
+one of two schemes.
+
+The bug it was written to prevent, and which has its own test: **an
+`#EXTINF` whose URL line never came must not attach its name to the next
+station.** Every station showing the previous station's name is the
+shape of thing that ships.
+
+**-Wformat-truncation, for the third time.** `snprintf(dst, sizeof dst,
+"%s", src)` is correct at every call site in that file -- the length is
+already checked -- but the compiler cannot see the check from the call,
+and the diagnostic only exists after the constant propagation that -O2
+does, so it is invisible at the -O1 the sanitiser build uses. The
+Makefile's separate `-O2 -Werror` pass caught it before `idf.py` did,
+which is exactly what that pass is for and the third time it has paid
+for itself. The file has no `snprintf` in it now, which is also the
+better shape: truncating a URL gives a station that connects to the
+wrong thing, so the call sites reject instead.
+
+**Where the series stands.** Phase 1 written, compiled, unflashed. Phase
+4's parser written and tested, with nothing reading the file yet. Phases
+2 and 3 untouched, and both want a board before they are worth starting
+-- phase 2's first question is what the AAC decoder costs in internal
+RAM, which is a measurement and not a decision.
+
 ### The stream path: plan
 
 Written after the probe, from what it measured. Each phase is its own
