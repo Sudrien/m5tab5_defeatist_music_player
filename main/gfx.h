@@ -61,6 +61,19 @@ int gfx_h(void);
  * screen until this is called, which is the point. */
 void gfx_blit(int y0, int y1);
 
+/*
+ * A filter on everything sent to the panel: each pixel scaled by
+ * filter/256 as it is blitted, the shadow buffer untouched. 256 is off.
+ * For brightness below the backlight's floor -- see brightness.h.
+ *
+ * Takes effect at the next blit of each band, so a caller that changes
+ * it and wants the whole screen to show it blits the whole screen.
+ * Costs a copy of each band into a scratch buffer while it is on, and
+ * nothing while it is off.
+ */
+void gfx_set_filter(int filter);
+int gfx_filter(void);
+
 /* Same, but returns the panel's error instead of swallowing it. The
  * drawing code does not care; albumart does, because a cover that failed
  * to reach the panel should not be reported as shown. */

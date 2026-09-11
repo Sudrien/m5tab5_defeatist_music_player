@@ -85,6 +85,7 @@
 #include "wifi.h"
 #include "portal.h"
 #include "sleeppage.h"
+#include "brightness.h"
 #include "wifistore.h"
 #include "waveform.h"
 
@@ -760,39 +761,32 @@ static esp_err_t backlight_set(int percent)
  */
 #define SCREEN_FADE_MS  (800)
 
-/*
- * The brightness setting, as a PWM duty in percent.
- *
- * Gamma 2.2: the slider is a position in what is seen, and PWM duty is
- * not. On hardware a fixed 80% duty looked like a plateau -- raising it
- * did not visibly help -- which is what a linear duty scale does at its
- * top. The curve puts more of the slider's travel where the panel still
- * changes. 2.2 is the conventional display gamma, an ESTIMATE for this
- * backlight; the log line gives position and duty so the real response
- * can be read off the device and the curve, or a ceiling, set from that.
- */
-#define BRIGHTNESS_GAMMA    (2.2)
-
-static int brightness_duty_pct(int level)
-{
-    if (level <= 0) return 0;
-    if (level >= 100) return 100;
-    const double d = 100.0 * pow((double)level / 100.0, BRIGHTNESS_GAMMA);
-    const int pct = (int)(d + 0.5);
-    return pct < 1 ? 1 : pct;
-}
-
-/* Where the screen goes when it is on. ui_task only. */
+/* Where the backlight goes when the screen is on. ui_task only. */
 static int screen_on_duty(void)
 {
-    return brightness_duty_pct(settings_brightness());
+    return brightness_map(settings_brightness()).duty_pct;
 }
 
-/* The release of a brightness drag, with the duty the page cannot see. */
+/*
+ * Set the pixel filter for the current setting, and if it changed, send
+ * the whole screen again so every band shows it -- the filter is applied
+ * at blit time, and a band nobody redraws would keep the old level.
+ * ui_task only.
+ */
+static void screen_apply_filter(void)
+{
+    const int f = brightness_map(settings_brightness()).filter;
+    if (f == gfx_filter()) return;
+    gfx_set_filter(f);
+    gfx_blit(0, gfx_h());
+}
+
+/* The release of a brightness drag, with what the page cannot see. */
 static void log_brightness(void)
 {
-    ESP_LOGI(TAG, "brightness %d%% -> duty %d%% of %d",
-             (int)settings_brightness(), screen_on_duty(), LCD_LEDC_DUTY_MAX);
+    const brightness_t b = brightness_map(settings_brightness());
+    ESP_LOGI(TAG, "brightness %d%% -> duty %d%%, filter %d/256",
+             (int)settings_brightness(), b.duty_pct, b.filter);
 }
 
 static void backlight_fade_out(int from, int ms)
@@ -4828,6 +4822,10 @@ static void ui_task(void *arg)
                 ESP_LOGI(TAG, "brightness %d%% from settings (duty %d%%)",
                          (int)settings_brightness(), duty);
             }
+            /* The filter regardless of the screen: it is what the next
+             * wake should show, and changing it on a dark screen costs a
+             * blit nobody sees. */
+            screen_apply_filter();
         }
 
         /* The chooser, when it is up, is the whole screen and the whole
@@ -4914,6 +4912,7 @@ static void ui_task(void *arg)
                 /* Live, so the backlight follows the finger. The duty is
                  * logged with the release, below, not on every move. */
                 backlight_set(screen_on_duty());
+                screen_apply_filter();
                 sleeppage_draw();
             } else if (r == SLEEPPAGE_BRIGHTNESS_DONE) {
                 log_brightness();

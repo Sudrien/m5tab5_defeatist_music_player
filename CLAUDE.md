@@ -6239,8 +6239,15 @@ Known gaps, in the order a flash would hit them:
   looked like a plateau. The default, 90, is 79% duty, so a card without
   the key looks as before. The duty curve is an estimate: releasing the
   slider logs `brightness N% -> duty M%`, which is how to find where
-  this panel actually stops getting brighter. The timer's options go
-  below it.
+  this panel actually stops getting brighter. **Measured: the bottom is
+  the cliff** -- 5% maps to 1% duty and the backlight goes no lower,
+  which is still bright beside a bed. 0027 carries the slider below
+  that with a pixel filter (`brightness.h`): under the floor the
+  backlight holds at 1% and gfx.c scales every pixel by filter/256 as
+  it blits, into a scratch band, leaving the shadow buffer alone. The
+  minimum is now 3 (1% duty, filter 11/256); RGB565 loses red and blue
+  below about 8/256. Crossover is at 13. The timer's options go below
+  it.
   Relative ("for 45 minutes") needs no clock and should ship first.
   "Until 07:00" needs the wall clock; resolve the deadline to a
   monotonic reading once, at set time, or an NTP step silently changes

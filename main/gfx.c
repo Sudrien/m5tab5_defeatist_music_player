@@ -19,12 +19,22 @@
 #include "ark12.h"
 
 #include "gfx.h"
+#include "brightness.h"
 
 static const char *TAG = "tab5_gfx";
 
 static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;
 static int s_w, s_h;
+
+/*
+ * The brightness filter. s_filter is a plain value any task may set;
+ * each blit reads it once. s_dim is the scratch a dimmed band is built in,
+ * allocated the first time the filter is on, sized for the largest band a
+ * blit sends, and only touched under s_blit_lock.
+ */
+static volatile int s_filter = BRIGHTNESS_FILTER_FULL;
+static uint16_t *s_dim;
 
 /*
  * One blit at a time.
@@ -122,6 +132,15 @@ esp_err_t gfx_init(esp_lcd_panel_handle_t panel, int w, int h)
 }
 
 uint16_t *gfx_fb(void) { return s_fb; }
+
+void gfx_set_filter(int filter)
+{
+    if (filter < BRIGHTNESS_FILTER_MIN) filter = BRIGHTNESS_FILTER_MIN;
+    if (filter > BRIGHTNESS_FILTER_FULL) filter = BRIGHTNESS_FILTER_FULL;
+    s_filter = filter;
+}
+
+int gfx_filter(void) { return s_filter; }
 int gfx_w(void) { return s_w; }
 int gfx_h(void) { return s_h; }
 
@@ -178,10 +197,27 @@ esp_err_t gfx_blit_err(int y0, int y1)
      * with a y offset would be a different bitmap entirely. */
     xSemaphoreTake(s_blit_lock, portMAX_DELAY);
 
+    /* The filter, read once for this band. When it is on, the band is
+     * scaled into the scratch and that is what goes out. A band is never
+     * taller than BLIT_BAND_ABOVE here -- the split above sees to it. */
+    const int filter = s_filter;
+    const uint16_t *src = &s_fb[(size_t)y0 * s_w];
+    if (filter < BRIGHTNESS_FILTER_FULL) {
+        if (!s_dim) {
+            s_dim = heap_caps_malloc((size_t)s_w * BLIT_BAND_ABOVE * sizeof(uint16_t),
+                                     MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        }
+        if (s_dim) {
+            const size_t n = (size_t)(y1 - y0) * s_w;
+            for (size_t i = 0; i < n; i++) s_dim[i] = brightness_dim565(src[i], filter);
+            src = s_dim;
+        }
+        /* No scratch: sent undimmed rather than not at all. */
+    }
+
     esp_err_t err = ESP_OK;
     for (int i = 0; i < BLIT_RETRIES; i++) {
-        err = esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1,
-                                        &s_fb[(size_t)y0 * s_w]);
+        err = esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1, src);
         if (err != ESP_ERR_INVALID_STATE) break;
         /* One tick, which is longer than a band transfer takes. Sleeping
          * rather than spinning: the task that owns the previous transfer

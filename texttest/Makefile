@@ -85,7 +85,10 @@ OLD_BINS  := $(CACHE_BIN) $(OLD_STANDALONE)
 # idf.py -- the error 0018 shipped was exactly that kind.
 UI_CHECK := ../main/sleeppage.c
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui
+# Brightness: the backlight/filter split and the RGB565 scaling.
+BRIGHT_BIN := brightnesstest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -151,9 +154,16 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
+
+$(BRIGHT_BIN): brightnesstest.c ../main/brightness.h
+	$(CC) $(WARNCFLAGS) -c brightnesstest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ brightnesstest.c $(LDFLAGS)
+
+run-bright: $(BRIGHT_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BRIGHT_BIN)
 
 check-ui:
 	@for f in $(UI_CHECK); do \
@@ -161,4 +171,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright clean
