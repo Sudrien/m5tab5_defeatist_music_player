@@ -88,7 +88,10 @@ UI_CHECK := ../main/sleeppage.c
 # Brightness: the backlight/filter split and the RGB565 scaling.
 BRIGHT_BIN := brightnesstest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright
+# The sleep timer's arithmetic.
+SLEEP_BIN := sleeptimertest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -154,7 +157,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -165,10 +168,17 @@ $(BRIGHT_BIN): brightnesstest.c ../main/brightness.h
 run-bright: $(BRIGHT_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BRIGHT_BIN)
 
+$(SLEEP_BIN): sleeptimertest.c ../main/sleeptimer.h
+	$(CC) $(WARNCFLAGS) -c sleeptimertest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ sleeptimertest.c $(LDFLAGS)
+
+run-sleep: $(SLEEP_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SLEEP_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep clean

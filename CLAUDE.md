@@ -6273,10 +6273,19 @@ Known gaps, in the order a flash would hit them:
   curve to within one backlight count at every frame for a given filter
   schedule. Needs a flash to judge. The timer's options go below
   it.
-  Relative ("for 45 minutes") needs no clock and should ship first.
-  "Until 07:00" needs the wall clock; resolve the deadline to a
-  monotonic reading once, at set time, or an NTP step silently changes
-  its length. (This entry used to point at a DST write-up in
+  **The relative timer is written (0031).** A third control on the
+  Sleep page: a slider of 15-minute steps, off to 2 h, started on
+  release so dragging past 2 h on the way to 30 min never runs a
+  two-hour timer. It shows time left while it runs. The last 20 s ramp
+  the output volume to 0 -- ending at the deadline, not starting there
+  -- then the track pauses and the screen fades off. The output is left
+  at 0 and restored by the next play press, so the writer's last few
+  milliseconds cannot leak out at full level. Any press during the ramp
+  cancels the timer and puts the volume back. Deadline on esp_timer, not
+  saved across reboots. Arithmetic in `sleeptimer.h`, tested by
+  `sleeptimertest`. Unflashed. "Until 07:00" still needs the wall clock;
+  resolve the deadline to a monotonic reading once, at set time, or an
+  NTP step silently changes its length. (This entry used to point at a DST write-up in
   settings.h. There is none.)
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream

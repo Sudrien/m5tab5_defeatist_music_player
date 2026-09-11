@@ -87,6 +87,7 @@
 #include "portal.h"
 #include "sleeppage.h"
 #include "brightness.h"
+#include "sleeptimer.h"
 #include "wifistore.h"
 #include "waveform.h"
 
@@ -2624,6 +2625,25 @@ static volatile bool     s_open_sleep;   /* the moon: see sleeppage.h */
 static volatile bool     s_brightness_pending;
 
 /*
+ * The sleep timer -- see sleeptimer.h. ui_task only, all of it: the page
+ * sets it, the tick fades and pauses, and a press cancels a ramp.
+ *
+ * s_sleep_from is the volume when the ramp began, so the tick can put it
+ * back after pausing; -1 while no ramp is running.
+ */
+static int64_t s_sleep_deadline_us;     /* 0 = off */
+static int     s_sleep_step;
+static int     s_sleep_from = -1;
+static int     s_sleep_last = -1;       /* last volume the ramp wrote */
+/*
+ * Set when a timer ran out: the output was left at 0 on purpose. Putting
+ * the level back at the deadline would let the last few milliseconds the
+ * writer sends before it sees the pause come out at full volume. The
+ * next play press restores it, before it plays anything.
+ */
+static bool    s_sleep_restore;
+
+/*
  * The gain in effect for the track playing now, and whether there is
  * one. Published rather than fetched: the UI task cannot ask play_file()
  * anything -- the same rule s_ring_pct follows.
@@ -4843,6 +4863,77 @@ static void request_track(const char *path)
     s_pending_ready = true;
 }
 
+/* Put the volume back and forget the timer. ui_task only. */
+static void sleep_timer_clear(const char *why)
+{
+    if (s_sleep_from >= 0) audio_out_set_volume((uint8_t)s_volume);
+    if (s_sleep_deadline_us) ESP_LOGI(TAG, "sleep timer %s", why);
+    s_sleep_deadline_us = 0;
+    s_sleep_step = 0;
+    s_sleep_from = -1;
+    s_sleep_last = -1;
+}
+
+static void sleep_timer_set(int step)
+{
+    sleep_timer_clear("replaced");
+    if (step <= 0) {
+        ESP_LOGI(TAG, "sleep timer off");
+        return;
+    }
+    s_sleep_step = step;
+    s_sleep_deadline_us = esp_timer_get_time() +
+                          (int64_t)sleeptimer_minutes(step) * 60 * 1000000;
+    ESP_LOGI(TAG, "sleep timer %d min", sleeptimer_minutes(step));
+}
+
+/*
+ * Once per ui_task pass. Ramps the volume in the last SLEEPTIMER_FADE_MS,
+ * and at the deadline pauses, restores the level, and fades the screen.
+ *
+ * The ramp writes the output volume, not s_volume or the setting, so the
+ * slider and the settings file never see the fade. A timer that runs out
+ * with nothing playing still turns the screen off -- it is a sleep timer.
+ */
+static void sleep_timer_tick(void)
+{
+    if (!s_sleep_deadline_us) return;
+    const int64_t now = esp_timer_get_time();
+
+    if (now >= s_sleep_deadline_us) {
+        const bool was_playing = player_is_playing();
+        player_force_pause();
+        if (s_sleep_from >= 0) {
+            audio_out_set_volume(0);        /* the ramp's last step, exactly */
+            s_sleep_restore = true;
+            s_sleep_from = -1;              /* so clear() does not restore */
+        }
+        sleep_timer_clear(was_playing ? "ran out: paused" : "ran out");
+        if (!s_screen_off) {
+            if (sleeppage_is_open()) {
+                sleeppage_close();
+                s_repaint_art = true;
+            }
+            screen_fade_out(SCREEN_FADE_MS);
+            s_screen_off = true;
+        }
+        return;
+    }
+
+    if (sleeptimer_volume(now, s_sleep_deadline_us, s_volume) < s_volume ||
+        s_sleep_from >= 0) {
+        if (s_sleep_from < 0) {
+            s_sleep_from = s_volume;
+            ESP_LOGI(TAG, "sleep timer: fading out over %d s", SLEEPTIMER_FADE_MS / 1000);
+        }
+        const int v = sleeptimer_volume(now, s_sleep_deadline_us, s_sleep_from);
+        if (v != s_sleep_last) {
+            audio_out_set_volume((uint8_t)v);
+            s_sleep_last = v;
+        }
+    }
+}
+
 static void ui_task(void *arg)
 {
     ui_state_t st;
@@ -4850,6 +4941,8 @@ static void ui_task(void *arg)
     while (1) {
         int bx = 0, by = 0;
         const bool bdown = touch_get(&bx, &by);
+
+        sleep_timer_tick();
 
         /* Every track start sets this, so it only writes and logs when
          * the duty would actually change. */
@@ -4948,7 +5041,19 @@ static void ui_task(void *arg)
         }
 
         if (sleeppage_is_open()) {
+            sleeppage_set_timer(s_sleep_step,
+                                sleeptimer_seconds_left(esp_timer_get_time(),
+                                                        s_sleep_deadline_us));
             const sleeppage_result_t r = sleeppage_touch(bdown, bx, by);
+            if (r == SLEEPPAGE_TIMER) {
+                sleep_timer_set(sleeppage_timer_step());
+                sleeppage_set_timer(s_sleep_step,
+                                    sleeptimer_seconds_left(esp_timer_get_time(),
+                                                            s_sleep_deadline_us));
+                sleeppage_draw();
+                vTaskDelay(pdMS_TO_TICKS(20));
+                continue;
+            }
             if (r == SLEEPPAGE_BRIGHTNESS) {
                 /* Live, so the backlight follows the finger. The duty is
                  * logged with the release, below, not on every move. */
@@ -5161,6 +5266,20 @@ static void ui_task(void *arg)
          * every poll, fifty a second, and logging those buries
          * everything else. Its release is logged by the case below.
          */
+        /* Any press during the ramp means somebody is awake: stop it and
+         * put the volume back, before the press itself is handled. */
+        if (act.kind != UI_ACTION_NONE && s_sleep_from >= 0) {
+            sleep_timer_clear("cancelled by a press during the fade");
+        }
+        /* After a timer ran out the output is at 0; play brings the level
+         * back before it lets anything through. A volume press sets its
+         * own level below, so it only needs the flag dropped. */
+        if (s_sleep_restore &&
+            (act.kind == UI_ACTION_PLAY_PAUSE || act.kind == UI_ACTION_VOLUME)) {
+            if (act.kind == UI_ACTION_PLAY_PAUSE) audio_out_set_volume((uint8_t)s_volume);
+            s_sleep_restore = false;
+        }
+
         if (act.kind != UI_ACTION_NONE && act.kind != UI_ACTION_VOLUME) {
             if (act.kind == UI_ACTION_SEEK) {
                 ESP_LOGI(TAG, "button: %s -> %d%%",

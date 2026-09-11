@@ -8,6 +8,7 @@
 #include "esp_log.h"
 #include "gfx.h"
 #include "settings.h"
+#include "sleeptimer.h"
 
 #include <stdio.h>
 
@@ -54,6 +55,12 @@ static bool s_screen_on = true;
  * crossfade slider, for panel.c's reason. */
 static bool s_drag;
 
+/* The timer: what player.c says is running, and a drag's position. */
+static int     s_timer_step;
+static int64_t s_timer_left = -1;
+static int     s_drag_step;
+static bool    s_timer_drag;
+
 bool sleeppage_is_open(void) { return s_open; }
 
 void sleeppage_open(void)
@@ -63,6 +70,7 @@ void sleeppage_open(void)
     s_was_down = false;
     s_screen_on = true;
     s_drag = false;
+    s_timer_drag = false;
 }
 
 void sleeppage_close(void)
@@ -93,6 +101,27 @@ static void slider_track(int *x0, int *x1)
     *x0 = SLIDER_INSET + SLIDER_KNOB;
     *x1 = gfx_w() - SLIDER_INSET - SLIDER_KNOB;
 }
+
+static void timer_box(int *x, int *y, int *w, int *h)
+{
+    int bx, by, bw, bh;
+    brightness_box(&bx, &by, &bw, &bh);
+    *x = 0;
+    *y = by + bh + GAP;
+    *w = gfx_w();
+    *h = SLIDER_H;
+}
+
+void sleeppage_set_timer(int step, int64_t seconds_left)
+{
+    if (step != s_timer_step || seconds_left != s_timer_left) {
+        s_timer_step = step;
+        s_timer_left = seconds_left;
+        s_dirty = true;
+    }
+}
+
+int sleeppage_timer_step(void) { return s_drag_step; }
 
 void sleeppage_draw(void)
 {
@@ -159,6 +188,47 @@ void sleeppage_draw(void)
                       LABEL_SCALE, 80, C_FAINT);
     }
 
+    /* --- Sleep timer ----------------------------------------------- */
+    timer_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    {
+        /* While dragging, the finger's position; otherwise what runs. */
+        const int step = s_timer_drag ? s_drag_step : s_timer_step;
+        char head[48];
+        if (step == 0) {
+            snprintf(head, sizeof(head), "Sleep timer   off");
+        } else if (!s_timer_drag && s_timer_left > 0) {
+            const long m = (long)(s_timer_left / 60), sec = (long)(s_timer_left % 60);
+            snprintf(head, sizeof(head), "Sleep timer   %ld:%02ld", m, sec);
+        } else {
+            snprintf(head, sizeof(head), "Sleep timer   %d min", sleeptimer_minutes(step));
+        }
+        gfx_draw_text(24, y + 20, head, NAME_SCALE, w - 48, step ? C_TEXT : C_DIM);
+
+        int tx0, tx1;
+        slider_track(&tx0, &tx1);
+        const int ty = y + bh - 44;
+        const int kx = tx0 + ((tx1 - tx0) * step) / SLEEPTIMER_STEPS;
+        gfx_fill_rect(tx0, ty - 3, tx1 - tx0, 6, C_BTN);
+        /* A tick per step, so the notches are visible before dragging. */
+        for (int i = 0; i <= SLEEPTIMER_STEPS; i++) {
+            gfx_fill_rect(tx0 + ((tx1 - tx0) * i) / SLEEPTIMER_STEPS - 1, ty - 9, 2, 18, C_BTN);
+        }
+        if (step) gfx_fill_rect(tx0, ty - 3, kx - tx0, 6, C_ACCENT);
+        gfx_fill_circle(kx, ty, SLIDER_KNOB / 2, step ? C_TEXT : C_DIM);
+
+        gfx_draw_text(SLIDER_INSET, ty + SLIDER_KNOB, "off", LABEL_SCALE, 80, C_FAINT);
+        const int mw = gfx_text_w("2 h", LABEL_SCALE);
+        gfx_draw_text(w - SLIDER_INSET - mw, ty + SLIDER_KNOB, "2 h",
+                      LABEL_SCALE, 80, C_FAINT);
+    }
+    {
+        static const char *const note[] = {
+            "Fades out, pauses, and turns the screen off.",
+        };
+        gfx_draw_text(24, y + bh + NOTE_GAP, note[0], LABEL_SCALE, w - 48, C_DIM);
+    }
+
     /* Footer: panel.c's, one button, the way out. */
     const int fy = h - FOOT_H;
     gfx_fill_rect(0, fy, w, 2, C_RULE);
@@ -210,6 +280,35 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
                 s_drag = false;
                 /* player.c logs position and duty together. */
                 return SLEEPPAGE_BRIGHTNESS_DONE;
+            }
+        }
+    }
+
+    /* The timer slider, the same way: snapped to whole steps as the
+     * finger moves, and started only on release, so dragging across
+     * "2 h" on the way to "30 min" never runs a two-hour timer. */
+    {
+        int sx, sy, sw, sh;
+        timer_box(&sx, &sy, &sw, &sh);
+        if (s_timer_drag || (tapped && y >= sy && y < sy + sh)) {
+            if (down) {
+                int tx0, tx1;
+                slider_track(&tx0, &tx1);
+                int pos = x - tx0;
+                if (pos < 0) pos = 0;
+                if (pos > tx1 - tx0) pos = tx1 - tx0;
+                const int spanpx = tx1 - tx0;
+                const int step = spanpx > 0
+                    ? (pos * SLEEPTIMER_STEPS + spanpx / 2) / spanpx : 0;
+                if (!s_timer_drag || step != s_drag_step) s_dirty = true;
+                s_timer_drag = true;
+                s_drag_step = step;
+                return SLEEPPAGE_NONE;
+            }
+            if (s_timer_drag) {
+                s_timer_drag = false;
+                s_dirty = true;
+                return SLEEPPAGE_TIMER;
             }
         }
     }

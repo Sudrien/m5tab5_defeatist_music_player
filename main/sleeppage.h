@@ -21,6 +21,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -34,6 +35,9 @@ typedef enum {
                                and the page stays open */
     SLEEPPAGE_BRIGHTNESS_DONE,  /* the drag ended; nothing to apply, but
                                the caller logs the duty it chose */
+    SLEEPPAGE_TIMER,        /* the timer slider was released:
+                               sleeppage_timer_step() says where, 0 off;
+                               the caller (re)starts the timer from now */
     SLEEPPAGE_SCREEN_OFF,   /* the Screen switch went to OFF. The page has
                                already drawn OFF; the caller fades the
                                backlight, so the switch is seen to move,
@@ -49,6 +53,18 @@ void sleeppage_draw(void);
 
 /* A press, same edge detection as panel_touch(). */
 sleeppage_result_t sleeppage_touch(bool down, int x, int y);
+
+/*
+ * The timer, told to the page. The page does not own the timer -- player.c
+ * does, because it is what fades and pauses -- so the caller hands over
+ * the step it is running and the seconds left, every frame the page is
+ * up. The page redraws when either changes, which is once a second while
+ * a timer runs.
+ */
+void sleeppage_set_timer(int step, int64_t seconds_left);
+
+/* Where the slider was released, for SLEEPPAGE_TIMER. */
+int sleeppage_timer_step(void);
 
 #ifdef __cplusplus
 }
