@@ -29,6 +29,7 @@
 #include "wifi.h"
 #include "wifistore.h"
 #include "portal.h"
+#include "streamprobe.h"
 #include "freertos/event_groups.h"
 
 static const char *TAG = "tab5_wifi";
@@ -350,6 +351,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         /* The one call site NTP was waiting for. sntp_start() checks the
          * setting and its own started flag, so a reconnect is a no-op. */
         sntp_start();
+        streamprobe_kick();         /* once per boot; see streamprobe.h */
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         if (s_ap_clients < 255) s_ap_clients++;
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {

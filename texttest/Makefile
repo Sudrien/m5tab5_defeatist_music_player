@@ -91,7 +91,10 @@ BRIGHT_BIN := brightnesstest
 # The sleep timer's arithmetic.
 SLEEP_BIN := sleeptimertest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep
+# The stream probe's byte sniffing and ICY title parsing.
+SNIFF_BIN := streamsnifftest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -157,7 +160,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -175,10 +178,17 @@ $(SLEEP_BIN): sleeptimertest.c ../main/sleeptimer.h
 run-sleep: $(SLEEP_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SLEEP_BIN)
 
+$(SNIFF_BIN): streamsnifftest.c ../main/streamsniff.h
+	$(CC) $(WARNCFLAGS) -c streamsnifftest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ streamsnifftest.c $(LDFLAGS)
+
+run-sniff: $(SNIFF_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SNIFF_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff clean

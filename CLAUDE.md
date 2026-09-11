@@ -6344,6 +6344,18 @@ Known gaps, in the order a flash would hit them:
   resolve the deadline to a monotonic reading once, at set time, or an
   NTP step silently changes its length. (This entry used to point at a DST write-up in
   settings.h. There is none.)
+- **The stream probe (0037), before any of the stream path.** A
+  throwaway `streamprobe.c`: once per boot, 3 s after the first address,
+  it opens WNZK on Zeno.FM (`https://stream.zeno.fm/erunhwj5lekvv`),
+  follows redirects by hand so every hop logs, sends `Icy-MetaData: 1`,
+  and reads for 30 s. It logs each hop's status, connect+TLS and header
+  times, the ICY and content headers, internal and PSRAM heap before,
+  connected and after, whether mbedTLS checks certificate dates and
+  whether the clock was set, what the first audio bytes are, the first
+  three stream titles, and KB/s every 5 s. No decoding, no UI, and
+  playback carries on beside it. `streamsniff.h` (pure, tested by
+  `streamsnifftest`) does the byte sniffing and ICY title parsing.
+  Remove it when the stream path lands.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c

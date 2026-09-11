@@ -3,12 +3,12 @@ idf_component_register(
          "battery.c" "storage.c" "storage_io.c" "usbhost.c" "uac.c" "hid.c" "playlist.c" "settings.c"
        "wifistore.c" "wifi.c" "browser.c" "panel.c" "duration.c" "cbrseek.c" "flacseek.c" "oggseek.c" "tsseek.c" "mp4seek.c" "waveform.c" "replaygain.c" "loudness.c"
          "portal.c" "portalweb.c" "dnsreply.c"
-         "sleeppage.c"
+         "sleeppage.c" "streamprobe.c"
     INCLUDE_DIRS "."
     REQUIRES driver esp_app_format esp_driver_i2c esp_driver_i2s esp_driver_sdmmc
              esp_driver_jpeg esp_lcd esp_lcd_touch fatfs sdmmc
              usb usb_host_msc usb_host_uac esp_timer lwip json
-             nvs_flash esp_netif esp_event esp_http_server mbedtls
+             nvs_flash esp_netif esp_event esp_http_server esp_http_client mbedtls
     PRIV_REQUIRES pngle minimp3 ark12
 )
 
