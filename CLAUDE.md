@@ -6427,6 +6427,24 @@ Known gaps, in the order a flash would hit them:
   fit in internal RAM as configured, whatever the throughput. Hardware
   AES wants DMA-capable internal copies of its buffers, which is worth
   remembering if the TLS buffers do move to PSRAM.
+  **After `rm sdkconfig`, 0040 applied, and it was the fix for the
+  stalls** (a card track playing throughout):
+  - *Internal RAM:* 82.9 KB free before; hop 1 connected at 69.5 KB (13 KB
+    taken, against 46 KB before), hop 2 at 60.9 KB, minimum 52 KB, largest
+    block 31.7 KB the whole minute. PSRAM took the other 33 KB.
+  - *No `eh_sdio: mempool OOM` at all,* in 60 s, against one a second and
+    two ten-second stalls before. No `esp-aes` allocation failure either,
+    with hardware AES still on.
+  - *Throughput:* 1.02, 0.99, 0.93, 0.72, 1.01, 0.88, 1.02, 1.01, 0.95,
+    0.85, 0.91x -- 56.3 s of audio in 60.2 s, 0.93x overall, 53-64 KB/s.
+    From 0.47x idle to 0.93x with playback. Not yet enough: a 512
+    kbit/s stream draining a buffer at 7% would run dry, and several
+    five-second windows fell to 0.72-0.88x.
+  - The hypothesis held: TLS and lwIP buffers in internal RAM were
+    starving ESP-Hosted's. What remains is below 1.0x with no memory
+    pressure showing, so the next suspect is lwIP's TCP window
+    (IDF's defaults are small and nothing here raises them), then the
+    SDIO link itself.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
