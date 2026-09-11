@@ -78,9 +78,16 @@ static const char *TAG = "tab5_wifi";
 #define SDIO_PIN_D3             (8)
 #define SDIO_PIN_RESET          (15)    /* SOC_EXTRF_RST -> the C6's EN */
 
-/* A scan long enough to hear a quiet AP and short enough not to look
- * hung. Active scan, all channels, IDF's own per-channel defaults. */
-#define SCAN_MAX_AP             (32)
+/*
+ * How many APs a scan keeps. 32 was plenty while hidden networks were
+ * dropped; once 0018 kept them, both scans on the seventh flash came back
+ * "scan: 32 networks, 16 hidden" and "32 networks, 17 hidden" -- full,
+ * with the weakest named networks cut off the end. A building full of
+ * guest, IoT and enterprise BSSIDs is not unusual. 64 records is about
+ * 5 KB for the length of one scan. wifi_scan_list() logs when even this
+ * is not enough.
+ */
+#define SCAN_MAX_AP             (64)
 
 static bool s_powered;
 static bool s_up;
@@ -537,6 +544,7 @@ int wifi_scan_list(wifi_seen_t *out, int max)
 
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
+    const uint16_t heard = n;
     if (n > SCAN_MAX_AP) n = SCAN_MAX_AP;
     wifi_ap_record_t *ap = n ? calloc(n, sizeof(*ap)) : NULL;
     int got = 0;
@@ -568,6 +576,13 @@ int wifi_scan_list(wifi_seen_t *out, int max)
         ESP_LOGI(TAG, "scan: %d network%s, %d hidden, %d-%d ms a channel",
                  got, got == 1 ? "" : "s", hidden,
                  SCAN_ACTIVE_MIN_MS, SCAN_ACTIVE_MAX_MS);
+        /* Say so when the list was cut. The driver sorts strongest first,
+         * so what is missing is the weakest -- but "not in the scan" has
+         * to be told apart from "not heard". */
+        if (heard > got) {
+            ESP_LOGW(TAG, "scan: heard %u, kept %d -- the weakest were dropped",
+                     (unsigned)heard, got);
+        }
     }
     free(ap);
     esp_wifi_scan_stop();

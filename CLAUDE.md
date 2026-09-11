@@ -6109,7 +6109,12 @@ What that run measured, beyond "it works":
   `<select>` of the scan (name, security, dBm, channel) plus a text
   field for a hidden or unheard network; a typed name wins. Unflashed:
   whether the hotspot then appears is the question it was built to
-  answer. 0014's pause was
+  answer. Seventh flash: both scans came back exactly 32 networks with
+  16-17 hidden -- the old cap, full, cutting the weakest -- and still no
+  hotspot. 0020 raises the cap to 64 and warns when a scan is cut. The
+  same flash had the first boot-time-style join that worked on the
+  first attempt (after Wi-Fi off/on, no reason 2, id=43 present), so a
+  first attempt does not always expire. 0014's pause was
   not exercised: nothing was playing when START was pressed, and play
   was not pressed during setup.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth

@@ -484,11 +484,11 @@ static void bring_up(void)
 
     /* Scan first, as a plain station: the page's list, without an AP
      * sharing the radio while it is gathered. */
-    wifi_seen_t *seen = calloc(32, sizeof(*seen));
+    wifi_seen_t *seen = calloc(64, sizeof(*seen));
     s_seen_n = 0;
     s_hidden_n = 0;
     if (seen) {
-        const int n = wifi_scan_list(seen, 32);
+        const int n = wifi_scan_list(seen, 64);
         for (int i = 0; i < n && s_seen_n < SEEN_MAX; i++) {
             if (seen[i].hidden) { s_hidden_n++; continue; }
             bool dup = false;
