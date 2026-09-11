@@ -271,18 +271,21 @@ esp_err_t wifi_ap_end(void);
 int wifi_ap_clients(void);
 struct esp_netif_obj *wifi_ap_netif(void);
 
-/* One scanned network, copied out. `auth` is a wifi_auth_mode_t. */
+/* One scanned network, copied out. `auth` is a wifi_auth_mode_t. A
+ * hidden network has `hidden` set and an empty `ssid`. */
 typedef struct {
     char    ssid[33];
     int8_t  rssi;
     uint8_t auth;
+    uint8_t channel;
+    bool    hidden;
 } wifi_seen_t;
 
 /*
- * Scan, and copy up to `max` named networks into `out`, strongest first
- * as the driver sorts them. Hidden networks are skipped. Returns how
- * many, or -1 if the radio is down or the scan failed. Blocking, a few
- * seconds; logs each network as the old scan did.
+ * Scan, and copy up to `max` networks into `out`, strongest first as the
+ * driver sorts them, hidden ones included. Returns how many, or -1 if the
+ * radio is down or the scan failed. Active, up to 300 ms a channel, so
+ * about four seconds, blocking; logs each network and a summary line.
  */
 int wifi_scan_list(wifi_seen_t *out, int max);
 

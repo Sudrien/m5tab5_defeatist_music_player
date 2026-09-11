@@ -6101,7 +6101,15 @@ What that run measured, beyond "it works":
   the PSK on networks the scan shows as WPA3 or WPA2/WPA3 and tries the
   passphrase alone; WPA2-only and unscanned networks keep PSK first,
   because passphrase-first there would store a 64-hex key no join on
-  this C6 has used yet. Unflashed. 0014's pause was
+  this C6 has used yet. Unflashed.
+- **A phone hotspot a tablet lists never appeared in a scan.** 0018
+  scans actively at up to 300 ms a channel (IDF's default is 120), keeps
+  hidden networks and logs them with channel and BSSID, ends each scan
+  with a summary line, and replaces the form's `<datalist>` with a
+  `<select>` of the scan (name, security, dBm, channel) plus a text
+  field for a hidden or unheard network; a typed name wins. Unflashed:
+  whether the hotspot then appears is the question it was built to
+  answer. 0014's pause was
   not exercised: nothing was playing when START was pressed, and play
   was not pressed during setup.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth

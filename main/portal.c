@@ -44,7 +44,7 @@
 static const char *TAG = "tab5_portal";
 
 /* A page lists this many networks. The scan keeps the strongest. */
-#define SEEN_MAX            (16)
+#define SEEN_MAX            (24)
 /* Longest form body accepted: two fields, each at most three bytes per
  * character after escaping, and the names. Anything longer is refused. */
 #define BODY_MAX            (512)
@@ -70,6 +70,7 @@ static volatile bool     s_want_stop;
  * while it runs, so handlers read them without the lock. */
 static wifi_seen_t       s_seen[SEEN_MAX];
 static int               s_seen_n;
+static int               s_hidden_n;           /* hidden networks heard */
 static char              s_ap_ip[16] = "192.168.4.1";
 
 /* Portal task only. */
@@ -245,21 +246,42 @@ static esp_err_t send_form(httpd_req_t *req, const char *message)
     chunk(req, "<p>Choose the network this player should use, and enter "
                "its password. It is tried before it is saved.</p>"
                "<form method=post action=/join>"
-               "<label>Network<input name=ssid list=nets maxlength=32 "
-               "autocomplete=off autocapitalize=none required></label>"
-               "<datalist id=nets>");
+               "<label>Network<select name=ssid>");
+    /* Strongest first, as scanned. The value is the escaped SSID; the
+     * text adds what tells two similar names apart. */
     for (int i = 0; i < s_seen_n; i++) {
         chunk(req, "<option value=\"");
         chunk_escaped(req, s_seen[i].ssid);
-        char meta[48];
-        snprintf(meta, sizeof(meta), "\">%s, %d dBm</option>",
-                 wifi_auth_name(s_seen[i].auth), s_seen[i].rssi);
+        chunk(req, "\">");
+        chunk_escaped(req, s_seen[i].ssid);
+        char meta[64];
+        snprintf(meta, sizeof(meta), " &mdash; %s, %d dBm, ch %u</option>",
+                 wifi_auth_name(s_seen[i].auth), s_seen[i].rssi,
+                 (unsigned)s_seen[i].channel);
         chunk(req, meta);
     }
-    chunk(req, "</datalist>"
+    {
+        char other[96];
+        snprintf(other, sizeof(other),
+                 "<option value=\"\"%s>Other or hidden network (type it below)%s</option>",
+                 s_seen_n ? "" : " selected",
+                 s_hidden_n ? " &mdash; hidden nearby" : "");
+        chunk(req, other);
+    }
+    chunk(req, "</select></label>"
+               "<label>Or type a network name"
+               "<input name=ssid_other maxlength=32 autocomplete=off "
+               "autocapitalize=none placeholder='only if not in the list'></label>"
                "<label>Password<input name=pass type=password maxlength=64 "
                "autocomplete=off required></label>"
                "<button>Join</button></form>");
+    if (s_hidden_n) {
+        char note[96];
+        snprintf(note, sizeof(note),
+                 "<p>%d hidden network%s nearby. A hidden network's name has "
+                 "to be typed.</p>", s_hidden_n, s_hidden_n == 1 ? "" : "s");
+        chunk(req, note);
+    }
     chunk(req, PAGE_TAIL);
     return httpd_resp_send_chunk(req, NULL, 0);
 }
@@ -329,8 +351,17 @@ static esp_err_t h_join(httpd_req_t *req)
         got += (size_t)n;
     }
 
-    char ssid[WIFISTORE_SSID_MAX + 1], pass[WIFISTORE_SECRET_MAX + 1];
-    const bool have_ssid = portalweb_field(body, got, "ssid", ssid, sizeof(ssid));
+    /* Name buffers larger than an SSID on purpose: a 33-byte name has to
+     * arrive whole so portalweb_check() refuses it by length, rather than
+     * the decoder refusing it and the form quietly using the other field.
+     * A field that is absent, or malformed past 128 bytes, counts as "". */
+    char chosen[129], typed[129], ssid[129];
+    char pass[WIFISTORE_SECRET_MAX + 1];
+    if (!portalweb_field(body, got, "ssid", chosen, sizeof(chosen))) chosen[0] = '\0';
+    const bool typed_ok = portalweb_field(body, got, "ssid_other", typed, sizeof(typed));
+    if (!typed_ok) typed[0] = '\0';
+    snprintf(ssid, sizeof(ssid), "%s", portalweb_pick_ssid(chosen, typed));
+    const bool have_ssid = ssid[0] != '\0';
     const bool have_pass = portalweb_field(body, got, "pass", pass, sizeof(pass));
     memset(body, 0, sizeof(body));
 
@@ -379,7 +410,7 @@ static esp_err_t h_join(httpd_req_t *req)
         /* TRYING now rather than when the task picks it up, so the page
          * this request returns already says so. */
         s_st.status = PORTAL_TRYING;
-        snprintf(s_st.last_ssid, sizeof(s_st.last_ssid), "%s", ssid);
+        snprintf(s_st.last_ssid, sizeof(s_st.last_ssid), "%.32s", ssid);
     }
     xSemaphoreGive(s_mu);
     memset(pass, 0, sizeof(pass));
@@ -457,9 +488,11 @@ static void bring_up(void)
      * sharing the radio while it is gathered. */
     wifi_seen_t *seen = calloc(32, sizeof(*seen));
     s_seen_n = 0;
+    s_hidden_n = 0;
     if (seen) {
         const int n = wifi_scan_list(seen, 32);
         for (int i = 0; i < n && s_seen_n < SEEN_MAX; i++) {
+            if (seen[i].hidden) { s_hidden_n++; continue; }
             bool dup = false;
             for (int k = 0; k < s_seen_n; k++) {
                 if (strcmp(s_seen[k].ssid, seen[i].ssid) == 0) { dup = true; break; }

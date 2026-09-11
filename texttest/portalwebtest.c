@@ -208,6 +208,27 @@ int main(void)
               == PORTALWEB_TRY_NONE, "bad ssid, net %d", net);
     }
 
+    printf("the form's two network fields: typed wins, then chosen\n");
+    CHECK(strcmp(portalweb_pick_ssid("fivescore", ""), "fivescore") == 0, "chosen only");
+    CHECK(strcmp(portalweb_pick_ssid("", "MyHotspot"), "MyHotspot") == 0, "typed only");
+    CHECK(strcmp(portalweb_pick_ssid("fivescore", "MyHotspot"), "MyHotspot") == 0, "both: typed wins");
+    CHECK(strcmp(portalweb_pick_ssid("", ""), "") == 0, "neither");
+    CHECK(strcmp(portalweb_pick_ssid(NULL, NULL), "") == 0, "nulls");
+    CHECK(strcmp(portalweb_pick_ssid(NULL, "x"), "x") == 0, "null chosen");
+    {
+        /* End to end through the real form decoder, as h_join does it. */
+        const char *body = "ssid=&ssid_other=Pixel+7%27s+hotspot&pass=abcdefgh";
+        char c[33], ty[33];
+        const bool gc = portalweb_field(body, strlen(body), "ssid", c, sizeof c);
+        const bool gt = portalweb_field(body, strlen(body), "ssid_other", ty, sizeof ty);
+        CHECK(gc && c[0] == '\0' && gt, "fields decode");
+        CHECK(strcmp(portalweb_pick_ssid(c, ty), "Pixel 7's hotspot") == 0, "hidden name typed");
+        /* "ssid" must not match "ssid_other" as a prefix, in either order. */
+        const char *swapped = "ssid_other=typed&ssid=chosen";
+        CHECK(portalweb_field(swapped, strlen(swapped), "ssid", c, sizeof c) &&
+              strcmp(c, "chosen") == 0, "ssid is not ssid_other: '%s'", c);
+    }
+
     printf("hex is lower case and terminated\n");
     {
         const uint8_t b[3] = { 0x00, 0xAB, 0xff };

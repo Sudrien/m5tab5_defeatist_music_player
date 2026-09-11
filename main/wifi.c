@@ -515,10 +515,25 @@ int wifi_ap_clients(void) { return s_ap_on ? s_ap_clients : 0; }
 
 esp_netif_t *wifi_ap_netif(void) { return s_ap_on ? s_ap_netif : NULL; }
 
+/*
+ * Per-channel dwell for wifi_scan_list(). ESP-IDF's default active scan
+ * listens at most 120 ms a channel, and a phone hotspot that a tablet
+ * lists was absent from every scan here. 300 ms is an ESTIMATE of enough
+ * for a power-saving AP to answer a probe; thirteen channels make a scan
+ * about four seconds. The log says whether it found anything new.
+ */
+#define SCAN_ACTIVE_MIN_MS  (100)
+#define SCAN_ACTIVE_MAX_MS  (300)
+
 int wifi_scan_list(wifi_seen_t *out, int max)
 {
     if (!s_up || !out || max <= 0) return -1;
-    if (esp_wifi_scan_start(NULL, true) != ESP_OK) return -1;
+    wifi_scan_config_t sc = { 0 };
+    sc.show_hidden = true;
+    sc.scan_type = WIFI_SCAN_TYPE_ACTIVE;
+    sc.scan_time.active.min = SCAN_ACTIVE_MIN_MS;
+    sc.scan_time.active.max = SCAN_ACTIVE_MAX_MS;
+    if (esp_wifi_scan_start(&sc, true) != ESP_OK) return -1;
 
     uint16_t n = 0;
     esp_wifi_scan_get_ap_num(&n);
@@ -526,16 +541,33 @@ int wifi_scan_list(wifi_seen_t *out, int max)
     wifi_ap_record_t *ap = n ? calloc(n, sizeof(*ap)) : NULL;
     int got = 0;
     if (ap && esp_wifi_scan_get_ap_records(&n, ap) == ESP_OK) {
+        int hidden = 0;
         for (uint16_t i = 0; i < n && got < max; i++) {
-            if (!ap[i].ssid[0]) continue;       /* hidden: nothing to show */
+            /* A hidden network is kept, with an empty name: the portal
+             * counts it, and the log line is how to see that a phone's
+             * hotspot is being heard but not named. */
+            const bool h = !ap[i].ssid[0];
             snprintf(out[got].ssid, sizeof(out[got].ssid), "%.32s",
                      (const char *)ap[i].ssid);
             out[got].rssi = ap[i].rssi;
             out[got].auth = (uint8_t)ap[i].authmode;
-            ESP_LOGI(TAG, "  %4d dBm  ch%-3d  %-10s  %.32s", ap[i].rssi,
-                     ap[i].primary, authmode(ap[i].authmode), out[got].ssid);
+            out[got].channel = ap[i].primary;
+            out[got].hidden = h;
+            if (h) {
+                hidden++;
+                ESP_LOGI(TAG, "  %4d dBm  ch%-3d  %-10s  (hidden) %02x:%02x:%02x:%02x:%02x:%02x",
+                         ap[i].rssi, ap[i].primary, authmode(ap[i].authmode),
+                         ap[i].bssid[0], ap[i].bssid[1], ap[i].bssid[2],
+                         ap[i].bssid[3], ap[i].bssid[4], ap[i].bssid[5]);
+            } else {
+                ESP_LOGI(TAG, "  %4d dBm  ch%-3d  %-10s  %.32s", ap[i].rssi,
+                         ap[i].primary, authmode(ap[i].authmode), out[got].ssid);
+            }
             got++;
         }
+        ESP_LOGI(TAG, "scan: %d network%s, %d hidden, %d-%d ms a channel",
+                 got, got == 1 ? "" : "s", hidden,
+                 SCAN_ACTIVE_MIN_MS, SCAN_ACTIVE_MAX_MS);
     }
     free(ap);
     esp_wifi_scan_stop();
@@ -573,6 +605,8 @@ static void connect_saved(bool force)
     if (n > 0) {
         const char *names[SCAN_MAX_AP];
         int8_t rssi[SCAN_MAX_AP];
+        /* Hidden entries have "" for a name, which no saved record has, so
+         * wifistore_rank() passes over them without being told. */
         for (int i = 0; i < n; i++) { names[i] = seen[i].ssid; rssi[i] = seen[i].rssi; }
         const int k = wifistore_rank(names, rssi, n, cand, WIFISTORE_MAX);
         if (k == 0) {

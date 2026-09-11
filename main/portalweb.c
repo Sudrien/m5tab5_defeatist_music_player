@@ -302,3 +302,10 @@ portalweb_plan_t portalweb_join_plan(portalweb_check_t kind, portalweb_net_t net
         return PORTALWEB_TRY_NONE;
     }
 }
+
+const char *portalweb_pick_ssid(const char *chosen, const char *typed)
+{
+    if (typed && typed[0]) return typed;
+    if (chosen && chosen[0]) return chosen;
+    return "";
+}

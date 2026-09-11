@@ -139,6 +139,15 @@ typedef enum {
 
 portalweb_plan_t portalweb_join_plan(portalweb_check_t kind, portalweb_net_t net);
 
+/*
+ * The form has a <select> of scanned networks and a text field for one
+ * that is hidden or was not heard. `chosen` and `typed` are those two
+ * decoded values, either possibly "". A typed name wins when there is
+ * one -- typing is the deliberate act, and a <select> always submits
+ * something. Returns whichever applies, or "" for neither; never NULL.
+ */
+const char *portalweb_pick_ssid(const char *chosen, const char *typed);
+
 /* Lower-case hex of `n` bytes into `out`, which needs 2n + 1. */
 void portalweb_hex(const uint8_t *in, size_t n, char *out);
 
