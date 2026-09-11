@@ -120,8 +120,18 @@ void portalweb_non_ascii_hint(const char *secret, char *out, size_t out_size);
  * passphrase first there and storing a derived key afterwards would be
  * as good -- if the passphrase joins, the PBKDF2 key is correct by
  * construction -- but it would store a 64-hex key that no join on this
- * C6 has ever used. That waits for a WPA2-only network to show
- * "saved ... as PSK" and then join from it at the next boot.
+ * C6 had ever used when this was written.
+ *
+ * Half of that is now measured. Eighth flash, a phone hotspot on channel
+ * 10, WPA2:
+ *
+ *   tab5_portal: trying Suscore (PSK, then passphrase: WPA2 network)
+ *   tab5_wifi: joined Suscore
+ *   tab5_portal: saved Suscore as PSK
+ *
+ * The derived 64-hex PSK joined on the first attempt. What is left is
+ * the stored PSK joining at the next boot, from wifistore, through the
+ * worker -- "saved network 1 of 2 in range: Suscore" and an address.
  */
 typedef enum {
     PORTALWEB_NET_UNKNOWN = 0,      /* not in the scan, or an auth mode

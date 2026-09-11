@@ -6109,7 +6109,11 @@ What that run measured, beyond "it works":
   `<select>` of the scan (name, security, dBm, channel) plus a text
   field for a hidden or unheard network; a typed name wins. Unflashed:
   whether the hotspot then appears is the question it was built to
-  answer. Seventh flash: both scans came back exactly 32 networks with
+  answer. **Eighth flash: it did** -- `Suscore`, a phone hotspot, WPA2
+  on channel 10 at -48 dBm, and the portal joined it with the derived
+  PSK on the first attempt and saved it as a PSK. That is the first
+  64-hex key this C6 has joined with. Two saved networks now, both in
+  range; the next boot is the test of the stored PSK and of ranking. Seventh flash: both scans came back exactly 32 networks with
   16-17 hidden -- the old cap, full, cutting the weakest -- and still no
   hotspot. 0020 raises the cap to 64 and warns when a scan is cut. The
   same flash had the first boot-time-style join that worked on the
