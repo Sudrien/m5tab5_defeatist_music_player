@@ -260,14 +260,12 @@ static esp_err_t send_form(httpd_req_t *req, const char *message)
                  (unsigned)s_seen[i].channel);
         chunk(req, meta);
     }
-    {
-        char other[96];
-        snprintf(other, sizeof(other),
-                 "<option value=\"\"%s>Other or hidden network (type it below)%s</option>",
-                 s_seen_n ? "" : " selected",
-                 s_hidden_n ? " &mdash; hidden nearby" : "");
-        chunk(req, other);
-    }
+    /* Chunks, not snprintf: the longest form of this line is 97 bytes
+     * and IDF's -Werror=format-truncation refused a 96-byte buffer. */
+    chunk(req, s_seen_n ? "<option value=\"\">" : "<option value=\"\" selected>");
+    chunk(req, "Other or hidden network (type it below)");
+    if (s_hidden_n) chunk(req, " &mdash; hidden nearby");
+    chunk(req, "</option>");
     chunk(req, "</select></label>"
                "<label>Or type a network name"
                "<input name=ssid_other maxlength=32 autocomplete=off "
