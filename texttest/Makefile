@@ -94,7 +94,21 @@ SLEEP_BIN := sleeptimertest
 # The stream probe's byte sniffing and ICY title parsing.
 SNIFF_BIN := streamsnifftest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff
+# The ICY demultiplexer. Header-only, so this compiles icydemux.h itself
+# and there is nothing to drift from. The property it exists for --
+# feeding a body in pieces gives the same answer as feeding it whole --
+# cannot be observed on hardware, where metaint is 16000 and the reads
+# are 2048, without waiting for the one read in eight that splits a
+# metadata block.
+ICY_BIN := icydemuxtest
+
+# The connection policy: which statuses are followed, retried and given
+# up on, and the backoff schedule. netstream.c cannot be host-tested --
+# it is esp_http_client and a task -- but its decisions are a table, and
+# the table is the part that will be wrong.
+NETPLAN_BIN := netplantest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -160,7 +174,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -185,10 +199,24 @@ $(SNIFF_BIN): streamsnifftest.c ../main/streamsniff.h
 run-sniff: $(SNIFF_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SNIFF_BIN)
 
+$(ICY_BIN): icydemuxtest.c ../main/icydemux.h ../main/streamsniff.h
+	$(CC) $(WARNCFLAGS) -c icydemuxtest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ icydemuxtest.c $(LDFLAGS)
+
+run-icy: $(ICY_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(ICY_BIN)
+
+$(NETPLAN_BIN): netplantest.c ../main/netplan.h
+	$(CC) $(WARNCFLAGS) -c netplantest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ netplantest.c $(LDFLAGS)
+
+run-netplan: $(NETPLAN_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(NETPLAN_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan clean
