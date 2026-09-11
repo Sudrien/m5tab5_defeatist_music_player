@@ -2,8 +2,9 @@
 # falls back to the IDF default on purpose.
 
 # Pin the target. Without this, anything that deletes sdkconfig (a clean
-# checkout, tools/enable_exfat.sh, idf.py fullclean) regenerates it with
-# IDF's default target of esp32.
+# checkout, tools/enable_exfat.sh, `rm sdkconfig`) regenerates it with
+# IDF's default target of esp32. `idf.py fullclean` is NOT one of those: it
+# empties build/ and leaves sdkconfig exactly as it was.
 CONFIG_IDF_TARGET="esp32p4"
 
 # Tab5 silicon is ESP32-P4 rev v1.3. Without this the build targets rev
@@ -279,7 +280,9 @@ CONFIG_LWIP_SNTP_MAX_SERVERS=3
 # out the transport's own; these two move the first two to PSRAM, and the
 # probe logs internal heap every five seconds to say whether it helped.
 #
-# sdkconfig.defaults does not override an existing sdkconfig: delete it or
-# run `idf.py fullclean` for these to take effect.
+# sdkconfig.defaults does not override an existing sdkconfig. `rm sdkconfig`
+# before building; `idf.py fullclean` does not touch it. The first flash
+# after this was added still had CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y and
+# TRY_ALLOCATE_WIFI_LWIP unset, and so measured nothing.
 CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y

@@ -79,7 +79,8 @@ dependencies:
   # the P4-Function-EV-Board pins instead (CLK 18, CMD 19, D0-D3 14-17,
   # reset 54) is using an sdkconfig generated before those defaults
   # existed: sdkconfig.defaults does not override an existing sdkconfig,
-  # so delete it or run `idf.py fullclean`.
+  # so `rm sdkconfig` and build. `idf.py fullclean` empties build/ only and
+  # would leave the stale sdkconfig in place.
   espressif/esp_wifi_remote: "*"
   espressif/esp_hosted: ">=3.0.2"
 

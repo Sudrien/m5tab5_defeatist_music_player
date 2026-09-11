@@ -1318,7 +1318,10 @@ Two would mean something else entirely. After pulling this change:
 
     rm sdkconfig && idf.py reconfigure
 
-or `idf.py fullclean`. Verify with `idf.py menuconfig` under
+Not `idf.py fullclean` alone, which this file used to offer as an
+alternative: in IDF 5.5 it deletes the contents of build/ and leaves
+sdkconfig untouched, so every stale value survives it. Verify with
+`idf.py menuconfig` under
 *Component config -> FAT Filesystem support -> API character encoding*.
 
 This is not a one-off. It applies to **every** symbol added to
@@ -6412,8 +6415,18 @@ Known gaps, in the order a flash would hit them:
   **0040** puts mbedTLS and lwIP/Wi-Fi buffers in PSRAM
   (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`)
   on the hypothesis that they crowd the transport's buffers out of
-  internal RAM, and the probe now logs internal heap every window. Needs
-  a deleted sdkconfig or fullclean to take effect.
+  internal RAM, and the probe now logs internal heap every window.
+  **The first flash of 0040 did not apply it:** the sdkconfig still read
+  `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y` and TRY_ALLOCATE unset, because
+  `idf.py fullclean` -- which 0040 and this file both offered -- does not
+  touch sdkconfig. `rm sdkconfig` is the only way. That run was not
+  wasted: with a card track playing, internal free was 82 KB before the
+  probe (98 KB idle), one TLS session took it to 35 KB with the largest
+  internal block at 14 KB, and hop 2 failed with `esp-aes: Failed to
+  allocate memory` then `HTTP -1`. So streaming beside playback does not
+  fit in internal RAM as configured, whatever the throughput. Hardware
+  AES wants DMA-capable internal copies of its buffers, which is worth
+  remembering if the TLS buffers do move to PSRAM.
 - **The stream path itself.** Nothing exists. `BROWSER_PLAY_FILE` means
   "this path is a track and its folder is the playlist", which a stream
   has no answer for, so it needs its own kind and somewhere in player.c
