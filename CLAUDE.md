@@ -6518,7 +6518,99 @@ Known gaps, in the order a flash would hit them:
   retention, 31 KB RTC, 18 KB and 7 KB more -- about 383 KB, of which
   about 98 KB is free once the player is up. Where the rest goes has not
   been audited.
-- **The stream path itself.** Nothing exists yet; the plan is below.
+- **The stream path itself.** Phase 1 is written (the 0100 series,
+  below). Phases 2-4 are the plan, unchanged.
+
+### The 0100 series: phase 1, written and not compiled
+
+`netstream.c` exists, with its two pure pieces host-tested and itself
+never put through a compiler. That split is deliberate and is the same
+bargain `texttest` was built on: a build here is expensive enough not to
+be the feedback loop, so the parts that can be tested on a host are
+separated out until they are *most* of the logic, and what remains is
+plumbing that only a flash can judge.
+
+**0101, `icydemux.h`.** The probe's inline ICY loop, lifted out and made
+a struct. The property is split-invariance -- the same body in 1-byte,
+3-byte, 97-byte, 1000-byte and single-shot pieces must give identical
+audio and identical titles -- plus 2000 random bodies in random pieces
+against the same bodies whole. 4064 checks under ASan and UBSan.
+
+It found a bug that would have been invisible on hardware and maddening
+in use: **a metadata block with no StreamTitle blanked the title.**
+`icy_stream_title()` terminates its output before it searches, so
+passing `d->title` straight to it clears the title on every block that
+carries only a `StreamUrl` -- which stations send. The screen would have
+gone empty and come back for no reason a listener could see. It parses
+into a scratch buffer now.
+
+Worth keeping in mind for the next reader: metaint is 16000 and the
+reads are 2048, so a length byte lands on a read boundary about one time
+in eight. A wrong demultiplexer plays for a minute before it desyncs,
+which is exactly long enough to be believed.
+
+**0102, `netplan.h`.** Statuses, hops and backoff as a table, 1202
+checks. 404 is fatal and 5xx retries; five redirects then fatal; 1, 2,
+4, 8 seconds and then FAILED, a bounded fifteen seconds from first
+failure to a screen that says something actionable.
+
+Two things the probe had already taught, written as functions so a test
+can fail rather than as comments:
+
+- `netplan_reconnect_from()` always returns the station URL. The Zeno
+  token lives 60 s, so a cached resolved URL **works for the first
+  minute of testing and then never again** -- the worst shape a bug can
+  have, and the reason this is not left to the reconnect path's
+  discretion.
+- `netplan_made_progress()` resets the failure count on audio, not on a
+  successful connect, so a station that accepts a connection and drops
+  it after 200 bytes is given up on rather than retried forever.
+
+**0103, `netstream.c`.** The task, the 256 KB PSRAM ring (static buffer
+over a permanent allocation -- `xStreamBufferCreateWithCaps()` is still
+banned and this does not reintroduce it), redirects by hand, published
+values and no handles across tasks. Requests are a generation counter
+rather than a queue, because a second play request while one is
+connecting means "that one instead", not "that one next".
+
+Two judgements to disagree with later if a flash says so:
+
+- **A full ring drops.** Stalling the read is how a server decides to
+  disconnect us, and for a live stream a full ring means the server is
+  ahead of real time. Dropping is the honest answer; a stall is a
+  disconnect with extra steps.
+- **A zero read is told from an ended body by time, not by count.** A
+  live stream never ends on purpose, so ten seconds of silence is a
+  drop. The probe's 50-count heuristic was fine for a 60-second probe
+  and is not fine for an evening.
+
+**What a flash would settle, in the order it would hit them.** None of
+this is knowable from here:
+
+1. **Whether it compiles.** The enum spellings and the
+   `esp_http_client` call shapes have never been checked by anything.
+   This is the cheap one -- no cable, no flash.
+2. **Whether `ICY 200 OK` ever arrives.** `netplan_icy_status()` knows
+   what the line means; whether `esp_http_client` hands it over or
+   fails the request outright is a hardware question. Zeno answers
+   HTTP, so this will not fire on the station being tested with, and
+   will fire on the first old Shoutcast relay somebody adds.
+3. **Whether priority 3 is right.** Chosen to sit below the writer (6)
+   and ui_task (4) and above `media_task` (1), on the argument that the
+   network must never delay the writer and the ring covers the gap. That
+   is reasoning, not measurement.
+4. **Whether the ring is ever full, or ever empty.** At 0.97x beside
+   playback it should trend empty, which is phase 3's problem; if it
+   trends full, the drop path above is running and the log says so.
+5. **What a real drop looks like.** Every reconnect path here has been
+   reasoned about and none has been seen. The failure classification is
+   the part most likely to be wrong in a way the table cannot show.
+
+**Not done, and next:** the probe still opens its own connection rather
+than being rewritten on top of `netstream`, which the plan calls for and
+which is the thing that would prove this file on hardware. That is 0105
+and it should come before phase 2 -- decoding from a ring that has never
+been shown to fill correctly is two unknowns at once.
 
 ### The stream path: plan
 
