@@ -69,6 +69,7 @@
 #include "cbrseek.h"
 #include "decoder.h"
 #include "framewalk.h"
+#include "gfx.h"          /* the brightness filter and a full reblit */
 #include "loudness.h"
 #include "tailplan.h"
 #include "replaygain.h"
