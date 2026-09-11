@@ -118,7 +118,12 @@ STATION_BIN := stationlisttest
 # chopping rather than as a pause.
 BUFPLAN_BIN := bufferplantest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan
+# Which decoder a stream's bytes go to. The bytes win over Content-Type,
+# because handing AAC to minimp3 does not fail -- it produces noise, and
+# noise from a live stream is hard to tell from a bad connection.
+CODEC_BIN := codecplantest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -184,7 +189,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -237,10 +242,17 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(CODEC_BIN): codecplantest.c ../main/codecplan.h ../main/streamsniff.h
+	$(CC) $(WARNCFLAGS) -c codecplantest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ codecplantest.c $(LDFLAGS)
+
+run-codec: $(CODEC_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CODEC_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec clean

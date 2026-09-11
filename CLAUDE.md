@@ -6742,6 +6742,45 @@ running -- which is exactly why it would have survived listening to it;
 what was wrong was the phase, which is what the screen and the log read.
 It enters `DRAINING` the moment no more bytes are coming.
 
+**0111, `codecplan.h`.** Phase 2's one decision that is not a
+measurement: which decoder the ring's bytes go to. There are two
+sources and they disagree often -- Content-Type is a header somebody
+configured years ago, and the first bytes are what the decoder will
+actually be handed.
+
+**The bytes win.** The header is consulted only when the bytes say
+nothing. This matters because of the failure mode: handing AAC to
+minimp3 does not error, it produces noise, and noise from a live stream
+with no seek bar is very hard to tell from a bad connection. A single
+station with a stale Content-Type would present as "internet radio is
+flaky". An AAC station announcing `audio/mpeg` is routine, not
+hypothetical.
+
+Everything outside phase 2's scope -- ADTS AAC and MP3 -- is refused
+**by name**. An Ogg stream, an HLS playlist and an error page are three
+different things to say on a screen, and "failed" for all three is the
+version that produces a bug report nobody can act on. The playlist cases
+earn their place: a great many station URLs in the wild are `.pls` or
+`.m3u` files that *contain* the stream URL, radio-browser hands them
+out, and resolving them is explicitly not in scope -- so the least this
+can do is say which kind it found rather than playing a text file as
+audio.
+
+Two things separated that a simpler version would merge:
+
+- **"Not enough bytes yet" is not "not audio."** A station whose first
+  block has not arrived says Buffering, not Unsupported.
+- **ID3 is a wrapper, not a codec.** A Shoutcast MP3 stream can open
+  with a tag; `id3_skip_bytes()` reads its length so the caller drops it
+  and sniffs again. The length is four syncsafe bytes -- seven bits
+  each -- and reading it as a plain big-endian integer is wrong
+  silently, for every tag under 2 MB, landing mid-frame. Tested
+  directly, and end to end: tag in front of real MP3, skip, re-sniff,
+  decode.
+
+8053 checks, including every combination of sniff result, Content-Type
+and byte count, and 5000 random buffers through the real sniffer.
+
 **Where the series stands.** Phase 1 written, compiled, unflashed. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
