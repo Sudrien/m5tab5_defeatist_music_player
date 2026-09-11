@@ -6254,7 +6254,24 @@ Known gaps, in the order a flash would hit them:
   to the floor, then the pixel filter to black, against the clock --
   and logs frames and reblits. A reblit is far slower than a backlight
   write, so the filter end of a fade has few frames; the log says how
-  few. The timer's options go below
+  few.
+- **Next for brightness: interpolate duty and filter, don't switch.**
+  Good enough for now, but both places hand off at a hard edge.
+  *The fade:* a filter change is a full reblit and a backlight write is
+  nearly free, so step the filter coarsely -- 12 to 16 steps spread over
+  the whole fade rather than crowded into its last tenth -- and on every
+  16 ms frame set duty = wanted light / current filter, so the backlight
+  fills in between reblits and the product tracks the curve. Only the
+  very bottom, with the backlight pinned at its floor, can still step.
+  *The slider:* level 13 is 1% duty and filter 256, level 12 is 1% and
+  241, so the picture changes character at one notch. Blend across a
+  band of roughly 1-4% duty, both moving. Lean on the backlight for as
+  long as it has range, because RGB565 has five bits of red and blue and
+  dark colours band and shift under a heavy filter; the fade does not
+  care, it ends black. Both belong in `brightness.h` as pure functions,
+  and `brightnesstest` can require that duty times filter follows the
+  curve to within one backlight count at every frame for a given filter
+  schedule. Needs a flash to judge. The timer's options go below
   it.
   Relative ("for 45 minutes") needs no clock and should ship first.
   "Until 07:00" needs the wall clock; resolve the deadline to a
