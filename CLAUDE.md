@@ -14,6 +14,20 @@ history: correcting it in place erases the reasoning that produced it,
 and which things turned out not to be tasks is the useful part of a
 record like this one.
 
+**There is one number, and it is the patch number.** A patch's series
+number, its subject prefix and its filename are the same number. The
+next patch after 0108 is 0109, in a file named `0109-...patch`. Not
+`0001-0109-...`, which is what `git format-patch` gives by default when
+it is handed a range it thinks starts a new series -- it numbers from
+the range, not from the project. Pass `--start-number`:
+
+    git format-patch --start-number 109 -1 -o out/
+
+Two numbers on one patch means the filenames sort against the series
+after ten of them and nobody can say which patch `0003` is without
+opening it. The series is the history of this project, not of one
+session's range, and it does not restart because a session did.
+
 Within a patch, change the lines that must change and no others. No
 reflowing, no drive-by renames, no reorganising code being passed
 through. Restructuring an existing function is sometimes the smallest
@@ -6675,6 +6689,17 @@ which is exactly what that pass is for and the third time it has paid
 for itself. The file has no `snprintf` in it now, which is also the
 better shape: truncating a URL gives a station that connects to the
 wrong thing, so the call sites reject instead.
+
+**0108 built.** The one thing a build alone could settle is settled:
+`netstream.c`, `icydemux.h`, `netplan.h` and the rewritten probe all
+compile in the real IDF build at -Werror. The enum spellings and
+`esp_http_client` call shapes 0103 flagged as its most likely errors
+were not among them; the one error was a header that did not name its
+own buffer size, which was not on the list and could not have been --
+nothing had ever tried to call it from outside.
+
+So item 1 of "what a flash would settle" is closed and items 2-5 are
+untouched. Every remaining unknown in phase 1 needs a board.
 
 **Where the series stands.** Phase 1 written, compiled, unflashed. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
