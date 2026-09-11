@@ -6283,7 +6283,16 @@ Known gaps, in the order a flash would hit them:
   milliseconds cannot leak out at full level. Any press during the ramp
   cancels the timer and puts the volume back. Deadline on esp_timer, not
   saved across reboots. Arithmetic in `sleeptimer.h`, tested by
-  `sleeptimertest`. Unflashed. "Until 07:00" still needs the wall clock;
+  `sleeptimertest`. **Seen working on hardware:** ramp started at
+  1276620, `ran out: paused` at 1296187 (19.6 s -- the ramp begins on the
+  first ui_task pass inside the window), screen faded, amplifier idle
+  1.6 s later, woke on a touch 228 s after. The screen fade logged `45
+  frames, 1 reblits, 830 ms`: from a bright setting the filter phase got
+  a single reblit, which is the stepped end the duty/filter
+  interpolation item below is for. At volume 21 the ramp has only 21
+  levels to cross in 20 s; whether that is audible as steps is not yet
+  reported. Not yet confirmed: the level coming back on the next play
+  press. "Until 07:00" still needs the wall clock;
   resolve the deadline to a monotonic reading once, at set time, or an
   NTP step silently changes its length. (This entry used to point at a DST write-up in
   settings.h. There is none.)
