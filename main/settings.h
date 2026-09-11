@@ -154,6 +154,28 @@ uint8_t settings_crossfade_sec(void);
 void settings_set_crossfade_sec(uint8_t sec);
 
 /*
+ * Screen brightness, as a position on the Sleep page's slider, in percent.
+ *
+ * A position, not a PWM duty: player.c maps it through a gamma curve, so
+ * equal steps of the slider are roughly equal steps of what is seen. A
+ * straight duty ramp spends most of its travel where the panel has
+ * already stopped getting visibly brighter -- which is what the fixed 80%
+ * looked like on hardware.
+ *
+ * SETTINGS_BRIGHTNESS_MIN is not 0. A slider that can reach a black
+ * screen is a slider that hides itself, and switching the screen off is
+ * the switch above it on the same page. The default, 90, lands on the
+ * duty the screen always had -- 90% through gamma 2.2 is 79% duty,
+ * against the old fixed 80% -- so a card without the key looks the same
+ * as before.
+ */
+#define SETTINGS_BRIGHTNESS_MIN     (5)
+#define SETTINGS_BRIGHTNESS_MAX     (100)
+#define SETTINGS_BRIGHTNESS_DEFAULT (90)
+uint8_t settings_brightness(void);
+void settings_set_brightness(uint8_t pct);
+
+/*
  * Whether to crossfade between two tracks from the same album.
  *
  * Off by default, and that default is the whole reason this is a

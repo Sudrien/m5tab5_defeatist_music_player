@@ -29,6 +29,11 @@ extern "C" {
 typedef enum {
     SLEEPPAGE_NONE = 0,     /* nothing for the caller to do */
     SLEEPPAGE_CLOSE,        /* CLOSE pressed */
+    SLEEPPAGE_BRIGHTNESS,   /* the slider moved settings_brightness();
+                               the caller applies it to the backlight,
+                               and the page stays open */
+    SLEEPPAGE_BRIGHTNESS_DONE,  /* the drag ended; nothing to apply, but
+                               the caller logs the duty it chose */
     SLEEPPAGE_SCREEN_OFF,   /* the Screen switch went to OFF. The page has
                                already drawn OFF; the caller fades the
                                backlight, so the switch is seen to move,

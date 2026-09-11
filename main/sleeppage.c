@@ -7,6 +7,9 @@
 
 #include "esp_log.h"
 #include "gfx.h"
+#include "settings.h"
+
+#include <stdio.h>
 
 static const char *TAG = "tab5_sleep";
 
@@ -17,6 +20,8 @@ static const char *TAG = "tab5_sleep";
 #define C_DIM       RGB(0x77, 0x77, 0x77)
 #define C_BTN       RGB(0x26, 0x26, 0x26)
 #define C_ON        RGB(0x3C, 0xB3, 0x71)
+#define C_ACCENT    RGB(0xD1, 0x3B, 0x2C)
+#define C_FAINT     RGB(0x55, 0x55, 0x55)
 #define C_RULE      RGB(0x33, 0x33, 0x33)
 
 #define HEAD_H      (96)            /* where panel.c has its tab strip */
@@ -28,6 +33,11 @@ static const char *TAG = "tab5_sleep";
 #define OPTION_H    (ROW_H + 24)    /* panel.c's AUDIO_SWITCH_H */
 #define NOTE_GAP    (14)
 #define NOTE_STEP   (GFX_GLYPH_H(LABEL_SCALE) + 12)
+#define NOTE_LINES  (2)
+#define GAP         (36)            /* panel.c's AUDIO_GAP */
+#define SLIDER_H    (ROW_H + 96)    /* panel.c's AUDIO_SLIDER_H */
+#define SLIDER_INSET (24)
+#define SLIDER_KNOB  (28)
 
 static bool s_open;
 static bool s_dirty;
@@ -40,6 +50,9 @@ static bool s_was_down;
  * touch on a dark screen, which ui.c owns.
  */
 static bool s_screen_on = true;
+/* A drag on the brightness slider, held across polls -- panel.c's
+ * crossfade slider, for panel.c's reason. */
+static bool s_drag;
 
 bool sleeppage_is_open(void) { return s_open; }
 
@@ -49,6 +62,7 @@ void sleeppage_open(void)
     s_dirty = true;
     s_was_down = false;
     s_screen_on = true;
+    s_drag = false;
 }
 
 void sleeppage_close(void)
@@ -64,6 +78,20 @@ void sleeppage_close(void)
 static void screen_box(int *x, int *y, int *w, int *h)
 {
     *x = 0; *y = LIST_TOP; *w = gfx_w(); *h = OPTION_H;
+}
+
+static void brightness_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0;
+    *y = LIST_TOP + OPTION_H + NOTE_GAP + NOTE_LINES * NOTE_STEP + GAP;
+    *w = gfx_w();
+    *h = SLIDER_H;
+}
+
+static void slider_track(int *x0, int *x1)
+{
+    *x0 = SLIDER_INSET + SLIDER_KNOB;
+    *x1 = gfx_w() - SLIDER_INSET - SLIDER_KNOB;
 }
 
 void sleeppage_draw(void)
@@ -105,6 +133,32 @@ void sleeppage_draw(void)
         }
     }
 
+    /* --- Brightness ------------------------------------------------ */
+    brightness_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    {
+        const int b = settings_brightness();
+        char head[32];
+        snprintf(head, sizeof(head), "Brightness   %d%%", b);
+        gfx_draw_text(24, y + 20, head, NAME_SCALE, w - 48, C_TEXT);
+
+        const int span = SETTINGS_BRIGHTNESS_MAX - SETTINGS_BRIGHTNESS_MIN;
+        int tx0, tx1;
+        slider_track(&tx0, &tx1);
+        const int ty = y + bh - 44;
+        const int kx = tx0 + ((tx1 - tx0) * (b - SETTINGS_BRIGHTNESS_MIN)) / span;
+        gfx_fill_rect(tx0, ty - 3, tx1 - tx0, 6, C_BTN);
+        gfx_fill_rect(tx0, ty - 3, kx - tx0, 6, C_ACCENT);
+        gfx_fill_circle(kx, ty, SLIDER_KNOB / 2, C_TEXT);
+
+        char lo[8];
+        snprintf(lo, sizeof(lo), "%d%%", SETTINGS_BRIGHTNESS_MIN);
+        gfx_draw_text(SLIDER_INSET, ty + SLIDER_KNOB, lo, LABEL_SCALE, 80, C_FAINT);
+        const int mw = gfx_text_w("100%", LABEL_SCALE);
+        gfx_draw_text(w - SLIDER_INSET - mw, ty + SLIDER_KNOB, "100%",
+                      LABEL_SCALE, 80, C_FAINT);
+    }
+
     /* Footer: panel.c's, one button, the way out. */
     const int fy = h - FOOT_H;
     gfx_fill_rect(0, fy, w, 2, C_RULE);
@@ -121,9 +175,46 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
 {
     const bool tapped = down && !s_was_down;
     s_was_down = down;
-    (void)x;
 
-    if (!s_open || !tapped) return SLEEPPAGE_NONE;
+    if (!s_open) return SLEEPPAGE_NONE;
+
+    /*
+     * The slider first, before the tapped test: a drag is a run of downs
+     * with one edge at the front, and applied on every move so the
+     * backlight follows the finger. Snapped to whole percent on the way
+     * in, so the knob only sits where a setting exists.
+     */
+    {
+        int sx, sy, sw, sh;
+        brightness_box(&sx, &sy, &sw, &sh);
+        if (s_drag || (tapped && y >= sy && y < sy + sh)) {
+            if (down) {
+                int tx0, tx1;
+                slider_track(&tx0, &tx1);
+                int pos = x - tx0;
+                if (pos < 0) pos = 0;
+                if (pos > tx1 - tx0) pos = tx1 - tx0;
+                const int spanpx = tx1 - tx0;
+                const int span = SETTINGS_BRIGHTNESS_MAX - SETTINGS_BRIGHTNESS_MIN;
+                const int want = SETTINGS_BRIGHTNESS_MIN +
+                                 (spanpx > 0 ? (pos * span + spanpx / 2) / spanpx : 0);
+                s_drag = true;
+                if (want != settings_brightness()) {
+                    settings_set_brightness((uint8_t)want);
+                    s_dirty = true;
+                    return SLEEPPAGE_BRIGHTNESS;
+                }
+                return SLEEPPAGE_NONE;
+            }
+            if (s_drag) {
+                s_drag = false;
+                /* player.c logs position and duty together. */
+                return SLEEPPAGE_BRIGHTNESS_DONE;
+            }
+        }
+    }
+
+    if (!tapped) return SLEEPPAGE_NONE;
 
     if (y >= gfx_h() - FOOT_H) {
         ESP_LOGI(TAG, "button: close");

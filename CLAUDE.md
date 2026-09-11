@@ -6233,7 +6233,13 @@ Known gaps, in the order a flash would hit them:
   transport bar opens a Sleep page (`sleeppage.c`), and its first row is
   a settings-style switch, "Screen [ON]". Switching it off fades the
   backlight out over 800 ms (0025), squared, so the OFF is seen before
-  the page closes; waking is a touch, instant. The timer's options go
+  the page closes; waking is a touch, instant. Under it (0026), a
+  Brightness slider, 5-100%, saved as `brightness` in .defeatist.dat
+  and mapped to PWM duty through gamma 2.2, because the fixed 80% duty
+  looked like a plateau. The default, 90, is 79% duty, so a card without
+  the key looks as before. The duty curve is an estimate: releasing the
+  slider logs `brightness N% -> duty M%`, which is how to find where
+  this panel actually stops getting brighter. The timer's options go
   below it.
   Relative ("for 45 minutes") needs no clock and should ship first.
   "Until 07:00" needs the wall clock; resolve the deadline to a

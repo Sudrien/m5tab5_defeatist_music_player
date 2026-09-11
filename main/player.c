@@ -760,6 +760,41 @@ static esp_err_t backlight_set(int percent)
  */
 #define SCREEN_FADE_MS  (800)
 
+/*
+ * The brightness setting, as a PWM duty in percent.
+ *
+ * Gamma 2.2: the slider is a position in what is seen, and PWM duty is
+ * not. On hardware a fixed 80% duty looked like a plateau -- raising it
+ * did not visibly help -- which is what a linear duty scale does at its
+ * top. The curve puts more of the slider's travel where the panel still
+ * changes. 2.2 is the conventional display gamma, an ESTIMATE for this
+ * backlight; the log line gives position and duty so the real response
+ * can be read off the device and the curve, or a ceiling, set from that.
+ */
+#define BRIGHTNESS_GAMMA    (2.2)
+
+static int brightness_duty_pct(int level)
+{
+    if (level <= 0) return 0;
+    if (level >= 100) return 100;
+    const double d = 100.0 * pow((double)level / 100.0, BRIGHTNESS_GAMMA);
+    const int pct = (int)(d + 0.5);
+    return pct < 1 ? 1 : pct;
+}
+
+/* Where the screen goes when it is on. ui_task only. */
+static int screen_on_duty(void)
+{
+    return brightness_duty_pct(settings_brightness());
+}
+
+/* The release of a brightness drag, with the duty the page cannot see. */
+static void log_brightness(void)
+{
+    ESP_LOGI(TAG, "brightness %d%% -> duty %d%% of %d",
+             (int)settings_brightness(), screen_on_duty(), LCD_LEDC_DUTY_MAX);
+}
+
 static void backlight_fade_out(int from, int ms)
 {
     const int step_ms = 20;
@@ -2545,6 +2580,13 @@ static volatile bool     s_open_chooser;
  * to happen at the top of the next one. */
 static volatile bool     s_open_panel;
 static volatile bool     s_open_sleep;   /* the moon: see sleeppage.h */
+/*
+ * Set wherever settings are (re)loaded, consumed by ui_task, which owns
+ * the backlight. Not applied at the load sites themselves: one of them is
+ * the track loop, and a backlight write from there while the screen is
+ * off would switch it back on.
+ */
+static volatile bool     s_brightness_pending;
 
 /*
  * The gain in effect for the track playing now, and whether there is
@@ -4774,6 +4816,20 @@ static void ui_task(void *arg)
         int bx = 0, by = 0;
         const bool bdown = touch_get(&bx, &by);
 
+        /* Every track start sets this, so it only writes and logs when
+         * the duty would actually change. */
+        if (s_brightness_pending) {
+            s_brightness_pending = false;
+            static int applied = LCD_BRIGHTNESS_PERCENT;   /* app_main's */
+            const int duty = screen_on_duty();
+            if (!s_screen_off && duty != applied) {
+                backlight_set(duty);
+                applied = duty;
+                ESP_LOGI(TAG, "brightness %d%% from settings (duty %d%%)",
+                         (int)settings_brightness(), duty);
+            }
+        }
+
         /* The chooser, when it is up, is the whole screen and the whole
          * interaction. It is driven from here rather than from its own
          * task so there is exactly one writer to the framebuffer -- the
@@ -4854,10 +4910,17 @@ static void ui_task(void *arg)
 
         if (sleeppage_is_open()) {
             const sleeppage_result_t r = sleeppage_touch(bdown, bx, by);
-            if (r != SLEEPPAGE_NONE) {
+            if (r == SLEEPPAGE_BRIGHTNESS) {
+                /* Live, so the backlight follows the finger. The duty is
+                 * logged with the release, below, not on every move. */
+                backlight_set(screen_on_duty());
+                sleeppage_draw();
+            } else if (r == SLEEPPAGE_BRIGHTNESS_DONE) {
+                log_brightness();
+            } else if (r != SLEEPPAGE_NONE) {
                 if (r == SLEEPPAGE_SCREEN_OFF) {
                     sleeppage_draw();
-                    backlight_fade_out(LCD_BRIGHTNESS_PERCENT, SCREEN_FADE_MS);
+                    backlight_fade_out(screen_on_duty(), SCREEN_FADE_MS);
                     s_screen_off = true;
                 }
                 sleeppage_close();
@@ -5207,7 +5270,7 @@ static void ui_task(void *arg)
             break;
         case UI_ACTION_SCREEN_ON:
             s_screen_off = false;
-            backlight_set(LCD_BRIGHTNESS_PERCENT);
+            backlight_set(screen_on_duty());
             break;
         default:
             break;
@@ -8047,6 +8110,7 @@ static void restore_last_track(void)
         s_volume = settings_volume();
         audio_out_set_volume((uint8_t)s_volume);
         ESP_LOGI(TAG, "volume %d from settings", s_volume);
+        s_brightness_pending = true;
 
         /* The radio is one of the things the file decides, so it belongs
          * to this push and not to app_main(). See wifi.h.
@@ -8309,6 +8373,7 @@ static void player_loop(void)
             s_volume = settings_volume();
             audio_out_set_volume((uint8_t)s_volume);
             ESP_LOGI(TAG, "volume %d from settings", s_volume);
+            s_brightness_pending = true;
         }
 
         /*

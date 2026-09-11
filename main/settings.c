@@ -80,7 +80,9 @@ static const char *TAG = "tab5_settings";
  * a resume track silently forgotten on deep folder trees -- is
  * invisible enough to be worth the slack.
  */
-#define SETTINGS_MAX_LINE       (384)
+/* Raised again, from 384, when brightness arrived: 17 more bytes of keys
+ * would otherwise have come straight out of the path. */
+#define SETTINGS_MAX_LINE       (448)
 
 /*
  * The file is append-only, and this is where it stops growing.
@@ -117,6 +119,7 @@ static bool       s_rg_enabled = true;
  * way they were cut. See settings_crossfade_sec(). */
 static uint8_t    s_crossfade_sec;
 static bool       s_crossfade_album;
+static uint8_t    s_brightness = SETTINGS_BRIGHTNESS_DEFAULT;
 
 /* Off. The radio does not come up because a firmware update happened.
  * See settings_wifi_enabled(). */
@@ -201,6 +204,18 @@ void settings_set_crossfade_sec(uint8_t sec)
     if (sec > SETTINGS_CROSSFADE_MAX) sec = SETTINGS_CROSSFADE_MAX;
     if (sec == s_crossfade_sec) return;
     s_crossfade_sec = sec;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+uint8_t settings_brightness(void) { return s_brightness; }
+
+void settings_set_brightness(uint8_t pct)
+{
+    if (pct < SETTINGS_BRIGHTNESS_MIN) pct = SETTINGS_BRIGHTNESS_MIN;
+    if (pct > SETTINGS_BRIGHTNESS_MAX) pct = SETTINGS_BRIGHTNESS_MAX;
+    if (pct == s_brightness) return;
+    s_brightness = pct;
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -430,6 +445,15 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        const cJSON *br = cJSON_GetObjectItemCaseSensitive(root, "brightness");
+        if (take_settings && cJSON_IsNumber(br)) {
+            int v = br->valueint;
+            if (v < SETTINGS_BRIGHTNESS_MIN) v = SETTINGS_BRIGHTNESS_MIN;
+            if (v > SETTINGS_BRIGHTNESS_MAX) v = SETTINGS_BRIGHTNESS_MAX;
+            s_brightness = (uint8_t)v;
+            any = true;
+        }
+
         const cJSON *xa = cJSON_GetObjectItemCaseSensitive(root, "crossfade_album");
         if (take_settings && cJSON_IsBool(xa)) {
             s_crossfade_album = cJSON_IsTrue(xa);
@@ -517,6 +541,13 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
         if (v < 0) v = 0;
         if (v > SETTINGS_CROSSFADE_MAX) v = SETTINGS_CROSSFADE_MAX;
         s_crossfade_sec = (uint8_t)v;
+        return true;
+    }
+    if (strcmp(key, "brightness") == 0) {
+        int v = atoi(val);
+        if (v < SETTINGS_BRIGHTNESS_MIN) v = SETTINGS_BRIGHTNESS_MIN;
+        if (v > SETTINGS_BRIGHTNESS_MAX) v = SETTINGS_BRIGHTNESS_MAX;
+        s_brightness = (uint8_t)v;
         return true;
     }
     if (strcmp(key, "crossfade_album") == 0) {
@@ -668,9 +699,11 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
 #define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
                             "\"crossfade\":%u,\"crossfade_album\":%s," \
+                            "\"brightness\":%u," \
                             "\"wifi\":%s,\"ntp\":%s," \
                             "\"ntp_epoch\":%s,\"ntp_boot_us\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
+                             (unsigned)s_brightness, \
                              wf, np, nte, ntb
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {
