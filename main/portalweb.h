@@ -122,8 +122,8 @@ void portalweb_non_ascii_hint(const char *secret, char *out, size_t out_size);
  * construction -- but it would store a 64-hex key that no join on this
  * C6 had ever used when this was written.
  *
- * Half of that is now measured. Eighth flash, a phone hotspot on channel
- * 10, WPA2:
+ * Half of that is now measured. Eighth flash, Suscore, a WPA2-only guest
+ * network on the same router as the WPA2/WPA3 fivescore, channel 10:
  *
  *   tab5_portal: trying Suscore (PSK, then passphrase: WPA2 network)
  *   tab5_wifi: joined Suscore
