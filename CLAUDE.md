@@ -6404,7 +6404,11 @@ Known gaps, in the order a flash would hit them:
   - *The token:* `"iat":1789097220,"exp":1789097280,"rttl":5` -- the
     redirected URL is good for 60 seconds. A reconnect inside that could
     reuse it and skip 0.8 s; after it, Zeno again.
-  - Whether a card track was playing during this run is not in the log.
+  - *Nothing was playing.* The full log of the same boot (v0.3.0-83)
+    has the player idle on "ready to resume" from boot until a track was
+    started at 344952, three and a half minutes after the probe ended.
+    So the shortfall and the OOMs are the network path alone, with no
+    decoder, SD reads or writer competing for anything.
   **0040** puts mbedTLS and lwIP/Wi-Fi buffers in PSRAM
   (`CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC`, `CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP`)
   on the hypothesis that they crowd the transport's buffers out of
