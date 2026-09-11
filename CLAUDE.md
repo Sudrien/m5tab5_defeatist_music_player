@@ -6170,7 +6170,9 @@ What that run measured, beyond "it works":
   while paused mid-track had the same path. Also in 0035: the panel's
   CLOSE is greyed and refused while setup runs, since setup holds
   playback paused and a hidden setup is a player that will not play
-  with nothing saying why. STOP first.
+  with nothing saying why. STOP first. **Confirmed on v0.3.0-79:**
+  paused mid-track, the chooser's cancel, the panel's CLOSE and the
+  Sleep page's CLOSE each redrew the art at once.
 - **The PSK is refused by a WPA2/WPA3 transition network.** Fourth
   flash: reason 202, AUTH_FAIL, then the passphrase joined and was
   stored. PSK-first keeps the passphrase off the device only on
@@ -6332,8 +6334,13 @@ Known gaps, in the order a flash would hit them:
   a single reblit, which is the stepped end the duty/filter
   interpolation item below is for. At volume 21 the ramp has only 21
   levels to cross in 20 s; whether that is audible as steps is not yet
-  reported. Not yet confirmed: the level coming back on the next play
-  press. "Until 07:00" still needs the wall clock;
+  reported. **Second run (v0.3.0-79):** set to 30 min, replaced with 15
+  at 258718, ramp from 1138900, `ran out: paused` at 1158781 -- 63 ms
+  after the 15 minutes, across three track changes and three
+  fade-in-over-a-recorded-fade crossfades. Screen fade from brightness
+  53: 43 frames, 2 reblits. Woken and played 243 s later. The volume
+  restore had no log line, so whether sound came back could not be read
+  from the log; 0036 adds `sleep timer: volume N restored for play`. "Until 07:00" still needs the wall clock;
   resolve the deadline to a monotonic reading once, at set time, or an
   NTP step silently changes its length. (This entry used to point at a DST write-up in
   settings.h. There is none.)

@@ -5276,7 +5276,13 @@ static void ui_task(void *arg)
          * own level below, so it only needs the flag dropped. */
         if (s_sleep_restore &&
             (act.kind == UI_ACTION_PLAY_PAUSE || act.kind == UI_ACTION_VOLUME)) {
-            if (act.kind == UI_ACTION_PLAY_PAUSE) audio_out_set_volume((uint8_t)s_volume);
+            if (act.kind == UI_ACTION_PLAY_PAUSE) {
+                audio_out_set_volume((uint8_t)s_volume);
+                /* Logged because on hardware nothing said it had happened,
+                 * and "did the sound come back" was the one question the
+                 * log could not answer. */
+                ESP_LOGI(TAG, "sleep timer: volume %d restored for play", s_volume);
+            }
             s_sleep_restore = false;
         }
 
