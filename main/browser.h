@@ -33,12 +33,25 @@ typedef enum {
     BROWSER_NONE = 0,
     BROWSER_PLAY_FILE,      /* path is a track; its folder becomes the list */
     BROWSER_PLAY_FOLDER,    /* path is a directory; play it from the top */
+    /*
+     * A station from the RADIO tab. `index` is its position in the
+     * station list and `path` is NULL.
+     *
+     * The index rather than the URL, deliberately: stations.c owns the
+     * list, the name and the URL, and handing back a copy of two of
+     * those would give the player a station that could disagree with
+     * the one stations_index() reports a moment later. The player sets
+     * the index and reads the station back, so there is one answer to
+     * "which station is this" and stations.c has it.
+     */
+    BROWSER_PLAY_STREAM,
     BROWSER_CANCELLED,      /* closed without choosing */
 } browser_result_kind_t;
 
 typedef struct {
     browser_result_kind_t kind;
     const char *path;       /* owned by browser.c, valid until the next call */
+    int index;              /* BROWSER_PLAY_STREAM only; -1 otherwise */
 } browser_result_t;
 
 /* Open on the folder of `start` when it is on a mounted volume, otherwise

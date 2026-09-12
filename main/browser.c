@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "browser.h"
+#include "stations.h"
 #include "decoder.h"
 #include "gfx.h"
 #include "storage.h"
@@ -74,7 +75,44 @@ static bool s_open;
 static bool s_dirty;
 static bool s_was_down;
 
-static storage_id_t s_tab = STORAGE_SD;
+/*
+ * Which tab is up.
+ *
+ * A third tab rather than an entry in the file list, and the reason is
+ * that a station is not on a volume. An entry would have to live in
+ * some directory, which would make it appear and disappear with the
+ * card and put it in a sort order next to filenames. The tabs already
+ * mean "which source of things to play", which is exactly the
+ * distinction.
+ *
+ * BROWSER_TAB_SD and _USB match storage_id_t numerically so the two
+ * that are volumes can still be passed to storage_present() and
+ * storage_mount_path() without a mapping table.
+ */
+typedef enum {
+    BROWSER_TAB_SD = STORAGE_SD,
+    BROWSER_TAB_USB = STORAGE_USB,
+    BROWSER_TAB_RADIO,
+    BROWSER_TAB_COUNT
+} browser_tab_t;
+
+static browser_tab_t s_tab = BROWSER_TAB_SD;
+
+/*
+ * The station list, loaded into the same rows the files use.
+ *
+ * Copied in rather than drawn from stations.c directly, so that the
+ * scrollbar, the row striping, the paging and the clipping all work
+ * unchanged -- this tab adds a source of names, not a second list
+ * widget. is_dir is false for every one of them.
+ *
+ * NOTE: the chooser does NOT call stations_load(). That opens a file and
+ * ui_task is the one task that must not block on the card; the player
+ * loads the list from its idle branch. So this tab shows the list as
+ * last read, and a stations.m3u edited with the card still in will not
+ * appear until something reloads it.
+ */
+static bool s_radio;
 static char s_dir[512];
 static char s_result[512];
 
@@ -304,7 +342,13 @@ static void find_common_prefix(void)
 }
 
 /* Path of the volume root for the active tab. */
-static const char *tab_root(void) { return storage_mount_path(s_tab); }
+static const char *tab_root(void)
+{
+    /* RADIO has no root. Callers guard on s_radio before using this;
+     * returning "" rather than NULL keeps a stray use from crashing. */
+    if (s_tab == BROWSER_TAB_RADIO) return "";
+    return storage_mount_path((storage_id_t)s_tab);
+}
 
 static bool at_root(void)
 {
@@ -337,12 +381,65 @@ static void go_up(void)
  * selectable anyway: a tab that ignores taps while the drive spins up
  * reads as a lost tap.
  */
-static void select_tab(storage_id_t id)
+/* A tab has something in it. For the volumes that is a mount; for RADIO
+ * it is a station list that has been read. */
+static bool tab_present(browser_tab_t t)
+{
+    if (t == BROWSER_TAB_RADIO) return stations_count() > 0;
+    return storage_present((storage_id_t)t);
+}
+
+/* Fill the rows from the station list. Same entry_t the files use, so
+ * everything downstream of here is unchanged. */
+static void load_stations(void)
+{
+    entries_free();
+    if (!s_entries) {
+        s_entries = heap_caps_calloc(MAX_ENTRIES, sizeof(entry_t),
+                                     MALLOC_CAP_SPIRAM);
+        if (!s_entries) {
+            ESP_LOGE(TAG, "no PSRAM for the station rows");
+            return;
+        }
+    }
+    const int n = stations_count();
+    for (int i = 0; i < n && s_count < MAX_ENTRIES; i++) {
+        station_t st;
+        if (!stations_get(i, &st)) continue;
+        s_entries[s_count].name = strdup(st.name);
+        if (!s_entries[s_count].name) break;
+        s_entries[s_count].is_dir = false;
+        s_count++;
+    }
+    /* NOT sorted. The file's order is the listener's order -- it is what
+     * next and previous move through, and what stations_index() counts
+     * in. Sorting the display would make the first row and the first
+     * station different things. */
+    s_top = 0;
+    s_dirty = true;
+    ESP_LOGI(TAG, "radio: %d stations", s_count);
+}
+
+static void select_tab(browser_tab_t id)
 {
     const bool same = (id == s_tab);
     s_tab = id;
 
-    if (!storage_present(id)) {
+    if (id == BROWSER_TAB_RADIO) {
+        s_radio = true;
+        /* The prefix elision is a filename thing and station names are
+         * not filenames. Left set, "all start with" would be computed
+         * from the previous folder and applied to station rows. */
+        s_prefix[0] = '\0';
+        s_prefix_len = 0;
+        s_dir[0] = '\0';
+        load_stations();
+        return;
+    }
+
+    s_radio = false;
+
+    if (!storage_present((storage_id_t)id)) {
         entries_free();
         s_dir[0] = '\0';
         s_dirty = true;
@@ -350,7 +447,7 @@ static void select_tab(storage_id_t id)
     }
 
     if (same && s_count > 0) return;
-    load_dir(storage_mount_path(id));
+    load_dir(storage_mount_path((storage_id_t)id));
 }
 
 void browser_open(const char *start)
@@ -405,8 +502,20 @@ void browser_close(void)
 
 static const char *status_line(void)
 {
+    if (s_radio) {
+        static char line[96];
+        const int n = stations_count();
+        if (n <= 0) {
+            /* Names the file, because the fix is to make one. */
+            return "no " STATIONS_FILENAME " on the card";
+        }
+        const char *mount = storage_mount_path(stations_volume());
+        snprintf(line, sizeof(line), "%d station%s from %s", n,
+                 n == 1 ? "" : "s", mount ? mount : "?");
+        return line;
+    }
     if (s_dir[0]) return s_dir;
-    if (s_tab == STORAGE_USB) {
+    if (s_tab == BROWSER_TAB_USB) {
         /* The false branch is a few milliseconds of bring-up at boot,
          * not a state anyone can tap their way into any more. */
         return storage_usb_powered() ? "USB port on - waiting for a drive"
@@ -415,9 +524,9 @@ static const char *status_line(void)
     return "no card in the slot";
 }
 
-static void draw_tab(storage_id_t id, int x, int w)
+static void draw_tab(browser_tab_t id, int x, int w)
 {
-    const bool present = storage_present(id);
+    const bool present = tab_present(id);
     /* Selected is selected even with nothing mounted: the USB tab can be
      * the active one while the port is still coming up, and a strip with
      * no underline at all would read as a lost tap. */
@@ -426,7 +535,10 @@ static void draw_tab(storage_id_t id, int x, int w)
     gfx_fill_rect(x, 0, w, TAB_H, active ? C_TAB_ON : C_TAB_OFF);
     if (active) gfx_fill_rect(x, TAB_H - 5, w, 5, present ? C_ACCENT : C_DISABLED);
 
-    const char *label = storage_label(id);
+    /* storage_label() reports the volume's own label -- "SD8G" -- which
+     * RADIO has no equivalent of and should not borrow. */
+    const char *label = (id == BROWSER_TAB_RADIO) ? "RADIO"
+                                                  : storage_label((storage_id_t)id);
     const int tw = gfx_text_w(label, NAME_SCALE);
     gfx_draw_text(x + (w - tw) / 2, (TAB_H - GFX_GLYPH_H(NAME_SCALE)) / 2, label,
                   NAME_SCALE, w - 16,
@@ -531,10 +643,24 @@ void browser_draw(void)
     if (gen != s_seen_generation) {
         s_seen_generation = gen;
         s_dirty = true;
+        /*
+         * The radio tab has no volume behind it, so none of the
+         * mount-chasing below applies to it -- and all of it would be
+         * actively wrong: `!storage_present(s_tab)` on
+         * BROWSER_TAB_RADIO reads past the end of the volume array, and
+         * the adopt-what-appeared branch would silently switch the tab
+         * out from under a station list and replace the rows with a
+         * directory. The station rows are only rebuilt by select_tab().
+         *
+         * Scoped rather than an early return: s_dirty has just been set
+         * and returning here would leave the repaint a frame late, so
+         * the tab strip would not redraw until the next poll.
+         */
+        if (!s_radio) {
         /* The tab stays where the user put it. Jumping to whatever else
          * is mounted would undo the tap that powered this port about a
          * second before the drive it was waiting for turned up. */
-        if (!storage_present(s_tab)) {
+        if (!storage_present((storage_id_t)s_tab)) {
             if (s_dir[0]) {                 /* it was there and went away */
                 entries_free();
                 s_dir[0] = '\0';
@@ -553,13 +679,14 @@ void browser_draw(void)
                  */
                 for (int i = 0; i < STORAGE_COUNT; i++) {
                     if (!storage_present((storage_id_t)i)) continue;
-                    s_tab = (storage_id_t)i;
+                    s_tab = (browser_tab_t)i;
                     load_dir(tab_root());
                     break;
                 }
             }
         } else if (s_count == 0 || !s_dir[0]) {
             load_dir(s_dir[0] ? s_dir : tab_root());
+        }
         }
     }
 
@@ -569,8 +696,18 @@ void browser_draw(void)
     const int w = gfx_w(), h = gfx_h();
     gfx_fill_rect(0, 0, w, h, C_BG);
 
-    draw_tab(STORAGE_SD, 0, w / 2);
-    draw_tab(STORAGE_USB, w / 2, w - w / 2);
+    /*
+     * Three tabs, and the arithmetic is written so they tile exactly:
+     * the last one takes whatever the two divisions left over rather
+     * than each being w/3 and leaving a seam of background at the right
+     * edge on a width that is not a multiple of three. 720 is not.
+     */
+    {
+        const int t1 = w / 3, t2 = (2 * w) / 3;
+        draw_tab(BROWSER_TAB_SD, 0, t1);
+        draw_tab(BROWSER_TAB_USB, t1, t2 - t1);
+        draw_tab(BROWSER_TAB_RADIO, t2, w - t2);
+    }
 
     /* Current directory, tail kept -- the end of the path is the part
      * that says where you are. With nothing mounted it says why, because
@@ -661,8 +798,8 @@ void browser_draw(void)
     gfx_fill_rect(0, fy, w, 2, C_RULE);
 
     int bx, bw;
-    foot_box(0, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP",   !at_root() && s_dir[0]);
-    foot_box(1, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "FLDR", s_dir[0] != '\0');
+    foot_box(0, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP",   !s_radio && !at_root() && s_dir[0]);
+    foot_box(1, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "FLDR", !s_radio && s_dir[0] != '\0');
     foot_box(2, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP^",  s_top > 0);
     foot_box(3, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "DN",   s_top + rows < s_count);
     foot_box(4, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, order_label(), true);
@@ -677,7 +814,7 @@ void browser_draw(void)
 
 browser_result_t browser_touch(bool down, int x, int y)
 {
-    browser_result_t res = { BROWSER_NONE, NULL };
+    browser_result_t res = { BROWSER_NONE, NULL, -1 };
     const bool tapped = down && !s_was_down;
     s_was_down = down;
 
@@ -740,8 +877,16 @@ browser_result_t browser_touch(bool down, int x, int y)
     if (!tapped) return res;
 
     if (y < TAB_H) {
-        const storage_id_t want = (x < w / 2) ? STORAGE_SD : STORAGE_USB;
-        ESP_LOGI(TAG, "button: tab %s", want == STORAGE_SD ? "SD" : "USB");
+        /* Same thirds as the drawing, and derived the same way so a tap
+         * lands on the strip it looks like it landed on. */
+        const int t1 = w / 3, t2 = (2 * w) / 3;
+        const browser_tab_t want = (x < t1) ? BROWSER_TAB_SD
+                                 : (x < t2) ? BROWSER_TAB_USB
+                                            : BROWSER_TAB_RADIO;
+        static const char *const tab_name[BROWSER_TAB_COUNT] = {
+            "SD", "USB", "RADIO"
+        };
+        ESP_LOGI(TAG, "button: tab %s", tab_name[want]);
         select_tab(want);
         return res;
     }
@@ -760,6 +905,17 @@ browser_result_t browser_touch(bool down, int x, int y)
             "up", "play folder", "page up", "page down", "order", "cancel"
         };
         ESP_LOGI(TAG, "button: %s", foot_name[which]);
+
+        /*
+         * UP and FLDR are volume operations and the radio tab has
+         * neither a parent nor a folder to play. Refused here as well as
+         * drawn disabled, because a disabled button that still acts is
+         * worse than one that is not drawn at all.
+         */
+        if (s_radio && (which == 0 || which == 1)) {
+            ESP_LOGI(TAG, "not on the radio tab");
+            return res;
+        }
 
         switch (which) {
         case 0:
@@ -809,7 +965,18 @@ browser_result_t browser_touch(bool down, int x, int y)
     if (i >= s_count) return res;
 
     ESP_LOGI(TAG, "button: row %d (%s) \"%s\"", i,
-             s_entries[i].is_dir ? "dir" : "file", s_entries[i].name);
+             s_radio ? "station" : s_entries[i].is_dir ? "dir" : "file",
+             s_entries[i].name);
+
+    if (s_radio) {
+        /* The index, not the URL. See BROWSER_PLAY_STREAM in browser.h:
+         * the rows were built from the station list in its own order, so
+         * row i IS station i, and stations.c stays the only thing that
+         * knows what station i is. */
+        res.kind = BROWSER_PLAY_STREAM;
+        res.index = i;
+        return res;
+    }
 
     if (s_entries[i].is_dir) {
         char sub[512];

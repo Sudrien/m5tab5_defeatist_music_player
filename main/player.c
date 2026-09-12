@@ -95,7 +95,6 @@
 #include "netstream.h"
 #include "stations.h"
 #include "streamplan.h"
-#include "streamprobe.h"      /* STREAMPROBE_URL, for the test hook only */
 
 static const char *TAG = "tab5_mp3";
 
@@ -5229,6 +5228,27 @@ static void ui_task(void *arg)
                 touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
                 break;
+            case BROWSER_PLAY_STREAM: {
+                /*
+                 * The index is the choice; stations.c is asked what it
+                 * means. Setting the index first is what makes next and
+                 * previous continue from the station that was picked
+                 * rather than from wherever the list happened to be.
+                 */
+                station_t st;
+                stations_set_index(r.index);
+                if (stations_get(r.index, &st)) {
+                    ESP_LOGI(TAG, "station %d of %d: %s", r.index + 1,
+                             stations_count(), st.name);
+                    request_stream(st.url, st.name);
+                } else {
+                    ESP_LOGW(TAG, "no station %d", r.index);
+                }
+                browser_close();
+                touch_swallow();        /* mirror image: see touch_swallow() */
+                s_repaint_art = true;
+                break;
+            }
             case BROWSER_CANCELLED:
                 browser_close();
                 touch_swallow();        /* mirror image: see touch_swallow() */
@@ -9248,51 +9268,26 @@ static void player_loop(void)
     }
 
     /*
-     * TEMPORARY: the only way to reach play_stream() until the chooser
-     * has a RADIO entry.
+     * The station list, read once the player is idle.
      *
-     * There is no station list reader yet and no UI action that names a
-     * station, so without this nothing calls request_stream() and the
-     * whole of phase 3 is unreachable code that -Werror would reject
-     * anyway. The URL is streamprobe.h's, so the station this plays is
-     * the station the two probe runs measured and the logs are directly
-     * comparable.
+     * Here rather than app_main() because the file is on the volume the
+     * music is on and a USB drive is still enumerating when app_main()
+     * runs -- the same reason restore_last_track() is in this loop's
+     * idle branch.
      *
-     * Fires once, after the radio has joined, and only with nothing else
-     * playing -- a stream must never be started underneath a file,
-     * because there is one PCM ring pair and one TLS session.
+     * Not a stream started: loading the list only makes the RADIO tab
+     * have something in it. A player that starts making noise because
+     * it was switched on is a worse object than one that shows you
+     * where you were and waits to be asked, and that applies to a
+     * station exactly as it applies to a track.
      *
-     * **This block is removed by the patch that adds the chooser entry.**
-     * It is a test hook and it is the only thing in phase 3 that is.
+     * **This replaces the test hook that 0201 needed.** There is a way
+     * to choose a station now, so there is no longer any reason for the
+     * player to pick one by itself.
      */
-    bool stream_kicked = false;
+    bool stations_read = false;
 
     while (1) {
-        if (!stream_kicked && !have && !s_decoding && !s_pending_ready &&
-            wifi_connected()) {
-            stream_kicked = true;
-            /*
-             * The station list, read here rather than at boot: it lives
-             * on the volume the music is on, and a USB drive is still
-             * enumerating when app_main() runs. That is the same reason
-             * restore_last_track() happens in this branch.
-             */
-            station_t st;
-            if (stations_load() && stations_get(stations_index(), &st)) {
-                ESP_LOGW(TAG, "test hook: playing %d of %d, %s",
-                         stations_index() + 1, stations_count(), st.name);
-                request_stream(st.url, st.name);
-            } else {
-                /* No stations.m3u, or nothing in it. Falls back to the
-                 * probe's URL so the hook still exercises the path on a
-                 * card that has not been given a list yet, and says
-                 * which of the two it is doing. */
-                ESP_LOGW(TAG, "test hook: no station list; playing %s",
-                         STREAMPROBE_URL);
-                request_stream(STREAMPROBE_URL, "probe station");
-            }
-        }
-
         if (s_pending_ready) {
             /* Clear the flag before reading the buffer, so a second
              * choice made during the copy is not lost silently -- it
@@ -9353,6 +9348,15 @@ static void player_loop(void)
              * on screen with its envelope and its gain.
              */
             if (!s_restored) restore_last_track();
+
+            /* Once, and only when a volume has turned up. Retried until
+             * it succeeds, because "no card yet" and "no station list"
+             * are the same false from here and the card may still be on
+             * its way. */
+            if (!stations_read &&
+                (storage_present(STORAGE_SD) || storage_present(STORAGE_USB))) {
+                stations_read = stations_load();
+            }
 
             /*
              * The fade has reached silence. See s_fade_cleanup.
