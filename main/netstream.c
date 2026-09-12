@@ -401,10 +401,19 @@ static void netstream_task(void *arg)
 {
     (void)arg;
     uint32_t gen = 0;
-    /* url, name and the demuxer are at module scope: they are 5 KB
-     * between them and this task has 8 KB including a TLS session. */
-    char *const url = s_url;
-    char *const name = s_name_req;
+    /*
+     * url, name and the demuxer live at module scope: 5 KB between them,
+     * against a task stack of 8 KB that also carries a TLS session.
+     *
+     * No local alias for them. The first version of this had
+     * `char *const url = s_url;` to keep the body reading the same,
+     * which silently turned every `sizeof(url)` in the function from 512
+     * into 4 -- the width of a pointer -- and would have truncated every
+     * station URL to three characters. gcc refused it outright
+     * (-Wformat-truncation, "up to 511 bytes into a region of size 4"),
+     * which is the good outcome; the same mistake behind a memcpy or a
+     * strncpy compiles and ships.
+     */
 
     for (;;) {
         /* Idle: wait for a request. */
@@ -412,8 +421,8 @@ static void netstream_task(void *arg)
         const bool have = (s_req_gen != gen) && !s_req_stop;
         if (have) {
             gen = s_req_gen;
-            snprintf(url, sizeof(url), "%s", s_req_url);
-            snprintf(name, sizeof(name), "%s", s_req_name);
+            snprintf(s_url, sizeof(s_url), "%s", s_req_url);
+            snprintf(s_name_req, sizeof(s_name_req), "%s", s_req_name);
         } else if (s_req_stop) {
             s_req_stop = false;
             gen = s_req_gen;
@@ -429,8 +438,8 @@ static void netstream_task(void *arg)
             continue;
         }
 
-        ESP_LOGI(TAG, "stream requested: %.60s <%.160s>", name, url);
-        publish_name(name);
+        ESP_LOGI(TAG, "stream requested: %.60s <%.160s>", s_name_req, s_url);
+        publish_name(s_name_req);
         publish_title("");
         s_failures = 0;
         s_last_status = 0;
@@ -452,7 +461,7 @@ static void netstream_task(void *arg)
             /* Always from the station URL. The redirect Zeno hands back
              * carries a token that lives sixty seconds, so a cached
              * resolved URL works in testing and fails in use. */
-            const char *from = netplan_reconnect_from(url, NULL);
+            const char *from = netplan_reconnect_from(s_url, NULL);
 
             esp_http_client_config_t cfg = {
                 .url = from,

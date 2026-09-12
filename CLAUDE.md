@@ -6822,8 +6822,38 @@ that 5 KB has left it, deliberately generous until the number has been
 seen under a TLS session. It logs its own high-water mark every window,
 so the right size will be an observation instead of a third guess.
 
-**Where the series stands.** Phase 1 written, compiled, flashed once and
-panicked once. Phase
+**0113: `sizeof` on a pointer, and why the host pass did not catch it.**
+0112 moved the demuxer and URL buffers to module scope and, to keep the
+function body reading the same, aliased them back with
+`char *const url = s_url;`. That silently changed every `sizeof(url)` in
+the function from 512 to 4 -- the width of a pointer -- and every
+station URL would have been truncated to three characters.
+
+gcc refused it: *"up to 511 bytes into a region of size 4"*. That is the
+good outcome and not a compiler quirk. The same mistake behind a
+`memcpy` or a `strncpy` compiles, ships, and produces a URL that fails
+to resolve for no visible reason. **`-Wformat-truncation` has now caught
+two separate bugs in this series** (0106's was the opposite case, a
+correct call the compiler could not prove), which is worth more than the
+one false positive it cost.
+
+The real gap is why the `WARNCFLAGS` pass missed it. **That pass only
+covers the `texttest` translation units and `check-ui`.** `netstream.c`
+is not compiled on the host at all, because it needs
+`esp_http_client` and FreeRTOS, so the only thing that ever sees it is
+`idf.py`. Every diagnostic in that file therefore costs a full IDF
+build to discover, and both of 0112's and 0113's faults were of a kind a
+host compile would have caught in a second.
+
+Worth considering rather than assuming: stub headers good enough to
+compile `netstream.c` on a host -- not to *run* it, just to get
+`-O2 -Werror` over it. `texttest/fake` already does this for the UI. It
+would not have caught the stack overflow, which is a runtime fact, but
+it would have caught this one and the `ICY_TITLE_MAX` one in 0108.
+
+**Where the series stands.** Phase 1 written, flashed once, panicked
+once, and two build errors deep in a file nothing but `idf.py` ever
+compiles. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
