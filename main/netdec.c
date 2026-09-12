@@ -65,6 +65,25 @@ static uint8_t     *s_win_buf;
 static mp3dec_t    *s_mp3;
 static bool         s_open;
 static stream_codec_t s_codec;
+
+/*
+ * The sniff reached a verdict and the verdict was "not audio".
+ *
+ * Separate from s_codec because STREAM_CODEC_NONE means two things and
+ * the enum cannot tell them apart -- exactly the shape 0203 found in
+ * NETSTREAM_IDLE and 0209 found in stations_load()'s return. NONE is
+ * "not identified yet" before the sniff and "identified, and it is a web
+ * page" after it, and identify() wrote NONE for the second while its own
+ * first line uses NONE as "keep trying".
+ *
+ * So the verdict was re-reached on every call. On the board a BBC URL
+ * that 302s to a HTML page produced `The station returned a web page`
+ * at the decode loop's rate -- about 1300 lines in thirteen seconds,
+ * which is the entire log of that run -- and the stream never ended,
+ * because netdec_read() answered 0 for "wait" to a condition that is
+ * never going to change.
+ */
+static bool s_not_audio;
 static esp_audio_simple_dec_handle_t s_aac;
 
 static uint32_t s_frames;
@@ -112,6 +131,7 @@ bool netdec_open(void)
     }
 
     s_codec = STREAM_CODEC_NONE;
+    s_not_audio = false;
     s_frames = 0;
     s_samples = 0;
     s_resyncs = 0;
@@ -137,6 +157,7 @@ void netdec_close(void)
     s_mp3 = NULL;
     s_open = false;
     s_codec = STREAM_CODEC_NONE;
+    s_not_audio = false;
 }
 
 void netdec_reconnect(void)
@@ -192,6 +213,10 @@ static size_t refill(void)
 static void identify(void)
 {
     if (s_codec != STREAM_CODEC_NONE) return;
+    /* And once the answer is "never". See s_not_audio: without this the
+     * sniff is redone, and re-announced, for as long as the caller keeps
+     * asking. */
+    if (s_not_audio) return;
     const size_t have = framewin_avail(&s_win);
     if (have < CODECPLAN_MIN_SNIFF_BYTES) return;
 
@@ -201,8 +226,20 @@ static void identify(void)
         s_codec = plan.codec;
         ESP_LOGI(TAG, "stream is %s", stream_codec_name(s_codec));
     } else if (!codecplan_waiting(&plan)) {
+        /*
+         * A verdict, not a delay. codecplan_waiting() is what separates
+         * "need more bytes" from "these bytes are not a stream", and
+         * this branch is the second -- a playlist, a web page, or a
+         * codec not decoded here. None of those becomes audio if asked
+         * again.
+         *
+         * Latched and said once. The message is the listener's, and it
+         * is the same message whether it is printed once or a thousand
+         * times.
+         */
         ESP_LOGW(TAG, "%s", plan.message);
         s_codec = STREAM_CODEC_NONE;
+        s_not_audio = true;
     }
 }
 
@@ -353,10 +390,26 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
     refill();
     identify();
 
+    if (s_not_audio) {
+        /*
+         * THE OLD COMMENT HERE WAS WRONG, AND THIS IS THE HALF IT GOT
+         * WRONG. It said that sniffing and not-audio were the same to
+         * the caller and that both mean wait. They are not: one ends,
+         * and the other is a socket held open to a web server, feeding
+         * a decoder that will never produce a sample, until somebody
+         * presses something. On the board that was thirteen seconds and
+         * only because the listener intervened.
+         *
+         * -1 rather than 0, which is the signal the unsupported-codec
+         * branch below already uses and which bufferplan reads as the
+         * source being finished. play_stream() then tears down and says
+         * why, and streamplan_status() has "No signal" for the screen.
+         */
+        return -1;
+    }
     if (s_codec == STREAM_CODEC_NONE) {
-        /* Still sniffing, or the stream is not audio. codecplan has
-         * already said which in the log; either way there is nothing to
-         * decode yet and the caller should wait rather than stop. */
+        /* Still sniffing: too few bytes to judge. This one really does
+         * mean wait. */
         return 0;
     }
     if (s_codec == STREAM_CODEC_AAC_ADTS) return aac_read(out, max_int16, info);
