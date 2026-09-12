@@ -7134,16 +7134,72 @@ it is short-lived a reconnect will fail on it even though the policy is
 right. A reconnect getting a 4xx where the first attempt got 200 is
 that, and it is the station's constraint rather than a bug.
 
-**Where the series stands.** Phase 1 is finished: written, compiled,
-flashed four times, measured, and its two real faults fixed. The probe
-can now measure an MP3 station as well as an AAC one. Phase 2 is
-unblocked with a known memory budget (75 KB idle, 57 KB beside
-playback), a known link, and a station with headroom to measure
-against. Phase
-4's parser written and tested, with nothing reading the file yet. Phases
-2 and 3 untouched, and both want a board before they are worth starting
--- phase 2's first question is what the AAC decoder costs in internal
-RAM, which is a measurement and not a decision.
+### 0119: the counter selector, and what the WUOM run actually said
+
+The first MP3 run printed `18446744073709544819 ms of audio` and
+`3343012699113726.04x`. Both are one bug, and the station turned out to
+be something other than advertised.
+
+**The bug.** The probe chose its clock per window with
+`adts.frames ? adts_ms() : mp3_ms()`. The ADTS counter **false-positives
+on MP3 data** -- the run gave it 93 "frames" at 88200 Hz with 0
+channels, frame lengths of 25 to 8187 bytes and 442947 bytes lost. Junk,
+but not *zero*, so the selector picked ADTS on an MP3 station. And
+because it re-decided every window, the audio clock jumped between two
+unrelated counters, went backwards, and the unsigned subtraction wrapped
+to 2^64.
+
+**`codecplan.h` was written for exactly this decision, before this code,
+and then not used here.** 0111 built the table, argued that the bytes
+must beat the header, tested it 8053 ways -- and the first caller that
+needed it reached for `frames != 0` instead. A decision having a tested
+home does not mean the next caller will find it.
+
+**What the regression test found is more interesting than the bug.** The
+obvious test is "the wrong counter loses most of its bytes" -- 54% on
+the real station. On a synthetic MP3 stream it loses **4.5%**, because a
+bogus frame length makes the ADTS counter *skip* a large block and
+skipped bytes count as a frame body rather than as lost. That is what
+"frame 25-8187 bytes" was. **How wrong the wrong counter looks depends
+on what the audio happens to contain**, so no selector can be built on
+those figures; the decision has to come from the sniffer.
+
+**And the station is 64 kbit/s, not 128.** `icy-br: 64`, `icy-genre:
+Talk`, and netstream settled at 61-65 kbit/s after an opening burst of
+395 and 287. **StreamTheWorld bursts to fill a buffer and then paces at
+real time.** That makes this station useless for measuring link
+headroom -- x-real-time cannot exceed about 1.0 when the server will not
+send faster -- and *ideal* for phases 2 and 3, because it behaves the way
+a radio station behaves rather than the way a file server does.
+
+So the two stations do different jobs and both stay: **WNZK for link
+headroom, WUOM for behaviour.** Neither alone answers both. Also: first
+byte at 2468 ms against WNZK's 3289, there being no redirect hop, and
+the stop took 59 ms.
+
+### Where the stream path stands
+
+Rewritten rather than appended to, because the previous version of this
+paragraph had been edited four times in place and the tail of it was
+still text from before the first flash -- it claimed phases 2 and 3
+"both want a board before they are worth starting" and that phase 2's
+first question was an unanswered measurement, several sessions after the
+board answered it. **Four patches each replaced the sentence they
+disagreed with and left the rest standing**, which is the same failure
+1002 found in the open list and the reason that audit is a recurring job
+rather than a one-off.
+
+- **Phase 1: done.** Written, compiled, flashed five times, measured on
+  two stations, two real faults found and fixed (internal RAM
+  starvation, reconnect bookkeeping). Nothing about it is still a guess.
+- **Phase 2: unblocked, not started.** Its first question -- what the
+  AAC decoder costs in internal RAM -- has its budget now: **75 KB free
+  idle, 57 KB beside playback.**
+- **Phase 3: unblocked, not started.** `bufferplan.h` is written and
+  host-tested; its constants want tuning against WUOM, never against
+  WNZK, for the reasons above.
+- **Phase 4: parser written and tested** (`stationlist.h`), with nothing
+  reading the file yet. Needs `storage_io` and the chooser.
 
 ### The stream path: plan
 
