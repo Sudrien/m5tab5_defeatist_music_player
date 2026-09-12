@@ -146,7 +146,12 @@ STREAMPLAN_BIN := streamplantest
 # the index arithmetic, which is where (i - 1) % n bites.
 STATIONNAV_BIN := stationnavtest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav
+# The radio-browser request, and the server's own M3U through the parser
+# that was chosen for it. Links stationlist.h as well as radiobrowser.h on
+# purpose: the encoder and the parser are checked against each other.
+RADIOBROWSER_BIN := radiobrowsertest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -212,7 +217,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -265,6 +270,13 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(RADIOBROWSER_BIN): radiobrowsertest.c ../main/radiobrowser.h ../main/stationlist.h
+	$(CC) $(WARNCFLAGS) -c radiobrowsertest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ radiobrowsertest.c $(LDFLAGS)
+
+run-radiobrowser: $(RADIOBROWSER_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(RADIOBROWSER_BIN)
+
 $(STATIONNAV_BIN): stationnavtest.c ../main/stationlist.h
 	$(CC) $(WARNCFLAGS) -c stationnavtest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ stationnavtest.c $(LDFLAGS)
@@ -306,4 +318,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser clean
