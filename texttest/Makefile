@@ -123,7 +123,13 @@ BUFPLAN_BIN := bufferplantest
 # noise from a live stream is hard to tell from a bad connection.
 CODEC_BIN := codecplantest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec
+# MPEG frame lengths. An MP3 header does not carry its frame length, so a
+# wrong table entry desynchronises the stream and shows up as bytes lost
+# -- the figure the probe uses to certify icydemux and the ring. The test
+# computes the lengths a second time, longhand.
+MP3_BIN := mp3counttest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -189,7 +195,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -249,10 +255,17 @@ $(CODEC_BIN): codecplantest.c ../main/codecplan.h ../main/streamsniff.h
 run-codec: $(CODEC_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CODEC_BIN)
 
+$(MP3_BIN): mp3counttest.c ../main/mp3count.h
+	$(CC) $(WARNCFLAGS) -c mp3counttest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ mp3counttest.c $(LDFLAGS)
+
+run-mp3: $(MP3_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(MP3_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 clean

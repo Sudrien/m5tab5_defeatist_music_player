@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "mp3count.h"
 #include "netstream.h"
 #include "streamsniff.h"
 
@@ -113,8 +114,17 @@ static void probe_task(void *arg)
     uint8_t *const sniff = work + READ_CHUNK;
     const size_t sniff_size = 2048;
 
-    static adts_count_t adts;       /* 40-odd bytes; internal is fine */
+    /*
+     * Both counters, fed every byte. Deciding between them from the
+     * sniff result would mean not counting the bytes that arrive before
+     * the sniff completes, and they are cheap: a few comparisons per
+     * byte at 60 KB/s. Whichever one finds frames is the one the station
+     * is sending, and if neither does, that is the finding.
+     */
+    static adts_count_t adts;       /* 40-odd bytes each; internal is fine */
+    static mp3_count_t  mp3;
     memset(&adts, 0, sizeof(adts));
+    memset(&mp3, 0, sizeof(mp3));
 
     size_t sniffed = 0;
     bool   sniff_logged = false;
@@ -163,6 +173,7 @@ static void probe_task(void *arg)
         total += (int64_t)n;
         window += (int64_t)n;
         adts_count_bytes(&adts, buf, n);
+        mp3_count_bytes(&mp3, buf, n);
 
         if (!sniff_logged && sniffed < sniff_size) {
             const size_t take = (sniff_size - sniffed) < n
@@ -185,7 +196,7 @@ static void probe_task(void *arg)
 
         const int64_t t = esp_timer_get_time();
         if (t - last >= 5000000) {
-            const uint64_t ams = adts_ms(&adts);
+            const uint64_t ams = adts.frames ? adts_ms(&adts) : mp3_ms(&mp3);
             const int64_t wall = (t - last) / 1000;
             const uint64_t got = ams - last_audio_ms;
             /* The same x-real-time figure as before, but measured after
@@ -219,6 +230,23 @@ static void probe_task(void *arg)
 
     netstream_name(name, sizeof(name));
     const int64_t secs_ms = (esp_timer_get_time() - start) / 1000;
+    /* Bytes lost hunting for a sync is the figure four runs of the AAC
+     * station established at 0 -- it is how icydemux and the ring are
+     * certified, and it has to be available on an MP3 station too. */
+    const uint64_t audio_ms = adts.frames ? adts_ms(&adts) : mp3_ms(&mp3);
+    if (!adts.frames && mp3.frames) {
+        ESP_LOGI(TAG, "MP3: %u frames, MPEG%u layer %u, %u Hz, %u ch, %u kbit/s, frame %u-%u bytes, %llu bytes lost hunting",
+                 (unsigned)mp3.frames, mp3.version, mp3.layer, mp3.rate,
+                 mp3.channels, mp3.bitrate, mp3.min_len, mp3.max_len,
+                 (unsigned long long)mp3.lost);
+        ESP_LOGI(TAG, "MP3: %llu ms of audio in %lld ms, bitrate %llu kbit/s",
+                 (unsigned long long)audio_ms, (long long)secs_ms,
+                 audio_ms ? (unsigned long long)(total * 8 / (int64_t)audio_ms) : 0ULL);
+    } else if (!adts.frames && !mp3.frames) {
+        ESP_LOGW(TAG, "neither ADTS nor MPEG frames found in %lld KB -- "
+                      "no duration to compare against the clock",
+                 (long long)(total / 1024));
+    }
     if (adts.frames) {
         ESP_LOGI(TAG, "ADTS: %u frames, AAC profile %u, %u Hz core, %u ch, frame %u-%u bytes, %llu bytes lost hunting",
                  (unsigned)adts.frames, adts.profile, adts.rate, adts.channels,
@@ -228,8 +256,8 @@ static void probe_task(void *arg)
          * with the same station, is icydemux or the ring and not the
          * network. */
         ESP_LOGI(TAG, "ADTS: %llu ms of audio in %lld ms, bitrate %llu kbit/s",
-                 (unsigned long long)adts_ms(&adts), (long long)secs_ms,
-                 adts_ms(&adts) ? (unsigned long long)(total * 8 / (int64_t)adts_ms(&adts)) : 0ULL);
+                 (unsigned long long)audio_ms, (long long)secs_ms,
+                 audio_ms ? (unsigned long long)(total * 8 / (int64_t)audio_ms) : 0ULL);
     }
     ESP_LOGI(TAG, "done: %lld KB drained in %lld ms from \"%s\", first byte %lld ms, ring peak %u%%, %d empty reads",
              (long long)(total / 1024), (long long)secs_ms, name,

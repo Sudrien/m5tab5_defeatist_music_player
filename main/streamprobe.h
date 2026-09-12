@@ -43,7 +43,38 @@
 extern "C" {
 #endif
 
-#define STREAMPROBE_URL      "https://stream.zeno.fm/erunhwj5lekvv"
+/*
+ * The station under test.
+ *
+ * WUOM-FM, 128 kbit/s MP3 over StreamTheWorld, chosen because 0116
+ * concluded that WNZK's 511 kbit/s AAC sits right at this link's
+ * capacity and makes every number ambiguous between link, station and
+ * code. At the measured ~500 kbit/s idle this one has about 3.9x of
+ * headroom, which is what phase 2 and 3 need to be measured against.
+ *
+ * WNZK is kept below as the deliberate worst case. Swap them to re-run
+ * it; the four runs recorded in CLAUDE.md are all against that URL and
+ * remain the comparison point.
+ *
+ * Two things differ besides the bitrate, and both are the point of
+ * running it:
+ *
+ *   - **It is MP3, not AAC.** The probe counted ADTS frames only, so on
+ *     this station it would have reported 0.00x every window and printed
+ *     no summary at all -- measuring nothing, quietly. mp3count.h is why
+ *     that does not happen.
+ *   - **The URL carries a `uuid` query parameter**, which looks like a
+ *     session token. Zeno's redirect token expired in sixty seconds and
+ *     is the reason netplan always reconnects from the station URL; if
+ *     this uuid is also short-lived then reconnects will fail on it
+ *     *even though* the policy is right, because here the token is in
+ *     the station URL itself rather than in a redirect. Worth watching
+ *     in the log: a reconnect that gets a 4xx where the first attempt
+ *     got a 200 is that, and it would be the station's constraint rather
+ *     than a bug.
+ */
+#define STREAMPROBE_URL      "https://26433.live.streamtheworld.com/WUOMFM.mp3?uuid=xnpek6ipb"
+/* #define STREAMPROBE_URL   "https://stream.zeno.fm/erunhwj5lekvv" */
 #define STREAMPROBE_SECONDS  (60)
 /*
  * Seconds after the first address before the probe starts. Long enough

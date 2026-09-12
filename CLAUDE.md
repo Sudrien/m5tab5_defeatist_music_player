@@ -7084,11 +7084,62 @@ phase 2's first is now answerable without fear. At 500 kbit/s mean this
 link is 3.9x real time for a 128 kbit/s station, 2.6x at 192, 2.0x at
 256.
 
+### 0118: an ordinary station, and the measurement that would have vanished
+
+0116 said to stop benchmarking on WNZK. The ordinary station is WUOM-FM,
+128 kbit/s MP3 over StreamTheWorld -- about 3.9x of headroom at the
+measured ~500 kbit/s, which is what phase 2 and 3 need.
+
+**Pointing the probe at it would have silently stopped measuring.**
+`streamsniff.h` counts ADTS frames and nothing else, because the only
+station this had ever been aimed at was AAC. On an MP3 stream
+`adts.frames` stays 0, `adts_ms()` returns 0, every window prints 0.00x
+and the summary block does not appear at all. Not a failure -- an
+absence. **The one figure four runs established, 0 bytes lost hunting
+for a sync, is also the figure that certifies `icydemux` and the ring,
+and it would have quietly become unavailable exactly when the station
+changed.**
+
+`mp3count.h` is the counterpart, the same shape as `adts_count_t`. The
+probe feeds both counters every byte rather than choosing from the sniff
+result, because choosing means not counting the bytes that arrive before
+the sniff completes, and they cost a few comparisons each at 60 KB/s.
+
+**Why MP3 is harder than ADTS, and what the test does about it.** An
+ADTS header carries its own frame length. An MP3 header does not: the
+length is computed from bitrate, sample rate and the padding bit, and
+the arithmetic differs between MPEG1 and MPEG2/2.5. So a wrong table
+entry does not produce a rejected frame -- **it produces a frame of the
+wrong length, the stream desynchronises, and the damage appears as bytes
+lost hunting.** A bad table would frame the ring for a fault it did not
+commit. `mp3counttest` therefore computes all 756 frame lengths a second
+time from the formula written out longhand, rather than checking the
+tables against themselves.
+
+UBSan found one in the first run: the sample-rate index can be 3, the
+reserved value, and the code checked the *value* after using the index
+on a three-element row. On the device that reads whatever follows the
+table and computes a frame length from it.
+
+Sync is also weaker -- eleven bits against ADTS's twelve plus a layer
+field -- so random data does parse as occasional frames. The test pins
+that at under 25% and it measures 7.9%, which is why **"bytes lost" is
+the signal and "frames found" is not.**
+
+**One thing to watch in the first log.** The station URL carries a
+`uuid` parameter that looks like a session token. Zeno's redirect token
+expired in sixty seconds and is why netplan always reconnects from the
+station URL -- but here the token is *in the station URL itself*, so if
+it is short-lived a reconnect will fail on it even though the policy is
+right. A reconnect getting a 4xx where the first attempt got 200 is
+that, and it is the station's constraint rather than a bug.
+
 **Where the series stands.** Phase 1 is finished: written, compiled,
-flashed four times, measured, and its two real faults fixed. Nothing
-about it is still a guess. Phase 2 is unblocked with a known memory
-budget and a known link; it wants an ordinary station rather than WNZK,
-for the reasons in 0116. Phase
+flashed four times, measured, and its two real faults fixed. The probe
+can now measure an MP3 station as well as an AAC one. Phase 2 is
+unblocked with a known memory budget (75 KB idle, 57 KB beside
+playback), a known link, and a station with headroom to measure
+against. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
