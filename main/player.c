@@ -8999,6 +8999,8 @@ static track_end_t play_stream(const char *url, const char *name)
      */
     bool seen_live = false;
     bool leaving = false;
+    /* Last seen netstream_failures(), for the stall clock below. */
+    int last_failures = 0;
     track_end_t why = TRACK_ENDED;
     /*
      * When the CURRENT connection was asked for, not when the station
@@ -9369,6 +9371,27 @@ static track_end_t play_stream(const char *url, const char *name)
             ESP_LOGI(TAG, "title: \"%s\"", s_stream_bottom);
         }
         s_stream_status = streamplan_status(net, plan.phase, out.audible);
+
+        /*
+         * Another connection attempt means the source is still working,
+         * so the stall clock restarts. See bufplan_note_attempt(): the
+         * 30 s giveup is wall-clock time in one silent phase, and an
+         * attempt against a server that handshakes and then times out
+         * costs six seconds of it. Five of those ended a stream 25 ms
+         * after the fifth attempt had succeeded.
+         *
+         * The edge, not the value: netstream_failures() rises once per
+         * failed attempt and resets when audio flows, and both of those
+         * are news. Held in a local because this loop is the only reader
+         * and the previous value is a property of this stream.
+         */
+        {
+            const int fails = netstream_failures();
+            if (fails != last_failures) {
+                last_failures = fails;
+                bufplan_note_attempt(&plan, esp_timer_get_time() / 1000);
+            }
+        }
 
         /* The compressed ring's fill, for the same bar the file path
          * fills from the PCM ring. A stream has two buffers and this is

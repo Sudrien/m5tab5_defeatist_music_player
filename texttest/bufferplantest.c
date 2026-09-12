@@ -427,6 +427,74 @@ int main(void)
         }
     }
 
+    
+    /* ---------------------------------------------------------------- */
+    /* bufplan_note_attempt(): the stall clock is not wall clock         */
+    /* ---------------------------------------------------------------- */
+    {
+        /*
+         * The board case. A resume rebuffers; the source spends six
+         * seconds per attempt against a server that handshakes and then
+         * times out; five of those is thirty seconds and the stall rule
+         * ended the stream 25 ms after the fifth attempt succeeded.
+         */
+        bufplan_t b;
+        bufplan_init(&b, 0);
+        bufplan_in_t in = { 0 };
+        bufplan_out_t out;
+        in.buffered_ms = 0;
+
+        /* Into REBUFFERING, the silent phase the giveup applies to. */
+        bufplan_enter(&b, BUFPLAN_REBUFFERING, 1000);
+        CHECK(b.phase == BUFPLAN_REBUFFERING, "rebuffering");
+
+        /* Without a note, thirty seconds of silence ends it -- which is
+         * the rule and is correct for a source doing nothing. */
+        in.now_ms = 1000 + BUFPLAN_STALL_GIVEUP_MS;
+        bufplan_step(&b, &in, &out);
+        CHECK(b.phase == BUFPLAN_ENDED, "no attempts: 30 s ends it");
+
+        /* With an attempt noted every six seconds, it does not. This is
+         * the fault: five attempts of ~6 s cross 30 s of wall clock
+         * while the source is plainly still working. */
+        bufplan_init(&b, 0);
+        bufplan_enter(&b, BUFPLAN_REBUFFERING, 1000);
+        int64_t t = 1000;
+        for (int attempt = 0; attempt < 5; attempt++) {
+            t += 6000;
+            bufplan_note_attempt(&b, t);
+            in.now_ms = t;
+            bufplan_step(&b, &in, &out);
+            CHECK(b.phase == BUFPLAN_REBUFFERING,
+                  "attempt %d at %lld ms still rebuffering, not %s",
+                  attempt + 1, (long long)t, bufplan_phase_name(b.phase));
+        }
+        CHECK(t > BUFPLAN_STALL_GIVEUP_MS,
+              "the test must actually pass 30 s of wall clock (%lld)",
+              (long long)t);
+
+        /* And the rule still bites once the attempts stop. Thirty
+         * seconds after the LAST one, not after the first. */
+        in.now_ms = t + BUFPLAN_STALL_GIVEUP_MS;
+        bufplan_step(&b, &in, &out);
+        CHECK(b.phase == BUFPLAN_ENDED, "30 s after the last attempt ends it");
+
+        /* PREROLL too: a first connect can be just as slow. */
+        bufplan_init(&b, 0);
+        CHECK(b.phase == BUFPLAN_PREROLL, "starts in preroll");
+        bufplan_note_attempt(&b, 9000);
+        CHECK(b.phase_since_ms == 9000, "preroll clock restarts");
+
+        /* But not in a phase where the clock means something else. A
+         * note while playing must not move anything. */
+        bufplan_enter(&b, BUFPLAN_PLAYING, 10000);
+        bufplan_note_attempt(&b, 20000);
+        CHECK(b.phase_since_ms == 10000,
+              "playing is untouched, got %lld", (long long)b.phase_since_ms);
+
+        bufplan_note_attempt(NULL, 0);  /* must not crash */
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     printf(failures ? "FAILURES\n" : "all passed\n");
     return failures ? 1 : 0;

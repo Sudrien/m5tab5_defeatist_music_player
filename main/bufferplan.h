@@ -220,6 +220,9 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
             bufplan_enter(b, BUFPLAN_ENDED, in->now_ms);
         }
         break;
+    /* BUFPLAN_STALL_GIVEUP_MS is wall-clock time in this phase, and
+     * bufplan_note_attempt() is what stops that being the same thing as
+     * "the source has given up". See the comment on that function. */
 
     case BUFPLAN_DRAINING:
         /* No rebuffer from here: there is nothing to refill from, and
@@ -246,6 +249,52 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
     default:
         out->finished = true;
         break;
+    }
+}
+
+/*
+ * The source has begun another attempt; restart the stall clock.
+ *
+ * BUFPLAN_STALL_GIVEUP_MS measures time spent silent in one phase, and
+ * this file's note on it claimed a source working through netplan's
+ * retries could never be cut off: the backoff table tops out at 15 s and
+ * the giveup is 30 s, so the arithmetic looked safe.
+ *
+ * **The arithmetic left out how long an attempt takes.** On the board a
+ * resume from pause hit a server that completed the TLS handshake and
+ * then timed out waiting for data -- `Connection timed out before data
+ * was ready!`, about 6 s each, five times over. The backoff never
+ * mattered; the attempts did. The fifth one connected and got
+ * `HTTP 200 -> play`, and the stall rule had given up 25 ms earlier:
+ *
+ *   attempt 4 failed after 5936 ms; retrying in 2064 ms
+ *   hop 2: HTTP 200 -> play, connect+TLS 1739 ms
+ *   only 0 audio bytes before the drop
+ *   stream ended: ended, 0 rebuffers, 30025 ms silent
+ *
+ * 30025 against a 30000 ms limit. The stream was killed at the moment it
+ * succeeded, and the log reads as the station dropping the connection
+ * when what dropped it was this rule.
+ *
+ * So the clock has to measure the right silence. A stream that is
+ * rebuffering behind a source doing nothing should end; a stream
+ * rebuffering behind a source that is opening sockets and completing
+ * handshakes is getting somewhere, and the phase timer cannot tell the
+ * difference because nothing it is given moves.
+ *
+ * The caller says so, on the edge of netstream_failures() -- a count
+ * that rises once per failed attempt and resets when audio flows, which
+ * is exactly "another attempt happened". Not the state, which sits in
+ * CONNECTING for six seconds at a time and would never produce an edge.
+ *
+ * Only in the two silent phases. In PLAYING and DRAINING the clock is
+ * not being used for this, and in ENDED the decision is already made.
+ */
+static inline void bufplan_note_attempt(bufplan_t *b, int64_t now_ms)
+{
+    if (!b) return;
+    if (b->phase == BUFPLAN_PREROLL || b->phase == BUFPLAN_REBUFFERING) {
+        b->phase_since_ms = now_ms;
     }
 }
 
