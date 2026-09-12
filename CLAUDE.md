@@ -6920,10 +6920,75 @@ writer in lockstep -- netstream adds 2048, the probe's next
 leaves the odd one behind. A ring that hovers near empty with a reader
 faster than the network is the correct picture, not a stall.
 
-**Where the series stands.** Phase 1 streams. Throughput is 0.79x on a
-station that needs 511 kbit/s, unexplained against an earlier 0.97x, and
-that gap is the next thing to measure rather than the next thing to
-build on. Phase
+### 0115: the stream path was holding 41 KB of internal RAM
+
+The second run answered item 5 -- what a real drop looks like -- by
+causing one, and the cause was this code.
+
+    W eh_sdio: dma_alloc(5120) failed; dropping read
+    W eh_sdio: rx_get_buffer(4700) failed; skipping read
+    E transport_base: esp_tls_conn_read error, errno=No more processes
+    E esp-tls: getaddrinfo() returns 202          [for the rest of the run]
+
+**The code that ran out of memory was not the code that took it.**
+Nothing in netstream failed an allocation; the Wi-Fi transport failed a
+DMA allocation, the socket died, and DNS stayed broken for every
+subsequent attempt. Internal free was still reporting 58-60 KB at the
+time, because **DMA-capable internal RAM is a subset of internal RAM and
+runs out earlier than the free-heap figure suggests.**
+
+What took it: `static uint8_t buf[2048]` is internal RAM, and that is
+the default nobody thinks about. Adding up the demuxer (4392), two 2 KB
+working buffers, the sniff buffer, an 8 KB stack, and the probe's own
+two 2 KB buffers and 6 KB stack: **about 41 KB of the 53-63 KB free**,
+against a file whose own header identifies internal RAM as the scarce
+resource and rations TLS sessions to one. 0103 was careful about the 13
+KB it could see and careless about the 26 KB it was itself.
+
+15 KB of internal RAM handed back: the demuxer, all four working buffers
+and the probe's two move to PSRAM (the bytes arrive by `memcpy` out of
+mbedTLS, not by DMA, and 54 KB/s through PSRAM is nothing), and the
+stack drops from 8192 to 6144 on the strength of the measurement -- the
+high-water log said 4848 free of 8192 across a full minute with TLS open
+and a redirect walked, a peak of 3344. Only the stack has to stay
+internal.
+
+**Two smaller things the same log exposed.**
+
+`attempt 0 failed; retrying in 1000 ms` is not a thing. After a drop
+that had played audio, `netplan_made_progress()` correctly reset the
+count to 0 and the backoff was then indexed at `s_failures - 1` -- minus
+one -- landing on `netplan_backoff_ms()`'s clamp. The right answer by
+accident. The reset case is its own branch now and says what happened.
+
+**The backoff schedule assumed attempts are cheap, and they are not.**
+A DNS failure took 13590 ms against a 1000 ms backoff, so "1, 2, 4, 8
+and give up after 15 seconds" was really four attempts of fourteen
+seconds each -- a minute of retrying behind a screen promising fifteen.
+The wait now subtracts what the attempt already cost, because the
+backoff exists to stop hammering a server and an attempt that spent
+longer than the wait has already done the waiting. `netplan`'s table is
+unchanged and still right; what was wrong was assuming its numbers
+dominated the loop.
+
+Also: the body read timeout drops from 10 s to 5. The run spent twenty
+seconds deciding the stream had stopped -- ten inside esp-tls reaching
+its own timeout, then ten more here -- and only the second is ours.
+
+**What this does not explain.** The throughput regression from 0114
+stands untouched; the first window of this run was 0.35x before the
+transport failed, which is consistent with memory pressure already
+biting rather than with a slow link. So 0114's 0.79x may have the same
+cause as this crash, which would be a happier answer than USB
+contention. **The re-runs 0114 asked for are now more interesting, not
+less:** with 15 KB of internal RAM back, beside SD and with nothing
+playing.
+
+**Where the series stands.** Phase 1 streams, and has now been made to
+fail and recover on hardware. The reconnect path ran for the first time
+and its bookkeeping was wrong in two ways, both fixed. Throughput is
+still unexplained and is still the thing to measure before building
+phase 2 on it. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal

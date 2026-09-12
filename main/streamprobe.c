@@ -7,6 +7,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -94,11 +95,27 @@ static void probe_task(void *arg)
         return;
     }
 
-    static uint8_t buf[READ_CHUNK];
-    static adts_count_t adts;
+    /*
+     * PSRAM, for the same reason netstream's buffers moved there: a
+     * `static uint8_t buf[]` is internal RAM, and between this file and
+     * netstream the stream path was holding about 41 KB of the 53-63 KB
+     * free. What failed was not an allocation here -- it was
+     * `dma_alloc(5120)` inside the Wi-Fi transport, and then DNS for the
+     * rest of the run.
+     */
+    uint8_t *const work = heap_caps_malloc(READ_CHUNK + 2048, MALLOC_CAP_SPIRAM);
+    if (!work) {
+        ESP_LOGE(TAG, "no PSRAM for the probe's buffers");
+        vTaskDelete(NULL);
+        return;
+    }
+    uint8_t *const buf = work;
+    uint8_t *const sniff = work + READ_CHUNK;
+    const size_t sniff_size = 2048;
+
+    static adts_count_t adts;       /* 40-odd bytes; internal is fine */
     memset(&adts, 0, sizeof(adts));
 
-    static uint8_t sniff[2048];
     size_t sniffed = 0;
     bool   sniff_logged = false;
 
@@ -132,7 +149,7 @@ static void probe_task(void *arg)
         /* 200 ms: long enough that an empty read means the ring really
          * was empty, short enough that a stall is noticed in the window
          * it happened in. */
-        const size_t n = netstream_read(buf, sizeof(buf), 200);
+        const size_t n = netstream_read(buf, READ_CHUNK, 200);
         if (n == 0) {
             empties++;
             window_empties++;
@@ -147,12 +164,12 @@ static void probe_task(void *arg)
         window += (int64_t)n;
         adts_count_bytes(&adts, buf, n);
 
-        if (!sniff_logged && sniffed < sizeof(sniff)) {
-            const size_t take = (sizeof(sniff) - sniffed) < n
-                              ? (sizeof(sniff) - sniffed) : n;
+        if (!sniff_logged && sniffed < sniff_size) {
+            const size_t take = (sniff_size - sniffed) < n
+                              ? (sniff_size - sniffed) : n;
             memcpy(sniff + sniffed, buf, take);
             sniffed += take;
-            if (sniffed == sizeof(sniff)) {
+            if (sniffed == sniff_size) {
                 ESP_LOGI(TAG, "first bytes out of the ring look like: %s",
                          sniff_name(sniff_bytes(sniff, sniffed)));
                 sniff_logged = true;
@@ -229,6 +246,7 @@ static void probe_task(void *arg)
              (long long)((esp_timer_get_time() - t_stop) / 1000),
              netstream_state_name(netstream_state()));
     heap_line("after");
+    free(work);
     vTaskDelete(NULL);
 }
 

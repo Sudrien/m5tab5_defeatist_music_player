@@ -43,9 +43,17 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
  * and the loop rechecks. */
 #define SEND_SLICE_MS       (100)
 
-/* Body read timeout. The stream is live, so a server that says nothing
- * for this long has dropped us whatever the socket thinks. */
-#define READ_TIMEOUT_MS     (10000)
+/*
+ * Body read timeout. The stream is live, so a server that says nothing
+ * for this long has dropped us whatever the socket thinks.
+ *
+ * 5 s, down from 10. When the transport failed under memory pressure the
+ * run spent twenty seconds deciding it had stopped: ten inside esp-tls
+ * reaching its own timeout, then ten more here. Only the second is ours
+ * to shorten. Five seconds of silence from a live stream is already far
+ * past anything a buffer can cover.
+ */
+#define READ_TIMEOUT_MS     (5000)
 
 /* Sniffed prefix, logged once per connection. Phase 2 will ask
  * streamsniff.h the same question to pick a codec; this only records it. */
@@ -108,9 +116,33 @@ static bool s_has_title;
  * is enforced by the design, not hoped for -- netstream_play() replaces
  * a running stream rather than starting a second one.
  */
-static icydemux_t s_demux;
-static char       s_url[NETSTREAM_URL_MAX];
-static char       s_name_req[NETSTREAM_NAME_MAX];
+/*
+ * All of it in PSRAM, allocated once in netstream_init() and never
+ * freed.
+ *
+ * These were internal-RAM statics, which is the default for a `static
+ * uint8_t buf[]`, and between the demuxer, the two 2 KB working buffers,
+ * the sniff buffer and an 8 KB stack this file claimed about 26 KB of
+ * internal RAM -- with the probe's own buffers, 41 KB against the 53-63
+ * KB free that netstream.h itself identifies as the scarce resource.
+ *
+ * The symptom was not a failed allocation here. It was
+ * `eh_sdio: dma_alloc(5120) failed; dropping read` inside the Wi-Fi
+ * transport, then a dead socket, then getaddrinfo() failing for the rest
+ * of the run. **The code that ran out of memory was not the code that
+ * took it.** DMA-capable internal RAM is a subset of internal RAM, so it
+ * runs out earlier than the free-heap figure suggests.
+ *
+ * None of this needs to be internal. The bytes arrive by memcpy out of
+ * mbedTLS's buffer, not by DMA, and 54 KB/s through PSRAM is nothing.
+ * Only the task stack has to stay internal.
+ */
+static icydemux_t *s_demux;     /* 4392 bytes */
+static uint8_t    *s_rx;        /* READ_CHUNK, off the socket */
+static uint8_t    *s_audio;     /* READ_CHUNK, after the demuxer */
+static uint8_t    *s_sniff;     /* SNIFF_BYTES, first bytes of a body */
+static char       *s_url;       /* NETSTREAM_URL_MAX */
+static char       *s_name_req;  /* NETSTREAM_NAME_MAX */
 
 /* Per-connection, owned by the task alone. */
 static int  s_hdr_metaint;
@@ -280,12 +312,12 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
  */
 static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
 {
-    /* Static, not on the stack: esp_http_client runs the TLS record layer
-     * on this task and that wants the stack. Same reasoning as the
-     * probe's buffers. */
-    static uint8_t buf[READ_CHUNK];
-    static uint8_t audio[READ_CHUNK];
-    static uint8_t sniff[SNIFF_BYTES];
+    /* In PSRAM, not on the stack and not in internal RAM -- see the note
+     * on the declarations. esp_http_client runs the TLS record layer on
+     * this task and that wants the stack it has. */
+    uint8_t *const buf = s_rx;
+    uint8_t *const audio = s_audio;
+    uint8_t *const sniff = s_sniff;
     size_t sniffed = 0;
     bool   sniff_logged = false;
 
@@ -296,7 +328,7 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
     int      zero_reads = 0;
 
     while (!superseded(gen)) {
-        const int n = esp_http_client_read(c, (char *)buf, sizeof(buf));
+        const int n = esp_http_client_read(c, (char *)buf, READ_CHUNK);
         if (n < 0) {
             ESP_LOGW(TAG, "read failed after %llu audio bytes",
                      (unsigned long long)produced);
@@ -329,12 +361,12 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
          * every way this read boundary can cut a metadata block. */
         const size_t got = icydemux_feed(d, buf, (size_t)n, audio);
 
-        if (!sniff_logged && sniffed < sizeof(sniff) && got) {
-            const size_t take = (sizeof(sniff) - sniffed) < got
-                              ? (sizeof(sniff) - sniffed) : got;
+        if (!sniff_logged && sniffed < SNIFF_BYTES && got) {
+            const size_t take = (SNIFF_BYTES - sniffed) < got
+                              ? (SNIFF_BYTES - sniffed) : got;
             memcpy(sniff + sniffed, audio, take);
             sniffed += take;
-            if (sniffed == sizeof(sniff)) {
+            if (sniffed == SNIFF_BYTES) {
                 ESP_LOGI(TAG, "first audio bytes look like %s (content-type %s)",
                          sniff_name(sniff_bytes(sniff, sniffed)),
                          s_hdr_ctype[0] ? s_hdr_ctype : "absent");
@@ -421,8 +453,8 @@ static void netstream_task(void *arg)
         const bool have = (s_req_gen != gen) && !s_req_stop;
         if (have) {
             gen = s_req_gen;
-            snprintf(s_url, sizeof(s_url), "%s", s_req_url);
-            snprintf(s_name_req, sizeof(s_name_req), "%s", s_req_name);
+            snprintf(s_url, NETSTREAM_URL_MAX, "%s", s_req_url);
+            snprintf(s_name_req, NETSTREAM_NAME_MAX, "%s", s_req_name);
         } else if (s_req_stop) {
             s_req_stop = false;
             gen = s_req_gen;
@@ -445,7 +477,7 @@ static void netstream_task(void *arg)
         s_last_status = 0;
         s_kbps = 0;
 
-        icydemux_init(&s_demux, 0);
+        icydemux_init(s_demux, 0);
 
         /* The ring starts empty for a new station: what is in it belongs
          * to the last one. A reconnect to the *same* station keeps it --
@@ -457,6 +489,7 @@ static void netstream_task(void *arg)
         bool give_up = false;
         while (!give_up && !superseded(gen)) {
             set_state(NETSTREAM_CONNECTING);
+            const int64_t attempt_start = esp_timer_get_time();
 
             /* Always from the station URL. The redirect Zeno hands back
              * carries a token that lives sixty seconds, so a cached
@@ -486,10 +519,10 @@ static void netstream_task(void *arg)
                 if (s_hdr_name[0]) publish_name(s_hdr_name);
                 /* A reconnect keeps the title on screen and restarts the
                  * byte phase on the new body's own metaint. */
-                icydemux_reconnect(&s_demux, s_hdr_metaint);
+                icydemux_reconnect(s_demux, s_hdr_metaint);
                 set_state(NETSTREAM_BUFFERING);
 
-                const uint64_t produced = pump(c, gen, &s_demux);
+                const uint64_t produced = pump(c, gen, s_demux);
 
                 if (netplan_made_progress(produced)) {
                     /* Audio flowed, so this is a fresh failure sequence
@@ -518,16 +551,52 @@ static void netstream_task(void *arg)
         backoff:
             if (give_up || superseded(gen)) break;
 
-            const int wait = netplan_backoff_ms(s_failures - 1);
-            if (wait < 0) {
-                ESP_LOGE(TAG, "%d attempts failed; giving up", s_failures);
-                give_up = true;
-                break;
+            const int attempt_ms =
+                (int)((esp_timer_get_time() - attempt_start) / 1000);
+
+            /*
+             * s_failures is the count *after* this attempt, and 0 means
+             * the attempt played audio and the sequence restarted -- so
+             * the wait is indexed from s_failures - 1, and a reset gives
+             * table[0] through netplan_backoff_ms()'s clamp. Passing -1
+             * and relying on a clamp read as an accident and logged
+             * "attempt 0 failed", which is not a thing; the reset case
+             * is now its own branch and says what happened.
+             */
+            int wait;
+            if (s_failures == 0) {
+                wait = netplan_backoff_ms(0);
+                set_state(NETSTREAM_RETRYING);
+                ESP_LOGW(TAG, "dropped after playing; reconnecting in %d ms",
+                         wait);
+            } else {
+                wait = netplan_backoff_ms(s_failures - 1);
+                if (wait < 0) {
+                    ESP_LOGE(TAG, "%d attempts failed; giving up", s_failures);
+                    give_up = true;
+                    break;
+                }
+                /*
+                 * The schedule assumed attempts are cheap. They are not:
+                 * a DNS failure took 13590 ms against a 1000 ms backoff,
+                 * so "1, 2, 4, 8 and give up after 15 s" was really a
+                 * minute of 14-second attempts. The backoff exists to
+                 * stop hammering a server, and an attempt that already
+                 * spent longer than the wait has done the waiting.
+                 */
+                if (attempt_ms >= wait) {
+                    ESP_LOGW(TAG, "attempt %d failed after %d ms; that is "
+                                  "longer than the %d ms backoff, retrying now",
+                             s_failures, attempt_ms, wait);
+                    wait = 0;
+                } else {
+                    ESP_LOGW(TAG, "attempt %d failed after %d ms; retrying in "
+                                  "%d ms", s_failures, attempt_ms, wait - attempt_ms);
+                    wait -= attempt_ms;
+                }
+                set_state(NETSTREAM_RETRYING);
             }
-            set_state(NETSTREAM_RETRYING);
-            ESP_LOGW(TAG, "attempt %d failed; retrying in %d ms",
-                     s_failures, wait);
-            if (!wait_ms(wait, gen)) break;
+            if (wait && !wait_ms(wait, gen)) break;
         }
 
         if (give_up) {
@@ -561,6 +630,24 @@ bool netstream_init(void)
      * tell full from empty. */
     s_ring = xStreamBufferCreateStatic(NETSTREAM_RING_BYTES + 1, 1,
                                        s_ring_storage, &s_ring_struct);
+
+    /* The working set, also PSRAM, also never freed. One block so a
+     * partial failure cannot leave half of it live. */
+    const size_t work = sizeof(icydemux_t) + READ_CHUNK * 2 + SNIFF_BYTES +
+                        NETSTREAM_URL_MAX + NETSTREAM_NAME_MAX;
+    uint8_t *w = heap_caps_malloc(work, MALLOC_CAP_SPIRAM);
+    if (!w) {
+        ESP_LOGE(TAG, "no PSRAM for a %u byte working set", (unsigned)work);
+        return false;
+    }
+    s_demux    = (icydemux_t *)w;   w += sizeof(icydemux_t);
+    s_rx       = w;                 w += READ_CHUNK;
+    s_audio    = w;                 w += READ_CHUNK;
+    s_sniff    = w;                 w += SNIFF_BYTES;
+    s_url      = (char *)w;         w += NETSTREAM_URL_MAX;
+    s_name_req = (char *)w;
+    s_url[0] = '\0';
+    s_name_req[0] = '\0';
     s_lock = xSemaphoreCreateMutex();
     s_idle = xSemaphoreCreateBinary();
     if (!s_ring || !s_lock || !s_idle) {
@@ -573,22 +660,23 @@ bool netstream_init(void)
      * media_task (1). The network must never delay the writer, and the
      * ring is what covers the gap when it is descheduled.
      *
-     * 8 KB of stack, not 6. The TLS record layer runs on this task, and
-     * the first version put a 4392-byte icydemux_t on it as well and
-     * died with a stack protection fault before it read a byte. The
-     * demuxer and the URL buffers are at module scope now, so 6 KB
-     * would very likely do -- this is 8 because the number that matters
-     * is the one measured with a TLS session open, and until the log
-     * below has printed it under load, headroom is cheaper than another
-     * panic. The task reports its high-water mark every window, so the
-     * right number is an observation rather than a guess.
+     * 6 KB of stack, measured rather than guessed. 0112 panicked at 6 KB
+     * with a 4392-byte demuxer on it, went to 8 KB, and then reported a
+     * high-water mark of 4848 free out of 8192 for a whole minute with a
+     * TLS session open and a redirect walked -- a peak of 3344 bytes. 6
+     * KB leaves 2.8 KB of margin on that, and the 2 KB handed back is
+     * internal RAM, which is the resource that actually ran out.
+     *
+     * The stack is the one thing here that cannot go to PSRAM.
      */
-    if (xTaskCreate(netstream_task, "netstream", 8192, NULL, 3, &s_task) != pdPASS) {
+    if (xTaskCreate(netstream_task, "netstream", 6144, NULL, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "no task for netstream");
         return false;
     }
-    ESP_LOGI(TAG, "ready: %d KB ring in PSRAM, %u byte demuxer at module scope",
-             NETSTREAM_RING_BYTES / 1024, (unsigned)sizeof(s_demux));
+    ESP_LOGI(TAG, "ready: %d KB ring + %u byte working set in PSRAM, "
+                  "internal free %u",
+             NETSTREAM_RING_BYTES / 1024, (unsigned)work,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     return true;
 }
 
