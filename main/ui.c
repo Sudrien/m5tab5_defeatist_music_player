@@ -54,6 +54,22 @@ static const char *TAG = "tab5_ui";
  * smudge. 0x6E is the dimmest grey that still resolves as a waveform at
  * arm's length on this panel.
  */
+/*
+ * The LIVE badge, and it is C_FILL rather than a fifth idea.
+ *
+ * The rule this file has followed so far is that a new kind of statement
+ * gets a new colour -- C_RG exists because a gain is neither a level nor
+ * a control. A broadcast indicator would qualify, except that red is
+ * already what an on-air light is everywhere else, and the one thing that
+ * could be confused with it is not on screen: while a stream plays there
+ * is no envelope and no seek fill, because there is no position for
+ * either to describe. The only other red left in the bar is a slider,
+ * and a filled slider is not confusable with a word in a pill.
+ *
+ * An alias rather than the bare constant so that a later patch deciding
+ * this was wrong changes one line and finds every use.
+ */
+#define C_LIVE      C_FILL
 #define C_WAVE_PAST   C_FILL
 #define C_WAVE_FUTURE RGB(0x6E, 0x6E, 0x6E)
 /* The playhead, where the two meet. The colour boundary alone marks the
@@ -793,6 +809,73 @@ static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
     gfx_fill_rect(x, y + r, w, h - 2 * r, c);
 }
 
+/* ------------------------------------------------------------------ */
+/* Row 2, when there is no position to draw there                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * LIVE, and what the stream is doing.
+ *
+ * This occupies the envelope's band -- the 72 px above the seek baseline
+ * -- because that is the row whose contents a stream cancels, and leaving
+ * it empty would put a 72 px hole in the middle of the bar. The hole is
+ * also the wrong statement: absence reads as something not having loaded
+ * yet, and the whole point is that nothing is coming.
+ *
+ * A pill and not just the word. At scale 3 on this panel four glyphs in
+ * grey is a caption, indistinguishable in weight from the artist row
+ * below; filled, it is an indicator, which is what it is. The text inside
+ * it is C_BG so the pill reads as lit rather than outlined.
+ *
+ * The status sits beside the badge rather than under it, on one baseline,
+ * because the two are one sentence -- this is live, and here is what it is
+ * doing about it. It is absent most of the time: streamplan_status()
+ * returns NONE whenever sound is coming out, so the badge alone is the
+ * normal state and any word next to it means there is no audio right now.
+ *
+ * Nothing here is a hit target. ui_touch() gates the seek drag on
+ * can_seek, which play_stream() holds false for the life of the stream,
+ * so the row is inert without a second check.
+ */
+#define LIVE_PAD_X  (14)    /* pill padding around the word */
+#define LIVE_PAD_Y  (8)
+#define LIVE_GAP    (24)    /* pill to status text */
+
+static void draw_live(const ui_state_t *st)
+{
+    int x0, x1, y;
+    seek_bounds(&x0, &x1, &y);
+
+    const int tw = gfx_text_w("LIVE", 3);
+    const int pw = tw + 2 * LIVE_PAD_X;
+    const int ph = GFX_GLYPH_H(3) + 2 * LIVE_PAD_Y;
+    /* Centred in the band the envelope would have stood in, not sat on
+     * the baseline: the baseline is where a waveform's floor is, and
+     * there is no waveform to share a floor with. */
+    const int py = y - UI_WAVE_H / 2 - ph / 2;
+
+    fill_rrect(TEXT_X, py, pw, ph, ph / 2, C_LIVE);
+    gfx_draw_text(TEXT_X + LIVE_PAD_X, py + LIVE_PAD_Y, "LIVE", 3, pw, C_BG);
+
+    if (!st->stream_status || !*st->stream_status) return;
+
+    /*
+     * C_THUMB, the same white as the title, and deliberately not the
+     * artist row's grey. While this line is on screen it is the answer to
+     * the only question being asked -- why is there no sound -- and grey
+     * at this size is the weight of a detail.
+     *
+     * One colour for all four states. "No signal" is terminal and the
+     * other three are not, and that difference is worth drawing, but it
+     * cannot be drawn from here: this is a string, by design, and the
+     * distinction would have to arrive as its own flag rather than be
+     * recovered by comparing prose in a draw call.
+     */
+    const int sx = TEXT_X + pw + LIVE_GAP;
+    gfx_draw_text(sx, py + LIVE_PAD_Y, st->stream_status, 3,
+                  x1 - sx - TEXT_X, C_THUMB);
+}
+
 /*
  * Scanline fill of a small closed polygon, in whole pixels.
  *
@@ -1029,7 +1112,12 @@ void ui_draw(const ui_state_t *st)
      */
     const int shown_pct = (s_drag == 0) ? s_drag_pct : pos_pct;
 
-    if (stats && waveform_ready() && st->len_sec > 0) {
+    if (st->live) {
+        /* No position exists, so none of the three states below applies
+         * -- not even the bare groove, which claims there is a position
+         * and that it is unknown. See ui_state_t::live. */
+        draw_live(st);
+    } else if (stats && waveform_ready() && st->len_sec > 0) {
         /*
          * The envelope is the bar. Played columns red, unplayed grey, and
          * the split is the position -- which is the whole reason for
@@ -1137,7 +1225,24 @@ void ui_draw(const ui_state_t *st)
      */
     const int ty = s_bar_top + TIME_Y;
 
-    if (!stats) {
+    if (st->live) {
+        /*
+         * Nothing, and blank rather than dashed.
+         *
+         * Dashes are this bar's way of saying a number is not known yet,
+         * and they are right for a file being scanned -- the length
+         * exists and is being looked for. A live stream has no length to
+         * find and no end to count down to, so two dashed clocks would
+         * report a lookup that is never going to finish. The badge one
+         * row up has already said why the row is empty.
+         *
+         * How long this station has been playing IS a real number and is
+         * arguably worth the left-hand slot. It is not free: nothing
+         * counts it today, so it needs a counter in play_stream() and a
+         * decision about whether a reconnect resets it. Left for its own
+         * patch rather than guessed at in this one.
+         */
+    } else if (!stats) {
         /* Both clocks, both dashed. The elapsed one especially: it is
          * the number that was counting a moment ago, and leaving it at
          * the old track's value for the length of an open is the single
@@ -1240,6 +1345,39 @@ void ui_draw(const ui_state_t *st)
     }
     if (st->artist && *st->artist) {
         gfx_draw_text(TEXT_X, s_bar_top + ARTIST_Y, st->artist, 3, win_w, C_ICON);
+    }
+
+    /*
+     * The ICY title, on the album row, when there is one.
+     *
+     * The row is free: a stream has no tags, and since the previous patch
+     * play_stream() clears the ones the last file left behind, so the two
+     * conditions above are already false here. Gated on `live` anyway --
+     * the flag, not the emptiness of the other rows -- so that a file can
+     * never draw this line no matter what a future path leaves in the
+     * field.
+     *
+     * The album row rather than the title row, keeping the order
+     * streamplan_lines() already chose: top is the station, bottom is the
+     * title. The station is what was chosen and what stays; this changes
+     * underneath it.
+     *
+     * C_ICON and not C_ALBUM. Three levels of grey exist to rank three
+     * rows against each other and there are two rows here, so the dimmest
+     * of the three is ranking this against nothing -- and a now-playing
+     * line is the most interesting string on a radio screen, not the
+     * least.
+     *
+     * Clipped with an ellipsis rather than given the marquee. It is the
+     * string most likely to need one -- "Artist - Title (Remastered)"
+     * overruns 19 characters easily -- but there is one marquee and the
+     * title row owns it, and handing it to whichever line is longest is a
+     * change to how the marquee is owned. Not in the patch that first
+     * draws this line.
+     */
+    if (st->live && st->stream_title && *st->stream_title) {
+        gfx_draw_text(TEXT_X, s_bar_top + ALBUM_Y, st->stream_title, 3,
+                      win_w, C_ICON);
     }
 
     vol_bounds(&x0, &x1, &y);

@@ -110,6 +110,54 @@ typedef struct {
      * lifetime.
      */
     bool  rg_measuring;
+
+    /*
+     * A live stream rather than a file.
+     *
+     * Not "there is no duration". A file whose length is unknown already
+     * has a state -- stats_valid false, or len_sec 0 -- and it means
+     * something is missing that ought to be there: the bar goes to a bare
+     * groove and both clocks go to dashes, which is a player admitting a
+     * gap in what it knows. A live stream is not missing a position. It
+     * does not have one, will never have one, and drawing the
+     * unknown-duration state for it reports a fault where there is none.
+     *
+     * So this is its own flag and it suppresses rows rather than emptying
+     * them: no envelope, no groove, no clocks. What goes in their place
+     * is the badge that says why they are absent.
+     */
+    bool live;
+
+    /*
+     * What the stream is doing, already rendered, or "" when there is
+     * nothing to say. streamplan_status_text() produces exactly this and
+     * never returns NULL.
+     *
+     * A string and not the streamplan_status_t, so that ui.c does not
+     * acquire an opinion about a state machine it cannot see: the value
+     * is a function of netstream's state AND the buffer phase, the two
+     * disagree on purpose, and streamplan.h has the table and the host
+     * test for reconciling them. Passing the enum would put the fifth
+     * copy of that reasoning in a draw call.
+     *
+     * It is empty whenever sound is coming out, which is most of the
+     * time -- see streamplan_status(). The line is therefore not a label
+     * that is always present; it appears when there is a reason.
+     */
+    const char *stream_status;
+
+    /*
+     * The ICY title -- what is playing on the station right now -- or
+     * NULL/"" when the station is not sending one, or is sending its own
+     * name as one, which several do for hours at a time.
+     *
+     * Separate from `title` rather than folded into it. `title` is the
+     * station, and the station is the thing the listener chose and the
+     * thing that stays put; this changes every few minutes underneath it,
+     * and the two swapping places on the same row would read as the
+     * player having switched station.
+     */
+    const char *stream_title;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */

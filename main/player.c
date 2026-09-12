@@ -2668,12 +2668,28 @@ static volatile bool     s_pending_stream;
  * "another station" while this is set and "another track" otherwise, and
  * those handlers are a long way above play_stream() in this file.
  *
- * It is also what a seek bar and a position counter should be
- * suppressed by -- a live stream has neither -- though nothing draws
- * from it yet.
+ * It is also what the seek bar and the position counter are suppressed
+ * by -- a live stream has neither -- which is ui_state_t::live.
  */
 static volatile bool     s_streaming;
 static volatile streamplan_status_t s_stream_status = STREAMPLAN_STATUS_NONE;
+
+/*
+ * What the screen shows for the stream: the station on top, the ICY
+ * title under it. Written by play_stream(), read by ui_task, published
+ * as values the way s_ring_pct is.
+ *
+ * UP HERE BECAUSE OF WHO READS THEM, NOT WHO WRITES THEM. These were
+ * declared beside play_stream(), four thousand lines below ui_task, and
+ * in a single translation unit that is not a matter of taste: ui_task
+ * could not name them, so it could not draw them, and "computed every
+ * pass and read by nothing" was enforced by declaration order rather
+ * than left undone. s_streaming and s_stream_status were moved up for
+ * this same reason when they were added; these two were not, and they
+ * are the two with something to say.
+ */
+static char s_stream_top[STREAMPLAN_LINE_MAX];
+static char s_stream_bottom[STREAMPLAN_LINE_MAX];
 
 /* Set by the UI task when the chooser closes, for any reason. The decode
  * loop repaints the cover art, because the chooser drew over it and the
@@ -5288,6 +5304,23 @@ static void ui_task(void *arg)
         st.title = s_tags_shown.title[0] ? s_tags_shown.title : s_name_shown;
         st.artist = s_tags_shown.artist;
         st.album = s_tags_shown.album;
+        /*
+         * The stream, in the same block as the other three text fields
+         * because it is the same kind of thing and it is set on the same
+         * pass that ends in ui_draw().
+         *
+         * s_stream_bottom unconditionally rather than only while
+         * streaming: ui.c gates it on `live`, so there is one place that
+         * decides whether it is drawn, and a stale pointer handed over
+         * with live false cannot be the thing that goes wrong.
+         *
+         * The status is read through streamplan_status_text() here and
+         * not in ui.c, so that ui.c is handed a rendered line and never
+         * an enum whose meaning lives in streamplan.h.
+         */
+        st.live = s_streaming;
+        st.stream_status = streamplan_status_text(s_stream_status);
+        st.stream_title = s_stream_bottom;
         st.playing = s_playing;
         st.volume = s_volume;
         st.rg_active = s_rg_active;
@@ -8649,10 +8682,8 @@ static void clear_play_screen(void)
 static char s_stream_url[NETSTREAM_URL_MAX];
 static char s_stream_name[NETSTREAM_NAME_MAX];
 
-/* What the screen is showing for the stream, published for ui_task the
- * way s_ring_pct is: values, written here, read anywhere. */
-static char s_stream_top[STREAMPLAN_LINE_MAX];
-static char s_stream_bottom[STREAMPLAN_LINE_MAX];
+/* s_stream_top and s_stream_bottom were here. They are declared with
+ * s_streaming now, beside the task that reads them. */
 
 /*
  * Decoded audio in the ring being filled, in milliseconds.
