@@ -7039,11 +7039,56 @@ the ring correctly trends empty behind a faster reader, and 0115's run
 exercised a real drop and a real reconnect. Phase 1 is done being
 guessed at.
 
-**Where the series stands.** Phase 1 works, is measured, and its
-remaining unknowns are about stations rather than about itself. Phase 2
-is unblocked -- and its first question, what the AAC decoder costs in
-internal RAM, is now a much more comfortable one to ask, with 57 KB
-free at the worst moment instead of 43. Phase
+### 0117: four runs, and the ring costs nothing
+
+The idle run 0114 asked for. With the USB and SD runs beside it the
+whole question closes.
+
+    run         mean kbit/s   peak   x-real-time
+    idle              500      596      0.926
+    SD playback       449      526      0.828
+    USB playback      428      468      0.794
+
+**The playback penalty reproduces the old probe almost exactly.** Idle
+to card playback costs **0.098x** here; the old probe, reading off the
+socket with no ring and no second task, measured 1.05x idle and 0.97x
+beside playback -- **0.080x**. Two measurements of the same quantity, a
+fifth of a window apart, one before the ring existed and one through it.
+
+So the curve has the same *shape* and sits about 0.12x lower across the
+board. That is not something a ring does; a ring that cost 12% would
+cost it under playback too, and the penalty would have grown rather than
+stayed put. What shifts a whole curve uniformly is the RF environment,
+which is exactly what the RSSI readings said -- **-38 to -47 dBm across
+these runs, on 2.4 GHz with twenty-four to thirty-three networks in
+earshot.**
+
+**The ceiling settles it beyond argument.** A window reached 596 kbit/s,
+**1.17x this station's bitrate**, through the demultiplexer, through the
+ring, across the task boundary, with a reader on the far side. The path
+is not the limit and never was. USB costs a further 0.034x, which is
+real and small and worth remembering when someone plays from a stick.
+
+**What the four runs actually bought.** Two genuine bugs -- the internal
+RAM starvation and the reconnect bookkeeping, both found by running out
+of memory -- and the retirement of a question that turned out to be
+about weather. The measurement worth keeping from the whole exercise is
+not any of the throughput figures; it is that **0 bytes were lost
+hunting for a sync in all four runs**, which is `icydemux` and the ring
+being exactly correct on two and a half hours of real traffic.
+
+**The number phase 2 needs.** Internal free bottomed at **75100** on the
+idle run and 57268 beside playback. That is the budget the AAC decoder
+has to fit in, and it is a comfortable one -- the question 0116 called
+phase 2's first is now answerable without fear. At 500 kbit/s mean this
+link is 3.9x real time for a 128 kbit/s station, 2.6x at 192, 2.0x at
+256.
+
+**Where the series stands.** Phase 1 is finished: written, compiled,
+flashed four times, measured, and its two real faults fixed. Nothing
+about it is still a guess. Phase 2 is unblocked with a known memory
+budget and a known link; it wants an ordinary station rather than WNZK,
+for the reasons in 0116. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
