@@ -1,0 +1,162 @@
+From 9f8deb017d8442ceaaa85dbfea3f23eade3c33f0 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 12 Sep 2026 20:44:48 +0000
+Subject: [PATCH 309/309] netdec.c -- a web page is a verdict, not a delay
+
+The BBC URL in the test list 302s to https://www.bbc.co.uk/ and serves
+HTML. netstream detected it correctly at the header --
+`first audio bytes look like HTML (content-type text/html)` -- went
+buffering -> playing anyway, and then netdec printed
+
+  W tab5_netdec: The station returned a web page
+
+at the decode loop's rate for thirteen seconds. About 1300 lines, which
+is the entire log of that run, and it stopped only because the listener
+pressed something. `stream ended: ended, 0 rebuffers, 13126 ms silent,
+0 frames`.
+
+TWO BUGS, ONE CAUSE, AND THE CAUSE IS THE SERIES' FAVOURITE.
+STREAM_CODEC_NONE means two things and the enum cannot tell them apart:
+"not identified yet" before the sniff, and "identified, and it is a web
+page" after it. identify() opens with `if (s_codec != NONE) return;`
+using NONE as "keep trying", and then writes NONE for a permanent
+verdict. So the verdict was re-reached, and re-announced, on every call.
+
+This is 0203's NETSTREAM_IDLE and 0209's stations_load() return value
+for the third time: a value asked a question it does not answer. The fix
+is the same shape -- a separate latch, s_not_audio, set where the verdict
+is reached and cleared only by open and close. Not by
+netdec_reconnect(), deliberately: a station that served HTML will serve
+HTML again, and the codec is meant to survive a reconnect anyway.
+
+The second bug is the comment that was there, which said sniffing and
+not-audio are the same to the caller and both mean wait. They are not.
+One ends; the other is a socket held open to a web server feeding a
+decoder that will never produce a sample. netdec_read() now returns -1,
+which is what the unsupported-codec branch below it already returns and
+what bufferplan reads as the source being finished -- so play_stream()
+tears down, logs why, and streamplan_status() has "No signal" for the
+screen. Which is, at last, true.
+
+Reached by the same verdict and therefore also fixed: a link to an .m3u
+or .pls (`That link is a playlist, not a stream`), and Ogg or FLAC
+streams, which are refused on purpose. All three previously spun.
+
+Not flashed. The station in the list that caused it is left in place --
+a URL that 302s to a web page is an ordinary thing for a station list to
+contain, and it is now the test case for this.
+---
+ main/netdec.c | 59 ++++++++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 56 insertions(+), 3 deletions(-)
+
+diff --git a/main/netdec.c b/main/netdec.c
+index d25e9b1..ec07dcd 100644
+--- a/main/netdec.c
++++ b/main/netdec.c
+@@ -65,6 +65,25 @@ static uint8_t     *s_win_buf;
+ static mp3dec_t    *s_mp3;
+ static bool         s_open;
+ static stream_codec_t s_codec;
++
++/*
++ * The sniff reached a verdict and the verdict was "not audio".
++ *
++ * Separate from s_codec because STREAM_CODEC_NONE means two things and
++ * the enum cannot tell them apart -- exactly the shape 0203 found in
++ * NETSTREAM_IDLE and 0209 found in stations_load()'s return. NONE is
++ * "not identified yet" before the sniff and "identified, and it is a web
++ * page" after it, and identify() wrote NONE for the second while its own
++ * first line uses NONE as "keep trying".
++ *
++ * So the verdict was re-reached on every call. On the board a BBC URL
++ * that 302s to a HTML page produced `The station returned a web page`
++ * at the decode loop's rate -- about 1300 lines in thirteen seconds,
++ * which is the entire log of that run -- and the stream never ended,
++ * because netdec_read() answered 0 for "wait" to a condition that is
++ * never going to change.
++ */
++static bool s_not_audio;
+ static esp_audio_simple_dec_handle_t s_aac;
+ 
+ static uint32_t s_frames;
+@@ -112,6 +131,7 @@ bool netdec_open(void)
+     }
+ 
+     s_codec = STREAM_CODEC_NONE;
++    s_not_audio = false;
+     s_frames = 0;
+     s_samples = 0;
+     s_resyncs = 0;
+@@ -137,6 +157,7 @@ void netdec_close(void)
+     s_mp3 = NULL;
+     s_open = false;
+     s_codec = STREAM_CODEC_NONE;
++    s_not_audio = false;
+ }
+ 
+ void netdec_reconnect(void)
+@@ -192,6 +213,10 @@ static size_t refill(void)
+ static void identify(void)
+ {
+     if (s_codec != STREAM_CODEC_NONE) return;
++    /* And once the answer is "never". See s_not_audio: without this the
++     * sniff is redone, and re-announced, for as long as the caller keeps
++     * asking. */
++    if (s_not_audio) return;
+     const size_t have = framewin_avail(&s_win);
+     if (have < CODECPLAN_MIN_SNIFF_BYTES) return;
+ 
+@@ -201,8 +226,20 @@ static void identify(void)
+         s_codec = plan.codec;
+         ESP_LOGI(TAG, "stream is %s", stream_codec_name(s_codec));
+     } else if (!codecplan_waiting(&plan)) {
++        /*
++         * A verdict, not a delay. codecplan_waiting() is what separates
++         * "need more bytes" from "these bytes are not a stream", and
++         * this branch is the second -- a playlist, a web page, or a
++         * codec not decoded here. None of those becomes audio if asked
++         * again.
++         *
++         * Latched and said once. The message is the listener's, and it
++         * is the same message whether it is printed once or a thousand
++         * times.
++         */
+         ESP_LOGW(TAG, "%s", plan.message);
+         s_codec = STREAM_CODEC_NONE;
++        s_not_audio = true;
+     }
+ }
+ 
+@@ -353,10 +390,26 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
+     refill();
+     identify();
+ 
++    if (s_not_audio) {
++        /*
++         * THE OLD COMMENT HERE WAS WRONG, AND THIS IS THE HALF IT GOT
++         * WRONG. It said that sniffing and not-audio were the same to
++         * the caller and that both mean wait. They are not: one ends,
++         * and the other is a socket held open to a web server, feeding
++         * a decoder that will never produce a sample, until somebody
++         * presses something. On the board that was thirteen seconds and
++         * only because the listener intervened.
++         *
++         * -1 rather than 0, which is the signal the unsupported-codec
++         * branch below already uses and which bufferplan reads as the
++         * source being finished. play_stream() then tears down and says
++         * why, and streamplan_status() has "No signal" for the screen.
++         */
++        return -1;
++    }
+     if (s_codec == STREAM_CODEC_NONE) {
+-        /* Still sniffing, or the stream is not audio. codecplan has
+-         * already said which in the log; either way there is nothing to
+-         * decode yet and the caller should wait rather than stop. */
++        /* Still sniffing: too few bytes to judge. This one really does
++         * mean wait. */
+         return 0;
+     }
+     if (s_codec == STREAM_CODEC_AAC_ADTS) return aac_read(out, max_int16, info);
+-- 
+2.43.0
+

@@ -142,6 +142,22 @@ extern "C" {
  */
 #define NETDEC_STACK_FLOOR  (20000)
 
+/*
+ * And it is compared against MEASURED headroom, not against
+ * uxTaskGetStackHighWaterMark().
+ *
+ * The first version used the high-water mark, which is the smallest free
+ * stack the task has ever had rather than what is free now. On the main
+ * task the smallest ever is set by play_file() running minimp3, so after
+ * one file had played the figure was 2068 and every stream was refused
+ * for the rest of the boot -- by a check whose own evidence was that the
+ * task had already survived the call it was refusing.
+ *
+ * netdec_open() measures the distance from its own frame to
+ * pxTaskGetStackStart(). Anyone changing that back: the mark only ever
+ * goes down, so it cannot answer a question about now.
+ */
+
 typedef struct {
     int sample_rate;        /* Hz; can change mid-stream, so compare */
     int channels;           /* 1 or 2 */

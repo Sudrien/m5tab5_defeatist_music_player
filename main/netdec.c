@@ -116,13 +116,51 @@ bool netdec_open(void)
      * mp3dec_decode_frame and a line number inside a vendored header,
      * which points at the library rather than at the caller that is
      * actually wrong.
+     *
+     * NOT uxTaskGetStackHighWaterMark(), WHICH IS THE WORST THE TASK HAS
+     * EVER BEEN AND NOT WHAT IS LEFT NOW.
+     *
+     * That function returns the smallest free stack recorded since the
+     * task started. On the main task the smallest ever recorded is set
+     * by the deepest thing that has run on it -- which is
+     * mp3dec_decode_frame(), from play_file(), putting its 17744 bytes
+     * there. So:
+     *
+     *   boot, chooser open, no file played yet   passes, stream plays
+     *   after one file has played                2068, refused for ever
+     *
+     * and the refusal is permanent, because a high-water mark only ever
+     * goes down. On the board that was every station after the first
+     * file, with a message naming a stack size that was already correct.
+     *
+     * **2068 is the proof the check was wrong.** A task reporting 2068
+     * bytes of worst-ever free has already SURVIVED a 17744-byte
+     * minimp3 call -- that call is what put the figure there. The
+     * measurement was reading the record of the demand being met as
+     * evidence that it could not be.
+     *
+     * It is the same error as the one at the top of CLAUDE.md, from the
+     * other direction: a stack protection fault reports the overshoot
+     * rather than the demand, and a high-water mark reports the past
+     * rather than the present. Neither is the headroom.
+     *
+     * What headroom actually is: the distance from this frame down to
+     * the bottom of the task's stack. pxTaskGetStackStart() gives the
+     * bottom, `&probe` is in this frame, and the stack grows down on
+     * both the P4's cores, so the difference is what a callee may still
+     * use. Measured, current, and unaffected by anything that has
+     * already returned.
      */
-    const unsigned headroom = uxTaskGetStackHighWaterMark(NULL);
+    char probe;
+    const uint8_t *floor = (const uint8_t *)pxTaskGetStackStart(NULL);
+    const uint8_t *here  = (const uint8_t *)&probe;
+    const unsigned headroom = (here > floor) ? (unsigned)(here - floor) : 0;
     if (headroom < NETDEC_STACK_FLOOR) {
-        ESP_LOGE(TAG, "this task has %u bytes of stack left; the minimp3 call "
-                      "measures 17744 on the caller's stack. Create the "
-                      "calling task with at least %d (the main task, which "
-                      "decodes files through the same library, has 24576).",
+        ESP_LOGE(TAG, "this task has %u bytes of stack below this frame; the "
+                      "minimp3 call measures 17744 on the caller's stack. "
+                      "Create the calling task with at least %d (the main "
+                      "task, which decodes files through the same library, "
+                      "has 24576).",
                  headroom, NETDEC_MIN_STACK);
         free(s_win_buf);
         s_win_buf = NULL;
