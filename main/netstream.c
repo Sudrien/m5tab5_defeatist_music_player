@@ -92,6 +92,26 @@ static char s_name[NETSTREAM_NAME_MAX];     /* icy-name, else the list's */
 static char s_title[NETSTREAM_TITLE_MAX];
 static bool s_has_title;
 
+/*
+ * The task's working set, at module scope rather than on its stack.
+ *
+ * icydemux_t is 4392 bytes -- almost all of it the meta[4081] buffer a
+ * maximum-size ICY block needs -- and it was a local in
+ * netstream_task(), together with 608 bytes of url and name and the
+ * inlined connect_hops()'s own url[512]. That is the whole 6 KB stack
+ * before a single byte is read, and the task died on its first pass
+ * with a stack protection fault. See the note on the stack size in
+ * netstream_init().
+ *
+ * These are safe at module scope for the same reason the ring is: there
+ * is exactly one netstream task and exactly one stream at a time. That
+ * is enforced by the design, not hoped for -- netstream_play() replaces
+ * a running stream rather than starting a second one.
+ */
+static icydemux_t s_demux;
+static char       s_url[NETSTREAM_URL_MAX];
+static char       s_name_req[NETSTREAM_NAME_MAX];
+
 /* Per-connection, owned by the task alone. */
 static int  s_hdr_metaint;
 static int  s_hdr_status_icy;
@@ -362,9 +382,10 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
         if (now - last_window >= KBPS_WINDOW_US) {
             const int64_t ms = (now - last_window) / 1000;
             s_kbps = ms ? (int)((int64_t)window_bytes * 8 / ms) : 0;
-            ESP_LOGI(TAG, "%d kbit/s, ring %u%% (%u bytes), internal free %u",
+            ESP_LOGI(TAG, "%d kbit/s, ring %u%% (%u bytes), internal free %u, stack low water %u",
                      s_kbps, netstream_ring_pct(), (unsigned)s_buffered,
-                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                     (unsigned)uxTaskGetStackHighWaterMark(NULL));
             window_bytes = 0;
             last_window = now;
         }
@@ -380,8 +401,10 @@ static void netstream_task(void *arg)
 {
     (void)arg;
     uint32_t gen = 0;
-    char url[NETSTREAM_URL_MAX];
-    char name[NETSTREAM_NAME_MAX];
+    /* url, name and the demuxer are at module scope: they are 5 KB
+     * between them and this task has 8 KB including a TLS session. */
+    char *const url = s_url;
+    char *const name = s_name_req;
 
     for (;;) {
         /* Idle: wait for a request. */
@@ -413,8 +436,7 @@ static void netstream_task(void *arg)
         s_last_status = 0;
         s_kbps = 0;
 
-        icydemux_t demux;
-        icydemux_init(&demux, 0);
+        icydemux_init(&s_demux, 0);
 
         /* The ring starts empty for a new station: what is in it belongs
          * to the last one. A reconnect to the *same* station keeps it --
@@ -455,10 +477,10 @@ static void netstream_task(void *arg)
                 if (s_hdr_name[0]) publish_name(s_hdr_name);
                 /* A reconnect keeps the title on screen and restarts the
                  * byte phase on the new body's own metaint. */
-                icydemux_reconnect(&demux, s_hdr_metaint);
+                icydemux_reconnect(&s_demux, s_hdr_metaint);
                 set_state(NETSTREAM_BUFFERING);
 
-                const uint64_t produced = pump(c, gen, &demux);
+                const uint64_t produced = pump(c, gen, &s_demux);
 
                 if (netplan_made_progress(produced)) {
                     /* Audio flowed, so this is a fresh failure sequence
@@ -537,15 +559,27 @@ bool netstream_init(void)
         return false;
     }
 
-    /* Priority 3: below the I2S writer (6) and ui_task (4), above
+    /*
+     * Priority 3: below the I2S writer (6) and ui_task (4), above
      * media_task (1). The network must never delay the writer, and the
-     * ring is what covers the gap when it is descheduled. 6 KB of stack
-     * because the TLS record layer runs on this task. */
-    if (xTaskCreate(netstream_task, "netstream", 6144, NULL, 3, &s_task) != pdPASS) {
+     * ring is what covers the gap when it is descheduled.
+     *
+     * 8 KB of stack, not 6. The TLS record layer runs on this task, and
+     * the first version put a 4392-byte icydemux_t on it as well and
+     * died with a stack protection fault before it read a byte. The
+     * demuxer and the URL buffers are at module scope now, so 6 KB
+     * would very likely do -- this is 8 because the number that matters
+     * is the one measured with a TLS session open, and until the log
+     * below has printed it under load, headroom is cheaper than another
+     * panic. The task reports its high-water mark every window, so the
+     * right number is an observation rather than a guess.
+     */
+    if (xTaskCreate(netstream_task, "netstream", 8192, NULL, 3, &s_task) != pdPASS) {
         ESP_LOGE(TAG, "no task for netstream");
         return false;
     }
-    ESP_LOGI(TAG, "ready: %d KB ring in PSRAM", NETSTREAM_RING_BYTES / 1024);
+    ESP_LOGI(TAG, "ready: %d KB ring in PSRAM, %u byte demuxer at module scope",
+             NETSTREAM_RING_BYTES / 1024, (unsigned)sizeof(s_demux));
     return true;
 }
 

@@ -14,6 +14,18 @@ history: correcting it in place erases the reasoning that produced it,
 and which things turned out not to be tasks is the useful part of a
 record like this one.
 
+**Nothing over a few hundred bytes goes on a task stack.** A big struct
+is a module-scope static or a heap allocation, never a local. 0112 died
+on this: `icydemux_t` is 4392 bytes, almost all of it the `meta[4081]`
+buffer a maximum-size ICY block needs, and it was a local in
+`netstream_task()`. Together with 608 bytes of url and name and an
+inlined 512-byte buffer it consumed the whole 6 KB stack before the task
+read a byte, and the panic arrived at an unrelated
+`xSemaphoreGive()` -- a stack protection fault names the line that
+happened to be running, not the line that caused it. Check `sizeof`
+before putting a struct on a stack; the struct that will do this is one
+whose size is a protocol maximum somewhere else in the file.
+
 **A patch has one number, and it is written down once.** The next patch
 after 0108 is 0109 and its file is `0109-<subject>.patch`. The number is
 supplied by `--start-number`, which counts from the project rather than
@@ -6781,7 +6793,37 @@ Two things separated that a simpler version would merge:
 8053 checks, including every combination of sniff result, Content-Type
 and byte count, and 5000 random buffers through the real sniffer.
 
-**Where the series stands.** Phase 1 written, compiled, unflashed. Phase
+**0112: the first flash, and the first panic.** `netstream` died with a
+stack protection fault before `netstream_init()` reached its own log
+line -- which is how the log was read, since the absence of the
+"ready: 256 KB ring" line placed the crash on the task's first pass and
+ruled out everything to do with the network.
+
+The backtrace pointed at `xSemaphoreGive(s_lock)` and
+`xTaskPriorityDisinherit`, which had nothing to do with it. **A stack
+protection fault names the line that was running when the floor was
+crossed, not the line that consumed the stack.** The real cause was
+`sizeof(icydemux_t) == 4392` -- the `meta[4081]` buffer that a
+maximum-size ICY block requires -- sitting on the task stack as a local,
+with 608 bytes of url and name and an inlined `url[512]` beside it. 6 KB
+gone before the first read.
+
+Worth noting against 0101's own reasoning: that patch made the
+demultiplexer a struct precisely so it could be *owned, reset and
+inspected* rather than living as locals in a read loop. It was right
+about that and silent on where the struct should live, and the obvious
+place turned out to be the one place it could not go.
+
+The demuxer and both URL buffers are at module scope now, which is safe
+for exactly the reason the ring is: one task, one stream, enforced by
+`netstream_play()` replacing a running stream rather than starting a
+second. The stack is 8 KB rather than 6 -- probably more than needed now
+that 5 KB has left it, deliberately generous until the number has been
+seen under a TLS session. It logs its own high-water mark every window,
+so the right size will be an observation instead of a third guess.
+
+**Where the series stands.** Phase 1 written, compiled, flashed once and
+panicked once. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
