@@ -5282,7 +5282,28 @@ static void ui_task(void *arg)
          * chooser can load a different folder underneath, and a next
          * button greyed against a playlist that no longer exists is
          * worse than one that is briefly right for the wrong reason. */
-        st.has_next = playlist_has_next(browser_order());
+        /*
+         * And during a stream it asks the station list instead, because
+         * that is what the button does then.
+         *
+         * UI_ACTION_NEXT and UI_ACTION_PREV have branched on s_streaming
+         * since 0206 -- a press goes to stations_next() rather than
+         * playlist_next() -- but nothing told the icon, so it went on
+         * being greyed or lit by playlist_has_next(), which answers about
+         * files in a folder and there is no folder here. Both answers it
+         * can give are wrong: lit with one station, so the button invites
+         * a press that logs "no other station in the list" and does
+         * nothing; greyed with a full station list if the folder behind
+         * the stream happened to be at its last track, which hides a
+         * button that works.
+         *
+         * stations_have_other() and not count > 1, so the one-station
+         * case is still decided in one place -- it is the same call the
+         * press handlers and streamplan_transport() make, which is what
+         * keeps the icon and the action from drifting apart.
+         */
+        st.has_next = s_streaming ? stations_have_other()
+                                  : playlist_has_next(browser_order());
 
         /*
          * The staged text becomes the shown text when the art has
