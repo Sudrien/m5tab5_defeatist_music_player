@@ -8759,6 +8759,58 @@ static void clear_play_screen(void)
 /* ------------------------------------------------------------------ */
 
 /*
+ * What goes in the artwork square while a stream plays.
+ *
+ * A stream has no cover and `ui_clear_art()` leaves 720x720 of black,
+ * which this project has already decided is the wrong answer -- it is
+ * the note on ui_show_art_info(): black reads as a cover that has not
+ * arrived rather than one that does not exist, and what goes there
+ * instead is the thing the source can always say about itself. That
+ * argument was written for a file with no picture in it and applies
+ * unchanged here; a stream simply never got the call.
+ *
+ * The station on top because it is the thing chosen, then the format,
+ * then the rate -- largest to smallest, the same hierarchy the format
+ * card uses for a file.
+ *
+ * Called with whatever is known. Before the first frame the codec and
+ * the rate are not, and the lines are simply shorter: a card that says
+ * only the station name is honest, and waiting for the numbers would
+ * leave the square black for the three seconds this exists to fill.
+ */
+static void show_stream_card(uint32_t rate, int chans, int kbps)
+{
+    char fmt[48];
+    char det[48];
+    const char *lines[3];
+    int n = 0;
+
+    lines[n++] = s_stream_top[0] ? s_stream_top : "Radio";
+
+    const stream_codec_t c = netdec_codec();
+    if (c != STREAM_CODEC_NONE) {
+        snprintf(fmt, sizeof(fmt), "%s", stream_codec_name(c));
+        lines[n++] = fmt;
+    }
+
+    if (rate > 0) {
+        /* Mono is worth saying and stereo is not: stereo is the
+         * expectation, and WUOM being mono is the sort of thing that
+         * otherwise reads as a fault in the player. */
+        if (kbps > 0) {
+            snprintf(det, sizeof(det), "%" PRIu32 " Hz  %s  %d kbit/s",
+                     rate, chans == 1 ? "mono" : "stereo", kbps);
+        } else {
+            snprintf(det, sizeof(det), "%" PRIu32 " Hz  %s",
+                     rate, chans == 1 ? "mono" : "stereo");
+        }
+        lines[n++] = det;
+    }
+
+    ui_show_art_info(lines, n);
+}
+
+/*
  * BESIDE play_file(), FOR THE REASONS THE PLAN GAVE
  *
  * A stream has no length, no seek, no sidecar, no ReplayGain, no
@@ -9035,6 +9087,10 @@ static track_end_t play_stream(const char *url, const char *name)
     bool leaving = false;
     /* Last seen netstream_failures(), for the stall clock below. */
     int last_failures = 0;
+    /* Whether the artwork square has been drawn for this stream. The
+     * card is redrawn on demand after that; this is only about the first
+     * one, which waits for a format to put on it. */
+    bool art_shown = false;
     track_end_t why = TRACK_ENDED;
     /*
      * When the CURRENT connection was asked for, not when the station
@@ -9405,6 +9461,33 @@ static track_end_t play_stream(const char *url, const char *name)
             ESP_LOGI(TAG, "title: \"%s\"", s_stream_bottom);
         }
         s_stream_status = streamplan_status(net, plan.phase, out.audible);
+
+        /*
+         * THE ARTWORK SQUARE, WHICH play_stream() WAS NOT REPAINTING AT
+         * ALL.
+         *
+         * s_repaint_art is set by every screen that draws over the art
+         * -- the chooser, the panel, the sleep page -- and consumed in
+         * three places: twice in play_file()'s decode loop and once in
+         * the idle branch of player_loop(). play_stream() is beside
+         * play_file() and inherited neither, so a chooser dismissed
+         * during a stream left its file listing on screen above the bar
+         * for as long as the stream ran. Found by looking at the panel,
+         * which nothing in fifteen patches of logs could have shown.
+         *
+         * Same shape as 0204's amplifier: a postcondition that
+         * play_file() owns and play_stream() needs, and the reason
+         * "beside play_file()" keeps costing one of these per screen
+         * element.
+         *
+         * Redrawn on the card's own terms rather than by calling
+         * load_track_visuals(), which wants a path.
+         */
+        if (s_repaint_art || (out.audible && !art_shown)) {
+            s_repaint_art = false;
+            art_shown = true;
+            show_stream_card(out_rate, last_chans, last_kbps);
+        }
 
         /*
          * Another connection attempt means the source is still working,
