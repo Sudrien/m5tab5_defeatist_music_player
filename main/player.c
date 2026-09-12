@@ -5585,7 +5585,32 @@ static void ui_task(void *arg)
              * changes in one capture were the first evidence of presses
              * nobody made, and until then the only trace of them was the
              * settings file being rewritten. */
-            ESP_LOGI(TAG, "button: volume -> %d%%", act.value);
+            /*
+             * On a CHANGE, though, which is what 0503 was actually
+             * reading. A drag delivers one action per poll and the
+             * slider resolves to whole percent, so a thumb that moves
+             * less than one percent per 50 ms -- most of a slow drag,
+             * and all of the release, which repeats the last position --
+             * logged the same number four and five times over:
+             *
+             *   button: volume -> 41%   (x4, over 153 ms)
+             *
+             * The repeats say nothing 0503 wanted. A press nobody made
+             * is a volume arriving at a value it was not at, and that is
+             * exactly what this still prints; what it no longer prints
+             * is the same value restated because a finger is resting on
+             * it. Four identical lines are also how a real second press
+             * at the same percent gets lost in the noise.
+             *
+             * Static, because "the last volume this was logged at" is a
+             * property of the log rather than of the player -- s_volume
+             * is set below and would make this test always false.
+             */
+            static int logged_volume = -1;
+            if (act.value != logged_volume) {
+                logged_volume = act.value;
+                ESP_LOGI(TAG, "button: volume -> %d%%", act.value);
+            }
             s_volume = act.value;
             settings_set_volume((uint8_t)act.value);
             /* Moving the slider unmutes. Adjusting a control that is
