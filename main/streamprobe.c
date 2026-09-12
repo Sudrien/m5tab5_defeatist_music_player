@@ -479,6 +479,7 @@ static void probe_task(void *arg)
 
 void streamprobe_kick(void)
 {
+    if (!STREAMPROBE_ENABLE) return;
     if (s_started || !STREAMPROBE_URL[0]) return;
     s_started = true;
     /*

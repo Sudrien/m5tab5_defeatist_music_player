@@ -93,6 +93,26 @@ extern "C" {
  */
 #define STREAMPROBE_DECODE   (1)
 
+/*
+ * Whether the probe runs at all.
+ *
+ * 0 since play_stream() landed, and this is the retirement CLAUDE.md
+ * promised: "the probe goes when this lands". It is gated rather than
+ * deleted because it is still the only thing that measures a station --
+ * KB/s, x-real-time, resyncs, ring peak -- and pointing it at a new
+ * station is how the next one gets characterised.
+ *
+ * It MUST stay 0 while a stream can be played. **One TLS session at a
+ * time, ever**: the probe holds one for sixty seconds, and with the
+ * probe armed the station play_stream() had already connected would be
+ * torn down under it, or the probe refused, depending only on which
+ * arrived first. Nothing in either log would say that is what happened.
+ *
+ * STREAMPROBE_URL is still read by player.c's test hook, so this
+ * header stays included either way.
+ */
+#define STREAMPROBE_ENABLE   (0)
+
 #define STREAMPROBE_SECONDS  (60)
 /*
  * Seconds after the first address before the probe starts. Long enough

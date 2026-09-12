@@ -8680,7 +8680,16 @@ static track_end_t play_stream(const char *url, const char *name)
     s_stream_hold = true;
 
     if (!netstream_play(s_stream_url, s_stream_name)) {
-        ESP_LOGE(TAG, "netstream refused the station");
+        /*
+         * Two things cause this and the log should say which, because
+         * from outside they are the same silence. A stream already
+         * running is the one-session rule; no ring is netstream_init()
+         * never having been called or having failed, which is what
+         * happened the first time this path was flashed.
+         */
+        ESP_LOGE(TAG, "netstream refused the station (state %s) -- "
+                      "no ring, or a session is already open",
+                 netstream_state_name(netstream_state()));
         s_stream_hold = false;
         s_streaming = false;
         return TRACK_UNREADABLE;
@@ -9564,6 +9573,28 @@ void app_main(void)
      * wifi_apply_settings() runs from the settings push below. */
     wifi_init(s_exp2);
     portal_init(player_is_playing, player_force_pause);
+
+    /*
+     * The stream ring, here because netstream.h says here: "Call once
+     * from app_main(), before anything can ask for a stream."
+     *
+     * It was not. streamprobe.c called it, which meant the ring existed
+     * only from the moment the probe ran -- 45 s into the boot -- and
+     * play_stream()'s test hook, firing the instant the radio joined,
+     * was refused by a netstream that had no ring yet. The refusal was
+     * correct and said so; what was missing was this line.
+     *
+     * Not fatal, and not ESP_ERROR_CHECK'd: a player with no PSRAM for
+     * the ring should still play files. netstream_play() refuses
+     * everything after a failure here, which is the behaviour the header
+     * describes.
+     *
+     * Idempotent (`if (s_ring) return true`), so the probe's own call is
+     * left alone and becomes a no-op rather than a second allocation.
+     */
+    if (!netstream_init()) {
+        ESP_LOGW(TAG, "no stream ring this boot; internet radio disabled");
+    }
 
     /* The other class driver on that port. Not ESP_ERROR_CHECK'd on the
      * device: no headset plugged in is the normal way to boot, and the
