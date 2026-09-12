@@ -8792,6 +8792,38 @@ static track_end_t play_stream(const char *url, const char *name)
     s_display_name = s_stream_top;
 
     /*
+     * And retire the FILE's text, which is the half of the list above
+     * that was missing.
+     *
+     * ui_task does not read s_display_name. It reads s_name_shown -- a
+     * copy taken only when s_text_staged is set -- and it prefers
+     * s_tags_shown.title to that copy whenever the title is non-empty.
+     * Nothing in this function staged anything, so a station chosen
+     * after a tagged file had played put the station name in
+     * s_display_name and left the screen showing the PREVIOUS TRACK'S
+     * title, artist and album for the whole broadcast.
+     *
+     * Every run that tested phase 3 missed it, and missed it
+     * structurally rather than by luck: each one chose a station from a
+     * boot that had played nothing, where s_tags_shown is still zeroed
+     * and the fallback to s_name_shown happens to be the right answer.
+     * The fault needs a file first, which is the ordinary way to reach
+     * the RADIO tab and the one order not yet flashed.
+     *
+     * s_text_release, so the copy is taken on ui_task's next pass rather
+     * than after TEXT_HOLD_MS. That hold exists to land the text and the
+     * cover art in the same frame, and ui_clear_art() above has already
+     * said there is no cover coming.
+     *
+     * s_text_staged last. Everything it publishes is written above it,
+     * so ui_task cannot sample a station name beside a file's artist.
+     */
+    memset(&s_tags, 0, sizeof(s_tags));
+    s_text_release = true;
+    s_text_staged_at = xTaskGetTickCount();
+    s_text_staged = true;
+
+    /*
      * Hold the writer before a single byte is decoded.
      *
      * The order matters on WUOM: it delivers 6.6x real time for the
@@ -9227,6 +9259,18 @@ static track_end_t play_stream(const char *url, const char *name)
         netstream_name(icy_name, sizeof(icy_name));
         netstream_title(title, sizeof(title));
         streamplan_lines(icy_name, s_stream_name, title, &lines);
+        /*
+         * No second stage here, and that follows from the one above
+         * rather than being an omission: s_name_shown is now the
+         * s_stream_top POINTER, so rewriting the buffer in place is
+         * already on screen at ui_task's next repaint. A station
+         * replacing the list's name with its own icy-name -- the only
+         * thing this branch ever does -- arrives for free.
+         *
+         * It is also why s_stream_top may not become a local. It is read
+         * by another task for as long as the stream runs, which is the
+         * same reason s_path is a static.
+         */
         if (strcmp(s_stream_top, lines.top) != 0) {
             snprintf(s_stream_top, sizeof(s_stream_top), "%s", lines.top);
             s_display_name = s_stream_top;
