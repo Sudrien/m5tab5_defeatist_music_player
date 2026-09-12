@@ -135,7 +135,14 @@ MP3_BIN := mp3counttest
 # radio is a bit crackly" with no file to compare against.
 FRAMEWIN_BIN := framewintest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin
+# What play_stream() shows and what a press does. The screen has to pick
+# between two state machines that disagree on purpose -- a reconnect
+# behind a full PCM ring is not a message, an empty ring on a healthy
+# link is -- and that choice is a table rather than an if chain in a
+# loop nobody can step through.
+STREAMPLAN_BIN := streamplantest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -201,7 +208,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -254,6 +261,13 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(STREAMPLAN_BIN): streamplantest.c ../main/streamplan.h ../main/bufferplan.h ../main/netplan.h
+	$(CC) $(WARNCFLAGS) -c streamplantest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ streamplantest.c $(LDFLAGS)
+
+run-streamplan: $(STREAMPLAN_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STREAMPLAN_BIN)
+
 $(CODEC_BIN): codecplantest.c ../main/codecplan.h ../main/streamsniff.h
 	$(CC) $(WARNCFLAGS) -c codecplantest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ codecplantest.c $(LDFLAGS)
@@ -281,4 +295,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan clean
