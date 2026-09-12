@@ -44,16 +44,28 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
 #define SEND_SLICE_MS       (100)
 
 /*
- * Body read timeout. The stream is live, so a server that says nothing
- * for this long has dropped us whatever the socket thinks.
+ * Two timeouts, because one constant was doing two unrelated jobs.
  *
- * 5 s, down from 10. When the transport failed under memory pressure the
- * run spent twenty seconds deciding it had stopped: ten inside esp-tls
- * reaching its own timeout, then ten more here. Only the second is ours
- * to shorten. Five seconds of silence from a live stream is already far
- * past anything a buffer can cover.
+ * SOCKET_TIMEOUT_MS is how long a single read blocks with nothing to
+ * read. It bounds how quickly the task notices a stop, because a stop
+ * request is checked between reads and not during one. Observed stop
+ * latencies across six runs were 59, 59, 119, 119, 219 and 599 ms -- a
+ * paced 64 kbit/s station delivers 2048 bytes every 256 ms, so a read
+ * normally returns quickly, but the worst case was the whole 5 s.
+ * Phase 3's pause is a stop, and five seconds of a button doing nothing
+ * is not a pause.
+ *
+ * DROP_SILENCE_MS is how long a live stream may say nothing before it is
+ * treated as gone. That is a property of the stream, not of the socket,
+ * and it is measured from the last byte that actually arrived rather
+ * than from any one read returning empty.
+ *
+ * Separating them lets the read be impatient and the diagnosis be
+ * patient. They were the same number only because the first version had
+ * one place to put it.
  */
-#define READ_TIMEOUT_MS     (5000)
+#define SOCKET_TIMEOUT_MS   (1000)
+#define DROP_SILENCE_MS     (5000)
 
 /* Sniffed prefix, logged once per connection. Phase 2 will ask
  * streamsniff.h the same question to pick a codec; this only records it. */
@@ -342,13 +354,16 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
             /* esp_http_client_read() returns 0 both for "nothing yet"
              * and for a body that has ended, and a live stream never
              * ends on purpose. Told apart by time: a station that has
-             * said nothing for READ_TIMEOUT_MS has dropped us. */
+             * said nothing for DROP_SILENCE_MS has dropped us. */
             if (esp_timer_get_time() - last_progress >
-                (int64_t)READ_TIMEOUT_MS * 1000) {
+                (int64_t)DROP_SILENCE_MS * 1000) {
                 ESP_LOGW(TAG, "nothing for %d ms; treating as a drop",
-                         READ_TIMEOUT_MS);
+                         DROP_SILENCE_MS);
                 break;
             }
+            /* The time check above is the real one; this only catches a
+             * read that returns 0 immediately and forever, which would
+             * otherwise spin. */
             if (++zero_reads > 500) {
                 ESP_LOGW(TAG, "stream ended after %llu audio bytes",
                          (unsigned long long)produced);
@@ -529,7 +544,7 @@ static void netstream_task(void *arg)
                 .event_handler = on_event,
                 .crt_bundle_attach = esp_crt_bundle_attach,
                 .disable_auto_redirect = true,
-                .timeout_ms = READ_TIMEOUT_MS,
+                .timeout_ms = SOCKET_TIMEOUT_MS,
                 .buffer_size = 4096,
                 .buffer_size_tx = 1024,
                 .user_agent = "DefeatistMusicPlayer/0.4",

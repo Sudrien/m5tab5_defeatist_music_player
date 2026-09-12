@@ -7223,6 +7223,33 @@ for a 43-second burst at 64 kbit/s would be 344 KB; big enough at
 128 kbit/s, 688 KB. Growing it is cheap in PSRAM, but stalling is not a
 fault, so the number to watch is whether stalls cost reconnects.
 
+### 0122: 0121 is unexercised, and one constant was doing two jobs
+
+The run after 0121 reports **`stalled 0 ms` in every window**, which is
+the predicted result and not a reassuring one. **The probe drains flat
+out, so the ring never fills, so the path 0121 rewrote never executes.**
+0121 is a reasoned change backed by a measurement of the *server*, not a
+verified one -- it cannot be exercised until a decoder drains at 1x,
+which is phase 2. Recorded here so that nobody later reads five green
+runs as evidence for it.
+
+What the run did surface is stop latency. Across six runs: 59, 59, 119,
+119, 219 and **599 ms**. A stop is noticed between reads and not during
+one, so the bound is the socket read timeout -- which was the same
+constant as the drop timeout, at 5 s. **Phase 3's pause is a stop, and
+five seconds of a button doing nothing is not a pause.**
+
+They are split. `SOCKET_TIMEOUT_MS` is 1 s and bounds responsiveness;
+`DROP_SILENCE_MS` stays 5 s and is measured from the last byte that
+actually arrived, which is a property of the stream rather than of any
+one read. The read can be impatient while the diagnosis stays patient.
+They were ever the same number only because the first version had one
+place to put it.
+
+A paced 64 kbit/s station delivers 2048 bytes every 256 ms, so normal
+stop latency was never the problem; the tail was. The figure to watch in
+phase 3 is the worst case, not the median.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
