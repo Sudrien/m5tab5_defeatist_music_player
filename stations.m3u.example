@@ -1,0 +1,21 @@
+#EXTM3U
+#
+# stations.m3u -- copy this to the root of the SD card (or the USB drive)
+# as "stations.m3u". SD is preferred when both have one; they are not
+# merged, because "next station" is a position and it should not depend
+# on which drive is plugged in.
+#
+# One #EXTINF line for the name, then the stream URL. The -1 is the
+# duration and a live stream has none.
+#
+# A bare URL on its own line also works: the host becomes the name,
+# which is what pasting gives and is a better label than nothing.
+#
+# radio-browser.info emits this format directly -- its station endpoints
+# serve M3U as well as JSON -- so a search result can be appended here
+# without editing.
+#
+#EXTINF:-1,Michigan Radio
+https://26433.live.streamtheworld.com/WUOMFM.mp3
+#EXTINF:-1,WNZK
+https://stream.zeno.fm/erunhwj5lekvv

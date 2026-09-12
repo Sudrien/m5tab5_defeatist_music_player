@@ -93,6 +93,7 @@
 #include "bufferplan.h"
 #include "netdec.h"
 #include "netstream.h"
+#include "stations.h"
 #include "streamplan.h"
 #include "streamprobe.h"      /* STREAMPROBE_URL, for the test hook only */
 
@@ -2659,6 +2660,21 @@ static volatile bool     s_pending_ready;
 static char              s_pending_url[NETSTREAM_URL_MAX];
 static char              s_pending_station[NETSTREAM_NAME_MAX];
 static volatile bool     s_pending_stream;
+
+/*
+ * True for as long as play_stream() is in its loop.
+ *
+ * Declared up here with the shared state rather than beside
+ * play_stream(), because ui_task reads it: next and previous mean
+ * "another station" while this is set and "another track" otherwise, and
+ * those handlers are a long way above play_stream() in this file.
+ *
+ * It is also what a seek bar and a position counter should be
+ * suppressed by -- a live stream has neither -- though nothing draws
+ * from it yet.
+ */
+static volatile bool     s_streaming;
+static volatile streamplan_status_t s_stream_status = STREAMPLAN_STATUS_NONE;
 
 /* Set by the UI task when the chooser closes, for any reason. The decode
  * loop repaints the cover art, because the chooser drew over it and the
@@ -5432,6 +5448,23 @@ static void ui_task(void *arg)
             break;
         case UI_ACTION_PREV:
             /*
+             * A station, and with none of the restart-first behaviour
+             * below: there is no position in a live stream to return to,
+             * so "back to the start" has no meaning and the only thing
+             * this button can do is change station.
+             */
+            if (s_streaming) {
+                if (!stations_have_other()) {
+                    ESP_LOGI(TAG, "no other station in the list");
+                    break;
+                }
+                station_t stp;
+                if (stations_get(stations_prev(), &stp)) {
+                    request_stream(stp.url, stp.name);
+                }
+                break;
+            }
+            /*
              * Back to the start of the track first, and only to the
              * previous track if it is already there.
              *
@@ -5490,6 +5523,29 @@ static void ui_task(void *arg)
             break;
         }
         case UI_ACTION_NEXT: {
+            /*
+             * A station, not a track. Ahead of the playlist entirely:
+             * playlist_next() answers about files in a folder and there
+             * is no folder here.
+             *
+             * stations_have_other() rather than count > 1 at this call
+             * site, so the one-station case is decided in one place --
+             * and with one station this is deliberately a no-op rather
+             * than a reconnect. Restarting a station on a press that
+             * means "something else" is what makes a transport feel
+             * broken.
+             */
+            if (s_streaming) {
+                if (!stations_have_other()) {
+                    ESP_LOGI(TAG, "no other station in the list");
+                    break;
+                }
+                station_t st;
+                if (stations_get(stations_next(), &st)) {
+                    request_stream(st.url, st.name);
+                }
+                break;
+            }
             /*
              * PLAY_ORDER_ONE means "do not go on by yourself" -- it is an
              * answer about what happens at the end of a track, and a
@@ -8577,11 +8633,6 @@ static char s_stream_name[NETSTREAM_NAME_MAX];
  * way s_ring_pct is: values, written here, read anywhere. */
 static char s_stream_top[STREAMPLAN_LINE_MAX];
 static char s_stream_bottom[STREAMPLAN_LINE_MAX];
-static volatile streamplan_status_t s_stream_status = STREAMPLAN_STATUS_NONE;
-/* True for as long as play_stream() is in its loop. The seek bar and the
- * position counter are meaningless on a live stream and this is what
- * suppresses them. */
-static volatile bool s_streaming;
 
 /*
  * Decoded audio in the ring being filled, in milliseconds.
@@ -8791,7 +8842,7 @@ static track_end_t play_stream(const char *url, const char *name)
             const streamplan_action_t act = streamplan_transport(
                 STREAMPLAN_PRESS_PLAYPAUSE,
                 streamplan_is_connected(netstream_state()),
-                false /* no station list yet -- see 0202 */);
+                stations_have_other());
             if (act == STREAMPLAN_DISCONNECT) {
                 ESP_LOGI(TAG, "stream paused: disconnecting");
                 netstream_stop();
@@ -9220,8 +9271,26 @@ static void player_loop(void)
         if (!stream_kicked && !have && !s_decoding && !s_pending_ready &&
             wifi_connected()) {
             stream_kicked = true;
-            ESP_LOGW(TAG, "test hook: playing %s", STREAMPROBE_URL);
-            request_stream(STREAMPROBE_URL, "probe station");
+            /*
+             * The station list, read here rather than at boot: it lives
+             * on the volume the music is on, and a USB drive is still
+             * enumerating when app_main() runs. That is the same reason
+             * restore_last_track() happens in this branch.
+             */
+            station_t st;
+            if (stations_load() && stations_get(stations_index(), &st)) {
+                ESP_LOGW(TAG, "test hook: playing %d of %d, %s",
+                         stations_index() + 1, stations_count(), st.name);
+                request_stream(st.url, st.name);
+            } else {
+                /* No stations.m3u, or nothing in it. Falls back to the
+                 * probe's URL so the hook still exercises the path on a
+                 * card that has not been given a list yet, and says
+                 * which of the two it is doing. */
+                ESP_LOGW(TAG, "test hook: no station list; playing %s",
+                         STREAMPROBE_URL);
+                request_stream(STREAMPROBE_URL, "probe station");
+            }
         }
 
         if (s_pending_ready) {

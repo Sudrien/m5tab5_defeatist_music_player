@@ -142,7 +142,11 @@ FRAMEWIN_BIN := framewintest
 # loop nobody can step through.
 STREAMPLAN_BIN := streamplantest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan
+# Moving through the station list. The parser has its own test; this is
+# the index arithmetic, which is where (i - 1) % n bites.
+STATIONNAV_BIN := stationnavtest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -208,7 +212,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -261,12 +265,19 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(STATIONNAV_BIN): stationnavtest.c ../main/stationlist.h
+	$(CC) $(WARNCFLAGS) -c stationnavtest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ stationnavtest.c $(LDFLAGS)
+
+run-stationnav: $(STATIONNAV_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STATIONNAV_BIN)
+
 $(STREAMPLAN_BIN): streamplantest.c ../main/streamplan.h ../main/bufferplan.h ../main/netplan.h
 	$(CC) $(WARNCFLAGS) -c streamplantest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ streamplantest.c $(LDFLAGS)
 
-run-streamplan: $(STREAMPLAN_BIN)
-	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STREAMPLAN_BIN)
+run-streamplan: $(STREAMPLAN_BIN) $(STATIONNAV_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STREAMPLAN_BIN) $(STATIONNAV_BIN)
 
 $(CODEC_BIN): codecplantest.c ../main/codecplan.h ../main/streamsniff.h
 	$(CC) $(WARNCFLAGS) -c codecplantest.c -o /dev/null
@@ -295,4 +306,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav clean
