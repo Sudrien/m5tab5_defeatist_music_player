@@ -230,12 +230,24 @@ static bool aac_open(void)
          */
         .use_frame_dec = false,
     };
+    /*
+     * Internal free either side of the open, because this decoder is not
+     * ours and allocates where it likes. The first AAC run bottomed at
+     * 40268 bytes of internal RAM against the MP3 run's 56084 -- about
+     * 15.8 KB -- and 0115's transport starvation happened on a run whose
+     * minimum was 43560. That is close enough that the cost wants
+     * attributing to a line in the log rather than inferred by
+     * subtracting two runs.
+     */
+    const unsigned before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     if (esp_audio_simple_dec_open(&cfg, &s_aac) != ESP_AUDIO_ERR_OK) {
         ESP_LOGE(TAG, "esp_audio_simple_dec_open(AAC) failed");
         s_aac = NULL;
         return false;
     }
-    ESP_LOGI(TAG, "AAC decoder open (ADTS, parser-framed)");
+    const unsigned after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "AAC decoder open (ADTS, parser-framed); internal free "
+                  "%u -> %u (cost %d)", before, after, (int)before - (int)after);
     return true;
 }
 

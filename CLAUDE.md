@@ -7636,6 +7636,50 @@ station is 511 kbit/s HE-AAC and sits at the link's capacity, so expect
 the ring to behave nothing like WUOM's -- it will not front-load, and
 0121's backpressure should not fire at all.
 
+### 0131: AAC works, and 0130 claimed an overrun that would not have happened
+
+    first frame: AAC, 48000 Hz, 2 ch, 16-bit, 1366 bytes -> 1024 samples
+    decoded 2676 frames, 57088 ms of audio in 60016 ms, 0 bytes resynced
+    ring peak 29% -- 0121's backpressure was NOT exercised
+
+**AAC decodes, with zero resyncs**, same as MP3. And the prediction in
+0130 held exactly: WNZK does not front-load, the ring stayed under 29%,
+`stalled 0 ms`, and backpressure correctly never fired. A prediction
+written before the run and confirmed by it is worth more than the run
+alone.
+
+**The correction.** 0130 said the old `NETDEC_MAX_INT16` of 2304 "would
+have been overrun by 1792 int16" because WNZK is HE-AAC. It is not.
+1366 bytes decode to **1024 samples** -- plain AAC-LC -- so a stereo
+frame is 2048 int16 and the old buffer would have held it. The claim
+came from an `audio/aacp` Content-Type seen in an early probe and was
+never checked against a decoded frame; this run's header says
+`audio/aac`.
+
+The resize is still right -- HE-AAC streams exist and would produce 4096
+-- but **the reason given was wrong, and the station that would actually
+overrun has not been found.** Corrected in `netdec.h` too, since that
+comment is what the next reader will believe.
+
+**The number that matters more than either.** Internal free bottomed at
+**40268**, against the MP3 run's 56084. The AAC decoder costs about
+15.8 KB of internal RAM, and it allocates where it likes -- it is not
+ours. For scale: **0115's transport starvation happened on a run whose
+minimum was 43560.** This run went lower than that and survived, but not
+by much, and largest-free-block held at 31744 throughout, which is
+probably why.
+
+So the AAC path is the tightest configuration the stream has ever run
+in, and phase 3 adds an I2S writer and its buffers on top. `netdec` now
+logs internal free either side of the decoder open so the cost is
+attributed to a line rather than inferred by subtracting two runs.
+**This is the thing to watch in phase 3, not throughput.**
+
+Throughput itself: 0.951x overall, windows 0.89 to 1.17, mean 1.006.
+That is the link at its limit on a 511 kbit/s station, exactly as 0116
+described, and it is why WNZK is the worst case rather than the
+benchmark.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
@@ -7651,9 +7695,9 @@ rather than a one-off.
 - **Phase 1: done.** Written, compiled, flashed five times, measured on
   two stations, two real faults found and fixed (internal RAM
   starvation, reconnect bookkeeping). Nothing about it is still a guess.
-- **Phase 2: MP3 works end to end**, 2220 frames with 0 resyncs at
-  0.9998x on hardware. **AAC is written and unflashed.** Internal free
-  bottoms at 56 KB with the 24 KB decode stack in place.
+- **Phase 2: done.** MP3 and AAC both decode on hardware with 0 resyncs
+  -- 2220 and 2676 frames. Internal free bottoms at **56 KB on MP3 and
+  40 KB on AAC**, the latter being the tightest the stream path has run.
 - **Phase 3: unblocked, not started.** `bufferplan.h` is written and
   host-tested; its constants want tuning against WUOM, never against
   WNZK, for the reasons above.

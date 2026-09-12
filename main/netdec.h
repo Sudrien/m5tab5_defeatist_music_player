@@ -110,11 +110,17 @@ extern "C" {
  * MINIMP3_MAX_SAMPLES_PER_FRAME (netdec.c asserts they agree rather than
  * trusting it).
  *
- * **AAC needs far more.** AAC-LC is 1024 samples a frame, but HE-AAC
- * doubles the output rate through SBR, so a stereo frame is 2048 * 2 =
- * 4096 int16 -- and WNZK, the AAC station this was written for, announces
- * `audio/aacp` with a 48 kHz core, which is exactly that case. An
- * MP3-sized buffer would have been overrun by the first AAC frame.
+ * **AAC can need far more.** AAC-LC is 1024 samples a frame, so a stereo
+ * frame is 2048 int16 and would have fitted. But HE-AAC doubles the
+ * output rate through SBR, making a stereo frame 2048 * 2 = 4096 --
+ * comfortably past an MP3-sized buffer.
+ *
+ * A correction to what this comment said first: WNZK was *assumed* to be
+ * that case, on the strength of an `audio/aacp` Content-Type seen in an
+ * early probe. Measured, it decodes 1366 bytes to **1024 samples at
+ * 48 kHz** -- plain AAC-LC, which the old 2304 would have held. The
+ * resize was right and the reason given for it was not, and the station
+ * that would actually have overrun has not been found yet.
  *
  * So this matches DECODER_MAX_INT16, which the file path already sized
  * for the worst case across both backends. One number, sized once, for
