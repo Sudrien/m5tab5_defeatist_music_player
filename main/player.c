@@ -8899,7 +8899,32 @@ static track_end_t play_stream(const char *url, const char *name)
                     remain = (size_t)n * sizeof(int16_t);
                 }
 
-                while (remain && !s_pending_ready) {
+                /*
+                 * `s_playing == was_playing` is the pause, and without
+                 * it this loop never ends.
+                 *
+                 * A pause stops the writer, so the PCM ring stops
+                 * draining and fills -- 3520 KB, about twenty seconds at
+                 * 44.1/16/2 -- and then this send blocks with nowhere to
+                 * put the rest of its block. The only other exit was
+                 * s_pending_ready, so a paused stream parked here
+                 * permanently and the top of the loop, where the pause
+                 * is turned into a disconnect, was never reached again.
+                 * On the board the press logged nothing at all and the
+                 * compressed ring climbed from 67% to 75% while the
+                 * station went on sending.
+                 *
+                 * The undelivered remainder of the block is dropped, and
+                 * that is correct rather than merely acceptable: pause
+                 * on a live stream drops what is buffered anyway.
+                 *
+                 * Gated on s_playing itself rather than on a change
+                 * against was_playing: the latter is true again as soon
+                 * as the top of the loop latches the new value, which
+                 * would let a block decoded after the pause park here on
+                 * a ring the stopped writer is not draining.
+                 */
+                while (remain && !s_pending_ready && s_playing) {
                     const size_t sent = xStreamBufferSend(
                         s_pcm, src, remain, pdMS_TO_TICKS(SEND_SLICE_MS));
                     src += sent;
@@ -8985,6 +9010,31 @@ static track_end_t play_stream(const char *url, const char *name)
 
         if (out.audible && !first_sound) {
             first_sound = true;
+            /*
+             * The amplifier, because nothing else will do it here.
+             *
+             * ui_task idles the amplifier from one line in player_loop()
+             * -- `!s_playing || (!s_decoding && ...)` -- and that line
+             * is never reached while the chooser is up: the chooser
+             * branch draws and `continue`s. For a file that is
+             * harmless, because choosing a file is what closes the
+             * chooser, so sound and the closed chooser arrive together.
+             *
+             * A STREAM IS THE FIRST SOUND THAT CAN START WITH THE
+             * CHOOSER OPEN. On the board the audio was correct from
+             * 3111 ms and inaudible for 161 seconds, until a tap
+             * dismissed the chooser and ui_task evaluated that line for
+             * the first time since boot -- when the amplifier came on
+             * mid-programme.
+             *
+             * Set from here rather than by teaching the chooser branch
+             * to idle the amplifier, because the rule this enforces is
+             * the simple one: the amplifier is on when samples are
+             * being written, and this is the moment this path starts
+             * writing them. ui_task's line goes on owning every other
+             * transition, and agrees with this one.
+             */
+            audio_out_set_idle(false);
             ESP_LOGI(TAG, "first sound at %" PRIu32 " ms, %" PRIu32 " Hz, "
                           "%d ch decoded, %d kbit/s",
                      (uint32_t)((esp_timer_get_time() - t_start) / 1000),
