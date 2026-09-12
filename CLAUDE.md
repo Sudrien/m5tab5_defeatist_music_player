@@ -7946,10 +7946,12 @@ the end of the iteration.
   `icy-metaint: 16000`. WNZK's `" - "` proves the demuxer surfaces them,
   so suspect the plumbing rather than `icydemux` (4064 host checks)
   -- but it may simply be a station that sends empty titles.
-- **The chooser cannot reload the station list.** `stations_load()`
-  opens a file and ui_task must not block on the card, so a
-  `stations.m3u` edited with the card in does not appear until the
-  player is idle and reloads.
+- ~~**The chooser cannot reload the station list.**~~ Closed by 0304.
+  `stations_load()` opens a file and ui_task must not block on the card,
+  so a `stations.m3u` edited with the card in did not appear until the
+  player was idle and reloaded. The obstacle was real and the answer was
+  not to remove it: RLOD is a request, performed by the player task,
+  answered by an epoch.
 - **`stack low water 2756`** on the netstream task, stable across every
   run and the thinnest figure in any of these logs, on a task doing TLS.
   Not urgent; worth knowing.
@@ -8069,10 +8071,25 @@ and pick a station, and read the three text rows.**
 
 ### What is open
 
-- **Nothing here has been on a board.** All three patches are reasoning
-  over this file and the source, which is the mode the 0200 series
-  specifically warned about -- six of its faults were invisible until
-  flashed.
+- **It builds and boots, and none of it has been exercised.** 0300-0303
+  went on the board as `v0.3.0-138-gc2dd970` and the boot is clean and
+  identical in shape to the one before it: no new warnings, the file path
+  unchanged, `no stations.m3u on any volume` still once and only once.
+  Then the RADIO tab was tapped at 560 s and said `radio: 0 stations`,
+  which is what it has said on every run of this series.
+
+  **Nothing in the 0300 series has drawn a pixel.** No LIVE badge, no
+  station name, no status line, no ICY title, no lit next icon -- all of
+  it needs a stream, and a stream needs a station list. Two flashes have
+  now confirmed the patches compile and confirmed nothing else about
+  them, which is the trap the 0200 series' six board-found faults warn
+  about, arrived at from the other side: flashing early does not help if
+  the path cannot be reached.
+
+  **0304 is the unblock and is the thing to flash next.** Write a
+  `stations.m3u` (`stations.m3u.example` is in the tree), tap RADIO, tap
+  RLOD. Then the 0300 test that has never been run: play a tagged file
+  first, and only then pick a station.
 - **"No signal" looks like "Buffering".** All four statuses draw in the
   same white. One is terminal and three are not, the difference is worth
   drawing, and it cannot be recovered from a string by comparing prose in
@@ -8085,13 +8102,30 @@ and pick a station, and read the three text rows.**
   line most likely to overrun 19 characters. There is one marquee and the
   title row owns it; handing it to whichever line is longest is a change
   to how the marquee is owned, not a change to what is drawn.
+- **The first join after a scan fails, reproducibly, and costs 10 s.**
+  Not new and not this series -- `wifi_join()`'s comment block already
+  records `boot, first attempt -> reason 2 after 6.6 s` and the six
+  flashes that established the whole-attempt retry. What these two runs
+  add is that it is **reproducible to about twenty milliseconds**: scan
+  ends, `set_config`, `WifiEventNoArgs id=43` about 2.45 s later, then
+  reason 2 at 6.64 s, then the retry joins ~4 s after that. Both logs.
+  Address at 18.2 s and 18.7 s from boot against about 8 s if the first
+  attempt worked.
+
+  The one thing in the timing that is not already written down: in both
+  runs the failing attempt was issued **within 13 ms of a 30-network
+  scan finishing**. That is a hypothesis and nothing more -- the sixth
+  flash had a reason-2 with no scan and no 43 before it -- and per the
+  cyan flash it is worth instrumenting before it is worth patching. The
+  retry works and the cost is ten seconds of a boot that is not playing
+  yet.
 - **The compressed ring's fill is still drawn by nothing.**
   `s_ring_pct` is fed from `netstream_ring_pct()` every pass and row 2
   now has a 72 px band with a pill in it and room to spare. It is
   telemetry rather than something a listener asked for, which is why it
   was not added here.
-- **The chooser still cannot reload the station list**, and
-  **`stack low water 2756`** on the netstream task still stands. Both
+- ~~**The chooser still cannot reload the station list.**~~ Closed by
+  0304. **`stack low water 2756`** on the netstream task still stands,
   carried over from the 0200 list unchanged.
 
 ## Where v0.3.0 got to (the 1000 series)
