@@ -8757,7 +8757,14 @@ static track_end_t play_stream(const char *url, const char *name)
     bool seen_live = false;
     bool leaving = false;
     track_end_t why = TRACK_ENDED;
-    const int64_t t_start = esp_timer_get_time();
+    /*
+     * When the CURRENT connection was asked for, not when the station
+     * was. Reset on every resume, because "first sound at 102365 ms"
+     * after a pause is the age of the session and not the thing the
+     * figure is for -- it is meant to be the wait a listener just sat
+     * through, which on the board was 2.8 s both times.
+     */
+    int64_t t_connect = esp_timer_get_time();
     /* The pause the listener asked for, as distinct from the buffer
      * holding off. s_playing is the writer's gate and ui_task toggles it
      * on a press; a stream turns that into a disconnect. */
@@ -8808,11 +8815,56 @@ static track_end_t play_stream(const char *url, const char *name)
                  * it up. Latching this down again is what stops the
                  * resume ending the stream it just asked for. */
                 seen_live = false;
+                t_connect = esp_timer_get_time();
                 netstream_play(s_stream_url, s_stream_name);
             }
         }
 
         const netstream_state_t net = netstream_state();
+
+        /*
+         * PAUSED: the plan is suspended, not stepped.
+         *
+         * A paused stream used to end itself after exactly thirty
+         * seconds, and the arithmetic is the whole story. The pause
+         * disconnects and flushes the ring, so buffered_ms goes to 0;
+         * the plan was still being stepped, so PLAYING fell below
+         * BUFPLAN_LOW_MS into REBUFFERING; and a rebuffer that gets
+         * nowhere for BUFPLAN_STALL_GIVEUP_MS is declared over. On the
+         * board: paused at 135665, `ended, 1 rebuffers, 32808 ms
+         * silent` at 165761.
+         *
+         * Nothing about that was wrong except asking the question. The
+         * plan exists to decide whether a stream that is TRYING to play
+         * can; a paused stream is not trying, and a buffer that is empty
+         * because the listener emptied it is not a stall. There is
+         * nothing for a rebuffer policy to do here and no reading it
+         * could take that would mean anything -- so it is not stepped,
+         * which also keeps `rebuffers` and `silent_ms` honest. Those two
+         * are the figures that say whether bufferplan's constants are
+         * right on a station with no surplus, and a pause was adding a
+         * rebuffer and half a minute of silence to both.
+         *
+         * The resume re-inits the plan, so preroll is measured from the
+         * reconnect rather than resumed mid-phase.
+         *
+         * Decoding is skipped too. netdec_read() on a stopped stream
+         * returns 0 after its timeout, which is harmless but costs a
+         * 17.8 KB stack frame through minimp3 to learn nothing.
+         */
+        /*
+         * `!leaving` because this branch skips the exit test at the
+         * bottom of the loop. Without it, a station or track chosen
+         * while the stream is PAUSED would set leaving, continue past
+         * the break, and go round for ever -- the pause would have
+         * become a way to make the player unresponsive.
+         */
+        if (!s_playing && !leaving) {
+            s_stream_hold = true;
+            s_stream_status = STREAMPLAN_STATUS_NONE;
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
 
         /*
          * Decode. 0 is "nothing yet", not end of stream: a live stream
@@ -9037,7 +9089,7 @@ static track_end_t play_stream(const char *url, const char *name)
             audio_out_set_idle(false);
             ESP_LOGI(TAG, "first sound at %" PRIu32 " ms, %" PRIu32 " Hz, "
                           "%d ch decoded, %d kbit/s",
-                     (uint32_t)((esp_timer_get_time() - t_start) / 1000),
+                     (uint32_t)((esp_timer_get_time() - t_connect) / 1000),
                      out_rate, last_chans, last_kbps);
         }
 
