@@ -9284,8 +9284,13 @@ static void player_loop(void)
      * **This replaces the test hook that 0201 needed.** There is a way
      * to choose a station now, so there is no longer any reason for the
      * player to pick one by itself.
+     *
+     * Keyed on storage_generation() rather than on having succeeded --
+     * see the load below for why that distinction cost a flash.
+     * UINT32_MAX so the first pass always differs, which is the same
+     * initial value browser.c's s_seen_generation uses.
      */
-    bool stations_read = false;
+    uint32_t stations_gen = UINT32_MAX;
 
     while (1) {
         if (s_pending_ready) {
@@ -9349,13 +9354,40 @@ static void player_loop(void)
              */
             if (!s_restored) restore_last_track();
 
-            /* Once, and only when a volume has turned up. Retried until
-             * it succeeds, because "no card yet" and "no station list"
-             * are the same false from here and the card may still be on
-             * its way. */
-            if (!stations_read &&
-                (storage_present(STORAGE_SD) || storage_present(STORAGE_USB))) {
-                stations_read = stations_load();
+            /*
+             * Once per change of what is mounted -- NOT once per
+             * success.
+             *
+             * The first version retried until stations_load() returned
+             * true, on the reasoning that "no card yet" and "no station
+             * list" are the same false from here. They are, and that is
+             * exactly why retrying on it is wrong: **a card with no
+             * stations.m3u fails permanently**, so this ran every pass
+             * of the idle loop for ever. On the board that was
+             * `no stations.m3u on any volume` every 104 ms from boot
+             * until the power went off -- about 500 lines in the first
+             * minute, and two file opens a second on the card behind
+             * whatever is playing.
+             *
+             * storage_generation() is the right trigger and browser.c
+             * already uses it for this exact question: it changes when
+             * a volume appears or goes away, which is the only thing
+             * that can turn a failed load into a successful one. A card
+             * arriving therefore still gets read, on the pass after it
+             * mounts, and a card without a list is asked once.
+             *
+             * The generation is latched whether the load worked or not.
+             * That is the whole fix: the attempt is the thing that has
+             * happened, and the result is not what decides whether to
+             * repeat it.
+             */
+            const uint32_t sgen = storage_generation();
+            if (sgen != stations_gen) {
+                stations_gen = sgen;
+                if (storage_present(STORAGE_SD) ||
+                    storage_present(STORAGE_USB)) {
+                    stations_load();
+                }
             }
 
             /*
