@@ -6851,9 +6851,79 @@ compile `netstream.c` on a host -- not to *run* it, just to get
 would not have caught the stack overflow, which is a runtime fact, but
 it would have caught this one and the `ICY_TITLE_MAX` one in 0108.
 
-**Where the series stands.** Phase 1 written, flashed once, panicked
-once, and two build errors deep in a file nothing but `idf.py` ever
-compiles. Phase
+### 0114: it streamed, and the throughput regressed
+
+Phase 1 works end to end on hardware. Items 2 to 5 of "what a flash
+would settle" are now answered, and one of the answers is bad.
+
+**What went right, read in the order 0107 said to read it in.**
+
+    hop 1: HTTP 302 -> redirect, connect+TLS  855 ms, metaint 0
+    hop 2: HTTP 200 -> play,     connect+TLS 1634 ms, metaint 16000
+      content-type: audio/aac   icy-name: WNZK-AM   icy-metaint: 16000
+    first audio byte out of the ring at 3166 ms
+    ADTS: 2238 frames, profile 2, 48000 Hz, 2 ch, 1365-1366 bytes,
+          0 bytes lost hunting
+    stop completed after 119 ms, state idle
+
+The redirect walk, the ICY header capture, the state machine, the sniff
+and the drain all behave. **0 bytes lost hunting for a sync, measured
+after the demultiplexer and after the ring** -- the same figure the old
+probe got off the socket, which is what 0105 was built to make
+comparable. `icydemux` is correct on real traffic, including the metadata
+block that arrives every 16000 bytes, and the title is `" - "` exactly
+as predicted. Stop takes 119 ms, so phase 3's pause is cheap. No
+reconnect happened, so item 5 is still unanswered.
+
+**The stack, now measured instead of guessed.** Low water 4848 of 8192,
+so the task's peak use is 3344 bytes with a TLS session open. 6 KB would
+have fit *after* 0112 moved 5 KB off it -- which is worth noting
+precisely because 6 KB was the number that panicked. It stays at 8192:
+the measured path did not include a reconnect or a second redirect, and
+2.8 KB of margin costs nothing that is in short supply. Internal free
+bottomed at 46916 with a track playing, comfortably clear.
+
+**The bad number.** Throughput is **0.79x overall**, windows 0.76-0.92,
+mean 0.835. The link delivered a mean of 428 kbit/s against the
+station's 511. The old probe, reading the same station off the socket on
+the same link, measured **1.05x idle and 0.97x beside card playback.**
+
+That is a regression of roughly 100 kbit/s and it must be explained
+before either figure is trusted. Two differences between the runs, both
+cheap to separate:
+
+1. **This run played from USB, the old one from the card.** USB 2.0 MSC
+   and the Wi-Fi SDIO link are the obvious contention, and the earlier
+   0.97x figure was explicitly "beside *card* playback".
+2. **The bytes now cross a task boundary and a ring.** That should cost
+   almost nothing at 54 KB/s, but it has not been shown to cost nothing.
+
+**Re-run wanted, before any of phase 2:** the probe beside SD playback,
+and the probe with nothing playing. Those two readings against the old
+probe's 1.05/0.97 say whether the ring costs anything or whether USB
+does.
+
+**The thing that stops this being a crisis.** The link delivers ~428
+kbit/s fairly steadily whatever it is asked for, and WNZK at 511 kbit/s
+is an outlier -- most stations are a quarter of that. The same 428
+kbit/s is **3.3x real time for a 128 kbit/s station**, 2.2x at 192 and
+1.7x at 256. So internet radio is comfortably viable and *this station*
+is marginal on this link. A station list should probably not lead with
+it, and phase 3's watermarks cannot be tuned against it: at 0.79x the
+buffer drains forever and `bufferplan` would correctly give up after 30
+seconds every time.
+
+**One log line that looks wrong and is not.** `ring 0% (2047 bytes)`
+appears in every window, always exactly 2047. That is the reader and the
+writer in lockstep -- netstream adds 2048, the probe's next
+`netstream_read()` takes 2048, and a single metadata byte removed early
+leaves the odd one behind. A ring that hovers near empty with a reader
+faster than the network is the correct picture, not a stall.
+
+**Where the series stands.** Phase 1 streams. Throughput is 0.79x on a
+station that needs 511 kbit/s, unexplained against an earlier 0.97x, and
+that gap is the next thing to measure rather than the next thing to
+build on. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
