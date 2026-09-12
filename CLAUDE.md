@@ -14,6 +14,17 @@ history: correcting it in place erases the reasoning that produced it,
 and which things turned out not to be tasks is the useful part of a
 record like this one.
 
+**A library's stack use is the caller's problem, and only the caller can
+fix it.** Check what a vendored function puts on the stack before calling
+it from a task you sized for your own code. 0127 died on this:
+`mp3dec_decode_frame()` keeps about **11.6 KB of scratch on the caller's
+stack**, so a 6 KB task panicked inside minimp3 on its first frame with
+SP 11604 bytes below the floor. The file path had always known --
+`media_task` is 16384 for exactly this -- but the number lived in a
+`xTaskCreate` call and nowhere a second caller would look. It is
+`NETDEC_MIN_STACK` now, and `netdec_open()` measures the calling task's
+headroom rather than waiting for the panic.
+
 **Nothing over a few hundred bytes goes on a task stack.** A big struct
 is a module-scope static or a heap allocation, never a local. 0112 died
 on this: `icydemux_t` is 4392 bytes, almost all of it the `meta[4081]`
@@ -7444,6 +7455,47 @@ does the ring climb past 90% in the first fifteen seconds and netstream
 start reporting a non-zero `stalled`; and is `resyncs` zero. A non-zero
 resync count on a station that gave six runs of zero bytes lost is
 `framewin` or `netdec`, not the network.
+
+### 0127: the second stack fault, and the opposite of the first
+
+0126 drove `netdec` for the first time and it panicked on the first
+frame:
+
+    Detected in task "probe" at tab5_mp3dec_decode_frame
+    Stack pointer: 0x4ff7b2f0
+    Stack bounds: 0x4ff7e044 - 0x4ff7f840
+
+SP is **11604 bytes below the floor**. `mp3dec_decode_frame()` puts its
+scratch on the caller's stack -- that is minimp3's design and there is no
+option to heap it -- and the probe task had 6144.
+
+**This is the exact inverse of 0112.** There, a 4392-byte struct of ours
+was on a task stack and the fix was to move it to PSRAM. Here **nothing
+of ours is on the stack at all**: the window and the decoder state are
+both already in PSRAM, precisely because of 0112. The space is consumed
+entirely inside a vendored library, so there is nothing to move and the
+only available fix is to give the caller a bigger stack.
+
+The rule 0112 added -- check `sizeof` before putting a struct on a stack
+-- would not have caught it. The generalisation that would have is: **ask
+what a library puts on your stack before calling it from a task you
+sized for your own code.** Added to the conventions.
+
+The information existed. `media_task` has been 16384 since long before
+any of this, for the same decoder on the file path. But the number lived
+in an `xTaskCreate` argument and nowhere a second caller would ever look,
+so it is `NETDEC_MIN_STACK` in `netdec.h` now, cited from both call
+sites, and `netdec_open()` measures the calling task's headroom against
+it rather than waiting for a panic. A panic names
+`mp3dec_decode_frame` and a line inside a vendored header, which points
+at the library rather than at the caller that is actually wrong.
+
+**What the log did confirm before dying.** `netdec: ready: 24576 byte
+window + 6668 byte decoder in PSRAM`, then `stream is MP3` --
+`codecplan_choose()` identified the codec correctly on the first 64 bytes
+of real data, and `sizeof(mp3dec_t)` is 6668 bytes, which is worth
+knowing: it is large enough that having it on the stack too would have
+been a second bug.
 
 ### Where the stream path stands
 

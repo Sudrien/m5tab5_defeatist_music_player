@@ -10,6 +10,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 /*
  * Declarations only. MINIMP3_IMPLEMENTATION is defined in decoder.c and
@@ -81,6 +83,27 @@ bool netdec_open(void)
 
     framewin_init(&s_win, s_win_buf, FRAMEWIN_BYTES);
     mp3dec_init(s_mp3);
+
+    /*
+     * minimp3's scratch is about 11.6 KB on the caller's stack, so a
+     * task that is comfortable everywhere else dies on the first frame.
+     * Checked here rather than left to a panic: the panic names
+     * mp3dec_decode_frame and a line number inside a vendored header,
+     * which points at the library rather than at the caller that is
+     * actually wrong.
+     */
+    const unsigned headroom = uxTaskGetStackHighWaterMark(NULL);
+    if (headroom < NETDEC_STACK_FLOOR) {
+        ESP_LOGE(TAG, "this task has %u bytes of stack left; minimp3 needs "
+                      "about 11600 on the caller's stack. Create the calling "
+                      "task with at least %d (media_task uses the same for "
+                      "the file path).",
+                 headroom, NETDEC_MIN_STACK);
+        free(s_win_buf);
+        s_win_buf = NULL;
+        s_mp3 = NULL;
+        return false;
+    }
 
     s_codec = STREAM_CODEC_NONE;
     s_frames = 0;

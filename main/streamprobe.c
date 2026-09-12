@@ -481,7 +481,14 @@ void streamprobe_kick(void)
 {
     if (s_started || !STREAMPROBE_URL[0]) return;
     s_started = true;
-    if (xTaskCreate(probe_task, "probe", 6144, NULL, 2, NULL) != pdPASS) {
+    /*
+     * NETDEC_MIN_STACK in decode mode: minimp3 puts about 11.6 KB of
+     * scratch on the caller's stack, and 6144 died inside
+     * mp3dec_decode_frame on the first frame. The raw mode never calls a
+     * decoder and does not need it, but one number is easier to keep
+     * right than two.
+     */
+    if (xTaskCreate(probe_task, "probe", NETDEC_MIN_STACK, NULL, 2, NULL) != pdPASS) {
         ESP_LOGE(TAG, "no task for the probe");
     }
 }

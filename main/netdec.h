@@ -39,6 +39,29 @@
  * No seeking, no duration, no pause. A live stream has no position to
  * hold; phase 3's pause is a stop and a fresh connection.
  *
+ * THE CALLER'S STACK MUST BE 16 KB
+ *
+ * **`mp3dec_decode_frame()` puts its scratch buffers on the caller's
+ * stack, and they are about 11.6 KB.** That is minimp3's design; there
+ * is no option to heap them. A 6 KB task calling `netdec_read()` dies
+ * with a stack protection fault inside minimp3 on the first frame, which
+ * is exactly what happened the first time this was driven -- SP was
+ * 11604 bytes below the floor.
+ *
+ * The file path has always known this: `media_task`, which runs
+ * `decoder_read()` and therefore minimp3, is created with 16384. Any
+ * task calling `netdec_read()` needs the same, and `NETDEC_MIN_STACK`
+ * below is that number so the next caller does not have to rediscover
+ * it. `netdec_open()` checks the headroom of whatever task calls it and
+ * complains loudly if it is short.
+ *
+ * This is the second stack fault in the stream path and the opposite of
+ * the first. 0112 was a 4392-byte struct of *ours* on a task stack, and
+ * the fix was to move it. Here nothing of ours is on the stack at all --
+ * the window and the decoder state are both in PSRAM -- and the space is
+ * consumed entirely inside a library. Only the caller can fix it, and
+ * only if it is told.
+ *
  * THREADING
  *
  * One caller, which is whatever is driving the writer. `netdec_read()`
@@ -69,6 +92,17 @@ extern "C" {
  */
 #define NETDEC_MAX_INT16    (1152 * 2)
 
+/*
+ * Stack a task must have to call netdec_read(). See above: minimp3's
+ * scratch is about 11.6 KB and lives on the caller's stack. 16384 is
+ * what media_task uses for the same decoder on the file path.
+ */
+#define NETDEC_MIN_STACK    (16384)
+
+/* Free stack netdec_open() insists on seeing, with margin over the
+ * 11.6 KB measured, since the caller also has its own frame. */
+#define NETDEC_STACK_FLOOR  (13000)
+
 typedef struct {
     int sample_rate;        /* Hz; can change mid-stream, so compare */
     int channels;           /* 1 or 2 */
@@ -81,6 +115,11 @@ typedef struct {
  * first. The working buffers are PSRAM, for the reason 0115 exists:
  * internal RAM is what the Wi-Fi transport needs for DMA, and this path
  * has already starved it once.
+ */
+/*
+ * MUST be called from the task that will call netdec_read(): it measures
+ * that task's remaining stack against NETDEC_STACK_FLOOR, which is the
+ * only check available for a requirement a library imposes on a caller.
  */
 bool netdec_open(void);
 
