@@ -619,6 +619,29 @@ static void draw_note_icon(int cx, int cy, uint16_t c)
  */
 static char s_playing[512];
 
+/*
+ * The station being heard, as an index, or -1 for none.
+ *
+ * An index and not a name, because a station list is a position: two
+ * entries with the same name are two stations and stations_index() is
+ * what next and previous move through. Same reason BROWSER_PLAY_STREAM
+ * hands back an index rather than a URL.
+ *
+ * Told rather than read from stations_index(), which is always set to
+ * something: it keeps the last choice after a stream ends, so reading it
+ * directly would leave a station marked as playing when nothing is.
+ * That distinction is the player's to make and this is how it says it --
+ * exactly as s_playing works for files.
+ */
+static int s_playing_station = -1;
+
+void browser_set_station(int index)
+{
+    if (index == s_playing_station) return;
+    s_playing_station = index;
+    s_dirty = true;     /* same reason as browser_set_playing()'s */
+}
+
 void browser_set_playing(const char *path)
 {
     const char *p = (path && *path) ? path : "";
@@ -796,7 +819,22 @@ void browser_draw(void)
         }
         gfx_fill_rect(0, y, w, ROW_H, (r & 1) ? C_ROW_ALT : C_ROW);
 
-        const bool playing = !s_entries[i].is_dir && is_current(s_entries[i].name);
+        /*
+         * On the radio tab the marker is the station index, because
+         * is_current() cannot answer there: it joins s_dir with the row
+         * name and compares against a file path, and s_dir is empty on
+         * RADIO -- so it returned false for every station and NOTHING
+         * was ever marked. A file was correctly highlighted on the SD
+         * tab in the same session, which is what made it look like the
+         * marker working rather than the marker being absent.
+         *
+         * Row i IS station i: load_stations() builds the rows in the
+         * list's order and does not sort, for exactly this kind of
+         * reason.
+         */
+        const bool playing = s_radio
+            ? (i == s_playing_station)
+            : (!s_entries[i].is_dir && is_current(s_entries[i].name));
 
         if (s_entries[i].is_dir) {
             draw_folder_icon(48, y + ROW_H / 2, C_DIM);

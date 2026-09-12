@@ -8947,6 +8947,15 @@ static track_end_t play_stream(const char *url, const char *name)
      */
     s_stream_hold = true;
 
+    /* The chooser's marker. stations_index() is already where this
+     * station is -- the chooser set it before asking -- but the browser
+     * is told rather than reading it, because it keeps the last choice
+     * after a stream ends. See browser_set_station(). */
+    browser_set_station(stations_index());
+    /* And no file is playing any more, which the file marker has to be
+     * told or the SD tab goes on pointing at the track this replaced. */
+    browser_set_playing(NULL);
+
     if (!netstream_play(s_stream_url, s_stream_name)) {
         /*
          * Two things cause this and the log should say which, because
@@ -9457,6 +9466,7 @@ static track_end_t play_stream(const char *url, const char *name)
 
     free(pcm);
     free(st);
+    browser_set_station(-1);    /* nothing is playing; unmark the row */
     s_decoding = false;
     s_streaming = false;
     s_stream_status = STREAMPLAN_STATUS_NONE;

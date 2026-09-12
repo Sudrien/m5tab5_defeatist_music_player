@@ -100,6 +100,16 @@ void browser_stations_reloaded(void);
  */
 void browser_set_playing(const char *path);
 
+/*
+ * Which station is playing, as its index in the station list, or -1 for
+ * none. The RADIO tab's marker; the volume tabs ignore it.
+ *
+ * An index rather than a name or a URL, for the reason
+ * BROWSER_PLAY_STREAM is an index: stations.c owns the list and a
+ * position in it is the only thing that cannot disagree with itself.
+ */
+void browser_set_station(int index);
+
 void browser_open(const char *start);
 
 void browser_close(void);
