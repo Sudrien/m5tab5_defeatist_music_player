@@ -477,6 +477,35 @@ void browser_open(const char *start)
     s_dirty = true;
     s_seen_generation = storage_generation();
 
+    /*
+     * A VOLUME TAB, WHICH MEANS NOT THE RADIO TAB.
+     *
+     * Every path below sets s_tab to a storage id or leaves both tabs
+     * grey with no rows; none of them can open on RADIO. But none of
+     * them went through select_tab() either, and select_tab() is the
+     * only thing that had ever cleared s_radio -- so once the radio tab
+     * had been visited, every REOPEN of the chooser showed a volume's
+     * files with s_radio still true.
+     *
+     * The board found it and the log is unambiguous:
+     *
+     *   button: row 3 (station) "Advent_Chamber_Orchestra_-_04_-_Mozart..."
+     *   station 4 of 4: ice1.somafm.com
+     *
+     * A file row, named as a station, playing whatever station happened
+     * to sit at that index -- and for rows past the end of a four-entry
+     * station list, playing nothing at all while the press logged as
+     * received. The footer's slot 0 was RLOD over a directory too, and
+     * `radio: 4 stations` was drawn over a nine-file listing.
+     *
+     * Reset here rather than by routing browser_open() through
+     * select_tab(): that function loads, and this one has three
+     * different ideas about what to load and which volume to load it
+     * from. What was missing was one line of state, and this is that
+     * line.
+     */
+    s_radio = false;
+
     /* Reopen where the current track lives, when that volume is still
      * there. Coming back to the root of the card every time is the thing
      * that makes a chooser tedious on an album you are picking through. */
