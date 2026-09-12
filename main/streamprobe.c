@@ -18,6 +18,7 @@
 #include "freertos/task.h"
 #include "sdkconfig.h"
 
+#include "codecplan.h"
 #include "mp3count.h"
 #include "netstream.h"
 #include "streamsniff.h"
@@ -126,6 +127,26 @@ static void probe_task(void *arg)
     memset(&adts, 0, sizeof(adts));
     memset(&mp3, 0, sizeof(mp3));
 
+    /*
+     * Which counter's clock is the real one, decided ONCE and then kept.
+     *
+     * The first version asked `adts.frames ? adts_ms() : mp3_ms()` every
+     * window, and that is wrong twice over. The ADTS counter
+     * false-positives on MP3 data -- a real run produced 93 "frames" at
+     * 88200 Hz with 0 channels, frame lengths of 25 to 8187 bytes and
+     * 442947 bytes lost hunting, which is obviously noise but is
+     * obviously not zero. So the selector chose ADTS on an MP3 station.
+     * Worse, it chose differently from window to window, so `ams` jumped
+     * between two unrelated clocks, went backwards, and the unsigned
+     * subtraction below wrapped: the log printed 18446744073709544819 ms
+     * of audio and a rate of 3343012699113726.04x.
+     *
+     * codecplan.h exists for exactly this decision and was written
+     * before this code and then not used here. It is used now, on the
+     * first 64 bytes, and the answer is kept for the run.
+     */
+    stream_codec_t chosen = STREAM_CODEC_NONE;
+
     size_t sniffed = 0;
     bool   sniff_logged = false;
 
@@ -187,6 +208,18 @@ static void probe_task(void *arg)
             }
         }
 
+        if (chosen == STREAM_CODEC_NONE && sniffed >= CODECPLAN_MIN_SNIFF_BYTES) {
+            const codecplan_t plan =
+                codecplan_choose(sniff_bytes(sniff, sniffed), sniffed, NULL);
+            if (codecplan_ready(&plan)) {
+                chosen = plan.codec;
+                ESP_LOGI(TAG, "counting as %s", stream_codec_name(chosen));
+            } else if (!codecplan_waiting(&plan)) {
+                ESP_LOGW(TAG, "codecplan says: %s", plan.message);
+            }
+        }
+
+
         netstream_title(title, sizeof(title));
         if (strcmp(title, last_title) != 0) {
             ESP_LOGI(TAG, "stream title: \"%s\"%s", title,
@@ -196,9 +229,15 @@ static void probe_task(void *arg)
 
         const int64_t t = esp_timer_get_time();
         if (t - last >= 5000000) {
-            const uint64_t ams = adts.frames ? adts_ms(&adts) : mp3_ms(&mp3);
+            const uint64_t ams = (chosen == STREAM_CODEC_AAC_ADTS) ? adts_ms(&adts)
+                               : (chosen == STREAM_CODEC_MP3)      ? mp3_ms(&mp3)
+                               : 0;
             const int64_t wall = (t - last) / 1000;
-            const uint64_t got = ams - last_audio_ms;
+            /* Never an unsigned subtraction without this. The clock is
+             * monotonic by construction and went backwards anyway, and
+             * the wrap produced a number 19 digits long in a log people
+             * are meant to read. */
+            const uint64_t got = ams > last_audio_ms ? ams - last_audio_ms : 0;
             /* The same x-real-time figure as before, but measured after
              * the demuxer and the ring rather than off the socket. A
              * ratio that was 0.97x on the wire and is lower here is
@@ -233,8 +272,19 @@ static void probe_task(void *arg)
     /* Bytes lost hunting for a sync is the figure four runs of the AAC
      * station established at 0 -- it is how icydemux and the ring are
      * certified, and it has to be available on an MP3 station too. */
-    const uint64_t audio_ms = adts.frames ? adts_ms(&adts) : mp3_ms(&mp3);
-    if (!adts.frames && mp3.frames) {
+    const uint64_t audio_ms = (chosen == STREAM_CODEC_AAC_ADTS) ? adts_ms(&adts)
+                            : (chosen == STREAM_CODEC_MP3)      ? mp3_ms(&mp3)
+                            : 0;
+    /* Both counters, always, with the chosen one named. The rejected
+     * counter's figures are the evidence for the choice -- an MP3 run
+     * shows ADTS finding a handful of frames and losing nearly every
+     * byte, which is what a false positive looks like and is worth being
+     * able to see rather than inferring. */
+    ESP_LOGI(TAG, "counted as %s: ADTS %u frames / %llu lost, MPEG %u frames / %llu lost",
+             stream_codec_name(chosen),
+             (unsigned)adts.frames, (unsigned long long)adts.lost,
+             (unsigned)mp3.frames, (unsigned long long)mp3.lost);
+    if (chosen == STREAM_CODEC_MP3) {
         ESP_LOGI(TAG, "MP3: %u frames, MPEG%u layer %u, %u Hz, %u ch, %u kbit/s, frame %u-%u bytes, %llu bytes lost hunting",
                  (unsigned)mp3.frames, mp3.version, mp3.layer, mp3.rate,
                  mp3.channels, mp3.bitrate, mp3.min_len, mp3.max_len,
@@ -242,12 +292,12 @@ static void probe_task(void *arg)
         ESP_LOGI(TAG, "MP3: %llu ms of audio in %lld ms, bitrate %llu kbit/s",
                  (unsigned long long)audio_ms, (long long)secs_ms,
                  audio_ms ? (unsigned long long)(total * 8 / (int64_t)audio_ms) : 0ULL);
-    } else if (!adts.frames && !mp3.frames) {
-        ESP_LOGW(TAG, "neither ADTS nor MPEG frames found in %lld KB -- "
-                      "no duration to compare against the clock",
+    } else if (chosen == STREAM_CODEC_NONE) {
+        ESP_LOGW(TAG, "no codec identified in %lld KB -- no duration to "
+                      "compare against the clock",
                  (long long)(total / 1024));
     }
-    if (adts.frames) {
+    if (chosen == STREAM_CODEC_AAC_ADTS) {
         ESP_LOGI(TAG, "ADTS: %u frames, AAC profile %u, %u Hz core, %u ch, frame %u-%u bytes, %llu bytes lost hunting",
                  (unsigned)adts.frames, adts.profile, adts.rate, adts.channels,
                  adts.min_len, adts.max_len, (unsigned long long)adts.lost);

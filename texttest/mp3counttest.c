@@ -21,7 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "codecplan.h"
 #include "mp3count.h"
+#include "streamsniff.h"
 
 static int failures;
 static int checks;
@@ -294,6 +296,80 @@ int main(void)
         CHECK((double)total_frames * 417.0 < (double)total_bytes * 0.25,
               "random bytes parsed as %.0f%% valid frames",
               100.0 * (double)total_frames * 417.0 / (double)total_bytes);
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* MP3 data must not be counted as ADTS                              */
+    /*                                                                   */
+    /* A real run picked the ADTS counter on an MP3 station because the   */
+    /* probe tested `adts.frames != 0` and ADTS false-positives on MP3    */
+    /* data: 93 "frames" at 88200 Hz with 0 channels and 442947 bytes     */
+    /* lost. Choosing per-window then made the audio clock jump between   */
+    /* two counters, go backwards, and wrap an unsigned subtraction --    */
+    /* the log printed 18446744073709544819 ms of audio.                  */
+    /*                                                                   */
+    /* So: on real MP3 frames, the sniffer and codecplan must both say    */
+    /* MP3, and the ADTS counter must look as wrong as it is.             */
+    /* ---------------------------------------------------------------- */
+    {
+        buf_t s = { 0 };
+        uint8_t h[4];
+        for (int i = 0; i < 300; i++) {
+            hdr(h, 3, 1, 9, 0, (unsigned)(i & 1), 0);
+            put_frame(&s, h, 417 + (unsigned)(i & 1));
+        }
+
+        CHECK(sniff_bytes(s.b, s.len) == SNIFF_MP3,
+              "the sniffer did not recognise real MP3 frames");
+
+        const codecplan_t plan = codecplan_choose(sniff_bytes(s.b, s.len),
+                                                  s.len, "audio/mpeg");
+        CHECK(plan.codec == STREAM_CODEC_MP3,
+              "codecplan chose %s for MP3 frames", stream_codec_name(plan.codec));
+        CHECK(plan.why == CODECPLAN_FROM_BYTES, "chosen from %d, not the bytes",
+              (int)plan.why);
+
+        mp3_count_t m;
+        memset(&m, 0, sizeof(m));
+        mp3_count_bytes(&m, s.b, s.len);
+        CHECK(m.frames == 300 && m.lost == 0,
+              "the MP3 counter: %u frames, %llu lost",
+              m.frames, (unsigned long long)m.lost);
+
+        adts_count_t a;
+        memset(&a, 0, sizeof(a));
+        adts_count_bytes(&a, s.b, s.len);
+        /*
+         * It is allowed to find junk -- eleven bits of sync guarantee it
+         * will. The finding worth recording is that **its own numbers do
+         * not reliably give it away.**
+         *
+         * The first version of this test asserted `a.lost > s.len / 2`,
+         * on the strength of the real station's 442947 bytes lost out of
+         * 803 KB, about 54%. On this synthetic stream it loses 4.5%.
+         * The reason is that a bogus frame length makes the ADTS counter
+         * *skip* a large block, and skipped bytes are counted as a frame
+         * body rather than as lost -- which is exactly why the real run
+         * reported frame lengths of "25-8187 bytes". How much it appears
+         * to lose therefore depends on what the audio data happens to
+         * look like.
+         *
+         * So a selector must not be built on these figures at all. The
+         * decision belongs to the sniffer and codecplan, asserted above.
+         * What is checked here is only the weaker, robust thing: the
+         * wrong counter finds an order of magnitude fewer frames, and it
+         * reports a channel count that is not a channel count.
+         */
+        CHECK(a.frames * 5 < m.frames,
+              "ADTS claimed %u frames against MPEG's %u on the same bytes",
+              a.frames, m.frames);
+        CHECK(a.channels == 0 || a.channels > 2 || a.rate != m.rate,
+              "ADTS's junk header looked plausible: %u Hz, %u channels",
+              a.rate, a.channels);
+        printf("  MP3 data: MPEG %u frames / %llu lost, ADTS %u frames / %llu lost\n",
+               m.frames, (unsigned long long)m.lost,
+               a.frames, (unsigned long long)a.lost);
+        free(s.b);
     }
 
     /* A zeroed counter reports nothing rather than dividing by zero. */
