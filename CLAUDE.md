@@ -8184,8 +8184,9 @@ fault was masking 0310's, and 0310's was masking 0311's.**
 - **0200's WUOM measurement reproduced exactly**: ring climbs to 69% on
   the front-loaded burst, then holds while the rate settles to 62
   kbit/s. WNZK still sits at 0% for its whole life, as predicted.
-- **SomaFM is the third pacing case** and sits between the two: 128
-  kbit/s, ring 0-2%, 300 ms of cumulative stall in half a minute.
+- ~~**SomaFM is the third pacing case** and sits between the two: 128
+  kbit/s, ring 0-2%, 300 ms of cumulative stall in half a minute.~~
+  **Wrong, and wrong from one run.** Corrected below.
 
 ### The four faults
 
@@ -8226,6 +8227,36 @@ fault was masking 0310's, and 0310's was masking 0311's.**
   does close and reopen, so it is fragmentation rather than a leak --
   but the internal-RAM budget was tuned against 14860 as though it were
   fixed, and the spread is 4 KB.
+
+### SomaFM front-loads, and the 0% run was the link (0314)
+
+The clean run above measured the same station at **ring 12% -> 32% ->
+46% -> 70% -> 89%, then holding at 89-90%** while the rate settled to
+128 kbit/s, with 30 ms of cumulative stall in forty seconds and no
+rebuffers. That is WUOM's shape, not a third one: burst, fill, hold.
+
+The run that said 0-2% and 300 ms of stall was the same station, the
+same URL, and the same firmware. **It was the link.** That run also
+reached SomaFM through `first sound at 4040 ms` against 537 ms here, and
+one of its windows reported 124 kbit/s on a 128 kbit/s stream -- a
+station delivering audio slower than real time, which is the definition
+of not being able to build a lead.
+
+**Two stations bracket this problem and a third does not exist.** WUOM
+and WNZK were picked in 0200 because one always has a surplus and the
+other never can; a station that front-loads on a good connection and
+starves on a bad one is not a new case, it is the first case in bad
+conditions. Tune against WNZK, as 0200 said.
+
+**What this cost was one patch, and it is the cheapest instance of the
+mistake in this file.** A pacing figure was taken from a single session
+and written up as a property of the station -- which is the same error as
+the 0.97x-beside-card-playback number that is still single-sourced and
+still flagged in the 0100 list, and the same one 0116 caught by measuring
+four times. **A throughput measured once is a measurement of that
+afternoon.** Anything in these notes describing how a station behaves
+needs two runs before it goes in, and this entry exists because this one
+did not have them.
 
 ### What is open
 
