@@ -2675,6 +2675,24 @@ static volatile bool     s_streaming;
 static volatile streamplan_status_t s_stream_status = STREAMPLAN_STATUS_NONE;
 
 /*
+ * Whether the stream is actually making sound -- bufplan_out_t.audible,
+ * published for ui_task.
+ *
+ * Needed because s_decoding is not the same question for a stream as it
+ * is for a file. A file goes from open to sound in about 150 ms, so
+ * "the decode loop is running" and "there is audio" are the same event
+ * and ui_task's amplifier line can use the first to mean the second. A
+ * STREAM can spend eighteen seconds between them: on the board a station
+ * tapped before the network was up retried through four DNS failures,
+ * and the amplifier was powered the whole time for silence.
+ *
+ * 0204 set the amplifier from play_stream() at first sound, which is
+ * correct and was not enough -- ui_task re-evaluates its own line every
+ * pass and had already turned it on.
+ */
+static volatile bool     s_stream_audible;
+
+/*
  * What the screen shows for the stream: the station on top, the ICY
  * title under it. Written by play_stream(), read by ui_task, published
  * as values the way s_ring_pct is.
@@ -5488,7 +5506,26 @@ static void ui_task(void *arg)
          * down the ramp and the fade this patch exists to add ends as
          * the click it was meant to replace.
          */
+        /*
+         * And for a stream, the amplifier follows AUDIBILITY rather
+         * than the decode loop.
+         *
+         * s_decoding covers the gap between opening and sound, which on
+         * a file is 150 ms and is why this line can use it. A stream
+         * connecting is silent for as long as the connect takes --
+         * eighteen seconds on the board, through four DNS failures on a
+         * network that was not up yet -- and powering the analog stage
+         * through that is the thing the README advertises not doing on
+         * a pause. A connecting stream is exactly as silent as a pause.
+         *
+         * s_stream_audible rather than a second guess at the phase:
+         * play_stream() already computes it from bufferplan, and 0204's
+         * direct call at first sound stands. This stops ui_task
+         * overriding that call on its next pass, which is what it was
+         * doing.
+         */
         audio_out_set_idle(!s_playing ||
+                           (s_streaming && !s_stream_audible) ||
                            (!s_decoding && !s_track_changing &&
                             !s_tail_pending && !fade_out_active()));
         st.battery_pct = battery_pct();
@@ -9394,6 +9431,10 @@ static track_end_t play_stream(const char *url, const char *name)
          * stops the writer, and releasing this as well would let a
          * resume start from a ring that is about to be flushed. */
         s_stream_hold = s_playing ? !out.audible : true;
+        /* Published for ui_task's amplifier line. Written every pass
+         * rather than on the edge: it is one word and the alternative is
+         * a second piece of state saying whether this one is current. */
+        s_stream_audible = out.audible;
 
         if (out.audible && !first_sound) {
             first_sound = true;
@@ -9551,6 +9592,7 @@ static track_end_t play_stream(const char *url, const char *name)
     free(st);
     browser_set_station(-1);    /* nothing is playing; unmark the row */
     s_decoding = false;
+    s_stream_audible = false;
     s_streaming = false;
     s_stream_status = STREAMPLAN_STATUS_NONE;
     /* Released last. A hold left standing would gate the next FILE's
