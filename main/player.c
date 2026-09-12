@@ -90,6 +90,11 @@
 #include "sleeptimer.h"
 #include "wifistore.h"
 #include "waveform.h"
+#include "bufferplan.h"
+#include "netdec.h"
+#include "netstream.h"
+#include "streamplan.h"
+#include "streamprobe.h"      /* STREAMPROBE_URL, for the test hook only */
 
 static const char *TAG = "tab5_mp3";
 
@@ -1114,6 +1119,18 @@ static bool tail_playing(void)
  */
 static volatile bool s_writer_stop;
 
+/*
+ * The stream's buffer watermark holds the writer off. Written by
+ * play_stream() from bufplan_out_t.audible, read by i2s_writer_task.
+ *
+ * Declared here rather than with the stream state further down because
+ * the writer comes first in the file and needs the name, which is the
+ * same reason s_playing has a tentative declaration below. Always false
+ * while a file plays: a file's producer can outrun the writer and does
+ * not need holding back.
+ */
+static volatile bool s_stream_hold;
+
 /* Tentative declaration. The definition, with the rest of the shared
  * player state, is further down; the writer needs the name here and the
  * writer comes first in the file. Kept static rather than extern so it
@@ -2107,6 +2124,31 @@ static void i2s_writer_task(void *arg)
         }
 
         /*
+         * A stream is filling its first four seconds, or refilling after
+         * running dry. See bufferplan.h.
+         *
+         * This is NOT the pause gate above and must not be folded into
+         * it. Pause means a listener pressed a button and the ring's
+         * contents stay valid; this means the producer has not got far
+         * enough ahead to be heard yet, which is the file path's
+         * "decode-ahead" applied to a source that cannot be read faster
+         * than real time. Sharing s_playing would make the pause epoch,
+         * the amplifier idle timer and the fade all fire on a buffer
+         * watermark -- and a station that rebuffers twice an hour would
+         * look to all three of them like somebody pressing pause.
+         *
+         * The ring is deliberately not drained here, for the same
+         * reason the pause gate does not drain it: what is in it is
+         * still the correct next samples. A stream that gives up
+         * entirely drains through BUFPLAN_DRAINING instead, which plays
+         * out what was decoded rather than discarding it.
+         */
+        if (s_stream_hold) {
+            vTaskDelay(pdMS_TO_TICKS(20));
+            continue;
+        }
+
+        /*
          * The last sample of the finished track has gone to I2S.
          *
          * This is the event the screen has been waiting for, and it is
@@ -2600,6 +2642,23 @@ static void hid_button(hid_button_t button)
  */
 static char              s_pending[512];
 static volatile bool     s_pending_ready;
+
+/*
+ * The same handshake for a station, and a separate pair rather than a
+ * flag on the one above.
+ *
+ * s_pending is a path and every reader of it treats it as one -- it goes
+ * to playlist_next(), history_push() and load_track_visuals(). A URL in
+ * that variable would be a path to all three, and the one that would not
+ * simply fail is history_push(), which would file it as a track and
+ * offer it as a back destination for ever.
+ *
+ * The name comes with the URL because it is the station list's name and
+ * nothing downstream can recover it from the URL alone.
+ */
+static char              s_pending_url[NETSTREAM_URL_MAX];
+static char              s_pending_station[NETSTREAM_NAME_MAX];
+static volatile bool     s_pending_stream;
 
 /* Set by the UI task when the chooser closes, for any reason. The decode
  * loop repaints the cover art, because the chooser drew over it and the
@@ -4860,6 +4919,35 @@ static void request_track(const char *path)
     }
 
     snprintf(s_pending, sizeof(s_pending), "%s", path);
+    s_pending_ready = true;
+}
+
+/*
+ * Hand a chosen station to the decode loop. ui_task only, like
+ * request_track().
+ *
+ * s_pending_ready is raised as well as s_pending_stream, and that is not
+ * redundant: it is the flag play_file() and play_stream() both watch to
+ * break out of a send, so a station chosen while a file is playing
+ * interrupts it through the path that already exists. The loop then sees
+ * s_pending_stream and knows which of the two pending buffers to read.
+ */
+static void request_stream(const char *url, const char *name)
+{
+    if (!url || !url[0]) return;
+    s_refill_pacing = false;
+    if (s_seek_pct >= 0) {
+        ESP_LOGI(TAG, "dropping unserviced seek (%s): station chosen",
+                 s_seek_why);
+        s_seek_pct = -1;
+    }
+    snprintf(s_pending_url, sizeof(s_pending_url), "%s", url);
+    snprintf(s_pending_station, sizeof(s_pending_station), "%s",
+             name ? name : "");
+    /* Stream flag first, then the acknowledgement -- the same ordering
+     * s_pending uses, and for the same reason: the reader must never see
+     * the handshake complete with the discriminator not yet set. */
+    s_pending_stream = true;
     s_pending_ready = true;
 }
 
@@ -8423,6 +8511,509 @@ static void clear_play_screen(void)
     ESP_LOGI(TAG, "the screen is empty; nothing is playing");
 }
 
+/* ------------------------------------------------------------------ */
+/* play_stream() -- a live stream, beside play_file() and not inside it */
+/* ------------------------------------------------------------------ */
+
+/*
+ * BESIDE play_file(), FOR THE REASONS THE PLAN GAVE
+ *
+ * A stream has no length, no seek, no sidecar, no ReplayGain, no
+ * gapless, no tail rules, no measuring pass and no cover. Folding
+ * "unless it is a stream" into each of those would make play_file()
+ * worse for files, and play_file() is 2500 lines in which every one of
+ * those branches has a reason written next to it.
+ *
+ * What is shared, and shared by using the same variables rather than by
+ * copying the code: the PCM ring, the writer, ring switching,
+ * sample-rate reconfiguration, the volume, the pause epoch and the
+ * sleep timer.
+ *
+ * THE PCM RING IS ALWAYS 16-BIT STEREO
+ *
+ * Mono is duplicated before it reaches the ring -- play_file() does this
+ * and so does this function. It matters twice over here: WUOM is
+ * **1 channel at 44.1 kHz**, which is the first mono source anything in
+ * the stream path has met, and the buffered-millisecond arithmetic the
+ * watermarks depend on is bytes / (rate * 4) with the 4 being stereo
+ * int16. Computing that from the *decoder's* channel count would read
+ * half the true fill on WUOM and rebuffer against a full ring.
+ *
+ * WHY THIS RUNS ON THE MAIN TASK
+ *
+ * `mp3dec_decode_frame()` puts about 17.8 KB of scratch on its caller's
+ * stack. Only CONFIG_ESP_MAIN_TASK_STACK_SIZE (24576) clears
+ * NETDEC_STACK_FLOOR; media_task's 16384 does not, and finding that out
+ * by panic cost two sessions. netdec_open() measures the calling task's
+ * headroom, which is why it is called from here and not from a helper.
+ *
+ * WHAT THE TWO PROBE RUNS SAID, AND WHAT IT CHANGED
+ *
+ * The two stations bracket the problem and the policy below is written
+ * against both:
+ *
+ *   WNZK  512 kbit/s AAC 48 kHz stereo, paces at 1.00x, ring peaked 41%.
+ *         No surplus is ever offered, so the only way to build a lead is
+ *         to hold the writer off, and a rebuffer's cost is permanent.
+ *   WUOM  64 kbit/s MP3 44.1 kHz MONO, bursts about 6.6x for ten seconds
+ *         and then paces exactly; the compressed ring pegged at 100% for
+ *         fifty seconds and 46 s of cumulative full-ring wait lost
+ *         0 bytes.
+ *
+ * So a rebuffer is nearly free on WUOM and expensive on WNZK, and the
+ * station that must not be made worse is not the station the thresholds
+ * are comfortable on. BUFPLAN_RESUME_MS is left where it is, but the
+ * rebuffer count is logged at teardown because on WNZK it is the figure
+ * that says whether these constants were right.
+ */
+
+/* The station being played, and what to call it. Module scope rather
+ * than locals: NETSTREAM_URL_MAX + NETSTREAM_NAME_MAX is 608 bytes and
+ * nothing over a few hundred goes on a task stack (0112). */
+static char s_stream_url[NETSTREAM_URL_MAX];
+static char s_stream_name[NETSTREAM_NAME_MAX];
+
+/* What the screen is showing for the stream, published for ui_task the
+ * way s_ring_pct is: values, written here, read anywhere. */
+static char s_stream_top[STREAMPLAN_LINE_MAX];
+static char s_stream_bottom[STREAMPLAN_LINE_MAX];
+static volatile streamplan_status_t s_stream_status = STREAMPLAN_STATUS_NONE;
+/* True for as long as play_stream() is in its loop. The seek bar and the
+ * position counter are meaningless on a live stream and this is what
+ * suppresses them. */
+static volatile bool s_streaming;
+
+/*
+ * Decoded audio in the ring being filled, in milliseconds.
+ *
+ * Stereo int16 at the OUTPUT rate, which is the rate audio_out was last
+ * set to and not necessarily what the decoder just reported -- a station
+ * that changes rate mid-stream has a ring holding samples at the old one
+ * until it drains. `rate` is passed in for that reason rather than read
+ * from info.
+ */
+static int stream_buffered_ms(uint32_t rate)
+{
+    if (!s_pcm || rate == 0) return 0;
+    const size_t bytes = xStreamBufferBytesAvailable(s_pcm);
+    const uint32_t per_sec = rate * 4;          /* 2 ch * int16 */
+    return (int)((uint64_t)bytes * 1000 / per_sec);
+}
+
+/*
+ * Play one station until it ends, fails, or the listener leaves.
+ *
+ * Returns the same track_end_t play_file() does so that player_loop()
+ * needs no second set of cases:
+ *   TRACK_ENDED       the stream finished or gave up
+ *   TRACK_INTERRUPTED something else was chosen; s_pending has it
+ *   TRACK_UNREADABLE  it could not be set up at all
+ */
+static track_end_t play_stream(const char *url, const char *name)
+{
+    if (!url || !url[0]) return TRACK_UNREADABLE;
+    if (!s_pcm) {
+        /* No ring means the writer task died at boot and nothing can
+         * recover it. Same refusal play_file() makes, for the same
+         * reason: queueing into a ring nobody reads is silence with a
+         * progress indicator. */
+        ESP_LOGE(TAG, "no PCM ring; refusing the stream");
+        return TRACK_UNREADABLE;
+    }
+
+    snprintf(s_stream_url, sizeof(s_stream_url), "%s", url);
+    snprintf(s_stream_name, sizeof(s_stream_name), "%s", name ? name : "");
+
+    /*
+     * The screen, before anything slow.
+     *
+     * Connecting took 2245 ms on WUOM and 2789 ms on WNZK including a
+     * redirect, and until the first frame arrives there is nothing to
+     * show but the name the list gave. Setting it here rather than after
+     * the connect is the same reasoning as track_change_begin() running
+     * before decoder_open().
+     */
+    /*
+     * NOT track_change_begin(), deliberately.
+     *
+     * That function calls rg_hold(), sidecar_prime(), load_tags() and
+     * do_art() on the path it is given -- it exists to have everything
+     * the open would otherwise discover already in hand. A stream has no
+     * path, no sidecar, no tags and no cover, so passing it "" would set
+     * four subsystems looking for files that cannot exist, and one of
+     * them would write a sidecar for the empty path.
+     *
+     * So the parts a stream does need are done here, explicitly, and the
+     * list is short enough to read: retire the previous track's numbers,
+     * stop any scan still running for it, and release the visuals.
+     */
+    s_track_gen++;
+    s_scan_abort = true;
+    s_prefetch_abort = true;
+    s_wave_ready = false;
+    s_visuals_released = true;
+    wave_clear();
+    ui_clear_art();
+    s_streaming = true;
+    s_stream_status = STREAMPLAN_CONNECTING;
+    /* No length, no position, no seek. s_can_seek is what the bar reads. */
+    s_len_sec = 0;
+    s_pos_sec = 0;
+    s_can_seek = false;
+    s_stats_valid = false;
+    s_fmt_known = false;
+    streamplan_lines_t lines;
+    streamplan_lines(NULL, s_stream_name, NULL, &lines);
+    snprintf(s_stream_top, sizeof(s_stream_top), "%s", lines.top);
+    s_stream_bottom[0] = '\0';
+    s_display_name = s_stream_top;
+
+    /*
+     * Hold the writer before a single byte is decoded.
+     *
+     * The order matters on WUOM: it delivers 6.6x real time for the
+     * first ten seconds, so by the time a first frame has been decoded
+     * there can already be seconds of audio available to queue. A writer
+     * that was running would play the first 200 ms and then wait, which
+     * is the chopping the two watermarks exist to prevent.
+     */
+    s_stream_hold = true;
+
+    if (!netstream_play(s_stream_url, s_stream_name)) {
+        ESP_LOGE(TAG, "netstream refused the station");
+        s_stream_hold = false;
+        s_streaming = false;
+        return TRACK_UNREADABLE;
+    }
+
+    /*
+     * netdec_open() AFTER netstream_play() and on this task.
+     *
+     * On this task because it measures this task's stack headroom, which
+     * is the only check available for a requirement minimp3 imposes on
+     * its caller. After the play request because the codec is chosen
+     * from the first bytes, and there are none until the connection is
+     * up -- netdec_read() returning 0 while it waits is not an error.
+     */
+    if (!netdec_open()) {
+        ESP_LOGE(TAG, "netdec refused to open; is this task's stack %d?",
+                 NETDEC_MIN_STACK);
+        netstream_stop_wait(2000);
+        s_stream_hold = false;
+        s_streaming = false;
+        return TRACK_UNREADABLE;
+    }
+
+    s_decoding = true;
+
+    /* One block of samples, and the stereo copy mono is widened into.
+     * Both PSRAM and both module-scope by allocation, never stack: at
+     * NETDEC_MAX_INT16 these are 36 KB and 72 KB. */
+    int16_t *pcm = heap_caps_malloc(NETDEC_MAX_INT16 * sizeof(int16_t),
+                                    MALLOC_CAP_SPIRAM);
+    int16_t *st = heap_caps_malloc(NETDEC_MAX_INT16 * 2 * sizeof(int16_t),
+                                   MALLOC_CAP_SPIRAM);
+    if (!pcm || !st) {
+        ESP_LOGE(TAG, "no stream decode buffers");
+        free(pcm);
+        free(st);
+        netdec_close();
+        netstream_stop_wait(2000);
+        s_decoding = false;
+        s_stream_hold = false;
+        s_streaming = false;
+        return TRACK_UNREADABLE;
+    }
+
+    bufplan_t plan;
+    bufplan_init(&plan, esp_timer_get_time() / 1000);
+
+    uint32_t out_rate = 0;          /* what audio_out is set to now */
+    /*
+     * The last frame's shape, kept because the watermark that releases
+     * the writer is usually crossed on a pass that decoded nothing.
+     * Reading `info` there would report a zeroed struct -- which is
+     * exactly the spurious `0 kbit/s` the probe prints at first PCM, and
+     * a zero that gets read as a fault by whoever sees it next.
+     */
+    int last_chans = 0;
+    int last_kbps = 0;
+    bool first_sound = false;
+    bool leaving = false;
+    track_end_t why = TRACK_ENDED;
+    const int64_t t_start = esp_timer_get_time();
+    /* The pause the listener asked for, as distinct from the buffer
+     * holding off. s_playing is the writer's gate and ui_task toggles it
+     * on a press; a stream turns that into a disconnect. */
+    bool was_playing = s_playing;
+
+    while (1) {
+        /* Something else was chosen. Ahead of everything: a listener who
+         * has picked a track has already said what this stream is
+         * worth. */
+        if (s_pending_ready) {
+            why = TRACK_INTERRUPTED;
+            leaving = true;
+        }
+
+        /*
+         * The press, through streamplan rather than by reading s_playing
+         * twice. Pause disconnects and drops what is buffered; play
+         * reconnects from the station URL. There is no third state --
+         * holding the connection open while paused fills both rings and
+         * stalls the server anyway.
+         */
+        if (!leaving && s_playing != was_playing) {
+            was_playing = s_playing;
+            const streamplan_action_t act = streamplan_transport(
+                STREAMPLAN_PRESS_PLAYPAUSE,
+                streamplan_is_connected(netstream_state()),
+                false /* no station list yet -- see 0202 */);
+            if (act == STREAMPLAN_DISCONNECT) {
+                ESP_LOGI(TAG, "stream paused: disconnecting");
+                netstream_stop();
+                /* The ring's contents are a moment of live radio that
+                 * will never be current again, so unlike a file's pause
+                 * they are not worth keeping. Dropped through the
+                 * writer's own flush path rather than reset from here,
+                 * because that path is the one that publishes. */
+                /* Why first, flag second: the writer reads the string
+                 * when it sees the flag, and the other three call sites
+                 * set them in this order for the same reason. */
+                s_flush_why = "stream paused";
+                s_pcm_flush = true;
+            } else if (act == STREAMPLAN_CONNECT) {
+                ESP_LOGI(TAG, "stream resumed: reconnecting");
+                netdec_reconnect();
+                bufplan_init(&plan, esp_timer_get_time() / 1000);
+                first_sound = false;
+                netstream_play(s_stream_url, s_stream_name);
+            }
+        }
+
+        const netstream_state_t net = netstream_state();
+
+        /*
+         * Decode. 0 is "nothing yet", not end of stream: a live stream
+         * has no end, and on WNZK there were 235 such waits in a minute
+         * that played through without a resync.
+         */
+        netdec_info_t info = {0};
+        const int n = netdec_read(pcm, NETDEC_MAX_INT16, &info);
+        if (n < 0) {
+            /* This stream cannot be decoded at all -- not a format, or
+             * not frames. Distinct from a connection failure, and the
+             * only case where retrying would loop forever on the same
+             * bytes. */
+            ESP_LOGE(TAG, "stream cannot be decoded; giving up");
+            why = TRACK_UNREADABLE;
+            leaving = true;
+        }
+
+        if (n > 0) {
+            if (info.channels > 0) last_chans = info.channels;
+            if (info.bitrate_kbps > 0) last_kbps = info.bitrate_kbps;
+            /*
+             * The rate or the channel count changed, which on a live
+             * stream can happen at any frame and does at a programme
+             * boundary on some stations.
+             *
+             * Handled by draining and reconfiguring, which is what the
+             * file path does at a track boundary -- but WITHOUT the
+             * crossfade and tail machinery around it, because there is
+             * no incoming track to overlap with and nothing to be
+             * gapless about. The drain is bounded: a press breaks it.
+             */
+            if (info.sample_rate > 0 &&
+                (uint32_t)info.sample_rate != out_rate) {
+                if (out_rate != 0) {
+                    ESP_LOGI(TAG, "stream rate %" PRIu32 " -> %d Hz; draining",
+                             out_rate, info.sample_rate);
+                    /* Let what is queued be heard at the rate it was
+                     * decoded for. Unheld so the writer can actually
+                     * drain it -- holding it here would wait forever. */
+                    s_stream_hold = false;
+                    while (s_pcm && !xStreamBufferIsEmpty(s_pcm) &&
+                           !s_pending_ready) {
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                }
+                if (!audio_out_rate_supported((uint32_t)info.sample_rate)) {
+                    ESP_LOGE(TAG, "stream rate %d Hz unsupported",
+                             info.sample_rate);
+                    why = TRACK_UNREADABLE;
+                    leaving = true;
+                } else {
+                    const esp_err_t ferr = audio_out_set_format(
+                        (uint32_t)info.sample_rate, 2);
+                    if (ferr != ESP_OK) {
+                        ESP_LOGE(TAG, "stream set_format: %s",
+                                 esp_err_to_name(ferr));
+                        why = TRACK_UNREADABLE;
+                        leaving = true;
+                    } else {
+                        out_rate = (uint32_t)info.sample_rate;
+                        s_frames_rate[s_ring_fill] = out_rate;
+                    }
+                }
+            }
+
+            if (!leaving) {
+                /*
+                 * Mono to stereo, because the ring is always stereo.
+                 * WUOM is the station that needs this -- 64 kbit/s,
+                 * 44.1 kHz, ONE channel -- and it is the first mono
+                 * source the stream path has decoded.
+                 */
+                const uint8_t *src;
+                size_t remain;
+                if (info.channels == 1) {
+                    for (int i = 0; i < n; i++) {
+                        st[2 * i] = st[2 * i + 1] = pcm[i];
+                    }
+                    src = (const uint8_t *)st;
+                    remain = (size_t)n * 2 * sizeof(int16_t);
+                } else {
+                    src = (const uint8_t *)pcm;
+                    remain = (size_t)n * sizeof(int16_t);
+                }
+
+                while (remain && !s_pending_ready) {
+                    const size_t sent = xStreamBufferSend(
+                        s_pcm, src, remain, pdMS_TO_TICKS(SEND_SLICE_MS));
+                    src += sent;
+                    remain -= sent;
+                    /*
+                     * The send can park here for a long time while the
+                     * writer is held off and the ring is full -- which
+                     * is correct and is the whole point of the hold. The
+                     * plan is stepped from the top of the loop rather
+                     * than in here, so a ring that fills during preroll
+                     * still reaches its watermark and releases the
+                     * writer on the next pass.
+                     */
+                    if (remain) {
+                        bufplan_in_t in = {
+                            .now_ms = esp_timer_get_time() / 1000,
+                            .buffered_ms = stream_buffered_ms(out_rate),
+                            .source_done = false,
+                            .stop_requested = false,
+                        };
+                        bufplan_out_t out;
+                        bufplan_step(&plan, &in, &out);
+                        s_stream_hold = !out.audible;
+                    }
+                }
+            }
+        }
+
+        /*
+         * One step of the buffer plan, level-triggered on the fill, so a
+         * pass that decoded nothing still moves it.
+         *
+         * source_done is FAILED or IDLE -- no more bytes will ever come.
+         * RETRYING is deliberately not included: it is still live, and
+         * netplan's backoff runs to 15 s while
+         * BUFPLAN_STALL_GIVEUP_MS is 30 s, so a source working through
+         * its retries is never cut off by the buffer.
+         */
+        const bool source_done = (net == NETSTREAM_FAILED) ||
+                                 (net == NETSTREAM_IDLE && s_playing);
+        bufplan_in_t in = {
+            .now_ms = esp_timer_get_time() / 1000,
+            .buffered_ms = stream_buffered_ms(out_rate),
+            .source_done = source_done,
+            .stop_requested = leaving,
+        };
+        bufplan_out_t out;
+        bufplan_step(&plan, &in, &out);
+
+        /* The writer's gate, and the only place it is written while a
+         * stream plays. A paused stream stays held: s_playing already
+         * stops the writer, and releasing this as well would let a
+         * resume start from a ring that is about to be flushed. */
+        s_stream_hold = s_playing ? !out.audible : true;
+
+        if (out.audible && !first_sound) {
+            first_sound = true;
+            ESP_LOGI(TAG, "first sound at %" PRIu32 " ms, %" PRIu32 " Hz, "
+                          "%d ch decoded, %d kbit/s",
+                     (uint32_t)((esp_timer_get_time() - t_start) / 1000),
+                     out_rate, last_chans, last_kbps);
+        }
+
+        /*
+         * The screen. The status comes from both machines because they
+         * disagree on purpose -- a reconnect behind a full ring is not a
+         * message and an empty ring on a healthy link is. See
+         * streamplan.h.
+         */
+        char icy_name[NETSTREAM_NAME_MAX];
+        char title[NETSTREAM_TITLE_MAX];
+        netstream_name(icy_name, sizeof(icy_name));
+        netstream_title(title, sizeof(title));
+        streamplan_lines(icy_name, s_stream_name, title, &lines);
+        if (strcmp(s_stream_top, lines.top) != 0) {
+            snprintf(s_stream_top, sizeof(s_stream_top), "%s", lines.top);
+            s_display_name = s_stream_top;
+        }
+        if (strcmp(s_stream_bottom, lines.bottom) != 0) {
+            snprintf(s_stream_bottom, sizeof(s_stream_bottom), "%s",
+                     lines.bottom);
+            ESP_LOGI(TAG, "title: \"%s\"", s_stream_bottom);
+        }
+        s_stream_status = streamplan_status(net, plan.phase, out.audible);
+
+        /* The compressed ring's fill, for the same bar the file path
+         * fills from the PCM ring. A stream has two buffers and this is
+         * the one that says whether the network is keeping up. */
+        s_ring_pct = netstream_ring_pct();
+
+        if (streamplan_done(out.finished, leaving)) break;
+
+        /*
+         * 10 ms, not 0. A pass that decoded nothing must not spin: on
+         * WNZK there were 235 waits in a minute and netdec_read() has
+         * its own timeout, but a stopped stream returns 0 immediately
+         * and this is what stops that becoming a busy loop.
+         */
+        if (n == 0) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    /*
+     * Teardown, and NOTHING may leave a TLS session open.
+     *
+     * netstream_stop_wait() rather than netstream_stop(): the callers
+     * that must not leave a session behind are exactly the ones that
+     * wait, and this is one of them. The timeout is generous because the
+     * task may be parked in the full-ring wait -- the WUOM run took
+     * 199 ms to stop from there against 39 ms on WNZK, and that scales
+     * with how deep the wait is.
+     */
+    if (!netstream_stop_wait(3000)) {
+        ESP_LOGW(TAG, "stream did not stop in 3 s; state %s",
+                 netstream_state_name(netstream_state()));
+    }
+    netdec_close();
+
+    ESP_LOGI(TAG, "stream ended: %s, %" PRIu32 " rebuffers, %" PRId64
+                  " ms silent, %" PRIu32 " frames, %" PRIu32 " resyncs",
+             bufplan_phase_name(plan.phase), plan.rebuffers, plan.silent_ms,
+             netdec_frames(), netdec_resyncs());
+
+    free(pcm);
+    free(st);
+    s_decoding = false;
+    s_streaming = false;
+    s_stream_status = STREAMPLAN_STATUS_NONE;
+    /* Released last. A hold left standing would gate the next FILE's
+     * writer on a watermark nothing is updating, which is silence with
+     * no log line to explain it. */
+    s_stream_hold = false;
+    s_ring_pct = -1;
+    return why;
+}
+
 /*
  * One track after another, forever.
  *
@@ -8454,13 +9045,72 @@ static void player_loop(void)
         s_open_chooser = true;
     }
 
+    /*
+     * TEMPORARY: the only way to reach play_stream() until the chooser
+     * has a RADIO entry.
+     *
+     * There is no station list reader yet and no UI action that names a
+     * station, so without this nothing calls request_stream() and the
+     * whole of phase 3 is unreachable code that -Werror would reject
+     * anyway. The URL is streamprobe.h's, so the station this plays is
+     * the station the two probe runs measured and the logs are directly
+     * comparable.
+     *
+     * Fires once, after the radio has joined, and only with nothing else
+     * playing -- a stream must never be started underneath a file,
+     * because there is one PCM ring pair and one TLS session.
+     *
+     * **This block is removed by the patch that adds the chooser entry.**
+     * It is a test hook and it is the only thing in phase 3 that is.
+     */
+    bool stream_kicked = false;
+
     while (1) {
+        if (!stream_kicked && !have && !s_decoding && !s_pending_ready &&
+            wifi_connected()) {
+            stream_kicked = true;
+            ESP_LOGW(TAG, "test hook: playing %s", STREAMPROBE_URL);
+            request_stream(STREAMPROBE_URL, "probe station");
+        }
+
         if (s_pending_ready) {
             /* Clear the flag before reading the buffer, so a second
              * choice made during the copy is not lost silently -- it
              * simply sets the flag again and is picked up next time
              * round. */
             s_pending_ready = false;
+            if (s_pending_stream) {
+                /*
+                 * A station rather than a track. Played here and now
+                 * rather than by setting `have`, because everything the
+                 * `have` path goes on to do -- history_push(),
+                 * load_track_visuals(), playlist_next() at the bottom
+                 * -- is about a file on a volume, and a station is not
+                 * one.
+                 *
+                 * wifi_apply_settings() is NOT called first: the radio
+                 * is necessarily already up, since a station cannot have
+                 * been chosen without it, and the two seconds that call
+                 * costs would be spent on a C6 that is already joined.
+                 */
+                s_pending_stream = false;
+                const track_end_t swhy = play_stream(s_pending_url,
+                                                     s_pending_station);
+                if (swhy == TRACK_INTERRUPTED) {
+                    /* Something else is chosen and s_pending or
+                     * s_pending_url has it; go round again rather than
+                     * falling through to the playlist. */
+                    s_track_changing = true;
+                    continue;
+                }
+                /* The station ended or could not be played. There is no
+                 * "next station" yet -- that is the station list, and it
+                 * lands with the chooser entry -- so put the chooser up
+                 * rather than silently returning to a blank screen. */
+                clear_play_screen();
+                s_open_chooser = true;
+                continue;
+            }
             snprintf(s_path, sizeof(s_path), "%s", s_pending);
             have = true;
         }
