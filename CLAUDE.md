@@ -7698,11 +7698,18 @@ rather than a one-off.
 - **Phase 2: done.** MP3 and AAC both decode on hardware with 0 resyncs
   -- 2220 and 2676 frames. Internal free bottoms at **56 KB on MP3 and
   40 KB on AAC**, the latter being the tightest the stream path has run.
-- **Phase 3: unblocked, not started.** `bufferplan.h` is written and
-  host-tested; its constants want tuning against WUOM, never against
-  WNZK, for the reasons above.
-- **Phase 4: parser written and tested** (`stationlist.h`), with nothing
-  reading the file yet. Needs `storage_io` and the chooser.
+- **Phase 3: done and flashed** by the 0200 series. `play_stream()` is
+  in player.c beside `play_file()`. See "The 0200 series" below.
+- **Phase 4: done and flashed**, one bug outstanding. `stations.m3u`,
+  `stations.c`, a RADIO tab in the chooser.
+
+**Corrected, and it is the sentence this entry used to end with:** the
+constants want tuning **against WNZK, never against WUOM**. This had it
+exactly backwards. WUOM front-loads about thirty seconds into the
+compressed ring and makes every watermark look free; WNZK paces at 1.00x
+and never offers a surplus, so it is the station a rebuffer actually
+costs something on. Measured on the board, both of them, in the 0200
+series.
 
 ### The stream path: plan
 
@@ -7800,6 +7807,153 @@ of internal RAM with mbedTLS in PSRAM; lwIP must keep its default window.
   configuration. Three builds were diagnosed off that line as having
   wrong pins when the pins were already right. `wifi.c` logs the struct
   the driver actually copies, and says which line to believe.
+
+## The 0200 series: phases 3 and 4, and what the board said
+
+**Read this first if you are picking up internet radio.** 0200-0207 took
+the stream path from "netstream and netdec work, nothing plays them" to a
+station chooser that plays. Every patch after 0201 exists because of a
+board log, and **the board found six faults that reading did not** --
+which is the argument for flashing early and often on this path rather
+than writing it all and then testing.
+
+### Where it actually is
+
+- **Phase 1 and 2: unchanged and confirmed.** Three more runs put
+  0121's backpressure beyond doubt: ring peak 100%, 41-46 s of
+  cumulative full-ring wait, **0 bytes resynced** every time.
+- **Phase 3: done and flashed.** `play_stream()` in player.c, beside
+  `play_file()`. Sound on two stations, pause, resume, and a station
+  that paces at exactly real time for three minutes with no rebuffer.
+- **Phase 4: done and flashed, one bug outstanding** (below).
+  `stations.m3u`, `stations.c`, a RADIO tab.
+- **The probe is retired** (`STREAMPROBE_ENABLE 0`), as this file said
+  it would be. Gated rather than deleted: it is still the only thing
+  that characterises a new station.
+- **The screen is not done.** See the open list.
+
+### The two stations, and why both were needed
+
+They bracket the problem and no single one of them would have sized the
+buffers:
+
+| | WNZK | WUOM |
+| --- | --- | --- |
+| format | 512 kbit/s AAC-LC, 48 kHz **stereo** | 64 kbit/s MP3, 44.1 kHz **mono** |
+| pacing | **1.00x to the millisecond** over 57 s | bursts ~6.6x for 10 s, then exact |
+| compressed ring | peaked 41%, never filled | pegged 100% for 50 s |
+| internal free floor | **40216** (decoder open costs 14860) | 92183 |
+
+**WNZK never offers a surplus.** The only way to build a PCM lead is to
+hold the writer off, and once spent it cannot be earned back while
+playing -- so a rebuffer costs the listener four seconds of silence,
+permanently. On WUOM the same rebuffer is nearly free, because 256 KB at
+64 kbit/s is about thirty seconds of audio. **Tune the watermarks
+against WNZK and check they are comfortable on WUOM, never the other way
+round**: WUOM makes every threshold look cheap.
+
+AAC is the tight case for internal RAM and always will be; MP3 has about
+16 KB more headroom because it pays no decoder-open cost.
+
+### Six faults the board found, and the shape they share
+
+Four of the six are the same mistake in different clothes: **a value
+whose meaning depends on something not in the value.**
+
+1. **`netstream_init()` was never called from app_main** (0202). The
+   header had always said to; only the probe did, so the ring existed
+   from 45 s into the boot and a stream asked for at 18 s was refused
+   correctly. The refusal now names its cause, because "no ring" and
+   "a session is already open" are the same silence from outside.
+2. **IDLE means two things** (0203). `netstream_play()` posts a request
+   and returns *without touching the state*, so the first reading after
+   it is IDLE meaning "not started yet". Read as "stopped", it ended the
+   stream on its opening step -- `99 ms silent, 0 frames`, with the whole
+   connect appearing in the log afterwards because
+   `netstream_stop_wait()` was waiting for a task still dialling. **The
+   log read as a station hanging up and every line in it was the player
+   hanging up on itself.** `seen_live` is the latch; the fix moved into
+   streamplan.h to be tested.
+3. **The amplifier was off for 161 seconds** (0204) while correct audio
+   was written. ui_task idles the amp from one line in `player_loop()`,
+   and the chooser branch above it ends in `continue`. For a file that
+   never mattered -- choosing a file is what closes the chooser -- and
+   **a stream is the first sound that can start with the chooser open.**
+4. **Pause parked the decode loop forever** (0204). The writer stops, so
+   the PCM ring fills, so the send blocks; its only exit was
+   `s_pending_ready`, so the top of the loop -- where a pause becomes a
+   disconnect -- was unreachable. The press logged nothing at all.
+5. **A paused stream ended itself after exactly thirty seconds** (0205):
+   `BUFPLAN_STALL_GIVEUP_MS`. Nothing in bufferplan was wrong; the
+   mistake was asking it. The plan decides whether a stream *trying* to
+   play can, and a ring emptied by the listener is not a stall. It also
+   corrupted the two figures that matter -- a pause was adding a
+   rebuffer and half a minute to `silent_ms`.
+6. **`stations_load()` retried at 10 Hz for ever** (open, below).
+
+**Two of those were an early `continue` skipping a postcondition below
+it** (3 and 4, and the `!leaving` guard in 0205 is a third instance
+caught before flashing). This file's long loops hide their
+postconditions well; when adding a `continue`, read what is below it to
+the end of the iteration.
+
+### Things that are settled now and were guesses before
+
+- **The PCM ring is always 16-bit stereo**; mono is widened before the
+  send. So buffered-ms is `bytes / (rate * 4)` using the **output**
+  rate, never the decoder's channel count -- computing it from
+  `info.channels` would read half the true fill on WUOM and rebuffer
+  against a full ring.
+- **`play_stream()` must run on the main task.** 24576 is the only stack
+  that clears `NETDEC_STACK_FLOOR`.
+- **`storage_io_fread()` takes its own lease per chunk** and must not be
+  called while holding one. Wrapping a read loop in
+  `storage_io_acquire()` would hold the card across 64 KB and starve the
+  decode loop -- the exact contention the BACKGROUND class exists to
+  prevent.
+- **Stop from inside the full-ring wait takes 99-199 ms**, against 39 ms
+  from a quiet stream. `netstream_stop_wait(3000)` has ample margin.
+- **A reconnect costs one resync** (125 bytes seen): the new body starts
+  at its own frame boundary and the decoder hunts once.
+- **radio-browser.info serves M3U directly** from its station endpoints,
+  which is why `stations.m3u` is M3U and not a format of our own. The
+  hand-edited path and the portal's future search converge on one parser
+  with one test file.
+
+### What is open
+
+- **`stations_load()` is called at 10 Hz when there is no station
+  list.** `player_loop()` retries until it succeeds, and "no
+  stations.m3u" is a permanent false -- so a card without one produces
+  `no stations.m3u on any volume` every ~104 ms for ever. It floods the
+  log, and it opens two files per second on the card behind whatever is
+  playing. **This is the next patch.** The fix is to latch on the
+  attempt rather than the result and retry only when
+  `storage_generation()` changes, which is the same signal browser.c
+  already uses to notice a card.
+- **The screen shows only the station name.** `s_stream_bottom` (the ICY
+  title) and `s_stream_status` (Connecting / Buffering / Reconnecting /
+  No signal) are computed every pass by streamplan.h and **read by
+  nothing**; `s_streaming` is read only by the transport. There is no
+  LIVE mark, and the seek bar is suppressed only by `s_can_seek`. This
+  needs `ui.c` and `ui_state_t`, not player.c, which is why it was left.
+- **No ICY title has ever been seen on WUOM** despite
+  `icy-metaint: 16000`. WNZK's `" - "` proves the demuxer surfaces them,
+  so suspect the plumbing rather than `icydemux` (4064 host checks)
+  -- but it may simply be a station that sends empty titles.
+- **The chooser cannot reload the station list.** `stations_load()`
+  opens a file and ui_task must not block on the card, so a
+  `stations.m3u` edited with the card in does not appear until the
+  player is idle and reloads.
+- **`stack low water 2756`** on the netstream task, stable across every
+  run and the thinnest figure in any of these logs, on a task doing TLS.
+  Not urgent; worth knowing.
+- **The 45-second probe delay instruction was never followed** in any
+  run, so the 0.97x-beside-card-playback figure and the internal-RAM
+  contention with a file decoder open are still single-sourced from the
+  original probe session. Load testing, deferred deliberately.
+- **Next/previous never tested on hardware** -- every flash so far had
+  no `stations.m3u`, so the list has never had two entries in it.
 
 ## Where v0.3.0 got to (the 1000 series)
 
