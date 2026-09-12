@@ -85,7 +85,7 @@ bool netdec_open(void)
     mp3dec_init(s_mp3);
 
     /*
-     * minimp3's scratch is about 11.6 KB on the caller's stack, so a
+     * The minimp3 call measures 17744 bytes of the caller's stack, so a
      * task that is comfortable everywhere else dies on the first frame.
      * Checked here rather than left to a panic: the panic names
      * mp3dec_decode_frame and a line number inside a vendored header,
@@ -94,10 +94,10 @@ bool netdec_open(void)
      */
     const unsigned headroom = uxTaskGetStackHighWaterMark(NULL);
     if (headroom < NETDEC_STACK_FLOOR) {
-        ESP_LOGE(TAG, "this task has %u bytes of stack left; minimp3 needs "
-                      "about 11600 on the caller's stack. Create the calling "
-                      "task with at least %d (media_task uses the same for "
-                      "the file path).",
+        ESP_LOGE(TAG, "this task has %u bytes of stack left; the minimp3 call "
+                      "measures 17744 on the caller's stack. Create the "
+                      "calling task with at least %d (the main task, which "
+                      "decodes files through the same library, has 24576).",
                  headroom, NETDEC_MIN_STACK);
         free(s_win_buf);
         s_win_buf = NULL;

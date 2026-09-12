@@ -14,6 +14,13 @@ history: correcting it in place erases the reasoning that produced it,
 and which things turned out not to be tasks is the useful part of a
 record like this one.
 
+**A stack protection fault reports the overshoot, not the demand.** The
+figure to size against is `bounds_size + (floor - SP)`. Reading
+"SP 11604 below the floor" as "needs 11.6 KB" is how 0127 raised a stack
+from 6144 to 16384 and panicked again in the same place. Two panics at
+different sizes give the answer directly, and they should agree to the
+byte on a deterministic path -- both of these said 17744.
+
 **A library's stack use is the caller's problem, and only the caller can
 fix it.** Check what a vendored function puts on the stack before calling
 it from a task you sized for your own code. 0127 died on this:
@@ -7496,6 +7503,39 @@ window + 6668 byte decoder in PSRAM`, then `stream is MP3` --
 of real data, and `sizeof(mp3dec_t)` is 6668 bytes, which is worth
 knowing: it is large enough that having it on the stack too would have
 been a second bug.
+
+### 0128: the same fault twice, because the first fix read the wrong number
+
+0127 raised the probe's stack from 6144 to 16384 and it panicked again,
+at the same instruction.
+
+    stack  6140 bytes, SP 11604 below the floor -> 17744 used
+    stack 16380 bytes, SP  1364 below the floor -> 17744 used
+
+**Two panics, identical total.** A stack protection fault reports where
+SP had got to, which is the *overshoot*, not the demand -- and 0127 read
+11604 as the requirement. The number that matters is
+`bounds_size + (floor - SP)`, and the first panic could not show it
+because there was only one of them. Two at different stack sizes give it
+directly, and on a deterministic path they agree to the byte.
+
+**The wrong precedent, too.** 0127 cited `media_task` at 16384 as the
+task that decodes files. It is not: `play_file()` calls `decoder_read()`
+and runs on the **main task**, which `sdkconfig` gives
+`CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576`. Had 0127 checked which task
+actually calls the decoder rather than which task sounded like it
+should, the number would have been right the first time -- **and it was
+sitting in `sdkconfig` the whole time.** 24576 leaves 6.8 KB over the
+measured 17744.
+
+`NETDEC_STACK_FLOOR` is 20000 rather than something just above 17744, so
+that a task which merely looks generous is still refused. 16384 looked
+generous.
+
+The refusal in `netdec_open()` was in 0127 and would not have helped:
+the floor was 13000, which 16384 passes. **A guard derived from a wrong
+measurement is a guard that confirms the wrong measurement.** It has the
+measured figure now.
 
 ### Where the stream path stands
 

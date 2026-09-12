@@ -42,18 +42,30 @@
  * THE CALLER'S STACK MUST BE 16 KB
  *
  * **`mp3dec_decode_frame()` puts its scratch buffers on the caller's
- * stack, and they are about 11.6 KB.** That is minimp3's design; there
- * is no option to heap them. A 6 KB task calling `netdec_read()` dies
- * with a stack protection fault inside minimp3 on the first frame, which
- * is exactly what happened the first time this was driven -- SP was
- * 11604 bytes below the floor.
+ * stack, and the whole call needs about 17.8 KB.** That is minimp3's
+ * design; there is no option to heap them.
  *
- * The file path has always known this: `media_task`, which runs
- * `decoder_read()` and therefore minimp3, is created with 16384. Any
- * task calling `netdec_read()` needs the same, and `NETDEC_MIN_STACK`
- * below is that number so the next caller does not have to rediscover
- * it. `netdec_open()` checks the headroom of whatever task calls it and
- * complains loudly if it is short.
+ * The number is measured, from two panics that agree to the byte:
+ *
+ *     stack  6140 bytes, SP 11604 below the floor -> 17744 used
+ *     stack 16380 bytes, SP  1364 below the floor -> 17744 used
+ *
+ * Both runs died at the same instruction having consumed exactly the
+ * same amount, which is what a fixed-size scratch on a deterministic
+ * path looks like. **The first fix read 11604 as the requirement rather
+ * than as the overshoot, raised the stack to 16384, and panicked
+ * again** -- so the figure to size against is the total, and the first
+ * panic never showed it.
+ *
+ * The file path has always known. `play_file()` calls `decoder_read()`
+ * and therefore minimp3, and it runs on the **main task**, which
+ * `sdkconfig` gives `CONFIG_ESP_MAIN_TASK_STACK_SIZE=24576`. Not
+ * `media_task`'s 16384, which is what the first fix cited and which
+ * would have failed identically. 24576 leaves about 6.8 KB over the
+ * measured demand.
+ *
+ * `netdec_open()` checks the headroom of whatever task calls it and
+ * refuses if it is short.
  *
  * This is the second stack fault in the stream path and the opposite of
  * the first. 0112 was a 4392-byte struct of *ours* on a task stack, and
@@ -93,15 +105,18 @@ extern "C" {
 #define NETDEC_MAX_INT16    (1152 * 2)
 
 /*
- * Stack a task must have to call netdec_read(). See above: minimp3's
- * scratch is about 11.6 KB and lives on the caller's stack. 16384 is
- * what media_task uses for the same decoder on the file path.
+ * Stack a task must have to call netdec_read(). See above: the call
+ * measures 17744 bytes, and 24576 is what the main task -- which decodes
+ * files through the same library -- is given by sdkconfig.
  */
-#define NETDEC_MIN_STACK    (16384)
+#define NETDEC_MIN_STACK    (24576)
 
-/* Free stack netdec_open() insists on seeing, with margin over the
- * 11.6 KB measured, since the caller also has its own frame. */
-#define NETDEC_STACK_FLOOR  (13000)
+/*
+ * Free stack netdec_open() insists on seeing. Above the measured 17744
+ * so that a task which merely *looks* generous still gets refused: 16384
+ * did, and it took a second panic to find out.
+ */
+#define NETDEC_STACK_FLOOR  (20000)
 
 typedef struct {
     int sample_rate;        /* Hz; can change mid-stream, so compare */
