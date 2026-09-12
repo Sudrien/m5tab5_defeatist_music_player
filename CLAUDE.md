@@ -7583,6 +7583,59 @@ is now the largest single internal-RAM consumer in the stream path**,
 and it cannot move to PSRAM. Phase 3 pays this once, on whichever task
 decodes; it does not pay it twice.
 
+### 0130: AAC, and the buffer that would have overrun
+
+ADTS AAC through `esp_audio_simple_dec`, which completes phase 2's codec
+scope. Same two backends and the same division of labour as the file
+path: minimp3 for MP3, the codec component for everything else.
+
+**A sizing bug caught before it ran.** `NETDEC_MAX_INT16` was `1152 * 2`
+-- minimp3's worst case, and correct while MP3 was the only codec.
+AAC-LC is 1024 samples a frame, but **HE-AAC doubles the output rate
+through SBR**, so a stereo frame is 2048 * 2 = 4096 int16. WNZK, the
+station this was written for, announces `audio/aacp` with a 48 kHz core,
+which is exactly that case. **The first AAC frame would have overrun the
+PCM buffer by 1792 int16.** The constant now matches
+`DECODER_MAX_INT16`, which the file path already sized for the worst
+case across both backends -- one number, sized once, for what is the same
+decoder.
+
+Worth noting how close that came to shipping: `netdec_read()` checks
+`produced > max_int16` and would have returned -1 rather than writing
+past the end, so it would have surfaced as "AAC does not work" rather
+than as corruption. The check earned itself before the code it guards
+was ever run.
+
+**`use_frame_dec = false`** is what makes this work at all. It lets the
+decoder's own parser find ADTS boundaries in whatever the window hands
+it; `true` means "this buffer is exactly one frame", which a sliding
+window cannot promise. That is also why `_ALAC`, `_VORBIS`, `_RAW_OPUS`,
+`_ADPCM` and `_LC3` are unreachable from here -- they require
+frame-at-a-time input, as `decoder.c` has noted since long before any of
+this.
+
+**Registration has one owner now.** `esp_audio_dec_register_default()`
+was called behind a static flag inside `decoder.c`, invisible to
+`netdec`. Two files with two private flags is precisely how a double
+registration happens, so it is `decoder_register_codecs()` in
+`decoder.h`, called from both.
+
+**A reconnect closes and reopens the AAC decoder** rather than carrying
+it over. It holds parser state for a body that has ended, and an ADTS
+stream resumed mid-frame is the one thing that parser cannot be told
+about. `eos` is never set true on the input: a live stream has no end to
+signal, and claiming one would make the decoder flush and stop.
+
+24-bit and 32-bit are refused rather than folded. The file path folds 24
+and refuses 32 for good reasons; no broadcast AAC is either, so carrying
+that machinery into a path that would never exercise it would be
+untested code guarding an impossible case.
+
+**To test it, point `STREAMPROBE_URL` at the commented WNZK line.** That
+station is 511 kbit/s HE-AAC and sits at the link's capacity, so expect
+the ring to behave nothing like WUOM's -- it will not front-load, and
+0121's backpressure should not fire at all.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
@@ -7598,10 +7651,9 @@ rather than a one-off.
 - **Phase 1: done.** Written, compiled, flashed five times, measured on
   two stations, two real faults found and fixed (internal RAM
   starvation, reconnect bookkeeping). Nothing about it is still a guess.
-- **Phase 2: MP3 works end to end.** 2220 frames, 0 resyncs, 0.9998x in
-  steady state, on hardware. AAC through `esp_audio_simple_dec` is not
-  written; `netdec` refuses it cleanly. Internal free bottoms at 56 KB
-  with the 24 KB decode stack in place.
+- **Phase 2: MP3 works end to end**, 2220 frames with 0 resyncs at
+  0.9998x on hardware. **AAC is written and unflashed.** Internal free
+  bottoms at 56 KB with the 24 KB decode stack in place.
 - **Phase 3: unblocked, not started.** `bufferplan.h` is written and
   host-tested; its constants want tuning against WUOM, never against
   WNZK, for the reasons above.

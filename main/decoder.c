@@ -532,19 +532,29 @@ static bool install_table(decoder_t *d, const decoder_index_t *ix,
     return true;
 }
 
+void decoder_register_codecs(void)
+{
+    if (s_esp_codec_registered) return;
+    /* Registers every decoder the component was built with, which is
+     * what CONFIG_AUDIO_DECODER_*_SUPPORT controls. MP3 is switched off
+     * in sdkconfig.defaults so this does not register a decoder we will
+     * never route to; the symbol collision it also causes is handled
+     * separately, in minimp3_prefix.h.
+     *
+     * Lifted out of esp_codec_open() so netdec.c can call it: streams
+     * need the same decoders, and the flag has to have exactly one
+     * owner. Two files with two private flags is how a double
+     * registration happens.
+     */
+    esp_audio_dec_register_default();
+    esp_audio_simple_dec_register_default();
+    s_esp_codec_registered = true;
+}
+
 static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
                                 const decoder_index_t *ix)
 {
-    if (!s_esp_codec_registered) {
-        /* Registers every decoder the component was built with, which
-         * is what CONFIG_AUDIO_DECODER_*_SUPPORT controls. MP3 is
-         * switched off in sdkconfig.defaults so this does not register
-         * a decoder we will never route to; the symbol collision it
-         * also causes is handled separately, in minimp3_prefix.h. */
-        esp_audio_dec_register_default();
-        esp_audio_simple_dec_register_default();
-        s_esp_codec_registered = true;
-    }
+    decoder_register_codecs();
 
     d->f = storage_io_open(path, "rb");
     if (!d->f) return ESP_ERR_NOT_FOUND;

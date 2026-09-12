@@ -109,6 +109,17 @@ typedef struct {
     decoder_trim_t trim;
 } decoder_info_t;
 
+/*
+ * Register esp_audio_codec's decoders, once, process-wide.
+ *
+ * Exposed because netdec.c needs the same decoders for streams and the
+ * "have we registered yet" flag can only live in one place. Registering
+ * twice is not something the component documents as safe, and two
+ * private flags in two files is exactly how it would happen. Idempotent;
+ * call it before any esp_audio_simple_dec_open().
+ */
+void decoder_register_codecs(void);
+
 /* Extensions decoder_open() will accept, for the directory scan. */
 bool decoder_supports(const char *path);
 

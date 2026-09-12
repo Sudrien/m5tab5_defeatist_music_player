@@ -29,12 +29,18 @@
  *
  * WHAT IS HERE AND WHAT IS NOT
  *
- * MP3 only, for now, and against the order in the plan. The plan said
- * ADTS AAC first because WNZK was the station under test; the benchmark
- * station is now WUOM, which is MP3, and **the path that can be watched
- * on hardware is worth more than the one that was written down first.**
- * AAC through `esp_audio_simple_dec` is the next patch;
- * `netdec_open()` refuses it cleanly until then rather than pretending.
+ * MP3 through minimp3 and ADTS AAC through `esp_audio_simple_dec` --
+ * the same two backends, and the same division of labour, as the file
+ * path. MP3 landed first, against the order in the plan, because the
+ * benchmark station had become WUOM and the path that can be watched on
+ * hardware is worth more than the one written down first.
+ *
+ * AAC is opened with `use_frame_dec = false`, which lets the decoder's
+ * own parser find ADTS boundaries in whatever the window hands it. That
+ * is the same setting the file path uses for a file read as a stream,
+ * and it is the reason `_AAC` works here when `_ALAC`, `_VORBIS`,
+ * `_RAW_OPUS`, `_ADPCM` and `_LC3` could not: those require exactly one
+ * encoded frame per call, and a sliding window cannot promise that.
  *
  * No seeking, no duration, no pause. A live stream has no position to
  * hold; phase 3's pause is a stop and a fresh connection.
@@ -97,12 +103,24 @@ extern "C" {
 #endif
 
 /*
- * Largest number of int16 one netdec_read() can produce. An MPEG1
- * Layer II frame is 1152 samples; stereo doubles it. minimp3's own
- * MINIMP3_MAX_SAMPLES_PER_FRAME is the same number, and netdec.c
- * asserts they agree rather than trusting that they do.
+ * Largest number of int16 one netdec_read() can produce.
+ *
+ * MP3 alone would be 1152 * 2: an MPEG1 Layer II frame is 1152 samples
+ * and stereo doubles it, which is also minimp3's own
+ * MINIMP3_MAX_SAMPLES_PER_FRAME (netdec.c asserts they agree rather than
+ * trusting it).
+ *
+ * **AAC needs far more.** AAC-LC is 1024 samples a frame, but HE-AAC
+ * doubles the output rate through SBR, so a stereo frame is 2048 * 2 =
+ * 4096 int16 -- and WNZK, the AAC station this was written for, announces
+ * `audio/aacp` with a 48 kHz core, which is exactly that case. An
+ * MP3-sized buffer would have been overrun by the first AAC frame.
+ *
+ * So this matches DECODER_MAX_INT16, which the file path already sized
+ * for the worst case across both backends. One number, sized once, for
+ * a decoder that is the same decoder.
  */
-#define NETDEC_MAX_INT16    (1152 * 2)
+#define NETDEC_MAX_INT16    (9216 * 2)
 
 /*
  * Stack a task must have to call netdec_read(). See above: the call

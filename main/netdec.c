@@ -5,6 +5,7 @@
  */
 #include "netdec.h"
 
+#include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,10 @@
  */
 #include "minimp3_prefix.h"
 #include "minimp3.h"
+
+#include "decoder.h"            /* decoder_register_codecs() */
+#include "esp_audio_simple_dec.h"
+#include "esp_audio_simple_dec_default.h"
 
 #include "framewin.h"
 #include "netstream.h"
@@ -60,6 +65,7 @@ static uint8_t     *s_win_buf;
 static mp3dec_t    *s_mp3;
 static bool         s_open;
 static stream_codec_t s_codec;
+static esp_audio_simple_dec_handle_t s_aac;
 
 static uint32_t s_frames;
 static uint64_t s_samples;
@@ -122,6 +128,10 @@ void netdec_close(void)
     if (!s_open) return;
     ESP_LOGI(TAG, "closing after %u frames, %llu samples, %u bytes resynced",
              s_frames, (unsigned long long)s_samples, s_resyncs);
+    if (s_aac) {
+        esp_audio_simple_dec_close(s_aac);
+        s_aac = NULL;
+    }
     free(s_win_buf);
     s_win_buf = NULL;
     s_mp3 = NULL;
@@ -137,6 +147,14 @@ void netdec_reconnect(void)
      * the station's, not the connection's, and survive. */
     framewin_reset(&s_win);
     mp3dec_init(s_mp3);
+    if (s_aac) {
+        /* Closed and reopened rather than carried over: the decoder
+         * holds parser state for a body that has ended, and an ADTS
+         * stream resumed mid-frame is the one thing its parser cannot
+         * be told about. Cheap, and it happens once per drop. */
+        esp_audio_simple_dec_close(s_aac);
+        s_aac = NULL;
+    }
     ESP_LOGI(TAG, "reconnect: window dropped, %s kept",
              stream_codec_name(s_codec));
 }
@@ -188,6 +206,134 @@ static void identify(void)
     }
 }
 
+/*
+ * Open the AAC decoder. Deferred until the codec is known, so an MP3
+ * stream never pays for it.
+ */
+static bool aac_open(void)
+{
+    if (s_aac) return true;
+
+    /* One owner for the registration flag; see decoder.h. */
+    decoder_register_codecs();
+
+    esp_audio_simple_dec_cfg_t cfg = {
+        .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,
+        .dec_cfg = NULL,
+        .cfg_size = 0,
+        /*
+         * false: the decoder's own parser finds ADTS frame boundaries in
+         * whatever the window hands it. true would mean "this buffer is
+         * exactly one frame", which a sliding window cannot promise --
+         * and which is why _ALAC, _VORBIS, _RAW_OPUS, _ADPCM and _LC3
+         * are not reachable from here at all.
+         */
+        .use_frame_dec = false,
+    };
+    if (esp_audio_simple_dec_open(&cfg, &s_aac) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "esp_audio_simple_dec_open(AAC) failed");
+        s_aac = NULL;
+        return false;
+    }
+    ESP_LOGI(TAG, "AAC decoder open (ADTS, parser-framed)");
+    return true;
+}
+
+/* One AAC frame out of the window. Same contract as netdec_read(). */
+static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
+{
+    if (!aac_open()) return -1;
+    if (framewin_avail(&s_win) == 0) return 0;
+
+    esp_audio_simple_dec_raw_t raw = {
+        .buffer = (uint8_t *)framewin_data(&s_win),
+        .len = (uint32_t)framewin_avail(&s_win),
+        /* Never true: a live stream has no end to signal, and claiming
+         * one would make the decoder flush and stop. */
+        .eos = false,
+    };
+    esp_audio_simple_dec_out_t frame = {
+        .buffer = (uint8_t *)out,
+        .len = (uint32_t)((uint32_t)max_int16 * sizeof(int16_t)),
+    };
+
+    const esp_audio_err_t err =
+        esp_audio_simple_dec_process(s_aac, &raw, &frame);
+
+    /* Consumed first, and whatever the error: the decoder has moved past
+     * those bytes and showing them again would decode them twice. */
+    if (raw.consumed && !framewin_consume(&s_win, (size_t)raw.consumed)) {
+        ESP_LOGE(TAG, "AAC consumed %u of %u shown",
+                 (unsigned)raw.consumed, (unsigned)framewin_avail(&s_win));
+        return -1;
+    }
+
+    if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
+        /* NETDEC_MAX_INT16 is sized for HE-AAC's doubled frame; a
+         * stream needing more than that has a block size nothing here
+         * budgeted for, and truncating it would be silent damage. */
+        ESP_LOGE(TAG, "AAC frame needs %u bytes, buffer is %u",
+                 (unsigned)frame.needed_size,
+                 (unsigned)(max_int16 * sizeof(int16_t)));
+        return -1;
+    }
+    if (err != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "AAC decode error %d", (int)err);
+        return -1;
+    }
+    if (frame.decoded_size == 0) {
+        /* Consumed without producing: a partial frame, or the parser
+         * stepping over something. Not an error and not end of stream. */
+        if (raw.consumed == 0 && framewin_stuck(&s_win)) {
+            framewin_skip_byte(&s_win);
+            s_resyncs++;
+        }
+        return 0;
+    }
+
+    /* Format is only valid once decoded_size is non-zero, which is why
+     * it is asked here rather than at open. */
+    esp_audio_simple_dec_info_t fi;
+    memset(&fi, 0, sizeof(fi));
+    if (esp_audio_simple_dec_get_info(s_aac, &fi) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "AAC decoded %u bytes but reports no format",
+                 (unsigned)frame.decoded_size);
+        return -1;
+    }
+    if (fi.bits_per_sample != 16) {
+        /* The file path folds 24-bit and refuses 32. No broadcast AAC is
+         * either, so this refuses both rather than carrying that
+         * machinery into a path that would never exercise it. */
+        ESP_LOGE(TAG, "AAC is %d-bit; only 16 is handled here",
+                 fi.bits_per_sample);
+        return -1;
+    }
+    if (fi.channel < 1 || fi.channel > 2 || fi.sample_rate <= 0) {
+        ESP_LOGE(TAG, "AAC reports %d channels at %" PRIu32 " Hz",
+                 fi.channel, (uint32_t)fi.sample_rate);
+        return -1;
+    }
+
+    const int produced = (int)(frame.decoded_size / sizeof(int16_t));
+    s_frames++;
+    s_samples += (uint64_t)(produced / fi.channel);
+
+    if (info) {
+        info->sample_rate = (int)fi.sample_rate;
+        info->channels = fi.channel;
+        info->bitrate_kbps = 0;     /* the simple decoder does not say */
+        info->codec = s_codec;
+    }
+    if (!s_reported) {
+        s_reported = true;
+        ESP_LOGI(TAG, "first frame: AAC, %" PRIu32 " Hz, %d ch, %d-bit, "
+                      "%u bytes -> %d samples",
+                 (uint32_t)fi.sample_rate, fi.channel, fi.bits_per_sample,
+                 (unsigned)raw.consumed, produced / fi.channel);
+    }
+    return produced;
+}
+
 int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
 {
     if (!s_open || !out || max_int16 < NETDEC_MAX_INT16) return -1;
@@ -201,12 +347,9 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
          * decode yet and the caller should wait rather than stop. */
         return 0;
     }
+    if (s_codec == STREAM_CODEC_AAC_ADTS) return aac_read(out, max_int16, info);
     if (s_codec != STREAM_CODEC_MP3) {
-        /* AAC is the next patch. Refused rather than half-attempted:
-         * handing ADTS to minimp3 produces noise, not an error, and
-         * noise from a live stream is hard to tell from a bad link. */
-        ESP_LOGE(TAG, "%s is not decoded yet; MP3 only for now",
-                 stream_codec_name(s_codec));
+        ESP_LOGE(TAG, "%s is not decoded here", stream_codec_name(s_codec));
         return -1;
     }
 
