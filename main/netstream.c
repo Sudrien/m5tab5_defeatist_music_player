@@ -322,6 +322,10 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
     bool   sniff_logged = false;
 
     uint64_t produced = 0, window_bytes = 0;
+    /* Time spent not reading because the ring was full. This is a
+     * healthy number on a station that front-loads, and the figure that
+     * says whether the compressed ring wants to be bigger. */
+    int stalled_ms = 0, last_stall_log = 0;
     uint32_t last_titles = d->titles;
     int64_t  last_window = esp_timer_get_time();
     int64_t  last_progress = last_window;
@@ -380,8 +384,33 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
             publish_title(d->title);
         }
 
-        /* Into the ring, in slices, so a decoder that is not draining
-         * cannot stop this task from noticing a stop request. */
+        /*
+         * Into the ring, in slices, so a decoder that is not draining
+         * cannot stop this task from noticing a stop request.
+         *
+         * **This waits rather than dropping.** The first version dropped
+         * what would not fit, on the argument that a full ring means the
+         * server is ahead of real time and that stalling a read is how a
+         * server decides to disconnect us. The first argument is
+         * backwards and the second is not how HTTP works.
+         *
+         * WUOM measured it: StreamTheWorld front-loads about 43 seconds
+         * of audio -- windows of 3.18x, 6.06x and 2.25x -- and then
+         * paces at exactly real time, a mean of 1.000x over the next
+         * forty seconds. At 64 kbit/s that burst is 454 KB against a
+         * 256 KB ring, so with a decoder draining at 1x the old path
+         * would have discarded about 198 KB, some 25 seconds of audio
+         * the listener was going to hear. A gap in the middle of a
+         * programme, from a station that did nothing wrong.
+         *
+         * Not reading is the correct response: the TCP window closes,
+         * the server stops sending, and the bytes wait in its buffer
+         * instead of being thrown away in ours. That is what every other
+         * streaming client does. A server that disconnects an idle
+         * reader exists, and netplan already handles a drop by
+         * reconnecting -- which costs a reconnect, against a guaranteed
+         * hole in the audio.
+         */
         for (size_t off = 0; off < got; ) {
             const size_t sent = xStreamBufferSend(s_ring, audio + off, got - off,
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
@@ -389,15 +418,13 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
             produced += sent;
             if (sent == 0) {
                 if (superseded(gen)) return produced;
-                /* A full ring is not an error: it is the decoder keeping
-                 * up less than the network is delivering, which for a
-                 * live stream means the server is ahead of real time.
-                 * The bytes that do not fit are dropped rather than
-                 * stalling the read, because stalling the read is how a
-                 * server decides to disconnect us. */
-                ESP_LOGW(TAG, "ring full; dropped %u bytes",
-                         (unsigned)(got - off));
-                break;
+                stalled_ms += SEND_SLICE_MS;
+                if (stalled_ms - last_stall_log >= 5000) {
+                    last_stall_log = stalled_ms;
+                    ESP_LOGI(TAG, "ring full, not reading (%d ms so far) -- "
+                                  "the server is ahead and can wait",
+                             stalled_ms);
+                }
             }
         }
 
@@ -414,8 +441,9 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
         if (now - last_window >= KBPS_WINDOW_US) {
             const int64_t ms = (now - last_window) / 1000;
             s_kbps = ms ? (int)((int64_t)window_bytes * 8 / ms) : 0;
-            ESP_LOGI(TAG, "%d kbit/s, ring %u%% (%u bytes), internal free %u, stack low water %u",
+            ESP_LOGI(TAG, "%d kbit/s, ring %u%% (%u bytes), stalled %d ms, internal free %u, stack low water %u",
                      s_kbps, netstream_ring_pct(), (unsigned)s_buffered,
+                     stalled_ms,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
             window_bytes = 0;

@@ -33,6 +33,15 @@
  *    probe goes away when the stream path lands. Nothing else in the
  *    program may open HTTPS while a stream plays.
  *
+ * A FULL RING WAITS; IT DOES NOT DROP
+ *
+ * A station that front-loads its buffer will overrun this ring. WUOM
+ * sends about 43 seconds of audio in the first fifteen and then paces at
+ * real time; at 64 kbit/s that burst is 454 KB against 256 KB here. The
+ * task stops reading and lets the TCP window close, so the surplus waits
+ * in the server's buffer rather than being discarded in ours. Dropping
+ * would put a 25-second hole in the middle of a programme.
+ *
  * THE RING IS STATIC AND ALLOCATED ONCE
  *
  * `xStreamBufferCreateWithCaps()` is banned here -- see "Heap

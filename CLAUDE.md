@@ -7177,6 +7177,52 @@ headroom, WUOM for behaviour.** Neither alone answers both. Also: first
 byte at 2468 ms against WNZK's 3289, there being no redirect hop, and
 the stop took 59 ms.
 
+### 0121: a full ring waits, because WUOM front-loads 43 seconds
+
+The clean WUOM run measured something that had not come up on WNZK, and
+it condemns one of 0103's two named judgements.
+
+**StreamTheWorld front-loads and then paces exactly.** Windows of 3.18x,
+6.06x and 2.25x for the first fifteen seconds -- 58 seconds of audio --
+then eight windows averaging **1.000x**. The server hands over about 43
+seconds of audio up front and thereafter sends in real time.
+
+0103 wrote: *"A full ring drops the bytes that do not fit rather than
+stalling the read... for a live stream a full ring means the server is
+ahead of real time."* It listed that as a judgement to disagree with
+later if a flash said so. **The flash says so.** At 64 kbit/s the burst
+is **454 KB against a 256 KB ring**, so a decoder draining at 1x would
+have made netstream discard about 198 KB -- roughly **25 seconds of
+audio**, a hole in the middle of a programme from a station that did
+nothing wrong.
+
+Both halves of the original argument are wrong. "The server is ahead of
+real time" is the premise for keeping the bytes, not for throwing them
+away -- being ahead is exactly what a buffer is for. And "stalling the
+read is how a server decides to disconnect us" is not how HTTP works:
+not reading closes the TCP window, the server stops sending, and the
+surplus waits in its buffer. That is what every other streaming client
+does.
+
+So the send loop waits, in slices, still checking for a stop request
+each time, and logs how long it has been waiting. A server that does
+disconnect an idle reader exists -- and netplan already handles a drop
+by reconnecting, which costs one reconnect against a guaranteed hole.
+
+**This is why the probe drained as fast as it could and never saw it.**
+The probe reads flat out, so the ring sat at 0% for all five runs and
+the drop path never fired. It only appears with a decoder draining at
+1x, which is phase 2. The bug was measurable a run before it was
+reachable, and only because the probe logs the ring and the audio clock
+separately.
+
+**A number for phase 2 and 3:** the compressed ring will now stall
+rather than overflow on this station, and `stalled ms` in the window log
+is the figure that says whether 256 KB should grow. A ring big enough
+for a 43-second burst at 64 kbit/s would be 344 KB; big enough at
+128 kbit/s, 688 KB. Growing it is cheap in PSRAM, but stalling is not a
+fault, so the number to watch is whether stalls cost reconnects.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
