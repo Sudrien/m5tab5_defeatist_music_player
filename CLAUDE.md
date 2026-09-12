@@ -6984,11 +6984,66 @@ contention. **The re-runs 0114 asked for are now more interesting, not
 less:** with 15 KB of internal RAM back, beside SD and with nothing
 playing.
 
-**Where the series stands.** Phase 1 streams, and has now been made to
-fail and recover on hardware. The reconnect path ran for the first time
-and its bookkeeping was wrong in two ways, both fixed. Throughput is
-still unexplained and is still the thing to measure before building
-phase 2 on it. Phase
+### 0116: the throughput question, answered -- it is not the code
+
+Third run, beside SD playback, after 0115. **0115's fixes hold and the
+throughput question resolves, but not the way either candidate in 0114
+predicted.**
+
+    internal free at probe start   94423   (was 84259)
+    internal minimum during run    57268   (was 46916, and 43560 when it starved)
+    stack low water                 2784 free of 6144 -> peak 3360 bytes
+    no dma_alloc failures, no drop, full 60 s, stop in 119 ms
+    ADTS: 0 bytes lost hunting, again
+
+12 KB more internal RAM at the start and 14 KB more at the worst moment.
+The stack at 6144 peaks at 3360 with 2784 spare, matching the 8 KB
+measurement almost exactly, so that size is settled.
+
+**The number.** 0.828x overall, mean 449 kbit/s. Against the USB run's
+0.794x and 428 kbit/s. So **USB contention was worth about 20 kbit/s --
+real, but nowhere near the 100 kbit/s gap** -- and the extra 12 KB of
+internal RAM bought nothing measurable either. Both of 0114's candidates
+are wrong.
+
+**What the window breakdown says instead.** The SD run's windows run
+0.89, 0.97, 0.96, 0.90, 0.98, **1.01**, 0.80, **0.51**, 0.88, 0.82. Four
+consecutive windows at 0.96-1.01, and a peak of 526 kbit/s. **The ring
+and the task boundary sustain 1.03x of this station's bitrate when the
+link allows it**, which is the question that actually mattered and the
+answer is that the code is not the bottleneck. The mean is dragged down
+by a floor that fell to 0.51x, not by a ceiling.
+
+**And the comparison was never controlled.** RSSI was -40/-42 dBm on the
+first run and -38 on the starved one; this run was **-47 dBm**, five to
+seven dB worse, on a 2.4 GHz channel with twenty-four networks in
+earshot. The old probe's 1.05x and 0.97x were measured on a better
+signal, and the old probe no longer exists to re-run. So the honest
+conclusion is not "throughput regressed" but **"nothing here measures
+the link twice under the same conditions, and the code's ceiling is
+fine."**
+
+**Stop benchmarking on WNZK.** 511 kbit/s AAC sits right at this link's
+capacity on a good day and below it on a bad one, which makes every
+number ambiguous: a dip could be the link, the station, or the code, and
+there is no headroom to tell them apart. At 449 kbit/s mean the same
+link is 3.5x real time for a 128 kbit/s station and 2.3x at 192. **Phase
+2 and 3 should be measured on an ordinary station**, with WNZK kept as
+the deliberate worst case -- and `bufferplan` must not be tuned against
+it, since at 0.83x its buffer drains forever and giving up after 30 s is
+the correct behaviour rather than a bug.
+
+**Items 1-5 are now all answered.** It compiles, it reaches PLAYING in
+about 3.3 s, throughput is link-limited rather than code-limited,
+the ring correctly trends empty behind a faster reader, and 0115's run
+exercised a real drop and a real reconnect. Phase 1 is done being
+guessed at.
+
+**Where the series stands.** Phase 1 works, is measured, and its
+remaining unknowns are about stations rather than about itself. Phase 2
+is unblocked -- and its first question, what the AAC decoder costs in
+internal RAM, is now a much more comfortable one to ask, with 57 KB
+free at the worst moment instead of 43. Phase
 4's parser written and tested, with nothing reading the file yet. Phases
 2 and 3 untouched, and both want a board before they are worth starting
 -- phase 2's first question is what the AAC decoder costs in internal
