@@ -129,7 +129,13 @@ CODEC_BIN := codecplantest
 # computes the lengths a second time, longhand.
 MP3_BIN := mp3counttest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3
+# The window between the ring and the decoder. Losing bytes at a refill
+# boundary does not crash -- the decoder resynchronises and the stream
+# plays with a click every few seconds, which from outside is "internet
+# radio is a bit crackly" with no file to compare against.
+FRAMEWIN_BIN := framewintest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -195,7 +201,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -262,10 +268,17 @@ $(MP3_BIN): mp3counttest.c ../main/mp3count.h
 run-mp3: $(MP3_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(MP3_BIN)
 
+$(FRAMEWIN_BIN): framewintest.c ../main/framewin.h ../main/mp3count.h
+	$(CC) $(WARNCFLAGS) -c framewintest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ framewintest.c $(LDFLAGS)
+
+run-framewin: $(FRAMEWIN_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FRAMEWIN_BIN)
+
 check-ui:
 	@for f in $(UI_CHECK); do \
 		echo "$(CC) -c $$f"; \
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin clean

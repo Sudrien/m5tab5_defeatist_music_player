@@ -7301,6 +7301,49 @@ what a library constant covers. There was no way to catch it except by
 running it, which is an argument for flashing small changes rather than
 for reviewing them harder.
 
+### 0124: phase 2 begins with the window, not the decoder
+
+Phase 2 decodes from the ring. The first piece is not a decoder: it is
+the window between the ring and one, because `mp3dec_decode_frame()` and
+`esp_audio_simple_dec_process()` both want a contiguous buffer, both
+report how much they consumed, and both may consume **nothing** because
+the buffer does not yet hold a whole frame. Refill, partial consume,
+slide along -- and that bookkeeping is where a decode loop goes wrong.
+
+**The failure it prevents is not a crash.** A window that loses a few
+bytes at each refill boundary desynchronises the decoder, which
+resynchronises on the next frame header and carries on. The result is a
+click every few seconds and a stream that otherwise works. On a live
+stream, with no file to compare against and no seek bar to replay a
+passage, that is close to undiagnosable from outside -- it presents as
+"internet radio is a bit crackly".
+
+So the invariant is asserted directly: **every byte written in comes out
+exactly once, in order.** 2076 checks, including 400 real WUOM frames
+(MPEG1 L3, 64 kbit/s, 208/209 bytes, the frame the hardware actually
+receives) pushed through at chunk sizes from 1 byte to 16 KB, and 2000
+random walks where the consume amounts ignore frame boundaries entirely.
+
+Two decisions worth naming:
+
+- **Overruns are refused, not clamped.** A decoder reporting that it
+  consumed more than it was shown is a decoder whose return value has
+  been misread, and clamping would slide the window past bytes nothing
+  ever saw -- which is the click bug, arrived at politely.
+- **The window must exceed the largest frame, or the loop hangs.** A
+  frame that never fits means the decoder consumes nothing forever. ADTS
+  carries a 13-bit length field, so the bound is 8191 bytes, and a
+  window has to hold one whole frame plus the partial one before it.
+  Twice 8191 is 16382 -- **a 16 KB window clears that by two bytes**,
+  which is luck rather than design, so it is 24 KB and the test asserts
+  4 KB of margin rather than a bare inequality. `framewin_stuck()` is
+  the runtime answer for a stream that is simply not what it claimed.
+
+Nothing calls it yet. The decoder glue is next, and it wants minimp3's
+frame decoder rather than `mp3dec_ex` -- **MP3 first rather than AAC**,
+against the plan's order, because the benchmark station is now MP3 and
+that is the path that can be watched. `codecplan.h` already routes both.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
