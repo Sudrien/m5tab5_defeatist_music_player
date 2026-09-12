@@ -7922,15 +7922,17 @@ the end of the iteration.
 
 ### What is open
 
-- **`stations_load()` is called at 10 Hz when there is no station
-  list.** `player_loop()` retries until it succeeds, and "no
-  stations.m3u" is a permanent false -- so a card without one produces
-  `no stations.m3u on any volume` every ~104 ms for ever. It floods the
-  log, and it opens two files per second on the card behind whatever is
-  playing. **This is the next patch.** The fix is to latch on the
-  attempt rather than the result and retry only when
-  `storage_generation()` changes, which is the same signal browser.c
-  already uses to notice a card.
+- ~~**`stations_load()` is called at 10 Hz when there is no station
+  list.**~~ Closed by 0209, and worth keeping for the shape of it. The
+  load retried until it returned true, and "no stations.m3u" is a
+  **permanent** false -- so a card without one produced
+  `no stations.m3u on any volume` every ~104 ms from boot, about five
+  hundred lines in the first minute and two file opens a second on the
+  card behind whatever was playing. It now latches on
+  `storage_generation()` **whether the load worked or not**, because the
+  attempt is what has happened and the result is not what decides
+  whether to repeat it. Same error as 0804's `if (n <= 0) break`: a
+  return value asked a question it does not answer. **Unflashed.**
 - **The screen shows only the station name.** `s_stream_bottom` (the ICY
   title) and `s_stream_status` (Connecting / Buffering / Reconnecting /
   No signal) are computed every pass by streamplan.h and **read by
