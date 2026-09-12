@@ -8128,6 +8128,127 @@ and pick a station, and read the three text rows.**
   0304. **`stack low water 2756`** on the netstream task still stands,
   carried over from the 0200 list unchanged.
 
+## A VALUE THAT ANSWERS A DIFFERENT QUESTION (read this one)
+
+**Five faults in this series were the same fault.** Not the same code,
+the same shape: a value is read to answer a question it does not answer,
+the reading is plausible, and the wrong answer looks like someone else's
+bug. They are listed together because the fifth one was found by
+recognising the pattern rather than by instrumenting, and that is the
+first time on this project that reading this file was faster than
+reflashing.
+
+| value | asked | actually means |
+| --- | --- | --- |
+| `NETSTREAM_IDLE` (0203) | is the source done? | done, **or not started yet** |
+| `stations_load()` returns false (0209) | should I retry? | no file, **which is permanent** |
+| `STREAM_CODEC_NONE` (0309) | keep sniffing? | unidentified, **or identified as not audio** |
+| `uxTaskGetStackHighWaterMark()` (0310) | how much stack is left? | **the least there has ever been** |
+| `phase_since_ms` vs 30 s (0311) | has the source given up? | **how long the phase has lasted** |
+
+Two things they share, and both are the tell:
+
+**The wrong answer accuses something else.** 0203's log read as a station
+hanging up; 0311's read as a station hanging up; 0310 blamed the caller's
+stack size in a message naming the correct size; 0309 blamed the station,
+which for once was fair, 1300 times. **If a log accuses a thing you
+cannot see, suspect the value that named it.**
+
+**The evidence of the bug is usually in the number itself.** A task whose
+worst-ever free stack is 2068 has already survived the 17744-byte call it
+is being refused for. A stream that ended at `30025 ms silent` against a
+30000 ms limit ended 25 ms after the attempt that succeeded. Read the
+figure before believing the sentence built from it.
+
+There is a third of these in CLAUDE.md's own opening: a stack protection
+fault reports the overshoot, not the demand. That one cost two patches
+and two panics. This class is the most expensive thing on this project.
+
+## The 0308-0311 flashes: radio works, and four faults on the way
+
+Four runs, each one finding something the previous had hidden. Worth
+reading as a sequence, because the order was not optional -- **0308's
+fault was masking 0310's, and 0310's was masking 0311's.**
+
+### What works now
+
+- **All four stations play.** MP3 at 64 (WUOM) and 128 kbit/s (SomaFM),
+  AAC-LC at 48 kHz stereo (WNZK). Pause and resume on a stream. Station
+  to station without going through the file path.
+- **ICY titles, at last**, and the answer to the question 0200 left
+  open: `"Zero Cult - City Voices"` and `"D. Batistatos - For All I
+  Know"` from SomaFM, 1.4 s after connect. **The demuxer and the
+  plumbing were always fine.** WUOM sends `icy-metaint: 16000` and no
+  titles, and WNZK sends `" - "` forever, which `streamplan_lines()`
+  suppresses correctly. Two stations that send nothing is not a bug.
+- **0200's WUOM measurement reproduced exactly**: ring climbs to 69% on
+  the front-loaded burst, then holds while the rate settles to 62
+  kbit/s. WNZK still sits at 0% for its whole life, as predicted.
+- **SomaFM is the third pacing case** and sits between the two: 128
+  kbit/s, ring 0-2%, 300 ms of cumulative stall in half a minute.
+
+### The four faults
+
+1. **`browser_open()` never reset `s_radio`** (0308). Once the RADIO tab
+   had been visited, every REOPEN of the chooser drew a volume's files
+   with the radio flag still set -- `button: row 3 (station)
+   "Advent_Chamber_Orchestra_-_04_-_Mozart..."` followed by
+   `station 4 of 4: ice1.somafm.com`. Broken since 0207 and unreachable
+   until a station list existed, a station had played, AND the chooser
+   was reopened. **It also made every other fault in that run
+   unreadable**, because half the presses were being dispatched as the
+   wrong kind of thing.
+2. **A web page was a delay rather than a verdict** (0309). 1300 lines of
+   `The station returned a web page` in thirteen seconds, and the stream
+   never ended. See the table above.
+3. **The stack check read the high-water mark** (0310). Every stream
+   after a file had played was refused for the rest of the boot. The
+   changing figure was the clue -- 5604 after a stream, 2068 after a
+   256 kbps file -- and **no instrumentation was needed**: a value that
+   moves when nothing relevant has changed is not measuring the thing.
+4. **The stall giveup was wall clock** (0311). This file had claimed a
+   source working through retries could never be cut off, reasoning from
+   a 15 s backoff against a 30 s limit. **The arithmetic left out how
+   long an attempt takes**: six seconds each against a server that
+   handshakes and then times out, five of them, and the stream died
+   25 ms after the fifth succeeded.
+
+### Two things the logs settled that were guesses
+
+- **zeno.fm is the flaky one, not the player.** Three runs show
+  `mbedtls_ssl_handshake returned -0x0050` on the first attempt to
+  `stream.zeno.fm`, recovered by the whole-attempt retry, then a 302 to
+  `stream-285.surfernetwork.com`. It is worth keeping in the station
+  list precisely because it is unreliable: it is the only station here
+  that exercises the retry path, and it is what found 0311.
+- **The AAC decoder-open cost is not a constant.** 14860, 14864, 14872,
+  10888, 10896 across runs, all on the same station. `netdec_reconnect()
+  does close and reopen, so it is fragmentation rather than a leak --
+  but the internal-RAM budget was tuned against 14860 as though it were
+  fixed, and the spread is 4 KB.
+
+### What is open
+
+- **The screen has still never been looked at.** Every fault in these
+  four runs was found in the log, and 0301's LIVE badge, status line and
+  ICY title row have been on a working stream for minutes at a time with
+  nobody reporting what they looked like. That is now the cheapest
+  unknown in the project.
+- **`first sound at 11986 ms` on a resume**, against 482 ms on a
+  reconnect to a fast server. Most of it is the connect, but about five
+  seconds is preroll against a station whose ring never fills. Whether
+  BUFPLAN_PREROLL_MS is right for a 0%-ring station is a real question
+  and no number in these logs answers it.
+- **`stream cannot be decoded; giving up` prints before
+  `buffering -> playing`**, which reads as the give-up being ignored. It
+  is not -- two tasks, two log lines, no ordering between them -- but it
+  is the kind of line that costs somebody twenty minutes.
+- **`only 2048 audio bytes before the drop` after a give-up.** True and
+  misleading: the drop was ours. Same family as 0205.
+- **The 0311 case has not recurred.** The run that confirmed the patch
+  had a single retry, not five, so the fix is flashed and the fault it
+  fixes has not been re-triggered. Held open deliberately.
+
 ## radio-browser.info, which had never been touched (0306)
 
 **The question that prompted this: wasn't radio-browser integration
