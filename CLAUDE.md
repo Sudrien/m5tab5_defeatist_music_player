@@ -7344,6 +7344,67 @@ frame decoder rather than `mp3dec_ex` -- **MP3 first rather than AAC**,
 against the plan's order, because the benchmark station is now MP3 and
 that is the path that can be watched. `codecplan.h` already routes both.
 
+### 0125: netdec.c -- MP3 out of the ring
+
+The decoder glue. `framewin` feeds `mp3dec_decode_frame()` and PCM comes
+out.
+
+**Why it is not `decoder.c`.** That file is built around a file: it opens
+a path, builds or loads a seek index, answers duration and seek, and its
+MP3 backend is `mp3dec_ex`, which wants a seekable source and an index
+over the whole stream. A live stream has no path, no length, no index
+and no seek. Threading one through that facade means teaching every one
+of those to say "not applicable", and the result is a file decoder with
+a stream-shaped hole in it.
+
+What *is* shared is the decoder. minimp3 has two doors: `mp3dec_ex_*`,
+the indexed file API, and `mp3dec_decode_frame()`, which takes a buffer
+and reports how many bytes of it were a frame -- **already a stream
+interface**. Same library, same vendored copy, same renamed symbols,
+entered differently. `MINIMP3_IMPLEMENTATION` stays in `decoder.c` and
+this links against it; `minimp3_prefix.h` comes first here too, for the
+reason it exists at all.
+
+**To be clear about a thing that sounds like a hardware constraint and
+is not:** the P4 has no audio decoder in silicon. Every format this
+player handles, files included, is decoded in software. minimp3 is
+chosen over `esp_audio_codec`'s MP3 for the reasons in `decoder.h` --
+Layers I and II, free format, Xing/LAME -- and its frame API is chosen
+over its file API because a stream cannot seek.
+
+**MP3 only, against the plan's order.** The plan said ADTS AAC first,
+when WNZK was the station under test. The benchmark is WUOM now, which
+is MP3, and the path that can be watched on hardware is worth more than
+the one written down first. AAC is refused cleanly rather than
+half-attempted: handing ADTS to minimp3 produces noise, not an error,
+and noise from a live stream is hard to tell from a bad link.
+
+Three things carried over from earlier mistakes rather than rediscovered:
+
+- **The codec is identified once, by `codecplan_choose()`.** 0119 decided
+  per window from whichever counter was non-zero, chose ADTS on an MP3
+  stream and wrapped a clock. Decided once, then kept.
+- **Everything is in PSRAM.** 0115 is the reason: internal RAM is what
+  the Wi-Fi transport needs for DMA, and this path starved it once.
+- **`frame_bytes` and the return value are different questions.**
+  Consumed bytes and produced samples differ for an ID3 tag or junk
+  before the first sync -- consumed, no samples -- which is a resync and
+  not an error. A decoder reporting more consumed than it was shown is
+  fatal rather than clamped, because a wrong window position *is* the
+  click-every-few-seconds bug.
+
+**Checked with stub headers before shipping**, which 0113 suggested and
+nothing had done. `netdec.c` compiles at `-O2 -Werror` against a
+throwaway `minimp3.h`, `esp_log.h` and `esp_heap_caps.h` in /tmp -- which
+also checks the format strings and the `netstream.h` calls. It is not a
+committed harness and it proves nothing about behaviour, but two of the
+last four patches broke the build in a file only `idf.py` ever compiles,
+and this one did not.
+
+Nothing calls it yet: no task drives it, so the ring still has no reader
+but the probe. That is the next patch, and it is the one that finally
+exercises 0121's backpressure.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
