@@ -75,6 +75,24 @@ extern "C" {
  */
 #define STREAMPROBE_URL      "https://26433.live.streamtheworld.com/WUOMFM.mp3?uuid=xnpek6ipb"
 /* #define STREAMPROBE_URL   "https://stream.zeno.fm/erunhwj5lekvv" */
+/*
+ * Decode the stream instead of just draining it, at real time.
+ *
+ * 1: netdec decodes MP3 frames out of the ring and the PCM is thrown
+ *    away, paced so that decoded time tracks wall time. This is the only
+ *    way to exercise 0121's backpressure -- six runs of raw draining
+ *    reported `stalled 0 ms` because a reader going flat out never lets
+ *    the ring fill. A paced reader on WUOM should fill it within fifteen
+ *    seconds, since the station front-loads about 43 seconds of audio
+ *    against a 33-second ring.
+ *
+ * 0: the raw mode, which drains bytes and counts frames without
+ *    decoding. Kept because it is what produced six runs of "0 bytes
+ *    lost hunting", and because it is the mode that can be pointed at a
+ *    codec netdec does not handle yet.
+ */
+#define STREAMPROBE_DECODE   (1)
+
 #define STREAMPROBE_SECONDS  (60)
 /*
  * Seconds after the first address before the probe starts. Long enough

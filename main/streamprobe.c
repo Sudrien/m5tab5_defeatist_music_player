@@ -19,6 +19,7 @@
 #include "sdkconfig.h"
 
 #include "codecplan.h"
+#include "netdec.h"
 #include "mp3count.h"
 #include "netstream.h"
 #include "streamsniff.h"
@@ -65,6 +66,153 @@ static void heap_line(const char *when)
  *      dropping, and a ring that empties to nothing repeatedly at 0.97x
  *      is what phase 3's watermarks will have to ride.
  */
+/* Stop the stream and report the heap, shared by both probe modes. */
+static void finish(int64_t t_start)
+{
+    (void)t_start;
+    const int64_t t_stop = esp_timer_get_time();
+    const bool stopped = netstream_stop_wait(5000);
+    ESP_LOGI(TAG, "stop %s after %lld ms, state %s",
+             stopped ? "completed" : "TIMED OUT",
+             (long long)((esp_timer_get_time() - t_stop) / 1000),
+             netstream_state_name(netstream_state()));
+    heap_line("after");
+}
+
+#if STREAMPROBE_DECODE
+/*
+ * Decode the stream and throw the PCM away, AT REAL TIME.
+ *
+ * The pacing is the entire point. Every run so far drained the ring flat
+ * out, so it sat at 0% and `stalled 0 ms` for six runs -- which means
+ * **0121's backpressure has never executed.** A real decoder does not
+ * drain flat out; it consumes one second of audio per second. WUOM hands
+ * over about 43 seconds up front against a 33-second ring, so a paced
+ * reader should fill the ring within the first fifteen seconds and hold
+ * netstream in its send loop. If it does not, 0121 is wrong about
+ * something.
+ *
+ * So this sleeps to keep decoded time level with wall time, and reports
+ * the two against each other. It is a writer that writes nowhere: no
+ * I2S, no resampling, no volume -- those are phase 3's, and putting them
+ * here would mean this could fail for reasons that are not the stream
+ * path's.
+ *
+ * What it certifies, in place of the "0 bytes lost hunting" that the raw
+ * mode gave: `netdec_resyncs()`. Both are the same claim -- that the
+ * bytes reaching the decoder are the bytes the station sent, in order --
+ * measured on the far side of one more component.
+ */
+static void decode_paced(int64_t start)
+{
+    if (!netdec_open()) {
+        ESP_LOGE(TAG, "netdec_open failed");
+        return;
+    }
+
+    /* One frame of PCM. PSRAM: it is 4.6 KB and internal RAM is what the
+     * Wi-Fi transport needs (0115). */
+    int16_t *const pcm = heap_caps_malloc(NETDEC_MAX_INT16 * sizeof(int16_t),
+                                          MALLOC_CAP_SPIRAM);
+    if (!pcm) {
+        ESP_LOGE(TAG, "no PSRAM for a PCM frame");
+        netdec_close();
+        return;
+    }
+
+    netdec_info_t info;
+    memset(&info, 0, sizeof(info));
+
+    uint64_t samples = 0;           /* per channel, total */
+    uint64_t last_samples = 0;
+    int64_t  last_win = esp_timer_get_time();
+    int64_t  first_pcm = 0;
+    int      rate = 0;
+    unsigned ring_peak = 0, waits = 0, empties = 0;
+    bool     fatal = false;
+
+    while (esp_timer_get_time() - start < (int64_t)STREAMPROBE_SECONDS * 1000000) {
+        const netstream_state_t st = netstream_state();
+        if (st == NETSTREAM_FAILED) {
+            ESP_LOGE(TAG, "netstream gave up (status %d, %d failures)",
+                     netstream_last_status(), netstream_failures());
+            break;
+        }
+
+        const unsigned pct = (unsigned)netstream_ring_pct();
+        if (pct > ring_peak) ring_peak = pct;
+
+        const int n = netdec_read(pcm, NETDEC_MAX_INT16, &info);
+        if (n < 0) {
+            ESP_LOGE(TAG, "netdec refused the stream; stopping");
+            fatal = true;
+            break;
+        }
+        if (n == 0) {
+            empties++;
+            continue;
+        }
+        if (!first_pcm) {
+            first_pcm = esp_timer_get_time();
+            ESP_LOGI(TAG, "first PCM at %lld ms: %d Hz, %d ch, %d kbit/s",
+                     (long long)((first_pcm - start) / 1000),
+                     info.sample_rate, info.channels, info.bitrate_kbps);
+        }
+        rate = info.sample_rate;
+        samples += (uint64_t)(n / (info.channels > 0 ? info.channels : 1));
+
+        /*
+         * Pace. Sleep until wall time catches up with decoded time. A
+         * frame is 26 ms at 44.1 kHz, so this sleeps most iterations
+         * once the burst has been absorbed -- which is exactly when the
+         * ring should start filling.
+         */
+        if (rate > 0 && first_pcm) {
+            const int64_t due = first_pcm + (int64_t)(samples * 1000000ULL / (uint64_t)rate);
+            const int64_t now = esp_timer_get_time();
+            if (due > now) {
+                const int ms = (int)((due - now) / 1000);
+                if (ms > 0) {
+                    waits++;
+                    vTaskDelay(pdMS_TO_TICKS(ms > 100 ? 100 : ms));
+                }
+            }
+        }
+
+        const int64_t now = esp_timer_get_time();
+        if (now - last_win >= 5000000) {
+            const int64_t wall = (now - last_win) / 1000;
+            const uint64_t dec_ms = rate ? (samples - last_samples) * 1000ULL / (uint64_t)rate : 0;
+            ESP_LOGI(TAG, "%lld s: decoded %llu ms in %lld ms (%llu.%02llux), "
+                          "ring %u%%, %u frames, %u resyncs, %u waits, %u empty",
+                     (long long)((now - start) / 1000000),
+                     (unsigned long long)dec_ms, (long long)wall,
+                     (unsigned long long)(wall ? dec_ms / (uint64_t)wall : 0),
+                     (unsigned long long)(wall ? (dec_ms * 100 / (uint64_t)wall) % 100 : 0),
+                     (unsigned)netstream_ring_pct(), netdec_frames(),
+                     netdec_resyncs(), waits, empties);
+            last_samples = samples;
+            last_win = now;
+            waits = 0;
+            empties = 0;
+        }
+    }
+
+    const int64_t wall_ms = (esp_timer_get_time() - start) / 1000;
+    const uint64_t total_ms = rate ? samples * 1000ULL / (uint64_t)rate : 0;
+    ESP_LOGI(TAG, "decoded %u frames, %llu ms of audio in %lld ms, %u bytes resynced%s",
+             netdec_frames(), (unsigned long long)total_ms, (long long)wall_ms,
+             netdec_resyncs(), fatal ? " (stopped early)" : "");
+    ESP_LOGI(TAG, "ring peak %u%% -- 0121's backpressure %s",
+             ring_peak,
+             ring_peak >= 90 ? "was exercised"
+                             : "was NOT exercised; the ring never filled");
+
+    free(pcm);
+    netdec_close();
+}
+#endif /* STREAMPROBE_DECODE */
+
 static void probe_task(void *arg)
 {
     (void)arg;
@@ -97,6 +245,12 @@ static void probe_task(void *arg)
         return;
     }
 
+#if STREAMPROBE_DECODE
+    decode_paced(start);
+    finish(start);
+    vTaskDelete(NULL);
+    return;
+#else
     /*
      * PSRAM, for the same reason netstream's buffers moved there: a
      * `static uint8_t buf[]` is internal RAM, and between this file and
@@ -317,14 +471,9 @@ static void probe_task(void *arg)
     /* The stop path matters as much as the start: nothing may leave a
      * TLS session open, and how long this takes is the number phase 3
      * needs for its pause. */
-    const int64_t t_stop = esp_timer_get_time();
-    const bool stopped = netstream_stop_wait(5000);
-    ESP_LOGI(TAG, "stop %s after %lld ms, state %s",
-             stopped ? "completed" : "TIMED OUT",
-             (long long)((esp_timer_get_time() - t_stop) / 1000),
-             netstream_state_name(netstream_state()));
-    heap_line("after");
+    finish(start);
     free(work);
+#endif /* !STREAMPROBE_DECODE */
     vTaskDelete(NULL);
 }
 

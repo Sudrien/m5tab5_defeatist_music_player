@@ -7405,6 +7405,46 @@ Nothing calls it yet: no task drives it, so the ring still has no reader
 but the probe. That is the next patch, and it is the one that finally
 exercises 0121's backpressure.
 
+### 0126: the probe decodes, at real time
+
+The patch that finally puts a reader on the ring, and the first one that
+can fail for a reason phase 2 owns.
+
+**Why pacing is the whole point.** Six runs reported `stalled 0 ms` and a
+ring at 0%, because the probe drained flat out. A reader that goes as
+fast as it can never lets a ring fill, so **0121's backpressure has never
+once executed.** A real decoder consumes one second of audio per second.
+WUOM front-loads about 43 seconds against a 33-second ring, so a paced
+reader should fill it inside the first fifteen seconds and hold netstream
+in its send loop. If it does not, something in 0121 is wrong.
+
+So `decode_paced()` sleeps to keep decoded time level with wall time and
+reports the two against each other. It is a writer that writes nowhere --
+no I2S, no resampling, no volume. Those are phase 3's, and putting them
+here would let this fail for reasons that are not the stream path's.
+
+**What it certifies.** The raw mode's headline was "0 bytes lost hunting
+for a sync", six runs running. The decode mode's equivalent is
+`netdec_resyncs()`: the same claim -- the bytes reaching the decoder are
+the bytes the station sent, in order -- measured on the far side of one
+more component. It also prints, in as many words, whether the ring ever
+approached full, so the answer to "was 0121 exercised" is in the log
+rather than inferred from a peak figure.
+
+**The raw mode is kept**, behind `STREAMPROBE_DECODE`. It produced the
+six clean runs, and it is the mode that can still be pointed at a codec
+`netdec` does not handle -- which is every codec except MP3 right now.
+Both paths were stub-compiled at `-O2 -Werror` before shipping, the
+`#else` branch included, because a branch nothing builds is a branch
+that rots.
+
+**What to read in the first log, in order:** does `first PCM` appear at
+all; does the per-window ratio sit near 1.00x once the burst is absorbed;
+does the ring climb past 90% in the first fifteen seconds and netstream
+start reporting a non-zero `stalled`; and is `resyncs` zero. A non-zero
+resync count on a station that gave six runs of zero bytes lost is
+`framewin` or `netdec`, not the network.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
