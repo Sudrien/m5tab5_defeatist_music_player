@@ -1,0 +1,107 @@
+From df6773ba8e24527b7b324387cc2d686c291f4f22 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 12 Sep 2026 20:01:01 +0000
+Subject: [PATCH 300/303] player.c -- a stream's text rows are the stream's
+
+play_stream()'s list of "the parts a stream does need" retires the
+previous track's numbers and its visuals and does not retire its text.
+ui_task reads s_tags_shown and s_name_shown, both copies taken only when
+s_text_staged is set, and it prefers s_tags_shown.title over the name
+whenever that title is non-empty. So the station name went into
+s_display_name, nothing staged it, and the screen kept showing the last
+FILE's title, artist and album -- not for a moment, for the whole
+broadcast.
+
+CLAUDE.md's open list records this as "the screen shows only the station
+name", which is what every run so far saw, and the reason is that each of
+them chose a station from a boot that had played nothing: s_tags_shown is
+zeroed then, so the fallback to s_name_shown is accidentally correct. The
+fault needs a file played first, which is the ordinary route to the RADIO
+tab and the one order not yet flashed.
+
+Staged through the existing mechanism rather than written straight into
+the _shown copies, because those belong to ui_task; this is the same
+publish-a-value rule s_ring_pct follows. s_text_release is set with it so
+the copy is taken on the next pass instead of after TEXT_HOLD_MS -- that
+hold exists to land text and cover art in one frame, and ui_clear_art()
+two lines above has said there is no cover coming. s_text_staged is
+written last so ui_task cannot sample a station name beside a file's
+artist.
+
+One consequence is worth having written down where it can be read: after
+this, s_name_shown is the s_stream_top pointer, so the later in-place
+rewrite of the top line -- a station's own icy-name displacing the one the
+list gave -- reaches the screen with no second stage. That branch gets a
+comment saying so, and saying why s_stream_top cannot become a local.
+
+Nothing drawn changes for a file. Board-testable in one step: play a
+tagged track, open RADIO, pick a station, and read the three text rows.
+---
+ main/player.c | 44 ++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 44 insertions(+)
+
+diff --git a/main/player.c b/main/player.c
+index bc5161e..0579234 100644
+--- a/main/player.c
++++ b/main/player.c
+@@ -8739,6 +8739,38 @@ static track_end_t play_stream(const char *url, const char *name)
+     s_stream_bottom[0] = '\0';
+     s_display_name = s_stream_top;
+ 
++    /*
++     * And retire the FILE's text, which is the half of the list above
++     * that was missing.
++     *
++     * ui_task does not read s_display_name. It reads s_name_shown -- a
++     * copy taken only when s_text_staged is set -- and it prefers
++     * s_tags_shown.title to that copy whenever the title is non-empty.
++     * Nothing in this function staged anything, so a station chosen
++     * after a tagged file had played put the station name in
++     * s_display_name and left the screen showing the PREVIOUS TRACK'S
++     * title, artist and album for the whole broadcast.
++     *
++     * Every run that tested phase 3 missed it, and missed it
++     * structurally rather than by luck: each one chose a station from a
++     * boot that had played nothing, where s_tags_shown is still zeroed
++     * and the fallback to s_name_shown happens to be the right answer.
++     * The fault needs a file first, which is the ordinary way to reach
++     * the RADIO tab and the one order not yet flashed.
++     *
++     * s_text_release, so the copy is taken on ui_task's next pass rather
++     * than after TEXT_HOLD_MS. That hold exists to land the text and the
++     * cover art in the same frame, and ui_clear_art() above has already
++     * said there is no cover coming.
++     *
++     * s_text_staged last. Everything it publishes is written above it,
++     * so ui_task cannot sample a station name beside a file's artist.
++     */
++    memset(&s_tags, 0, sizeof(s_tags));
++    s_text_release = true;
++    s_text_staged_at = xTaskGetTickCount();
++    s_text_staged = true;
++
+     /*
+      * Hold the writer before a single byte is decoded.
+      *
+@@ -9175,6 +9207,18 @@ static track_end_t play_stream(const char *url, const char *name)
+         netstream_name(icy_name, sizeof(icy_name));
+         netstream_title(title, sizeof(title));
+         streamplan_lines(icy_name, s_stream_name, title, &lines);
++        /*
++         * No second stage here, and that follows from the one above
++         * rather than being an omission: s_name_shown is now the
++         * s_stream_top POINTER, so rewriting the buffer in place is
++         * already on screen at ui_task's next repaint. A station
++         * replacing the list's name with its own icy-name -- the only
++         * thing this branch ever does -- arrives for free.
++         *
++         * It is also why s_stream_top may not become a local. It is read
++         * by another task for as long as the stream runs, which is the
++         * same reason s_path is a static.
++         */
+         if (strcmp(s_stream_top, lines.top) != 0) {
+             snprintf(s_stream_top, sizeof(s_stream_top), "%s", lines.top);
+             s_display_name = s_stream_top;
+-- 
+2.43.0
+

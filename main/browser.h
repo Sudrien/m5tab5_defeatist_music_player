@@ -46,6 +46,19 @@ typedef enum {
      */
     BROWSER_PLAY_STREAM,
     BROWSER_CANCELLED,      /* closed without choosing */
+    /*
+     * The RADIO tab wants the station list read off the card again.
+     *
+     * A request and not a result: `path` is NULL and `index` is -1, the
+     * chooser stays open, and nothing has happened yet. The caller has
+     * to perform it, because stations_load() opens a file and the task
+     * that polls touch must not block on the card -- which is the whole
+     * reason the chooser could not reload until now.
+     *
+     * Answered by browser_stations_reloaded(), whenever the load has
+     * actually been done.
+     */
+    BROWSER_RELOAD_STATIONS,
 } browser_result_kind_t;
 
 typedef struct {
@@ -53,6 +66,17 @@ typedef struct {
     const char *path;       /* owned by browser.c, valid until the next call */
     int index;              /* BROWSER_PLAY_STREAM only; -1 otherwise */
 } browser_result_t;
+
+/*
+ * The station list has been re-read; rebuild the rows from it.
+ *
+ * Called on the task that polls touch, after some other task has done
+ * the load, and only that task ever touches the row array. A no-op
+ * unless the RADIO tab is the one showing: the rows belong to whichever
+ * tab is selected, and rebuilding station rows under a directory
+ * listing would replace the listing with stations.
+ */
+void browser_stations_reloaded(void);
 
 /* Open on the folder of `start` when it is on a mounted volume, otherwise
  * on the first volume that is. Safe to call when nothing is mounted: the

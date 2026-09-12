@@ -1,0 +1,71 @@
+From d708861bda280ef95cf23b7e5d7bc878cb202877 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 12 Sep 2026 20:03:29 +0000
+Subject: [PATCH 302/303] player.c -- the next icon during a stream asks the
+ station list
+
+The press handlers have branched on s_streaming since 0206: next and
+previous go to stations_next()/stations_prev() while a stream is running
+rather than to the playlist. The icon never learned, so it is still lit
+or greyed by playlist_has_next(), which answers a question about files in
+a folder at a moment when there is no folder.
+
+Both answers it can give are wrong. Lit with a one-station list, so the
+button invites a press whose entire effect is to log "no other station in
+the list" -- and CLAUDE.md records that next and previous have never been
+tested on hardware, because no flash so far has had a stations.m3u with
+two entries in it, so this has been the state every run was in. Greyed
+with a full station list, if the folder behind the stream happened to be
+at its last track, which hides a button that works.
+
+stations_have_other() rather than count > 1: it is the same call the
+press handlers and streamplan_transport() make, and one place deciding
+the one-station case is what keeps the icon from drifting away from the
+action it describes.
+
+Asked every repaint, which the line above it already was and for the same
+reason -- the station list can be reloaded underneath.
+
+Previous gets no equivalent and needs none: the bar has never greyed it,
+because on a file there is always something for it to do.
+---
+ main/player.c | 23 ++++++++++++++++++++++-
+ 1 file changed, 22 insertions(+), 1 deletion(-)
+
+diff --git a/main/player.c b/main/player.c
+index 2eef011..afaa992 100644
+--- a/main/player.c
++++ b/main/player.c
+@@ -5282,7 +5282,28 @@ static void ui_task(void *arg)
+          * chooser can load a different folder underneath, and a next
+          * button greyed against a playlist that no longer exists is
+          * worse than one that is briefly right for the wrong reason. */
+-        st.has_next = playlist_has_next(browser_order());
++        /*
++         * And during a stream it asks the station list instead, because
++         * that is what the button does then.
++         *
++         * UI_ACTION_NEXT and UI_ACTION_PREV have branched on s_streaming
++         * since 0206 -- a press goes to stations_next() rather than
++         * playlist_next() -- but nothing told the icon, so it went on
++         * being greyed or lit by playlist_has_next(), which answers about
++         * files in a folder and there is no folder here. Both answers it
++         * can give are wrong: lit with one station, so the button invites
++         * a press that logs "no other station in the list" and does
++         * nothing; greyed with a full station list if the folder behind
++         * the stream happened to be at its last track, which hides a
++         * button that works.
++         *
++         * stations_have_other() and not count > 1, so the one-station
++         * case is still decided in one place -- it is the same call the
++         * press handlers and streamplan_transport() make, which is what
++         * keeps the icon and the action from drifting apart.
++         */
++        st.has_next = s_streaming ? stations_have_other()
++                                  : playlist_has_next(browser_order());
+ 
+         /*
+          * The staged text becomes the shown text when the art has
+-- 
+2.43.0
+

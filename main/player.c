@@ -2700,6 +2700,24 @@ static volatile bool     s_repaint_art;
  * opened from whichever task polls touch, so there is one writer to the
  * framebuffer. */
 static volatile bool     s_open_chooser;
+
+/*
+ * The station list reload, which runs the other way round: asked for by
+ * the UI task, honoured by the player task.
+ *
+ * stations_load() opens a file, and stations.h says in terms not to call
+ * it from ui_task -- a chooser that blocks on the card behind live audio
+ * is the contention the storage arbiter exists to prevent. So the RLOD
+ * button sets this and the player task does the work, which is the same
+ * split as s_open_chooser with the tasks swapped.
+ *
+ * The epoch is the answer coming back. A bool would not do: ui_task has
+ * to know the load HAS HAPPENED, and a request flag going false says
+ * only that someone took it. Counting means the rebuild happens once per
+ * load and cannot be missed by a pass that ran at the wrong moment.
+ */
+static volatile bool     s_reload_stations;
+static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
  * iteration that has already sampled a touch, and the screen change has
@@ -5053,6 +5071,36 @@ static void sleep_timer_tick(void)
     }
 }
 
+/*
+ * Perform a requested station reload, if one is outstanding.
+ *
+ * Called from the player task and from nowhere else, at both the places
+ * that task can be: the idle branch of player_loop() and the decode
+ * loop's housekeeping. Two call sites for one request, because the
+ * button must not be dead while a track is playing -- the idle branch
+ * alone would have made RLOD work only when nothing was on, which is a
+ * button that does nothing for the reason a user is least likely to
+ * guess.
+ *
+ * Safe from the decode loop: stations_load() reads through
+ * storage_io_fread() at STORAGE_IO_BACKGROUND, taking its own lease per
+ * chunk, so the decode loop's PLAYBACK lease wins every contest. That
+ * class exists for exactly this kind of read and this is its second
+ * user.
+ *
+ * The generation is NOT latched here. A reload is a request about the
+ * volumes as they are, which is the generation already recorded, so
+ * there is nothing to move; the load's result is deliberately ignored
+ * for the same reason 0209 ignores it -- the attempt is what happened.
+ */
+static void service_station_reload(void)
+{
+    if (!s_reload_stations) return;
+    s_reload_stations = false;
+    stations_load();
+    s_stations_epoch++;
+}
+
 static void ui_task(void *arg)
 {
     ui_state_t st;
@@ -5270,9 +5318,42 @@ static void ui_task(void *arg)
                 touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
                 break;
+            case BROWSER_RELOAD_STATIONS:
+                /*
+                 * Requested, not done. The chooser stays open and stays
+                 * showing the list it has; the rows are rebuilt below,
+                 * when the epoch says the player task has actually read
+                 * the file.
+                 *
+                 * No touch_swallow() and no repaint: nothing closed, and
+                 * the press was a press on the chooser rather than one
+                 * that got through to what is behind it.
+                 */
+                s_reload_stations = true;
+                break;
             default:
                 break;
             }
+
+            /*
+             * And the answer, when it comes.
+             *
+             * A counter compared against what has been drawn, rather
+             * than a flag this clears: the load happens on another task
+             * at a moment this one does not choose, and one rebuild per
+             * load is the postcondition. Static, because it is a
+             * property of what this task has drawn and there is one of
+             * this task.
+             */
+            {
+                static uint32_t drawn_epoch;
+                const uint32_t now_epoch = s_stations_epoch;
+                if (now_epoch != drawn_epoch) {
+                    drawn_epoch = now_epoch;
+                    browser_stations_reloaded();
+                }
+            }
+
             browser_draw();
             vTaskDelay(pdMS_TO_TICKS(bdown ? 20 : 100));
             continue;
@@ -6613,6 +6694,13 @@ static track_end_t play_file(const char *path)
             s_repaint_art = false;
             load_track_visuals(path);
         }
+
+        /* The chooser's reload, which can be asked for over live audio
+         * because the chooser opens over live audio. Unconditional, in
+         * the way the repaint above is not: a station list is 64 KB read
+         * at BACKGROUND class and has nothing to do with this track's
+         * visuals, so none of the pending flags apply to it. */
+        service_station_reload();
 
         /* The envelope landed. Drawn here rather than on the loading
          * task so there is one writer to the framebuffer.
@@ -9477,6 +9565,12 @@ static void player_loop(void)
              * happened, and the result is not what decides whether to
              * repeat it.
              */
+            /* A reload the chooser asked for, before the
+             * generation-gated one below: this one has been requested
+             * and that one is a poll, and a request that arrived on the
+             * same pass should not wait for the next. */
+            service_station_reload();
+
             const uint32_t sgen = storage_generation();
             if (sgen != stations_gen) {
                 stations_gen = sgen;

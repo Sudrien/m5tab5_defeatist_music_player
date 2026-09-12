@@ -420,6 +420,22 @@ static void load_stations(void)
     ESP_LOGI(TAG, "radio: %d stations", s_count);
 }
 
+/*
+ * The list has been re-read. Same rows, rebuilt.
+ *
+ * load_stations() already does everything needed -- it frees the rows,
+ * refills them from stations.c in the file's order, resets the scroll and
+ * marks the screen dirty -- so this is a guard and a call. The guard is
+ * the whole of what is new: this arrives asynchronously, from a load
+ * another task performed, and by then the tab showing may not be RADIO
+ * any more.
+ */
+void browser_stations_reloaded(void)
+{
+    if (!s_open || !s_radio) return;
+    load_stations();
+}
+
 static void select_tab(browser_tab_t id)
 {
     const bool same = (id == s_tab);
@@ -798,7 +814,26 @@ void browser_draw(void)
     gfx_fill_rect(0, fy, w, 2, C_RULE);
 
     int bx, bw;
-    foot_box(0, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP",   !s_radio && !at_root() && s_dir[0]);
+        /*
+     * Slot 0 is UP on a volume and RLOD on the radio tab.
+     *
+     * Reused rather than given a seventh button. UP is a volume
+     * operation and has nothing to do on RADIO, so the slot was drawn
+     * disabled and refused -- a dead button in the corner the eye goes
+     * to first. Reload is the operation that tab actually wants and had
+     * nowhere to be.
+     *
+     * Always enabled on RADIO, including with no stations at all. That
+     * is the case it is most for: the status line says
+     * "no stations.m3u on the card", and the point of reading it is to
+     * go and make one.
+     */
+    foot_box(0, &bx, &bw);
+    if (s_radio) {
+        draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "RLOD", true);
+    } else {
+        draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP",   !at_root() && s_dir[0]);
+    }
     foot_box(1, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "FLDR", !s_radio && s_dir[0] != '\0');
     foot_box(2, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP^",  s_top > 0);
     foot_box(3, &bx, &bw); draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "DN",   s_top + rows < s_count);
@@ -904,7 +939,12 @@ browser_result_t browser_touch(bool down, int x, int y)
         static const char *const foot_name[FOOT_BUTTONS] = {
             "up", "play folder", "page up", "page down", "order", "cancel"
         };
-        ESP_LOGI(TAG, "button: %s", foot_name[which]);
+        static const char *const foot_name_radio[FOOT_BUTTONS] = {
+            "reload stations", "play folder", "page up", "page down",
+            "order", "cancel"
+        };
+        ESP_LOGI(TAG, "button: %s",
+                 s_radio ? foot_name_radio[which] : foot_name[which]);
 
         /*
          * UP and FLDR are volume operations and the radio tab has
@@ -912,7 +952,15 @@ browser_result_t browser_touch(bool down, int x, int y)
          * drawn disabled, because a disabled button that still acts is
          * worse than one that is not drawn at all.
          */
-        if (s_radio && (which == 0 || which == 1)) {
+        /*
+         * Slot 0 on RADIO is the reload, not UP. Before the refusal
+         * below, which still owns slot 1.
+         */
+        if (s_radio && which == 0) {
+            res.kind = BROWSER_RELOAD_STATIONS;
+            return res;
+        }
+        if (s_radio && which == 1) {
             ESP_LOGI(TAG, "not on the radio tab");
             return res;
         }
