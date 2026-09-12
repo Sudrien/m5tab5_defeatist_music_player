@@ -239,6 +239,46 @@ int main(void)
              STREAMPLAN_DISCONNECT);
 
     /* ---------------------------------------------------------------- */
+    /* source_done -- the IDLE that is not done                          */
+    /* ---------------------------------------------------------------- */
+
+    /* THE BUG THIS EXISTS FOR. netstream_play() posts a request and
+     * returns without touching the state, so the first reading after it
+     * is IDLE and means "not started yet". Calling that done ended a
+     * stream on its opening step: 99 ms silent, 0 frames. */
+    CHECK(!streamplan_source_done(NETSTREAM_IDLE, false, true),
+          "IDLE before the task has started is NOT done");
+
+    /* Once the task has been seen live, IDLE is a real stop. */
+    CHECK(streamplan_source_done(NETSTREAM_IDLE, true, true),
+          "IDLE after running is done");
+
+    /* A pause disconnects on purpose and leaves IDLE. Ending the stream
+     * there would make pause destroy the station. */
+    CHECK(!streamplan_source_done(NETSTREAM_IDLE, true, false),
+          "IDLE while paused waits for the resume");
+    CHECK(!streamplan_source_done(NETSTREAM_IDLE, false, false),
+          "IDLE while paused and never live is still not done");
+
+    /* FAILED is done whatever else is true -- including before the task
+     * was ever seen live, which is a station that refused on its first
+     * attempt. */
+    CHECK(streamplan_source_done(NETSTREAM_FAILED, false, true),
+          "FAILED is done even unseen");
+    CHECK(streamplan_source_done(NETSTREAM_FAILED, true, false),
+          "FAILED is done even paused");
+
+    /* Everything live is not done. RETRYING especially: netplan's
+     * backoff runs to 15 s and the stall giveup is 30 s. */
+    CHECK(!streamplan_source_done(NETSTREAM_CONNECTING, true, true), "connecting");
+    CHECK(!streamplan_source_done(NETSTREAM_BUFFERING, true, true), "buffering");
+    CHECK(!streamplan_source_done(NETSTREAM_PLAYING, true, true), "playing");
+    CHECK(!streamplan_source_done(NETSTREAM_RETRYING, true, true),
+          "RETRYING is live, not done");
+    CHECK(!streamplan_source_done(NETSTREAM_STOPPING, true, true),
+          "STOPPING still has a session");
+
+    /* ---------------------------------------------------------------- */
     /* done                                                              */
     /* ---------------------------------------------------------------- */
 

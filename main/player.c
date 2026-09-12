@@ -8748,6 +8748,13 @@ static track_end_t play_stream(const char *url, const char *name)
     int last_chans = 0;
     int last_kbps = 0;
     bool first_sound = false;
+    /*
+     * Whether netstream has been seen to leave IDLE. See the source_done
+     * comment below: IDLE means "not started yet" until this is true and
+     * "stopped" afterwards, and the two are indistinguishable from the
+     * state alone.
+     */
+    bool seen_live = false;
     bool leaving = false;
     track_end_t why = TRACK_ENDED;
     const int64_t t_start = esp_timer_get_time();
@@ -8796,6 +8803,11 @@ static track_end_t play_stream(const char *url, const char *name)
                 netdec_reconnect();
                 bufplan_init(&plan, esp_timer_get_time() / 1000);
                 first_sound = false;
+                /* Same race as the first connect: the resume posts a
+                 * request and the state stays IDLE until the task picks
+                 * it up. Latching this down again is what stops the
+                 * resume ending the stream it just asked for. */
+                seen_live = false;
                 netstream_play(s_stream_url, s_stream_name);
             }
         }
@@ -8920,14 +8932,42 @@ static track_end_t play_stream(const char *url, const char *name)
          * One step of the buffer plan, level-triggered on the fill, so a
          * pass that decoded nothing still moves it.
          *
-         * source_done is FAILED or IDLE -- no more bytes will ever come.
-         * RETRYING is deliberately not included: it is still live, and
-         * netplan's backoff runs to 15 s while
-         * BUFPLAN_STALL_GIVEUP_MS is 30 s, so a source working through
-         * its retries is never cut off by the buffer.
+         * **IDLE MEANS TWO THINGS AND ONLY ONE OF THEM IS DONE.**
+         *
+         * netstream_play() posts a request and returns; it does not
+         * touch the state. So for the first few milliseconds after it is
+         * called the state is still IDLE -- not "stopped" but "not
+         * started yet" -- and the first version of this line read that
+         * as source_done. The plan went PREROLL -> ENDED on its opening
+         * step, before a single byte existed:
+         *
+         *   I netstream: idle -> connecting
+         *   I netstream: hop 1: HTTP 200 -> play, connect+TLS 846 ms
+         *   W netstream: only 0 audio bytes before the drop
+         *   I mp3: stream ended: ended, 0 rebuffers, 99 ms silent, 0 frames
+         *
+         * The 99 ms is the tell: the plan took one step and finished.
+         * Everything after it -- the headers, the whole connect -- is
+         * netstream_stop_wait() waiting for a task that was still
+         * dialling, which is why the log looks like a station that
+         * hung up and is actually this loop hanging up on itself.
+         *
+         * `seen_live` is the latch that tells the two IDLEs apart: until
+         * the task has been observed somewhere other than IDLE, an IDLE
+         * reading is the request not yet picked up.
+         *
+         * The `s_playing` term stays for a different case. A pause
+         * disconnects deliberately and leaves the state IDLE, and that
+         * must NOT end the stream -- it waits for the resume. Without
+         * it, pausing a station would tear it down.
+         *
+         * RETRYING is in neither: it is still live, and netplan's
+         * backoff runs to 15 s while BUFPLAN_STALL_GIVEUP_MS is 30 s, so
+         * a source working through its retries is never cut off here.
          */
-        const bool source_done = (net == NETSTREAM_FAILED) ||
-                                 (net == NETSTREAM_IDLE && s_playing);
+        if (net != NETSTREAM_IDLE) seen_live = true;
+        const bool source_done =
+            streamplan_source_done(net, seen_live, s_playing);
         bufplan_in_t in = {
             .now_ms = esp_timer_get_time() / 1000,
             .buffered_ms = stream_buffered_ms(out_rate),

@@ -319,6 +319,39 @@ static inline bool streamplan_is_connected(netstream_state_t s)
 }
 
 /*
+ * Will this source produce no more bytes, ever?
+ *
+ * This is bufplan_in_t.source_done, and it is here rather than inline in
+ * play_stream() because **NETSTREAM_IDLE means two different things and
+ * the state alone cannot tell them apart.**
+ *
+ * netstream_play() posts a request and returns without touching the
+ * state, so for the first milliseconds after it is called the state is
+ * still IDLE -- "not started yet", not "stopped". Reading that as done
+ * ended a stream on its opening step, before a byte existed, and the
+ * log read as a station hanging up:
+ *
+ *   idle -> connecting / HTTP 200 -> play / only 0 audio bytes
+ *   stream ended: ended, 0 rebuffers, 99 ms silent, 0 frames
+ *
+ * `seen_live` is the caller's latch: false until the task has been
+ * observed anywhere other than IDLE.
+ *
+ * `playing` is the pause. A pause disconnects on purpose and leaves the
+ * state IDLE, and that must not end the stream -- it waits for a resume.
+ *
+ * RETRYING is live in both senses and is never done: netplan's backoff
+ * runs to 15 s and BUFPLAN_STALL_GIVEUP_MS is 30 s, so a source working
+ * through its retries is never cut off.
+ */
+static inline bool streamplan_source_done(netstream_state_t s,
+                                           bool seen_live, bool playing)
+{
+    if (s == NETSTREAM_FAILED) return true;
+    return seen_live && s == NETSTREAM_IDLE && playing;
+}
+
+/*
  * Is this stream over, from the buffer plan's `finished` plus the one
  * thing the buffer plan cannot see: that the listener left.
  *
