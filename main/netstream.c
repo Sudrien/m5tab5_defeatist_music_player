@@ -63,7 +63,24 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
  * Separating them lets the read be impatient and the diagnosis be
  * patient. They were the same number only because the first version had
  * one place to put it.
+ *
+ * CONNECT_TIMEOUT_MS is the third, and it exists because setting
+ * `cfg.timeout_ms` to SOCKET_TIMEOUT_MS broke connecting outright.
+ * **esp_http_client's timeout covers the header fetch as well as body
+ * reads**, and this server takes 1.4 to 2 seconds between the TLS
+ * handshake and its first header -- comfortably inside the old 5 s and
+ * hopeless against 1 s. A run failed four connections with
+ * `Connection timed out before data was ready!`, took 18 seconds to
+ * reach first audio instead of 2, and only succeeded because the fifth
+ * attempt happened to be quick.
+ *
+ * So the client is opened patient and made impatient afterwards, with
+ * esp_http_client_set_timeout_ms() once the headers are in and the only
+ * thing left is the body. Connecting is a slow, once-per-stream thing;
+ * reading is a fast, constant thing; they want opposite settings and the
+ * API allows both.
  */
+#define CONNECT_TIMEOUT_MS  (5000)
 #define SOCKET_TIMEOUT_MS   (1000)
 #define DROP_SILENCE_MS     (5000)
 
@@ -544,7 +561,7 @@ static void netstream_task(void *arg)
                 .event_handler = on_event,
                 .crt_bundle_attach = esp_crt_bundle_attach,
                 .disable_auto_redirect = true,
-                .timeout_ms = SOCKET_TIMEOUT_MS,
+                .timeout_ms = CONNECT_TIMEOUT_MS,
                 .buffer_size = 4096,
                 .buffer_size_tx = 1024,
                 .user_agent = "DefeatistMusicPlayer/0.4",
@@ -565,12 +582,23 @@ static void netstream_task(void *arg)
                 icydemux_reconnect(s_demux, s_hdr_metaint);
                 set_state(NETSTREAM_BUFFERING);
 
+                /* Headers are in; nothing slow is left. Tighten the
+                 * socket so a stop is noticed within a second rather
+                 * than within five. Doing this before the headers
+                 * arrived is what 0122 got wrong. */
+                esp_http_client_set_timeout_ms(c, SOCKET_TIMEOUT_MS);
+
                 const uint64_t produced = pump(c, gen, s_demux);
 
                 if (netplan_made_progress(produced)) {
                     /* Audio flowed, so this is a fresh failure sequence
-                     * rather than the fourth attempt at a dead station. */
-                    if (s_failures) {
+                     * rather than the fourth attempt at a dead station.
+                     * Not logged when the stream is being stopped: pump
+                     * also returns on a stop request, and announcing a
+                     * reset failure count immediately after "stopping"
+                     * reads as though a reconnect were being prepared
+                     * for a stream that is ending. */
+                    if (s_failures && !superseded(gen)) {
                         ESP_LOGI(TAG, "%llu bytes played; failure count reset",
                                  (unsigned long long)produced);
                     }

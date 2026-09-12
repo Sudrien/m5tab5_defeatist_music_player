@@ -7250,6 +7250,57 @@ A paced 64 kbit/s station delivers 2048 bytes every 256 ms, so normal
 stop latency was never the problem; the tail was. The figure to watch in
 phase 3 is the worst case, not the median.
 
+### 0123: 0122 broke connecting, and the retry path proved itself doing it
+
+The run after 0122 took **18079 ms to reach first audio** instead of
+2145, after four failed connections:
+
+    W HTTP_CLIENT: Connection timed out before data was ready!
+    I hop 1: HTTP -1 -> retry, connect+TLS 922 ms, metaint 0
+
+**`esp_http_client`'s `timeout_ms` covers the header fetch, not only
+body reads.** 0122 set it to 1 s to bound stop latency; this server takes
+1.4 to 2 seconds between the TLS handshake and its first header, which
+was comfortable inside the old 5 s and hopeless against 1 s. The fifth
+attempt succeeded only because it happened to be quick, which is the
+worst kind of pass -- the same change on a slower day fails outright.
+
+Fixed by opening patient and becoming impatient afterwards: the client
+is created with `CONNECT_TIMEOUT_MS` of 5 s, and
+`esp_http_client_set_timeout_ms()` drops it to 1 s once the headers are
+in and the only thing left is the body. Connecting is slow and happens
+once a stream; reading is fast and constant. They want opposite
+settings, and the API allows both -- 0122 assumed one knob where there
+were two.
+
+**The retry path proved itself while doing it**, which is the compensation:
+
+    attempt 1 failed after 1928 ms; that is longer than the 1000 ms backoff, retrying now
+    attempt 2 failed after 1941 ms; retrying in 59 ms
+    attempt 3 failed after 1947 ms; retrying in 2053 ms
+    attempt 4 failed after 1996 ms; retrying in 6004 ms
+
+That is **0115's attempt-cost subtraction working exactly as argued**, on
+the first occasion it has ever run: each wait is the backoff minus what
+the attempt already spent, so the schedule means what it says instead of
+being four fourteen-second attempts behind a fifteen-second promise. The
+counter is honest, the messages are readable, and `netplan_action(-1)`
+correctly classified an unparsed status as RETRY rather than FATAL. Had
+the fifth attempt failed, `netplan_backoff_ms(4)` would have returned -1
+and the state would have gone to FAILED -- correct, and untested until
+now.
+
+Also fixed: `bytes played; failure count reset` was printed after the
+stop, because `pump()` returns on a stop request too. It read as though
+a reconnect were being prepared for a stream that was ending.
+
+**The lesson worth keeping.** 0122 was a reasonable change that improved
+a real number, was checked against the suite, and broke the feature. The
+thing it got wrong was not in the diff -- it was an assumption about
+what a library constant covers. There was no way to catch it except by
+running it, which is an argument for flashing small changes rather than
+for reviewing them harder.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
