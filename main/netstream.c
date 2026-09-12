@@ -351,9 +351,21 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
     bool   sniff_logged = false;
 
     uint64_t produced = 0, window_bytes = 0;
-    /* Time spent not reading because the ring was full. This is a
-     * healthy number on a station that front-loads, and the figure that
-     * says whether the compressed ring wants to be bigger. */
+    /*
+     * Time spent waiting for room in the ring.
+     *
+     * **Measured as elapsed time in the send loop, not as a count of
+     * timeouts.** The first version incremented by SEND_SLICE_MS only
+     * when xStreamBufferSend() returned 0 after its full 100 ms, and
+     * that almost never happens: a decoder draining at real time frees a
+     * 208-byte frame every 26 ms, so a send blocks briefly and partially
+     * succeeds. The run that finally filled the ring held it at 99% for
+     * forty-five seconds while netstream's input rate fell from 408 to
+     * 64 kbit/s -- exactly the drain rate, which is backpressure doing
+     * precisely its job -- and this counter reported 0 ms throughout.
+     * The mechanism was right and the instrument was measuring
+     * something else.
+     */
     int stalled_ms = 0, last_stall_log = 0;
     uint32_t last_titles = d->titles;
     int64_t  last_window = esp_timer_get_time();
@@ -443,20 +455,24 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
          * reconnecting -- which costs a reconnect, against a guaranteed
          * hole in the audio.
          */
+        const int64_t send_start = esp_timer_get_time();
         for (size_t off = 0; off < got; ) {
             const size_t sent = xStreamBufferSend(s_ring, audio + off, got - off,
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             off += sent;
             produced += sent;
-            if (sent == 0) {
-                if (superseded(gen)) return produced;
-                stalled_ms += SEND_SLICE_MS;
-                if (stalled_ms - last_stall_log >= 5000) {
-                    last_stall_log = stalled_ms;
-                    ESP_LOGI(TAG, "ring full, not reading (%d ms so far) -- "
-                                  "the server is ahead and can wait",
-                             stalled_ms);
-                }
+            if (sent == 0 && superseded(gen)) return produced;
+        }
+        /* Whatever that cost, whether it came from one long block or
+         * fifty short ones. Near zero while the ring has room. */
+        const int send_ms = (int)((esp_timer_get_time() - send_start) / 1000);
+        if (send_ms > 0) {
+            stalled_ms += send_ms;
+            if (stalled_ms - last_stall_log >= 5000) {
+                last_stall_log = stalled_ms;
+                ESP_LOGI(TAG, "ring full, waiting rather than dropping "
+                              "(%d ms so far) -- the server is ahead and "
+                              "TCP can hold it", stalled_ms);
             }
         }
 

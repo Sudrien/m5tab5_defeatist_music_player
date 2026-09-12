@@ -7537,6 +7537,52 @@ the floor was 13000, which 16384 passes. **A guard derived from a wrong
 measurement is a guard that confirms the wrong measurement.** It has the
 measured figure now.
 
+### 0129: phase 2 works, and the stall counter was measuring the wrong thing
+
+The first run that decoded:
+
+    first frame: MPEG layer 3, 44100 Hz, 1 ch, 64 kbit/s, 208 bytes -> 1152 samples
+    2220 frames, 57991 ms of audio in 60023 ms, 0 bytes resynced
+    ring peak 100% -- 0121's backpressure was exercised
+
+**Everything phase 2 was supposed to prove, proved.** `framewin` and
+`netdec` delivered 2220 frames with **zero resyncs** -- the same claim
+the raw probe made six times as "0 bytes lost hunting", now measured on
+the far side of the window and the decoder. The frame matches the
+station exactly: 208 bytes, 1152 samples, 64 kbit/s mono at 44.1 kHz.
+Steady-state windows decoded 5015 ms of audio in 5015-5016 ms, which is
+**0.9998x** -- the tick-granularity worry did not materialise. The 0.966x
+overall is the first window's startup burst and nothing else.
+
+**0121 was exercised and is correct.** The ring climbed 40% -> 76% ->
+99% in fifteen seconds, as predicted from WUOM's 43-second front-load
+against a 33-second ring, and sat pinned at 99% for forty-five seconds.
+Nothing was dropped. Netstream's input rate fell 408 -> 162 -> 64
+kbit/s, settling at exactly the drain rate: TCP's window closing and the
+server pacing itself to the reader, which is the behaviour 0121 argued
+for against the original drop-on-full.
+
+**And `stalled 0 ms` throughout, which is a flaw in the instrument.** The
+counter only incremented when `xStreamBufferSend()` returned 0 after its
+full 100 ms timeout. A decoder draining at real time frees a 208-byte
+frame every 26 ms, so a send blocks briefly and partially succeeds and
+never times out. It now measures **elapsed time in the send loop**,
+whatever the shape of the waiting.
+
+Worth being clear that the ring occupancy is what actually proved 0121,
+not the counter that was added for the purpose. **A figure added to
+measure a specific behaviour reported zero while that behaviour was
+happening continuously**, and only the independently-logged ring level
+contradicted it. Two unrelated measurements of the same thing is what
+made that visible.
+
+**The cost, for phase 3's budget.** Internal free bottomed at 56084,
+against 79728 on the last raw run. The difference is almost exactly the
+probe task's stack going from 6144 to 24576 -- **the decode task's stack
+is now the largest single internal-RAM consumer in the stream path**,
+and it cannot move to PSRAM. Phase 3 pays this once, on whichever task
+decodes; it does not pay it twice.
+
 ### Where the stream path stands
 
 Rewritten rather than appended to, because the previous version of this
@@ -7552,9 +7598,10 @@ rather than a one-off.
 - **Phase 1: done.** Written, compiled, flashed five times, measured on
   two stations, two real faults found and fixed (internal RAM
   starvation, reconnect bookkeeping). Nothing about it is still a guess.
-- **Phase 2: unblocked, not started.** Its first question -- what the
-  AAC decoder costs in internal RAM -- has its budget now: **75 KB free
-  idle, 57 KB beside playback.**
+- **Phase 2: MP3 works end to end.** 2220 frames, 0 resyncs, 0.9998x in
+  steady state, on hardware. AAC through `esp_audio_simple_dec` is not
+  written; `netdec` refuses it cleanly. Internal free bottoms at 56 KB
+  with the 24 KB decode stack in place.
 - **Phase 3: unblocked, not started.** `bufferplan.h` is written and
   host-tested; its constants want tuning against WUOM, never against
   WNZK, for the reasons above.
