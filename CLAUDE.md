@@ -8128,6 +8128,86 @@ and pick a station, and read the three text rows.**
   0304. **`stack low water 2756`** on the netstream task still stands,
   carried over from the 0200 list unchanged.
 
+## radio-browser.info, which had never been touched (0306)
+
+**The question that prompted this: wasn't radio-browser integration
+supposed to happen?** It was, it is the headline of v0.4.0, and before
+0306 not one line of code mentioned it. Worth recording plainly, because
+the reason is instructive rather than an oversight: everything built so
+far was *scaffolding for* radio-browser -- `stations.m3u` is M3U because
+radio-browser serves M3U, `stationlist.h` says so in its opening
+paragraph, `netstream` does the TLS, the portal does the typing -- and
+scaffolding that is described in terms of a thing is easy to mistake for
+the thing.
+
+### The bet held, and it had never been tested
+
+`stations.h` and `stationlist.h` both claimed the server's M3U goes
+straight into the existing parser. **It does, and by rule rather than by
+luck.** The real response is not what `stations.m3u.example` shows:
+
+    #EXTM3U
+    #RADIOBROWSERUUID:01234567-89ab-cdef-0123-456789abcdef
+    #EXTINF:-1,Best Radio
+    http://stream.example.com/mp3_128
+
+The clause in `stationlist_parse()` that skips every `#` line which is
+not `#EXTINF` was written for files that have been through another
+player, and this is that case. `radiobrowsertest.c` carries the
+documented response as a fixture and it parses to four stations with the
+right names. **Had it failed, two headers and the choice of M3U over a
+format of our own would have failed with it**, and it would have failed
+on the board, three patches into a fetch.
+
+### Four API facts, each of which would otherwise cost a flash
+
+- **The pool name cannot be used over TLS.**
+  `all.api.radio-browser.info` is the documented way to find a mirror and
+  is a DNS construct rather than a server, so no certificate is valid for
+  that name. This player verifies certificates. Hence a short hardcoded
+  list of named mirrors -- the exact thing the DNS lookup exists to avoid
+  -- accepted with the exit written down: the fix is the SRV record
+  `_api._tcp.radio-browser.info`, esp_netif has no SRV resolver, and
+  adding one is a larger piece of work than the feature.
+- **`/m3u/stations/search?name=` and not `/m3u/stations/byname/{term}`.**
+  Both exist. In the second the term is a path segment, and an encoded
+  slash in a path segment is rewritten or rejected by enough
+  intermediaries that it is not worth finding out which.
+- **The service asks for three things**, and they are the price of
+  having no key and no account: a descriptive `appname/appversion`
+  User-Agent, no more than 2-3 requests a second with results cached
+  5-15 minutes, and `/json/url/{stationuuid}` called when a listener
+  starts a stream so the directory can count what is actually played.
+- **The default `limit` is 100000**, which is a 40 MB M3U into a 64 KB
+  buffer.
+
+### The thing that will be got wrong if it is not written here
+
+**A `stations.m3u` written from a search must copy the response body
+through verbatim.** Not be regenerated from parsed `station_t`s, which is
+the obvious way to write it and which silently discards
+`#RADIOBROWSERUUID`. The click count is the only obligation this service
+imposes, it needs the UUID, and the UUID exists nowhere but the response.
+Rebuilding the file loses the ability to ever honour it, and loses it
+invisibly -- the stations still play.
+
+### What is open, in the order it unblocks
+
+- **Nothing fetches anything.** 0306 is the request, not the call. The
+  next step is the GET on the netstream task or a worker, the mirror
+  retry, and the write through a temp file and a rename the way
+  `settings.c` does -- `stations.h` already says the write goes that way
+  and why.
+- **There is no way to type a search term.** There is no keyboard and
+  there will not be one; the portal is the answer and is why
+  `portalweb.c` exists. That makes the search a form on a phone, which
+  means the portal has to be reachable while the player is on a network
+  rather than only while it is an AP -- and that is a change to
+  `portal.c`, not to this.
+- **`RADIOBROWSER_HOSTS` will rot.** Two names, and the docs say either
+  may go away. Nothing monitors this and nothing can; it costs a failed
+  search and the second name.
+
 ## Where v0.3.0 got to (the 1000 series)
 
 **Read this first if you are picking this up cold.** The 1000 series was
