@@ -201,6 +201,14 @@ extern "C" {
  * break within a sentence. That was reasoning and not evidence, and the
  * header said so.
  *
+ * WHAT 0410 THOUGHT IT SAW IS WORTH LESS THAN IT LOOKED, and 0412 is
+ * why. The log line those readings came from printed whenever the gain
+ * had moved a decibel FROM THE LAST LINE, so consecutive values were a
+ * decibel apart by construction and a gently wandering gain printed as
+ * a clean triangle. The gain was moving; the tidy shape was the log's.
+ * The verdict from the room -- that it sounded fine -- stands, because
+ * ears do not read logs. The numbers below should be read as a sketch.
+ *
  * LISTENED TO, 0410, AND LEFT WHERE IT IS. Groove Salad, a full 17.3 s
  * window, three quarters of an hour of board log. With the window full
  * and steady the gain traced a slow triangle -- about -1.2, -0.2, +0.9,
@@ -245,11 +253,20 @@ extern "C" {
  *     412350  levelling: +1.01 dB, window 20100 ms
  *     414745  levelling: +0.00 dB, window 20100 ms
  *
- * Exactly 0.00, twice, is not a loudness measurement landing there. It
- * is `if (ceiling < 0) ceiling = 0` in streamgain_step(), which is the
- * clamp refusing to become a cut. A gate over the K-weighted mean of
- * two hundred blocks does not produce 0.00 to the centibel; a floor
- * does.
+ * THAT READING WAS WRONG AND THE CONSTANT IS KEPT ANYWAY. The argument
+ * was that a gate over two hundred blocks does not land on 0.00 to the
+ * centibel, so the clamp's floor must be what was being logged. The
+ * round numbers were an artifact of the log rule instead: it printed
+ * when the gain had moved a decibel from the previous LINE, so 0.00 is
+ * simply 1.02 minus 1.01 and carries no information at all. 0411
+ * shipped, and the next WUOM log was identical.
+ *
+ * Kept because the change is right for a reason that never depended on
+ * that evidence: a clamp computed over twenty seconds constrains the
+ * gain against audio that will be played at a different gain entirely,
+ * since the slew moves a decibel a second. Clamping against what this
+ * gain will actually meet is the correct question whether or not the
+ * old one was visible in a log.
  *
  * Three seconds, because that is the audio the gain chosen now will
  * actually be applied to. The slew moves a decibel a second, so by the
@@ -539,6 +556,18 @@ bool streamgain_window_db(const streamgain_t *g, float *out_db);
  * the time the audio took to play and nothing else.
  */
 void streamgain_step(streamgain_t *g, int elapsed_ms);
+
+/*
+ * The clip ceiling the next STREAMGAIN_CLAMP_MS of audio imposes, in
+ * dB. Never negative -- the clamp bounds a boost and does not become a
+ * cut.
+ *
+ * Public so a caller can log it beside the gate's answer and the
+ * applied gain. Those three are the whole of streamgain_step(), and
+ * until 0412 only the last was visible, which made an argument about
+ * which of them was moving unanswerable from a board log.
+ */
+float streamgain_ceiling_db(const streamgain_t *g);
 
 /* What to apply right now. Valid whether or not the window is
  * confident: an unconfident window holds the last good answer, and

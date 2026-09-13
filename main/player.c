@@ -9778,11 +9778,11 @@ static track_end_t play_stream(const char *url, const char *name)
      * through, which on the board was 2.8 s both times.
      */
     int64_t t_connect = esp_timer_get_time();
-    /* The last levelling figure printed, so the log reports movement
-     * rather than state. Seeded at 0 dB, which is what is applied
-     * before a confident window exists, so the first real answer is a
-     * line and the first second of unity is not. */
-    float last_logged_db = 0.0f;
+    /* When the levelling last said anything. A cadence rather than a
+     * threshold, because a threshold against the last printed value
+     * makes every line a decibel from the one before it whatever the
+     * gain is really doing -- see the call site. */
+    uint32_t last_level_log_ms = 0;
     /* The pause the listener asked for, as distinct from the buffer
      * holding off. s_playing is the writer's gate and ui_task toggles it
      * on a press; a stream turns that into a disconnect. */
@@ -10250,12 +10250,39 @@ static track_end_t play_stream(const char *url, const char *name)
             s_rg_active  = show;
             s_rg_gain_db = show ? streamgain_db(s_sgain) : 0.0f;
 
-            const float now_db = streamgain_db(s_sgain);
-            if (fabsf(now_db - last_logged_db) >= 1.0f) {
-                ESP_LOGI(TAG, "levelling: %+.2f dB, window %d ms%s",
-                         (double)now_db, streamgain_window_ms(s_sgain),
+            /*
+             * ON A CADENCE, AND WITH ALL THREE NUMBERS.
+             *
+             * The old rule printed when the gain had moved a decibel
+             * from the last line, which made the log lie about itself:
+             * consecutive values were a decibel apart BY CONSTRUCTION,
+             * so a gain wandering gently around half a decibel printed
+             * as +1.02, +0.01, +1.03, +0.00 -- and those round numbers
+             * were then read, by me, as a clamp pinning the gain at
+             * exactly zero. 0411 was written on that reading. The
+             * mechanism it changed is a real improvement and the
+             * evidence for it was an artifact of this very line.
+             *
+             * So: every ten seconds regardless, and the gate's answer
+             * and the ceiling beside the applied gain. Those three are
+             * the whole of streamgain_step(). With only the third
+             * visible, "which of them is moving" cannot be answered
+             * from a log, which is how a wrong answer survived a
+             * patch.
+             */
+            const uint32_t lvl_now = (uint32_t)(esp_timer_get_time() / 1000);
+            if ((int32_t)(lvl_now - last_level_log_ms) >= 10000) {
+                last_level_log_ms = lvl_now;
+                float want = 0.0f;
+                const bool have_want = streamgain_window_db(s_sgain, &want);
+                ESP_LOGI(TAG, "levelling: %+.2f dB applied, gate %s%+.2f, "
+                              "ceiling %+.2f, window %d ms%s",
+                         (double)streamgain_db(s_sgain),
+                         have_want ? "" : "(none) ",
+                         (double)want,
+                         (double)streamgain_ceiling_db(s_sgain),
+                         streamgain_window_ms(s_sgain),
                          streamgain_confident(s_sgain) ? "" : " (held: thin)");
-                last_logged_db = now_db;
             }
         }
 

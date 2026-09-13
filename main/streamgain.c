@@ -100,6 +100,44 @@ bool streamgain_window_db(const streamgain_t *g, float *out_db)
     return true;
 }
 
+/*
+ * The clip ceiling, on its own so that it can be LOGGED as well as
+ * applied.
+ *
+ * Extracted in 0412 for a reason worth stating: 0411 claimed this was
+ * steering the gain on WUOM, changed it, and the board log came back
+ * identical. The claim could not be checked because the only number
+ * anyone could see was the applied gain, which is the output of three
+ * things at once. A value that is argued about has to be printable.
+ */
+float streamgain_ceiling_db(const streamgain_t *g)
+{
+    if (!g) return STREAMGAIN_MAX_BOOST_DB;
+
+    int peak = 0;
+    int n = streamgain_count(g);
+    /* Only the records nearest the tail -- the audio this gain will be
+     * applied to. See STREAMGAIN_CLAMP_MS. */
+    const int clamp_n = STREAMGAIN_CLAMP_MS / STREAMGAIN_BLOCK_MS;
+    if (n > clamp_n) n = clamp_n;
+    const uint32_t tail = g->tail;
+    for (int i = 0; i < n; i++) {
+        const int p = g->rec[(tail + (uint32_t)i)
+                             & (STREAMGAIN_RECORDS - 1)].peak;
+        if (p > peak) peak = p;
+    }
+
+    float ceiling = STREAMGAIN_MAX_BOOST_DB;
+    if (peak > 0) {
+        /* Headroom to full scale, less the same 1 dB of margin the file
+         * path keeps, so a boost cannot land a sample on the rail. */
+        const float head_db = 20.0f * log10f(32767.0f / (float)peak) - 1.0f;
+        if (head_db < ceiling) ceiling = head_db;
+    }
+    if (ceiling < 0.0f) ceiling = 0.0f;     /* never a clamp into a cut */
+    return ceiling;
+}
+
 void streamgain_step(streamgain_t *g, int elapsed_ms)
 {
     if (!g || elapsed_ms <= 0) return;
@@ -132,28 +170,7 @@ void streamgain_step(streamgain_t *g, int elapsed_ms)
      * clamp computed against a quiet block that a loud one follows is a
      * clamp that does not hold.
      */
-    int peak = 0;
-    int n = streamgain_count(g);
-    /* Only the records nearest the tail -- the audio this gain will be
-     * applied to. See STREAMGAIN_CLAMP_MS, which carries the board log
-     * that made the whole-window version indefensible. */
-    const int clamp_n = STREAMGAIN_CLAMP_MS / STREAMGAIN_BLOCK_MS;
-    if (n > clamp_n) n = clamp_n;
-    const uint32_t tail = g->tail;
-    for (int i = 0; i < n; i++) {
-        const int p = g->rec[(tail + (uint32_t)i)
-                             & (STREAMGAIN_RECORDS - 1)].peak;
-        if (p > peak) peak = p;
-    }
-
-    float ceiling = STREAMGAIN_MAX_BOOST_DB;
-    if (peak > 0) {
-        /* Headroom to full scale, less the same 1 dB of margin the file
-         * path keeps, so a boost cannot land a sample on the rail. */
-        const float head_db = 20.0f * log10f(32767.0f / (float)peak) - 1.0f;
-        if (head_db < ceiling) ceiling = head_db;
-    }
-    if (ceiling < 0.0f) ceiling = 0.0f;     /* never a clamp into a cut */
+    const float ceiling = streamgain_ceiling_db(g);
 
     if (want > ceiling) want = ceiling;
     if (want < -STREAMGAIN_MAX_CUT_DB) want = -STREAMGAIN_MAX_CUT_DB;
