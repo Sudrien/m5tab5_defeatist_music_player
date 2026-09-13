@@ -9223,6 +9223,54 @@ static track_end_t play_stream(const char *url, const char *name)
         if (s_pending_ready) {
             why = TRACK_INTERRUPTED;
             leaving = true;
+
+            /*
+             * FADE, THEN DUMP THE RING -- WHICH play_stream() HAS NEVER
+             * DONE, AND WHICH IS WHY A STATION CHANGE SOUNDED WRONG.
+             *
+             * play_file()'s interrupt path fades over FADE_OUT_MS and
+             * sets s_pcm_flush, and logs `interrupted: dropped 3519 KB
+             * of queued audio`. play_stream() did neither, and the
+             * absence of that line in the log is how the fault was
+             * confirmed: at a station change the PCM ring kept whatever
+             * the old station had queued, the writer played it out, and
+             * the new station cut in on top when it caught up. Reported
+             * as "it pauses, then seems to continue until a sudden
+             * switch over", which is exactly what that is.
+             *
+             * AND IT DEFEATED THE PREROLL GATE. bufplan holds PREROLL
+             * until BUFPLAN_START_MS of decoded audio is queued -- 4 s
+             * -- but the ring still held seconds of the PREVIOUS
+             * station, so the watermark was already satisfied and the
+             * new stream went audible on its first frame. WNZK reached
+             * "first sound" five milliseconds after its first frame,
+             * with no buffer of its own at all, which is why its ring
+             * then sat at 0% and every hiccup was audible. "Build up the
+             * ring before playing" was already the rule; stale audio was
+             * answering the question.
+             *
+             * So the two complaints are one fault, and one fix.
+             *
+             * Through the writer rather than with xStreamBufferReset(),
+             * for 0507's reason: a reset rewrites head and tail under a
+             * task that may be blocked inside xStreamBufferReceive() on
+             * the same buffer. Asynchronous, picked up at the top of the
+             * writer's next pass.
+             *
+             * Against audio_out_rate() and not the stream's rate: the
+             * ramp is counted in frames and the frames are consumed by
+             * the hardware clock. Same argument as the file path's, and
+             * it matters more here because a station change can also
+             * change the sample rate -- 44100 to 48000 between SomaFM
+             * and WNZK.
+             */
+            fade_out_begin(audio_out_rate());
+            ESP_LOGI(TAG, "station change: fading out %u KB over %" PRIu32
+                          " ms",
+                     (unsigned)(xStreamBufferBytesAvailable(s_pcm) / 1024),
+                     (uint32_t)FADE_OUT_MS);
+            s_flush_why = "station change";
+            s_pcm_flush = true;
         }
 
         /*
