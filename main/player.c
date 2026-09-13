@@ -8821,7 +8821,8 @@ static void clear_play_screen(void)
  * have. `kbps` rather than `kbit/s` to match, for the same reason the
  * order matches.
  */
-static void show_stream_card(uint32_t rate, int chans, int kbps)
+static void show_stream_card(stream_codec_t codec, uint32_t rate,
+                             int chans, int kbps)
 {
     /*
      * THE GUARD show_format_card() HAS AND 0316 DID NOT.
@@ -8845,9 +8846,19 @@ static void show_stream_card(uint32_t rate, int chans, int kbps)
     char rline[48] = "";
     char cline[48] = "";
 
-    const stream_codec_t c = netdec_codec();
+    /*
+     * The codec is passed in, not read here. The caller compares it
+     * against what was last drawn to decide whether to redraw at all,
+     * and it is written by the decoder on another task -- so reading it
+     * twice can draw something the comparison did not authorise.
+     *
+     * "Radio" when it is not known yet, which is the first fraction of a
+     * second and the whole of a failed connect. It is a placeholder and
+     * the caller's job is to come back; before 0321 nothing did, and
+     * this line was the entire card.
+     */
     snprintf(head, sizeof(head), "%s",
-             c != STREAM_CODEC_NONE ? stream_codec_name(c) : "Radio");
+             codec != STREAM_CODEC_NONE ? stream_codec_name(codec) : "Radio");
 
     if (rate > 0) {
         /* Mono is worth saying and so is stereo, because this is the
@@ -9147,9 +9158,33 @@ static track_end_t play_stream(const char *url, const char *name)
     bool leaving = false;
     /* Last seen netstream_failures(), for the stall clock below. */
     int last_failures = 0;
-    /* Whether the artwork square has been drawn for this stream. The
-     * card is redrawn on demand after that; this is only about the first
-     * one, which waits for a format to put on it. */
+    /*
+     * What the artwork card was last drawn WITH, not merely whether it
+     * was drawn.
+     *
+     * 0316 kept a bool, and that was the bug: the card was drawn on the
+     * first trigger and the format arriving afterwards was not a
+     * trigger. The first trigger is the chooser closing, which happens
+     * on the press -- before the connect, let alone before the first
+     * frame -- so the square said
+     *
+     *     Radio
+     *     no cover art
+     *
+     * for the whole broadcast, which is the two lines that carry no
+     * information at all. The codec, the rate and the bitrate, which are
+     * the entire reason the card exists, arrived seconds later and
+     * nothing asked to redraw.
+     *
+     * A file does not have this problem because show_format_card() WAITS
+     * -- up to FMT_WAIT_MAX_MS, in slices, for s_fmt_known. A stream
+     * cannot wait on the decode loop's own task, so it redraws instead:
+     * same end, opposite mechanism, and the facts are the trigger.
+     */
+    stream_codec_t shown_codec = STREAM_CODEC_NONE;
+    uint32_t shown_rate = 0;
+    int shown_chans = 0;
+    int shown_kbps = 0;
     bool art_shown = false;
     track_end_t why = TRACK_ENDED;
     /*
@@ -9547,10 +9582,35 @@ static track_end_t play_stream(const char *url, const char *name)
          * Redrawn on the card's own terms rather than by calling
          * load_track_visuals(), which wants a path.
          */
-        if (s_repaint_art || (out.audible && !art_shown)) {
+        /*
+         * Redrawn when the facts change, as well as when something has
+         * drawn over the square.
+         *
+         * netdec_codec() sampled here rather than inside the card, so
+         * that what is compared is what will be drawn -- the card reads
+         * it too, and two reads of a value another task writes can
+         * disagree.
+         *
+         * The fields go stale in only one direction: last_chans and
+         * last_kbps latch the last non-zero value the decoder reported,
+         * and out_rate is what audio_out is actually set to. So a
+         * difference here is news, never a flicker between a known
+         * value and a zero.
+         */
+        const stream_codec_t codec_now = netdec_codec();
+        const bool facts_moved = codec_now != shown_codec ||
+                                 out_rate   != shown_rate  ||
+                                 last_chans != shown_chans ||
+                                 last_kbps  != shown_kbps;
+
+        if (s_repaint_art || facts_moved || !art_shown) {
             s_repaint_art = false;
             art_shown = true;
-            show_stream_card(out_rate, last_chans, last_kbps);
+            shown_codec = codec_now;
+            shown_rate  = out_rate;
+            shown_chans = last_chans;
+            shown_kbps  = last_kbps;
+            show_stream_card(codec_now, out_rate, last_chans, last_kbps);
         }
 
         /*
