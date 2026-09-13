@@ -37,43 +37,54 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
 /*
  * Read chunk.
  *
- * THIS IS AN EXPERIMENT AND 0407 EXISTS TO SETTLE IT.
+ * 2048, MEASURED TWICE AND TRIED AT 8192 ONCE. Do not raise it again
+ * without a reading that 0407's did not already take.
  *
- * The probe measured 50-64 KB/s through 2048-byte reads and that was
- * the reason not to change it. Three board logs later the delivery
- * figure has never once exceeded about 230 kbit/s -- 29 KB/s -- across
- * three stations on two servers:
+ * The probe measured 50-64 KB/s through 2048-byte reads. Three later
+ * board logs showed delivery never exceeding about 230 kbit/s across
+ * three stations on two servers, including a 128 kbit/s station pegged
+ * at 222-230 -- which looked like a server with plenty left being held
+ * to a ceiling, and 29 KB/s against the probe's 50-64 looked like a
+ * per-read cost that had grown with TLS.
  *
- *   SomaFM, a 128 kbit/s stream       222, 230, 227
- *   Adroit Jazz, 224 kbit/s of audio  averaged 165
- *   Classic Vinyl, 224 kbit/s         averaged 167
+ * 0407 raised it to 8192 to settle that. It is not a ceiling:
  *
- * The first line is the one that does not fit a story about slow
- * servers. A 128 kbit/s station delivered at 1.75x real time, steadily,
- * three windows running, is a server with plenty to give being held to
- * something -- and if it were the network there would be no reason for
- * the number to be so close to the other two. Half the probe's figure,
- * with TLS added to the path since, is the shape of a per-read cost
- * that has grown.
+ *   peak 209, bytes 3% (8192), audio  4.35s   ... 159% of need
+ *   peak 209, bytes 3% (8192), audio  7.49s
+ *   peak 209, bytes 3% (8192), audio 12.64s
+ *   peak 209, bytes 3% (8192), audio 17.62s
+ *   peak 209, bytes 3% (8192), audio 17.68s   ... 100% of need
  *
- * So: 8192, which is four times the reads' work per byte and the same
- * loop otherwise. If the ceiling is ours it moves. If a 128 kbit/s
- * station still reports about 230, the ceiling is the link, both
- * walmradio stations are simply too big for it, and this constant goes
- * back to 2048 with a comment saying so -- which is a better outcome
- * than the guess, because it is the end of the question rather than
- * another reading of it.
+ * Four times the bytes per read produced a peak of 209 where 2048 had
+ * produced 222-230. Slightly lower, which is noise, and certainly not
+ * four times anything.
  *
- * Costs 12 KB of PSRAM: the rx and audio buffers below are one chunk
- * each and the sniff buffer is unchanged. Nothing here is sized in
- * chunks except those two.
+ * WHAT THE 230 ACTUALLY WAS, which is the part worth keeping. The
+ * reserve climbs from 4.35 s to 17.7 s and stops, and delivery drops to
+ * exactly 100% of need and stays there for a minute. Nothing is being
+ * held to a rate: the PCM ring filled, the decode loop stopped asking,
+ * and a reader that is not asked does not read. Delivery here is
+ * PULL-limited by a full buffer, and the 1.6x during the fill is the
+ * decode loop's own refill pacing above REFILL_PACE_UNTIL_PCT.
  *
- * Safe against the demuxer by construction rather than by hope --
- * icydemux_feed() is tested across every way a read boundary can cut a
- * metadata block, at sizes from one byte up, and this station's metaint
- * of 16000 is larger than either chunk size anyway.
+ * So two different regimes produced numbers near each other and the
+ * coincidence read as a ceiling. WUOM's probe run had already said as
+ * much and it was not connected up: 6.6x burst for ten seconds with the
+ * compressed ring pegged at 100%, through these same 2048-byte reads.
+ * A path that does 6.6x on one station does not have a 230 kbit/s
+ * ceiling.
+ *
+ * Which leaves the walmradio stations where they were, and honestly so:
+ * 224 kbit/s of audio over TLS, delivered at about 167, is this link
+ * being too slow for that station. There is nothing in this file to
+ * fix.
+ *
+ * Back to 2048 because that is what was pre-registered for this
+ * outcome, and because 8192 costs 12 KB of PSRAM for the two buffers
+ * below and bought a result of nothing. The peak field that made this
+ * readable stays.
  */
-#define READ_CHUNK          (8192)
+#define READ_CHUNK          (2048)
 
 /* How long a ring send waits for room before giving up on this pass.
  * When the decoder is not draining -- it has not started yet, or it is
@@ -200,7 +211,7 @@ static bool s_has_title;
  * freed.
  *
  * These were internal-RAM statics, which is the default for a `static
- * uint8_t buf[]`, and between the demuxer, the two READ_CHUNK buffers,
+ * uint8_t buf[]`, and between the demuxer, the two 2 KB working buffers,
  * the sniff buffer and an 8 KB stack this file claimed about 26 KB of
  * internal RAM -- with the probe's own buffers, 41 KB against the 53-63
  * KB free that netstream.h itself identifies as the scarce resource.
@@ -245,11 +256,13 @@ static volatile int s_actual_br;
 /*
  * The best delivery window this station has managed.
  *
- * The ceiling above is a claim about a NUMBER NOT BEING EXCEEDED, and
- * an average cannot show that -- a station that bursts to 600 and then
- * idles averages the same as one held flat at 300. The peak is the
- * figure the experiment turns on, so it is printed rather than
- * reconstructed by hand from a column of windows.
+ * Kept after 0407 because it is what made that log readable. A claim
+ * that a number is not being exceeded cannot be tested against an
+ * average -- a station bursting to 600 and idling averages what one
+ * held flat at 300 does -- and the peak is also how a pull-limited
+ * stream is told from a starved one at a glance: a peak well above need
+ * with delivery sitting at 100% is a full buffer, while a peak that
+ * never reaches need is a station this link cannot carry.
  */
 static int  s_kbps_peak;
 
