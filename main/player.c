@@ -1923,7 +1923,8 @@ static void levelhist_note_silence(void)
  * after 2 ms; the previous frame then stays up for another 50 ms, which
  * is not a thing anybody can see.
  */
-static bool level_strip_copy(uint8_t *out, int *ahead_cols, bool *clipped)
+static bool level_strip_copy(uint8_t *out, uint8_t *ahead,
+                             int *ahead_cols, bool *clipped)
 {
     if (!out || !s_levelhist_lock) return false;
     if (xSemaphoreTake(s_levelhist_lock, pdMS_TO_TICKS(2)) != pdTRUE) {
@@ -1933,8 +1934,60 @@ static bool level_strip_copy(uint8_t *out, int *ahead_cols, bool *clipped)
     xSemaphoreGive(s_levelhist_lock);
 
     const int buffered = s_stream_buffered_ms;
-    if (ahead_cols) *ahead_cols = levelhist_ahead_columns(buffered);
+    const int cols = levelhist_ahead_columns(buffered);
+    if (ahead_cols) *ahead_cols = cols;
     if (clipped)    *clipped    = levelhist_ahead_clipped(buffered);
+
+    /*
+     * THE SHAPE OF THE RESERVE, into its OWN array.
+     *
+     * Not into the tail of `out`, which was the obvious place and is
+     * wrong: LEVELHIST_HISTORY_OFFSET means the history drawn left of
+     * the mark is out[80..239], so the slots past the mark are not
+     * spare at all -- they hold the most recent twenty seconds of
+     * level, which is the part beside the mark and the part anybody
+     * looks at. Writing the reserve there would erase the present to
+     * draw the future.
+     *
+     * The carrier already holds the shape: one record per 100 ms of
+     * queued PCM, kept byte-accurate against the ring because the
+     * levelling depends on that. No scan, no second measurement,
+     * nothing on ui_task but a copy it was already making.
+     *
+     * SCALED BY THE APPLIED GAIN, which is why this is eight lines and
+     * not three. The history is fed by levelhist_note(peak_of(buf,
+     * got)) AFTER the writer applies the levelling; these peaks were
+     * measured in the decode loop BEFORE it. On one axis without the
+     * gain between them, a station running 3 dB down draws a reserve a
+     * third taller than the history it runs into, and the step at the
+     * mark is the levelling rather than the music -- which breaks the
+     * promise levelhist.h makes hardest: same scale, one timeline.
+     *
+     * The strip is a listener's view, so the reserve is drawn as it
+     * WILL BE HEARD. That the gain may drift before a far column is
+     * played is true and invisible: a decibel a second, against columns
+     * a quarter-second wide.
+     *
+     * Zeroed first, so a stream with no carrier leaves zeros and the
+     * drawing falls back to the flat band it has always been.
+     */
+    if (!ahead) return true;
+    memset(ahead, 0, LEVELHIST_AHEAD_COLUMNS);
+    if (s_sgain_on && s_sgain && cols > 0) {
+        const int32_t q = s_sgain_apply
+                        ? streamgain_q16(streamgain_db(s_sgain)) : 65536;
+        const int per = levelhist_blocks_per_column(STREAMGAIN_BLOCK_MS);
+        for (int c = 0; c < cols && c < LEVELHIST_AHEAD_COLUMNS; c++) {
+            int peak = 0;
+            for (int b = 0; b < per; b++) {
+                const int p = streamgain_peak_at(s_sgain, c * per + b);
+                if (p > peak) peak = p;
+            }
+            int scaled = (int)(((int64_t)peak * q) >> 16);
+            if (scaled > 32767) scaled = 32767;
+            ahead[c] = levelhist_peak_to_column(scaled);
+        }
+    }
     return true;
 }
 
@@ -5925,7 +5978,8 @@ static void ui_task(void *arg)
         /* The level strip, only while streaming: a file's bar already
          * has an envelope and a seek position, which say more. */
         if (s_streaming) {
-            st.strip_valid = level_strip_copy(st.strip, &st.strip_ahead_cols,
+            st.strip_valid = level_strip_copy(st.strip, st.strip_ahead,
+                                              &st.strip_ahead_cols,
                                               &st.strip_clipped);
         } else {
             st.strip_valid = false;

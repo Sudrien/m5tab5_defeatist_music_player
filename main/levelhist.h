@@ -234,6 +234,50 @@ static inline int levelhist_ahead_columns(int buffered_ms)
 }
 
 /*
+ * How many measured blocks fold into one column of the strip.
+ *
+ * Here rather than at the call site because it is a property of the two
+ * time bases meeting -- a 250 ms column and a 100 ms measurement block
+ * -- and a drawing loop that inlined `250 / 100` would silently draw
+ * the wrong span the day either constant moved.
+ *
+ * Rounded UP, so a column is never built from less audio than it
+ * claims to cover. The bias is toward showing a loud column slightly
+ * early, which on a reserve display is the safe direction: the
+ * question the strip answers is "what is coming", and being a quarter
+ * second eager about a peak is better than missing it.
+ */
+static inline int levelhist_blocks_per_column(int block_ms)
+{
+    if (block_ms <= 0) return 1;
+    const int n = (LEVELHIST_BUCKET_MS + block_ms - 1) / block_ms;
+    return n < 1 ? 1 : n;
+}
+
+/*
+ * An int16 sample peak as a column byte.
+ *
+ * The one conversion between the units the writer measures in and the
+ * units the strip stores, in one place so the history and the reserve
+ * cannot disagree about it. levelhist_push() does the same shift on the
+ * way in; this is for callers building the ahead columns themselves,
+ * which cannot go through push() because that would put future audio
+ * into the history ring.
+ *
+ * Anything above zero returns at least 1, for the reason the column
+ * height clamp in ui.c exists: quiet is not silent, and the difference
+ * is the difference between playing and not.
+ */
+static inline uint8_t levelhist_peak_to_column(int peak)
+{
+    if (peak <= 0) return 0;
+    int v = peak >> 7;                  /* 0..32767 -> 0..255 */
+    if (v > 255) v = 255;
+    if (v < 1) v = 1;
+    return (uint8_t)v;
+}
+
+/*
  * Is the reserve being clipped by the strip's width?
  *
  * So the drawing can mark it rather than silently lying. A strip that

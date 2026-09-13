@@ -267,6 +267,45 @@ int main(void)
           "an over-range peak clamps loud, got %d",
           strip[LEVELHIST_COLUMNS - 1]);
 
+    printf("  columns for the reserve (0413)\n");
+    {
+        /* 250 ms columns against 100 ms blocks: three blocks a column,
+         * rounded up, so a column never claims more audio than built
+         * it. */
+        CHECK(levelhist_blocks_per_column(100) == 3,
+              "three 100 ms blocks to a column");
+        CHECK(levelhist_blocks_per_column(250) == 1, "an exact fit is one");
+        CHECK(levelhist_blocks_per_column(400) == 1,
+              "a block longer than a column is still one");
+        CHECK(levelhist_blocks_per_column(0) == 1, "and zero does not divide");
+
+        /* The peak-to-column conversion, which the history and the
+         * reserve must agree on or the two halves of the strip are in
+         * different units. */
+        CHECK(levelhist_peak_to_column(0) == 0, "silence is zero");
+        CHECK(levelhist_peak_to_column(32767) == 255, "full scale is full");
+        CHECK(levelhist_peak_to_column(16384) == 128, "half is half");
+        /* The case the clamp exists for: quiet is not silent, and a
+         * column that rounded to nothing would draw a dropout. */
+        CHECK(levelhist_peak_to_column(1) == 1, "the quietest is not silence");
+        CHECK(levelhist_peak_to_column(127) == 1, "nor is very quiet");
+
+        /*
+         * AND THE SLOTS DO NOT OVERLAP, which is the bug this nearly
+         * shipped with. The history drawn left of the mark is
+         * strip[LEVELHIST_HISTORY_OFFSET .. +LEVELHIST_NOW_COLUMN-1],
+         * which runs to the END of the array -- so the columns past the
+         * mark are the newest twenty seconds of level, not spare space
+         * for the reserve.
+         */
+        CHECK(LEVELHIST_HISTORY_OFFSET + LEVELHIST_NOW_COLUMN ==
+              LEVELHIST_COLUMNS,
+              "the history reaches the end of the read");
+        CHECK(LEVELHIST_HISTORY_OFFSET < LEVELHIST_NOW_COLUMN +
+              LEVELHIST_AHEAD_COLUMNS,
+              "so the reserve cannot borrow the tail of the strip");
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

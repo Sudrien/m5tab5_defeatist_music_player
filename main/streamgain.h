@@ -496,6 +496,37 @@ static inline void streamgain_drain(streamgain_t *g)
 }
 
 /*
+ * The sample peak of queued block `i`, 0 being the one about to be
+ * played. 0 when `i` is past the end.
+ *
+ * FOR DRAWING, and it is the reason the level strip can show the shape
+ * of the reserve rather than a flat grey block. The records between
+ * tail and head ARE the unheard audio, byte-accurate against the PCM
+ * ring, because that alignment is what the levelling already depends
+ * on -- so the strip gets a waveform of the future for the cost of
+ * reading an array that was going to exist anyway. No scan of the ring,
+ * no second measurement, nothing on ui_task.
+ *
+ * Read-only, and safe from any task for the same reason
+ * streamgain_count() is: one writer per index, and a record is complete
+ * before head moves. A reader racing the producer sees one column
+ * built from a record that has just been retired, which is a rectangle
+ * a quarter-second stale.
+ *
+ * PRE-GAIN, and callers that draw it beside played audio have to say
+ * so. See player.c, which scales by the applied gain for exactly this
+ * reason: the level history is what left the writer and this is what
+ * arrived at it, and drawing the two on one axis without the gain
+ * between them puts a step at the mark that is the levelling rather
+ * than the music.
+ */
+static inline int streamgain_peak_at(const streamgain_t *g, int i)
+{
+    if (!g || i < 0 || i >= streamgain_count(g)) return 0;
+    return g->rec[(g->tail + (uint32_t)i) & (STREAMGAIN_RECORDS - 1)].peak;
+}
+
+/*
  * How much measured audio is in hand, in milliseconds.
  *
  * From the record count and not from the byte count, because that is

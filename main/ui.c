@@ -901,7 +901,25 @@ static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
         }
 
         if (i - LEVELHIST_NOW_COLUMN <= st->strip_ahead_cols) {
-            const int h = UI_WAVE_H / 6;
+            /*
+             * The reserve, drawn as its own waveform when there is one.
+             *
+             * Same geometry as the history above and the same units --
+             * the publisher scales these by the applied gain so the two
+             * halves meet at the mark without a step -- so the strip is
+             * one continuous shape through "now" rather than a picture
+             * and a bar. A silence or an ad break in the buffer is then
+             * visible before it is audible, which is the whole point of
+             * drawing the future at all.
+             *
+             * A zero column means no measurement rather than silence:
+             * a file, or a stream whose carrier could not be allocated.
+             * That draws the flat band this used to be, so the strip
+             * degrades to its old self instead of to an empty one.
+             */
+            const int v = st->strip_ahead[i - LEVELHIST_NOW_COLUMN - 1];
+            int h = v ? (v * half / 255) : (UI_WAVE_H / 6);
+            if (h < 1) h = 1;
             gfx_fill_rect(cx0, mid - h, cw, h * 2, C_WAVE_FUTURE);
         }
     }

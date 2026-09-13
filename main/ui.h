@@ -178,6 +178,19 @@ typedef struct {
      */
     bool        strip_valid;
     uint8_t     strip[LEVELHIST_COLUMNS];
+    /*
+     * The reserve's own columns, nearest-first, in the same units as
+     * `strip` and already scaled by the applied gain so the two halves
+     * meet at the mark without a step.
+     *
+     * Separate from `strip` and not the spare end of it: see
+     * LEVELHIST_HISTORY_OFFSET -- the columns past the mark in `strip`
+     * are the newest twenty seconds of history, not spare.
+     *
+     * Zero means no measurement rather than silence, and draws the flat
+     * band the reserve used to be.
+     */
+    uint8_t     strip_ahead[LEVELHIST_AHEAD_COLUMNS];
     int         strip_ahead_cols;
     bool        strip_clipped;
 } ui_state_t;
