@@ -71,6 +71,65 @@ int main(void)
     CHECK(sniff_bytes(b, 1000) == SNIFF_UNKNOWN, "one fake sync with no second: %s",
           sniff_name(sniff_bytes(b, 1000)));
 
+    printf("real frames beat an early stray, both ways (0419)\n");
+    {
+        /*
+         * THESE DO NOT REPRODUCE THE DANCE WAVE FAILURE, and that is
+         * stated here rather than left for somebody to discover.
+         *
+         * On the board, a station whose every header said MP3 --
+         * Content-Type audio/mpeg, icy-br 128, icy-sr 44100, icy-vbr 1
+         * -- was sniffed as AAC, the AAC decoder was opened at a cost
+         * of 14 KB, and it died on "AAC only support 1-2 channel" with
+         * the parser reading MP3 payload as a channel configuration.
+         *
+         * The stray ADTS header written below is rejected by the OLD
+         * code as well, because its frame length does not land on
+         * another sync. Whatever the real payload held survived that
+         * check -- one accidental sync at one computed offset -- and
+         * these bytes are not it. The actual sequence was not captured.
+         *
+         * What they DO assert is the property the fix is built on: that
+         * the winner is the longest chain of frames rather than the one
+         * at the lowest index. That property is what makes a single
+         * lucky confirmation insufficient, which is the class the board
+         * failure belongs to even though this is not the instance.
+         */
+        memset(b, 0x5A, sizeof b);
+        /* A plausible ADTS header early on, with a frame length that
+         * points into payload rather than at another frame. */
+        b[6] = 0xFF; b[7] = 0xF1; b[8] = 0x50; b[9] = 0x80;
+        b[10] = 0x01; b[11] = 0x7F; b[12] = 0xFC;
+        /* Then real MP3, further in, as a mid-frame join would give. */
+        const size_t len = mp3_frames(b + 64, 0, 6) + 64;
+
+        CHECK(sniff_bytes(b, len) == SNIFF_MP3,
+              "real frames beat an early stray: %s",
+              sniff_name(sniff_bytes(b, len)));
+    }
+    {
+        /* The mirror image, so the fix is not just a thumb on the scale
+         * for MP3: a stray MPEG-looking pair ahead of real ADTS must
+         * lose to the real thing. */
+        memset(b, 0x5A, sizeof b);
+        b[6] = 0xFF; b[7] = 0xFB; b[8] = 0x90; b[9] = 0x44;
+        const size_t len = adts_frames(b + 64, 0, 6, 300) + 64;
+        CHECK(sniff_bytes(b, len) == SNIFF_AAC_ADTS,
+              "and the other way round: %s",
+              sniff_name(sniff_bytes(b, len)));
+    }
+    {
+        /* Two coincidences and no real audio stays UNKNOWN, so the
+         * caller can fall back to the Content-Type rather than being
+         * handed the winner of a coin toss. */
+        memset(b, 0x5A, sizeof b);
+        b[6]  = 0xFF; b[7]  = 0xF1; b[8]  = 0x50; b[9] = 0x80;
+        b[10] = 0x01; b[11] = 0x7F; b[12] = 0xFC;
+        b[40] = 0xFF; b[41] = 0xFB; b[42] = 0x90; b[43] = 0x44;
+        CHECK(sniff_bytes(b, 1000) == SNIFF_UNKNOWN,
+              "two strays decide nothing: %s", sniff_name(sniff_bytes(b, 1000)));
+    }
+
     printf("ADTS is AAC, not MP3\n");
     n = adts_frames(b, 0, 3, 300);
     CHECK(sniff_bytes(b, n) == SNIFF_AAC_ADTS, "ADTS: %s", sniff_name(sniff_bytes(b, n)));

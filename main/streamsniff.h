@@ -66,42 +66,112 @@ static inline sniff_t sniff_bytes(const uint8_t *b, size_t n)
         if (i < n && b[i] == '<') return SNIFF_HTML;
     }
 
+    /*
+     * FRAME CHAINS, NOT FIRST SYNC WINS -- rewritten in 0419.
+     *
+     * A live stream is joined mid-frame, so the first bytes here are
+     * compressed payload rather than a header. Payload is close enough
+     * to random that an ADTS-looking sync -- 0xFF, then a byte with the
+     * layer bits clear -- turns up in it readily, and the old scan
+     * returned whichever candidate appeared at the lowest index. A
+     * single stray pair before the first real MP3 header decided the
+     * whole stream.
+     *
+     * Which is what Dance Wave did. Everything the server said was MP3
+     * -- `Content-Type: audio/mpeg`, `icy-br: 128`, `icy-sr: 44100`,
+     * `icy-vbr: 1` -- and this returned AAC, the AAC decoder was opened
+     * and cost 14 KB, and the station died on `AAC only support 1-2
+     * channel` from a parser reading MP3 payload as a channel
+     * configuration.
+     *
+     * One confirming frame was not enough either: it only asks for a
+     * second sync at one computed offset, and a wrong flen can land on
+     * one by chance, which is exactly what a chance sync's flen does.
+     *
+     * So both candidates are followed as far as they chain, and the
+     * longest chain wins. Real audio chains to the end of the buffer --
+     * every frame header gives the next one's offset exactly, VBR
+     * included, which is why this works on a stream whose frames differ
+     * in length. A coincidence chains once or twice and stops.
+     */
     static const int kbps_v1_l3[16] = { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0 };
     static const int kbps_v2_l3[16] = { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0 };
     static const int rate_v1[4] = { 44100, 48000, 32000, 0 };
 
+    /* Enough to be sure. Three consecutive frames at exactly the right
+     * offsets is about 2e-14 by chance for MP3 and no better than 2e-9
+     * for ADTS, whose header constrains fewer bits; two is not
+     * comfortable and four costs buffer on a short sniff. */
+    #define SNIFF_CHAIN_WANT   (3)
+
+    int best_mp3 = 0, best_aac = 0;
+
     for (size_t i = 0; i + 4 <= n; i++) {
-        if (b[i] != 0xFF || (b[i + 1] & 0xF0) != 0xF0) {
-            /* MPEG-2.5 has 0xFFE; only layer III is looked for there. */
-            if (!(b[i] == 0xFF && (b[i + 1] & 0xE0) == 0xE0)) continue;
-        }
-        const int layer = (b[i + 1] >> 1) & 3;
-        if (layer == 0) {
-            /* ADTS: 12-bit sync 0xFFF, layer 00. Confirm by frame length. */
-            if ((b[i + 1] & 0xF0) != 0xF0 || i + 7 > n) continue;
-            const size_t flen = ((size_t)(b[i + 3] & 0x03) << 11) | ((size_t)b[i + 4] << 3) | (b[i + 5] >> 5);
-            if (flen < 7) continue;
-            if (i + flen + 2 <= n) {
-                if (b[i + flen] == 0xFF && (b[i + flen + 1] & 0xF6) == 0xF0) return SNIFF_AAC_ADTS;
-                continue;
+        if (b[i] != 0xFF) continue;
+
+        /* --- ADTS, as far as it goes --- */
+        if ((b[i + 1] & 0xF6) == 0xF0) {
+            size_t at = i;
+            int chain = 0;
+            while (at + 7 <= n) {
+                if (b[at] != 0xFF || (b[at + 1] & 0xF6) != 0xF0) break;
+                const size_t flen = ((size_t)(b[at + 3] & 0x03) << 11) |
+                                    ((size_t)b[at + 4] << 3) | (b[at + 5] >> 5);
+                if (flen < 7) break;
+                chain++;
+                at += flen;
+                if (at + 2 > n) { chain++; break; }   /* ran off the end whole */
             }
-            return SNIFF_AAC_ADTS;      /* too short to confirm; one sync */
+            if (chain > best_aac) best_aac = chain;
+            if (chain >= SNIFF_CHAIN_WANT) return SNIFF_AAC_ADTS;
         }
-        if (layer != 1) continue;       /* layer III only: what stations send */
-        const int ver = (b[i + 1] >> 3) & 3;     /* 3 = MPEG1, 2 = MPEG2, 0 = 2.5 */
-        if (ver == 1) continue;
-        const int bi = b[i + 2] >> 4, si = (b[i + 2] >> 2) & 3, pad = (b[i + 2] >> 1) & 1;
-        if (bi == 0 || bi == 15 || si == 3) continue;
-        const int rate = rate_v1[si] >> (ver == 3 ? 0 : ver == 2 ? 1 : 2);
-        const int kbps = (ver == 3 ? kbps_v1_l3 : kbps_v2_l3)[bi];
-        const size_t flen = (size_t)((ver == 3 ? 144000 : 72000) * kbps / rate + pad);
-        if (flen < 24) continue;
-        if (i + flen + 2 <= n) {
-            if (b[i + flen] == 0xFF && (b[i + flen + 1] & 0xE0) == 0xE0) return SNIFF_MP3;
-            continue;
+
+        /* --- MPEG layer III, as far as it goes --- */
+        if ((b[i + 1] & 0xE0) == 0xE0) {
+            size_t at = i;
+            int chain = 0;
+            while (at + 4 <= n) {
+                if (b[at] != 0xFF || (b[at + 1] & 0xE0) != 0xE0) break;
+                const int layer = (b[at + 1] >> 1) & 3;
+                if (layer != 1) break;              /* layer III only */
+                const int ver = (b[at + 1] >> 3) & 3;
+                if (ver == 1) break;                /* reserved */
+                const int bi = b[at + 2] >> 4;
+                const int si = (b[at + 2] >> 2) & 3;
+                const int pad = (b[at + 2] >> 1) & 1;
+                if (bi == 0 || bi == 15 || si == 3) break;
+                const int rate = rate_v1[si] >> (ver == 3 ? 0 : ver == 2 ? 1 : 2);
+                if (rate <= 0) break;
+                const int kbps = (ver == 3 ? kbps_v1_l3 : kbps_v2_l3)[bi];
+                const size_t flen =
+                    (size_t)((ver == 3 ? 144000 : 72000) * kbps / rate + pad);
+                if (flen < 24) break;
+                chain++;
+                at += flen;
+                if (at + 2 > n) { chain++; break; }
+            }
+            if (chain > best_mp3) best_mp3 = chain;
+            if (chain >= SNIFF_CHAIN_WANT) return SNIFF_MP3;
         }
-        return SNIFF_MP3;
     }
+
+    /*
+     * Nothing chained far enough, which is a short buffer rather than a
+     * strange stream. The longer chain still wins, and a tie goes to
+     * NOBODY: returning UNKNOWN lets the caller fall back to the
+     * Content-Type, which is a better guess than a coin toss between
+     * two one-frame coincidences.
+     *
+     * And a chain of ONE is never enough, whatever the other candidate
+     * managed. A single sync with nothing after it is the definition of
+     * the stray 0xFF this function exists to ignore -- it was already a
+     * test case, and requiring two is what keeps it passing. A lone
+     * frame that runs off the end of a short buffer counts as two,
+     * because running out of bytes is not the same as failing to
+     * match.
+     */
+    if (best_mp3 >= 2 && best_mp3 > best_aac) return SNIFF_MP3;
+    if (best_aac >= 2 && best_aac > best_mp3) return SNIFF_AAC_ADTS;
     return SNIFF_UNKNOWN;
 }
 
