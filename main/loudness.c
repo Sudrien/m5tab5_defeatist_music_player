@@ -82,6 +82,15 @@ void loudness_reset(loudness_t *l)
     l->active = true;
 }
 
+void loudness_set_block_sink(loudness_t *l,
+                             void (*fn)(void *user, float msq, float peak),
+                             void *user)
+{
+    if (!l) return;
+    l->block_sink = fn;
+    l->block_user = user;
+}
+
 void loudness_invalidate(loudness_t *l)
 {
     if (!l) return;
@@ -114,6 +123,19 @@ static void close_block(loudness_t *l)
     }
 
     const float lufs = ms_to_lufs(ms);
+
+    /*
+     * The sink first, and before the absolute gate below returns.
+     *
+     * A gated-out block is still 100 ms of audio that will be played,
+     * and a carrier that keeps its records in step with the ring by
+     * counting bytes cannot skip one -- the silence between two tracks
+     * on a station is exactly the case, and dropping it would put every
+     * later record ahead of the audio it describes by the length of the
+     * gap. The gate belongs to whoever reads the window, which is the
+     * one place that knows how many blocks it has.
+     */
+    if (l->block_sink) l->block_sink(l->block_user, (float)ms, l->block_peak);
 
     /* Into the tail before the gate, so a fade's quiet end is kept. */
     long clu = lrintf(lufs * 100.0f);
@@ -176,6 +198,7 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
 
             const float ax = fabsf(x);
             if (ax > l->peak) l->peak = ax;
+            if (ax > l->quarter_peak) l->quarter_peak = ax;
             if (ax > l->env_peak) l->env_peak = ax;
 
             /* High shelf. */
@@ -231,6 +254,12 @@ void loudness_process(loudness_t *l, const int16_t *pcm, int n,
         if (++l->quarter_samples >= l->quarter_len) {
             l->quarter_samples = 0;
             if (l->quarters_filled < 4) l->quarters_filled++;
+
+            /* Handed over before close_block() runs, because that is
+             * where the sink is called from and the peak it wants is
+             * this quarter's rather than the next one's. */
+            l->block_peak = l->quarter_peak;
+            l->quarter_peak = 0.0f;
 
             /* With four quarters in flight there is a complete 400 ms
              * block every 100 ms, which is the standard's 75% overlap. */

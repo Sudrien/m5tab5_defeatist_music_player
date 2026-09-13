@@ -189,6 +189,19 @@ $(FADE_BIN): fadetest.c ../main/loudness.c ../main/loudness.h
 run-fade: $(FADE_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FADE_BIN)
 
+# The stream levelling carrier, its gate and its slew. Links the real
+# main/streamgain.c, and builds it once more at -O2 -Werror for the
+# reason FADE_BIN does.
+SGAIN_BIN := streamgaintest
+
+$(SGAIN_BIN): streamgaintest.c ../main/streamgain.c ../main/streamgain.h
+	$(CC) $(WARNCFLAGS) -c ../main/streamgain.c -o /dev/null
+	$(CC) $(WARNCFLAGS) -c streamgaintest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ streamgaintest.c ../main/streamgain.c $(LDFLAGS)
+
+run-sgain: $(SGAIN_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SGAIN_BIN)
+
 $(TAIL_BIN): tailplantest.c ../main/tailplan.h
 	$(CC) $(WARNCFLAGS) -c tailplantest.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ tailplantest.c $(LDFLAGS)
@@ -221,7 +234,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 

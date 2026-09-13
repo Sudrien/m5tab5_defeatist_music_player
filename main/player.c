@@ -95,6 +95,7 @@
 #include "netdec.h"
 #include "netstream.h"
 #include "stations.h"
+#include "streamgain.h"
 #include "streamplan.h"
 
 static const char *TAG = "tab5_mp3";
@@ -1267,6 +1268,25 @@ static volatile bool     s_fade_out;
  */
 static volatile int      s_stream_buffered_ms;
 
+/*
+ * LEVELLING FOR A LIVE STREAM. See streamgain.h, which argues at length
+ * that this is not ReplayGain and must not be called it.
+ *
+ * The carrier is written by the stream decode loop and read by the
+ * writer, one field each way, no lock -- the ownership split is in the
+ * header. It is allocated once and never freed, for the same reason the
+ * PCM ring is: a structure two tasks touch must not stop existing while
+ * one of them is inside it, and there is no moment at which both are
+ * provably out.
+ *
+ * `s_sgain_on` is what the writer tests. It is lowered before a stream
+ * ends and raised only once the carrier has been reset, so the writer
+ * never applies a gain measured from audio that has been flushed.
+ */
+static streamgain_t     *s_sgain;
+static volatile bool     s_sgain_on;
+static volatile uint32_t s_sgain_block_bytes;   /* PCM one block covers */
+
 static levelhist_t       s_levelhist;
 static SemaphoreHandle_t s_levelhist_lock;
 
@@ -2304,6 +2324,20 @@ static void i2s_writer_task(void *arg)
                     dropped += got;
                 }
             }
+            /*
+             * And the levelling carrier, which described exactly the
+             * audio that was just thrown away. Not reset -- the applied
+             * gain is about the STATION and is still the best answer
+             * for what comes next -- but the records and the byte
+             * accounting go, because keeping them would retire the new
+             * stream's audio against the old one's blocks.
+             *
+             * streamgain_drain() rather than streamgain_reset(), which
+             * would also clear gain_db and have_gain and make a pause
+             * sound like a new station.
+             */
+            if (s_sgain) streamgain_drain(s_sgain);
+
             s_pcm_flush = false;
             ring_publish();
             ESP_LOGI(TAG, "%s: dropped %u KB of queued audio",
@@ -2670,6 +2704,48 @@ static void i2s_writer_task(void *arg)
              * reader to disagree with. Everything a crossfade needs to
              * touch, it touches from inside this if.
              */
+            /*
+             * The stream's levelling gain, first of everything here.
+             *
+             * Before the ramps because the ramps only ever attenuate: a
+             * chunk that has been boosted and then faded is quieter
+             * than either asked for, which is right, while a chunk
+             * faded and then boosted is the fade partly undone. And
+             * before audio_out_write() for the reason this whole block
+             * is here -- it is the last place the samples are samples.
+             *
+             * Nothing here for a file. A file's gain is folded in by
+             * the decode loop from its sidecar, which sees the whole
+             * track and is strictly better; two gain paths on one
+             * writer is a way to apply both. s_sgain_on is false for
+             * every file and every unmeasured stream.
+             */
+            if (s_sgain_on && s_sgain) {
+                const uint32_t rate = s_frames_rate[s_ring_play];
+                streamgain_step(s_sgain,
+                                rate ? (int)((uint64_t)got * 1000u /
+                                             ((uint64_t)rate * PCM_BYTES_PER_FRAME))
+                                     : 0);
+                const int32_t q = streamgain_q16(streamgain_db(s_sgain));
+                if (q != 65536) {
+                    int16_t *p16 = (int16_t *)buf;
+                    const size_t vals = got / sizeof(int16_t);
+                    for (size_t i = 0; i < vals; i++) {
+                        int32_t v = (int32_t)(((int64_t)p16[i] * q) >> 16);
+                        if (v >  32767) v =  32767;
+                        if (v < -32768) v = -32768;
+                        p16[i] = (int16_t)v;
+                    }
+                }
+                /*
+                 * Retired after the gain and not before, so a carrier
+                 * that is somehow behind cannot have this chunk's own
+                 * record retired out from under the measurement that
+                 * chose the gain for it.
+                 */
+                streamgain_consume(s_sgain, (uint32_t)got);
+            }
+
             bool ramp_over = false;
             if (s_fade_out) {
                 fade_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
@@ -9254,6 +9330,29 @@ static int stream_buffered_ms(uint32_t rate)
  *   TRACK_INTERRUPTED something else was chosen; s_pending has it
  *   TRACK_UNREADABLE  it could not be set up at all
  */
+/*
+ * loudness.c's per-block callback, on the stream decode loop.
+ *
+ * The bytes are computed here rather than passed through the sink,
+ * because the sink's two arguments are about the AUDIO and this one is
+ * about the ring. A block closes every 100 ms of input -- loudness.c's
+ * quarter is `rate / 10` frames -- and every frame decoded becomes one
+ * stereo frame in the ring, mono widened on the way. So the count is
+ * exact rather than estimated, and it has to be: the carrier stays in
+ * step with the ring by counting bytes, and an estimate would drift in
+ * one direction for ever.
+ *
+ * s_sgain_block_bytes is set wherever the rate becomes known, which is
+ * also the only place it can change.
+ */
+static void stream_block_sink(void *user, float msq, float peak)
+{
+    (void)user;
+    if (!s_sgain || !s_sgain_block_bytes) return;
+    streamgain_push(s_sgain, msq, (int)(peak * 32767.0f + 0.5f),
+                    s_sgain_block_bytes);
+}
+
 static track_end_t play_stream(const char *url, const char *name)
 {
     if (!url || !url[0]) return TRACK_UNREADABLE;
@@ -9420,6 +9519,52 @@ static track_end_t play_stream(const char *url, const char *name)
         return TRACK_UNREADABLE;
     }
 
+    /*
+     * The levelling accumulator and its carrier.
+     *
+     * Allocated on first use and never freed. The carrier because the
+     * writer reads it on another task and there is no moment both are
+     * provably out of it; the accumulator because it is ~9 KB and this
+     * function is entered once per station change, so a malloc/free
+     * pair per station is fragmentation bought with nothing.
+     *
+     * A failure here is not a failure to play. Levelling is a nicety
+     * and the station is what was asked for, so the allocation is
+     * tested and the stream goes on at unity if it did not come off --
+     * which is also exactly what happens when the listener has
+     * ReplayGain switched off.
+     */
+    static loudness_t *s_stream_loud;       /* this task's, and only this task's */
+    if (!s_sgain) {
+        s_sgain = heap_caps_calloc(1, sizeof(*s_sgain), MALLOC_CAP_SPIRAM);
+    }
+    if (!s_stream_loud) {
+        s_stream_loud = heap_caps_calloc(1, sizeof(*s_stream_loud),
+                                         MALLOC_CAP_SPIRAM);
+    }
+    const bool levelling = s_sgain && s_stream_loud && settings_rg_enabled();
+    if (levelling) {
+        /*
+         * reset() then set_block_sink(), in that order, because reset
+         * clears the sink -- loudness.h says so and the ordering is the
+         * reason it says so.
+         *
+         * The carrier is reset rather than drained: a new station is a
+         * new level and holding the last one would apply a measurement
+         * of the previous station to the first seconds of this one,
+         * which is the one moment a listener is most likely to notice.
+         */
+        streamgain_reset(s_sgain);
+        s_sgain_block_bytes = 0;
+        loudness_reset(s_stream_loud);
+        loudness_set_block_sink(s_stream_loud, stream_block_sink, NULL);
+    } else if (s_sgain) {
+        streamgain_reset(s_sgain);
+    }
+    /* Raised only once the carrier holds nothing, so the writer cannot
+     * apply a gain measured from a station that has gone. */
+    s_sgain_on = levelling;
+
     bufplan_t plan;
     bufplan_init(&plan, esp_timer_get_time() / 1000);
 
@@ -9481,6 +9626,11 @@ static track_end_t play_stream(const char *url, const char *name)
      * through, which on the board was 2.8 s both times.
      */
     int64_t t_connect = esp_timer_get_time();
+    /* The last levelling figure printed, so the log reports movement
+     * rather than state. Seeded at 0 dB, which is what is applied
+     * before a confident window exists, so the first real answer is a
+     * line and the first second of unity is not. */
+    float last_logged_db = 0.0f;
     /* The pause the listener asked for, as distinct from the buffer
      * holding off. s_playing is the writer's gate and ui_task toggles it
      * on a press; a stream turns that into a disconnect. */
@@ -9727,6 +9877,26 @@ static track_end_t play_stream(const char *url, const char *name)
                     } else {
                         out_rate = (uint32_t)info.sample_rate;
                         s_frames_rate[s_ring_fill] = out_rate;
+                        /*
+                         * The filters are designed for one rate and the
+                         * block structure is defined in seconds, so a
+                         * rate change is a second measurement rather
+                         * than a continuation -- loudness_process()
+                         * deactivates itself on one, which would
+                         * silently stop the carrier. Restarted here
+                         * instead, against a ring the drain above has
+                         * already emptied.
+                         */
+                        if (levelling) {
+                            s_sgain_on = false;
+                            streamgain_reset(s_sgain);
+                            loudness_reset(s_stream_loud);
+                            loudness_set_block_sink(s_stream_loud,
+                                                    stream_block_sink, NULL);
+                            s_sgain_block_bytes =
+                                (out_rate / 10u) * PCM_BYTES_PER_FRAME;
+                            s_sgain_on = true;
+                        }
                     }
                 }
             }
@@ -9738,6 +9908,27 @@ static track_end_t play_stream(const char *url, const char *name)
                  * 44.1 kHz, ONE channel -- and it is the first mono
                  * source the stream path has decoded.
                  */
+                /*
+                 * Measured here, on the decoder's own samples, before
+                 * the mono widening below.
+                 *
+                 * Mono is fed as one channel at weight 1.0 rather than
+                 * as the duplicated pair that reaches the ring, because
+                 * the duplicate reports the same signal 3 dB louder
+                 * than it is -- loudness.h says so, and WUOM is mono,
+                 * so this is the station the levelling would have been
+                 * wrong on rather than a case nothing meets.
+                 *
+                 * The carrier still counts the STEREO bytes, which is
+                 * what the ring holds and what the writer retires
+                 * against. The two units are different on purpose and
+                 * the sink is where they meet.
+                 */
+                if (levelling && s_sgain_on) {
+                    loudness_process(s_stream_loud, pcm, n, info.channels,
+                                     (uint32_t)info.sample_rate);
+                }
+
                 const uint8_t *src;
                 size_t remain;
                 if (info.channels == 1) {
@@ -9853,6 +10044,26 @@ static track_end_t play_stream(const char *url, const char *name)
         };
         bufplan_out_t out;
         bufplan_step(&plan, &in, &out);
+
+        /*
+         * The levelling, said out loud when it moves.
+         *
+         * Not every pass and not on a timer: a gain that walks a
+         * decibel a second would be a line every hundred milliseconds,
+         * which is the kind of log nobody reads and which would bury
+         * the rebuffer lines that this path is actually debugged from.
+         * One decibel is both the slew's own unit and about the
+         * smallest step a listener would say they heard.
+         */
+        if (levelling) {
+            const float now_db = streamgain_db(s_sgain);
+            if (fabsf(now_db - last_logged_db) >= 1.0f) {
+                ESP_LOGI(TAG, "levelling: %+.2f dB, window %d ms%s",
+                         (double)now_db, streamgain_window_ms(s_sgain),
+                         streamgain_confident(s_sgain) ? "" : " (held: thin)");
+                last_logged_db = now_db;
+            }
+        }
 
         /* The writer's gate, and the only place it is written while a
          * stream plays. A paused stream stays held: s_playing already
@@ -10045,6 +10256,26 @@ static track_end_t play_stream(const char *url, const char *name)
      * 199 ms to stop from there against 39 ms on WNZK, and that scales
      * with how deep the wait is.
      */
+    /*
+     * The levelling comes down FIRST, before anything that can block.
+     *
+     * netstream_stop_wait() below can sit for three seconds, and for
+     * every millisecond of it the writer is still draining a ring whose
+     * carrier has stopped being fed -- it would apply the last gain to
+     * the tail, which is harmless, and then go on applying it to the
+     * next FILE, which is not. Lowering the flag here is what makes
+     * "the writer's gain path belongs to streams" true at every instant
+     * rather than on average.
+     */
+    if (levelling) {
+        ESP_LOGI(TAG, "levelling: %+.2f dB at the end, window %d ms, "
+                      "%" PRIu32 " records dropped",
+                 (double)streamgain_db(s_sgain), streamgain_window_ms(s_sgain),
+                 s_sgain->dropped);
+        loudness_set_block_sink(s_stream_loud, NULL, NULL);
+    }
+    s_sgain_on = false;
+
     if (!netstream_stop_wait(3000)) {
         ESP_LOGW(TAG, "stream did not stop in 3 s; state %s",
                  netstream_state_name(netstream_state()));

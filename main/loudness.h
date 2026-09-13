@@ -190,6 +190,36 @@ typedef struct {
     float    peak;
 
     /*
+     * Sample peak within the 100 ms quarter being filled, and within
+     * the one that just closed.
+     *
+     * Separate from `peak`, which is the whole measurement's, and from
+     * `env_peak`, which belongs to a column whose span is a different
+     * length entirely. A block sink wants the peak of the audio the
+     * block describes and neither of the other two is that.
+     */
+    float    quarter_peak;
+    float    block_peak;
+
+    /*
+     * Called as each 400 ms block closes, with the block's K-weighted
+     * mean square and the sample peak of the 100 ms of new audio that
+     * completed it. NULL by default, which is every file: nothing about
+     * a file needs to see a block go past, because loudness_finish()
+     * sees all of them at once.
+     *
+     * `msq` rather than a level in dB, because gating sums and compares
+     * mean squares -- see streamgain.h, which is the only caller and
+     * says at length why a stream cannot wait for finish().
+     *
+     * Called from loudness_process(), on the caller's own task, inside
+     * the sample loop. It must not block and must not call back into
+     * this accumulator.
+     */
+    void   (*block_sink)(void *user, float msq, float peak);
+    void    *block_user;
+
+    /*
      * The drawable envelope: peak magnitude per column, which is what
      * a waveform IS. framewalk.c's envelope was global_gain out of the
      * frame headers -- an encoder's bit budget, which correlates with
@@ -218,6 +248,20 @@ typedef struct {
 
 /* Start (or restart) a measurement. Called once per play attempt. */
 void loudness_reset(loudness_t *l);
+
+/*
+ * Watch the blocks go past.
+ *
+ * Set AFTER loudness_reset(), which clears everything including this.
+ * That ordering is not a convenience: a reset that kept the sink would
+ * be a measurement of one thing feeding a carrier built for another,
+ * and the two would be indistinguishable from the numbers.
+ *
+ * Passing NULL removes it, which is the state every file path is in.
+ */
+void loudness_set_block_sink(loudness_t *l,
+                             void (*fn)(void *user, float msq, float peak),
+                             void *user);
 
 /*
  * Abandon this measurement.

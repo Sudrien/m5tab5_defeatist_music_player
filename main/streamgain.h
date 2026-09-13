@@ -7,9 +7,12 @@
  * built on top of it. See "WHAT THIS ACTUALLY IS" below, which is the
  * first thing to read.
  *
- * DRAFT. Nothing calls this. It is the design written down so the
- * argument can be had before the decode loop is touched, in the way
- * netplan.h and bufferplan.h were written before phase 2 and phase 3.
+ * NO LONGER A DRAFT as of 0400: streamgain.c implements the two
+ * functions this file used to declare and not define, player.c pushes
+ * from the stream decode loop and applies from the writer, and
+ * texttest/streamgaintest.c is the host test. The reasoning below is
+ * unchanged and was written before any of it, which is the point of
+ * having written it down first.
  *
  * THE PROBLEM
  *
@@ -148,6 +151,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <math.h>
 #include <stdint.h>
 #include <string.h>
 
@@ -239,15 +243,45 @@ typedef struct {
     uint16_t bytes_lo;
 } streamgain_rec_t;
 
+/*
+ * The carrier.
+ *
+ * ONE PRODUCER AND ONE CONSUMER, AND THE FIELDS ARE SPLIT BETWEEN THEM.
+ * The draft had `count` and `queued_bytes` written from both ends, which
+ * on two tasks is a lost update rather than a race that merely reorders
+ * -- `count++` on the decode loop against `count--` on the writer loses
+ * one of them, and the carrier then drifts against the audio for the
+ * rest of the session with nothing to say it happened. There is no lock
+ * here and there should not be one: the writer must not wait on the
+ * decode loop for a bookkeeping ring.
+ *
+ * So every field has exactly one writer:
+ *
+ *   decode loop  head, pushed_bytes, dropped
+ *   writer       tail, tail_bytes_left, played_bytes, gain_db, have_gain
+ *
+ * `head` and `tail` are free-running and masked on use, so the count is
+ * their difference and neither side has to write a shared total.
+ * STREAMGAIN_RECORDS is a power of two for that reason. Unsigned
+ * subtraction is defined on wrap, which is what makes a free-running
+ * pair legal rather than merely usual.
+ *
+ * A record is written before `head` moves and is not touched again, so
+ * the reader either does not see it yet or sees it whole.
+ */
 typedef struct {
     streamgain_rec_t rec[STREAMGAIN_RECORDS];
-    int      head;              /* next to write */
-    int      tail;              /* oldest not yet consumed */
-    int      count;
-    uint32_t tail_bytes_left;   /* of rec[tail], still unplayed */
-    uint32_t queued_bytes;      /* total PCM the carrier describes */
-    float    gain_db;           /* what is being applied now */
-    bool     have_gain;         /* has a confident answer ever been had */
+
+    volatile uint32_t head;             /* producer */
+    volatile uint32_t pushed_bytes;
+    volatile uint32_t dropped;          /* records the carrier could not take */
+
+    volatile uint32_t tail;             /* consumer */
+    uint32_t tail_bytes_left;           /* of rec[tail], still unplayed */
+    volatile uint32_t played_bytes;
+
+    float    gain_db;                   /* what is being applied now */
+    bool     have_gain;                 /* has a confident answer been had */
 } streamgain_t;
 
 static inline void streamgain_reset(streamgain_t *g)
@@ -256,17 +290,38 @@ static inline void streamgain_reset(streamgain_t *g)
     memset(g, 0, sizeof(*g));
 }
 
+/* How many records are in hand. Safe from either side: each index has
+ * one writer and the difference is correct whichever one moved last --
+ * it is a snapshot, and a snapshot is all either caller wants. */
+static inline int streamgain_count(const streamgain_t *g)
+{
+    if (!g) return 0;
+    const uint32_t n = g->head - g->tail;
+    return (int)(n > STREAMGAIN_RECORDS ? STREAMGAIN_RECORDS : n);
+}
+
+/* PCM the carrier describes and the writer has not yet played. */
+static inline uint32_t streamgain_queued_bytes(const streamgain_t *g)
+{
+    return g ? (uint32_t)(g->pushed_bytes - g->played_bytes) : 0;
+}
+
+static inline uint32_t streamgain_rec_bytes(const streamgain_rec_t *r)
+{
+    return ((uint32_t)r->bytes_hi << 16) | r->bytes_lo;
+}
+
 /*
  * The decode loop hands over one block, with the PCM it describes.
  *
- * Dropped silently when the carrier is full, and that is correct rather
- * than lazy: full means the decoder is further ahead than twenty
- * seconds, the window is already longer than any measurement needs, and
- * the alternative -- stalling the decode loop on a bookkeeping ring --
+ * Dropped when the carrier is full, and that is correct rather than
+ * lazy: full means the decoder is further ahead than twenty seconds,
+ * the window is already longer than any measurement needs, and the
+ * alternative -- stalling the decode loop on a bookkeeping ring --
  * would make loudness measurement a reason for audio to stop.
  *
  * The bytes still count. A dropped record's PCM is in the ring and will
- * be played, so `queued_bytes` has to include it or the carrier drifts
+ * be played, so `pushed_bytes` has to include it or the carrier drifts
  * behind the audio by exactly what was dropped. That is the failure
  * this signature exists to make impossible to write by accident.
  */
@@ -274,28 +329,22 @@ static inline bool streamgain_push(streamgain_t *g, float msq, int peak,
                                    uint32_t bytes)
 {
     if (!g || bytes == 0) return false;
-    g->queued_bytes += bytes;
+    g->pushed_bytes += bytes;
 
-    if (g->count >= STREAMGAIN_RECORDS) return false;
+    if (streamgain_count(g) >= STREAMGAIN_RECORDS) { g->dropped++; return false; }
 
     if (peak < 0) peak = 0;
     if (peak > 32767) peak = 32767;
 
-    streamgain_rec_t *r = &g->rec[g->head];
+    streamgain_rec_t *r = &g->rec[g->head & (STREAMGAIN_RECORDS - 1)];
     r->msq      = msq;
     r->peak     = (uint16_t)peak;
     r->bytes_hi = (uint16_t)(bytes >> 16);
     r->bytes_lo = (uint16_t)(bytes & 0xFFFF);
 
-    if (g->count == 0) g->tail_bytes_left = bytes;
-    g->head = (g->head + 1) % STREAMGAIN_RECORDS;
-    g->count++;
+    /* The record is complete before the reader can see it. */
+    g->head++;
     return true;
-}
-
-static inline uint32_t streamgain_rec_bytes(const streamgain_rec_t *r)
-{
-    return ((uint32_t)r->bytes_hi << 16) | r->bytes_lo;
 }
 
 /*
@@ -306,27 +355,65 @@ static inline uint32_t streamgain_rec_bytes(const streamgain_rec_t *r)
  * can span several chunks -- the writer's chunk size and the decoder's
  * block size have no relationship at all.
  *
- * `queued_bytes` is reduced by the whole amount even when the carrier
- * has no records left to retire, which is the dropped-record case
- * above: the audio was played, so the accounting has to say so.
+ * `played_bytes` moves by the whole amount even when the carrier has no
+ * records left to retire, which is the dropped-record case above: the
+ * audio was played, so the accounting has to say so.
  */
 static inline void streamgain_consume(streamgain_t *g, uint32_t bytes)
 {
     if (!g) return;
-    g->queued_bytes = (bytes >= g->queued_bytes) ? 0
-                                                 : g->queued_bytes - bytes;
 
-    while (bytes > 0 && g->count > 0) {
+    /*
+     * Clamped to what has been pushed, and that is not defensive
+     * programming -- it is the ordinary case at the start of a stream.
+     * The first PCM reaches the ring before the first 400 ms block
+     * closes, so the writer legitimately plays audio the carrier never
+     * described. Without the clamp `played_bytes` passes `pushed_bytes`
+     * and the unsigned difference becomes about four billion, which
+     * reads as a window that will never be thin again.
+     */
+    const uint32_t queued = streamgain_queued_bytes(g);
+    if (bytes > queued) bytes = queued;
+    g->played_bytes += bytes;
+
+    while (bytes > 0 && streamgain_count(g) > 0) {
+        if (g->tail_bytes_left == 0) {
+            g->tail_bytes_left =
+                streamgain_rec_bytes(&g->rec[g->tail & (STREAMGAIN_RECORDS - 1)]);
+            if (g->tail_bytes_left == 0) { g->tail++; continue; }
+        }
         if (bytes < g->tail_bytes_left) {
             g->tail_bytes_left -= bytes;
             return;
         }
         bytes -= g->tail_bytes_left;
-        g->tail = (g->tail + 1) % STREAMGAIN_RECORDS;
-        g->count--;
-        g->tail_bytes_left = g->count
-            ? streamgain_rec_bytes(&g->rec[g->tail]) : 0;
+        g->tail_bytes_left = 0;
+        g->tail++;
     }
+}
+
+/*
+ * Retire everything, because the PCM it described has been discarded.
+ *
+ * A flush -- a pause, a station change, a rate change -- empties the
+ * ring, and records that survived it would be drawn down by the NEXT
+ * stream's audio: the carrier would run a whole window behind the
+ * sound for as long as the session lasted, which is the one failure
+ * mode of a byte-counted carrier that produces no error and no log
+ * line.
+ *
+ * Deliberately NOT streamgain_reset(). `gain_db` is a fact about the
+ * station and survives a pause; clearing it would make every resume
+ * start at unity and walk back, audibly, to where it already was.
+ *
+ * Consumer side, like everything else it touches.
+ */
+static inline void streamgain_drain(streamgain_t *g)
+{
+    if (!g) return;
+    g->tail = g->head;
+    g->tail_bytes_left = 0;
+    g->played_bytes = g->pushed_bytes;
 }
 
 /*
@@ -340,7 +427,7 @@ static inline void streamgain_consume(streamgain_t *g, uint32_t bytes)
  */
 static inline int streamgain_window_ms(const streamgain_t *g)
 {
-    return g ? g->count * STREAMGAIN_BLOCK_MS : 0;
+    return g ? streamgain_count(g) * STREAMGAIN_BLOCK_MS : 0;
 }
 
 static inline bool streamgain_confident(const streamgain_t *g)
@@ -352,9 +439,9 @@ static inline bool streamgain_confident(const streamgain_t *g)
  * The gain the queued window asks for, before slewing and clamping.
  *
  * Two-stage gating over the records, as BS.1770 specifies and
- * loudness.c implements for a file: drop blocks below the absolute gate,
- * take the mean of what is left, drop blocks more than 10 LU below that
- * mean, and report the mean of the survivors.
+ * loudness.c implements for a file: drop blocks below the absolute
+ * gate, take the mean of what is left, drop blocks more than 10 LU
+ * below that mean, and report the mean of the survivors.
  *
  * Gating over a window rather than a whole track is the liberty taken
  * here, and the header's opening note says plainly what it costs: over
@@ -366,14 +453,15 @@ static inline bool streamgain_confident(const streamgain_t *g)
  * it does for a track, and code that assumes otherwise will be
  * surprised.
  *
+ * Over the mean squares directly rather than through a histogram. That
+ * is the one place this deliberately does NOT reuse loudness.c's shape:
+ * the histogram is there because a track has tens of thousands of
+ * blocks and keeping them all would be a megabyte, and this window has
+ * at most 256. Bucketing 256 floats to avoid keeping 256 floats would
+ * be quantisation bought with nothing.
+ *
  * Returns false when there is nothing to say, which is the case the
  * caller must handle by holding rather than by using zero.
- *
- * NOT IMPLEMENTED IN THIS DRAFT. The gating arithmetic wants to be the
- * same code loudness.c already has, and lifting it out of there into
- * something both can call is the first real patch of this work -- not a
- * second copy of a gate, which is how two answers to one question
- * start.
  */
 bool streamgain_window_db(const streamgain_t *g, float *out_db);
 
@@ -385,7 +473,8 @@ bool streamgain_window_db(const streamgain_t *g, float *out_db);
  * decorative: +6 dB is allowed, and +6 dB on a window whose peak is
  * already -3 dBFS is not, so the smaller of the two wins.
  *
- * NOT IMPLEMENTED IN THIS DRAFT.
+ * Called by the consumer, since the elapsed time that bounds a slew is
+ * the time the audio took to play and nothing else.
  */
 void streamgain_step(streamgain_t *g, int elapsed_ms);
 
@@ -396,6 +485,24 @@ void streamgain_step(streamgain_t *g, int elapsed_ms);
 static inline float streamgain_db(const streamgain_t *g)
 {
     return (g && g->have_gain) ? g->gain_db : 0.0f;
+}
+
+/*
+ * The gain as a 16.16 multiplier, which is what a sample loop wants.
+ *
+ * Here rather than at the call site so that the one conversion from dB
+ * to a multiplier in this program is in the file that owns the dB.
+ * Saturating application is the caller's, because only the caller knows
+ * the sample width.
+ */
+static inline int32_t streamgain_q16(float db)
+{
+    if (db > STREAMGAIN_MAX_BOOST_DB) db = STREAMGAIN_MAX_BOOST_DB;
+    if (db < -STREAMGAIN_MAX_CUT_DB)  db = -STREAMGAIN_MAX_CUT_DB;
+    /* powf() rather than a table: this runs once per chunk, not once
+     * per sample, and a table would be a second place for the curve to
+     * live. */
+    return (int32_t)(powf(10.0f, db / 20.0f) * 65536.0f + 0.5f);
 }
 
 #ifdef __cplusplus
