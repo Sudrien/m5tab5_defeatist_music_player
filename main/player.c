@@ -1286,6 +1286,23 @@ static volatile int      s_stream_buffered_ms;
  */
 static streamgain_t     *s_sgain;
 static volatile bool     s_sgain_on;
+/*
+ * Whether the measured gain is APPLIED, as distinct from measured.
+ *
+ * Two flags because the ReplayGain setting can be turned off in the
+ * middle of a stream and the carrier cannot simply stop. It stays in
+ * step with the PCM ring by counting bytes, so a writer that stopped
+ * calling streamgain_consume() would leave every record describing
+ * audio that had already been played -- and the gain would come back
+ * wrong by however long the setting was off.
+ *
+ * So the measurement and the accounting run whenever a stream is
+ * levelling-capable, and this says whether the multiplier is used. The
+ * cost of measuring with the setting off is a gate over 256 floats once
+ * a chunk, which is nothing; the cost of getting the accounting wrong
+ * is silent and lasts the session.
+ */
+static volatile bool     s_sgain_apply;
 static volatile uint32_t s_sgain_block_bytes;   /* PCM one block covers */
 
 static levelhist_t       s_levelhist;
@@ -2727,7 +2744,9 @@ static void i2s_writer_task(void *arg)
                                 rate ? (int)((uint64_t)got * 1000u /
                                              ((uint64_t)rate * PCM_BYTES_PER_FRAME))
                                      : 0);
-                const int32_t q = streamgain_q16(streamgain_db(s_sgain));
+                const int32_t q = s_sgain_apply
+                                ? streamgain_q16(streamgain_db(s_sgain))
+                                : 65536;
                 if (q != 65536) {
                     int16_t *p16 = (int16_t *)buf;
                     const size_t vals = got / sizeof(int16_t);
@@ -9667,7 +9686,14 @@ static track_end_t play_stream(const char *url, const char *name)
         s_stream_loud = heap_caps_calloc(1, sizeof(*s_stream_loud),
                                          MALLOC_CAP_SPIRAM);
     }
-    const bool levelling = s_sgain && s_stream_loud && settings_rg_enabled();
+    /*
+     * Measured whenever the memory is there, NOT only when the setting
+     * is on. The setting decides whether the gain is applied and
+     * whether the badge is drawn, and it is read every pass below so
+     * that turning it off is heard immediately rather than at the next
+     * station.
+     */
+    const bool levelling = s_sgain && s_stream_loud;
     if (levelling) {
         /*
          * reset() then set_block_sink(), in that order, because reset
@@ -9686,6 +9712,7 @@ static track_end_t play_stream(const char *url, const char *name)
     } else if (s_sgain) {
         streamgain_reset(s_sgain);
     }
+    s_sgain_apply = levelling && settings_rg_enabled();
     /* Raised only once the carrier holds nothing, so the writer cannot
      * apply a gain measured from a station that has gone. */
     s_sgain_on = levelling;
@@ -10199,6 +10226,30 @@ static track_end_t play_stream(const char *url, const char *name)
          * smallest step a listener would say they heard.
          */
         if (levelling) {
+            /*
+             * THE BADGE AND THE SLIDER MARK, the same two the file path
+             * draws and for the same reason: a station playing four
+             * decibels down with the slider untouched looks like a
+             * quiet station or a fault. It is the one visible sign that
+             * anything is being done to the audio, and a stream had
+             * none.
+             *
+             * `have_gain` rather than `levelling`, so the badge appears
+             * when there is a measurement rather than when there is an
+             * intention -- the first few seconds of a station are
+             * genuinely at unity and drawing RG over them would be a
+             * claim about audio nothing had measured yet.
+             *
+             * The setting is read here, every pass. Turning ReplayGain
+             * off takes the badge and the gain together, within a
+             * frame, without touching the carrier: the measurement goes
+             * on so that turning it back on is instant and in step.
+             */
+            s_sgain_apply = settings_rg_enabled();
+            const bool show = s_sgain_apply && s_sgain->have_gain;
+            s_rg_active  = show;
+            s_rg_gain_db = show ? streamgain_db(s_sgain) : 0.0f;
+
             const float now_db = streamgain_db(s_sgain);
             if (fabsf(now_db - last_logged_db) >= 1.0f) {
                 ESP_LOGI(TAG, "levelling: %+.2f dB, window %d ms%s",
@@ -10470,6 +10521,13 @@ static track_end_t play_stream(const char *url, const char *name)
      * "the writer's gain path belongs to streams" true at every instant
      * rather than on average.
      */
+    /* The badge goes with the station that earned it, before the fade
+     * and the stop-wait below rather than after -- it describes a gain
+     * that is no longer being applied the moment the flag drops. */
+    s_rg_active  = false;
+    s_rg_gain_db = 0.0f;
+    s_sgain_apply = false;
+
     if (levelling) {
         ESP_LOGI(TAG, "levelling: %+.2f dB at the end, window %d ms, "
                       "%" PRIu32 " records dropped",
