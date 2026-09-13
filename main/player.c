@@ -8796,53 +8796,76 @@ static void clear_play_screen(void)
 /* ------------------------------------------------------------------ */
 
 /*
- * What goes in the artwork square while a stream plays.
+ * What goes in the artwork square while a stream plays: the same card a
+ * cover-less FILE gets, with the same lines in the same order.
  *
- * A stream has no cover and `ui_clear_art()` leaves 720x720 of black,
- * which this project has already decided is the wrong answer -- it is
- * the note on ui_show_art_info(): black reads as a cover that has not
- * arrived rather than one that does not exist, and what goes there
- * instead is the thing the source can always say about itself. That
- * argument was written for a file with no picture in it and applies
- * unchanged here; a stream simply never got the call.
+ * 0316 added this and invented its own shape -- station name on top,
+ * then codec, then one combined rate line, and no closing "no cover
+ * art". Wrong on two counts.
  *
- * The station on top because it is the thing chosen, then the format,
- * then the rate -- largest to smallest, the same hierarchy the format
- * card uses for a file.
+ * The station does not belong here. show_format_card()'s top line is the
+ * CONTAINER, not the filename, because the filename is already on the
+ * title row and a card that repeats it wastes the largest line on the
+ * screen. A stream's title row is the station, so the station is the
+ * filename in that comparison and the top line is the codec.
  *
- * Called with whatever is known. Before the first frame the codec and
- * the rate are not, and the lines are simply shorter: a card that says
- * only the station name is honest, and waiting for the numbers would
- * leave the square black for the three seconds this exists to fill.
+ * And "no cover art" is not decoration. It is the line that makes the
+ * card an answer rather than a consolation: without it the square reads
+ * as a player that has decided to show technical details, and with it
+ * the square reads as a player saying there is no picture and here is
+ * what it does know. A stream has no cover for a different reason than
+ * an untagged file, and the listener does not care which.
+ *
+ * So: codec, rate and channels, codec and rate, no cover art -- and no
+ * size line, because that is the one fact a stream genuinely does not
+ * have. `kbps` rather than `kbit/s` to match, for the same reason the
+ * order matches.
  */
 static void show_stream_card(uint32_t rate, int chans, int kbps)
 {
-    char fmt[48];
-    char det[48];
-    const char *lines[3];
-    int n = 0;
+    /*
+     * THE GUARD show_format_card() HAS AND 0316 DID NOT.
+     *
+     * ui_show_art_info() blits straight to the panel: it does not go
+     * through ui_draw(), which is the call media_task's browser branch
+     * skips. So drawing it while the chooser is up lands the card on top
+     * of the file list -- and 0316's trigger can fire exactly then,
+     * because first sound can arrive while the chooser is open.
+     *
+     * s_repaint_art rather than dropping it, so the card is drawn when
+     * the chooser closes. Which is the flag 0316 was added to consume,
+     * arriving back at the same mechanism from the other side.
+     */
+    if (screen_covered()) {
+        s_repaint_art = true;
+        return;
+    }
 
-    lines[n++] = s_stream_top[0] ? s_stream_top : "Radio";
+    char head[24] = "";
+    char rline[48] = "";
+    char cline[48] = "";
 
     const stream_codec_t c = netdec_codec();
-    if (c != STREAM_CODEC_NONE) {
-        snprintf(fmt, sizeof(fmt), "%s", stream_codec_name(c));
-        lines[n++] = fmt;
-    }
+    snprintf(head, sizeof(head), "%s",
+             c != STREAM_CODEC_NONE ? stream_codec_name(c) : "Radio");
 
     if (rate > 0) {
-        /* Mono is worth saying and stereo is not: stereo is the
-         * expectation, and WUOM being mono is the sort of thing that
-         * otherwise reads as a fault in the player. */
-        if (kbps > 0) {
-            snprintf(det, sizeof(det), "%" PRIu32 " Hz  %s  %d kbit/s",
-                     rate, chans == 1 ? "mono" : "stereo", kbps);
-        } else {
-            snprintf(det, sizeof(det), "%" PRIu32 " Hz  %s",
-                     rate, chans == 1 ? "mono" : "stereo");
-        }
-        lines[n++] = det;
+        /* Mono is worth saying and so is stereo, because this is the
+         * line that says what the STATION sends -- WUOM being 64 kbit/s
+         * mono is a property of the broadcast, not a fault here. */
+        snprintf(rline, sizeof(rline), "%" PRIu32 " Hz  %s", rate,
+                 chans == 1 ? "mono" : chans == 2 ? "stereo" : "multichannel");
     }
+    if (kbps > 0) {
+        snprintf(cline, sizeof(cline), "%s  %d kbps", head, kbps);
+    }
+
+    const char *lines[4];
+    int n = 0;
+    lines[n++] = head;
+    if (rline[0]) lines[n++] = rline;
+    if (cline[0]) lines[n++] = cline;
+    lines[n++] = "no cover art";
 
     ui_show_art_info(lines, n);
 }
