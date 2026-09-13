@@ -475,6 +475,17 @@ extern uint32_t g_tab5_dpi_underruns;
 #define FADE_OUT_MS             (3000)
 
 /*
+ * The ramp up, on a station's first sound.
+ *
+ * The same 3 s as the ramp down, because the pair is one gesture and an
+ * asymmetric one draws attention to itself. It is also, unlike the ramp
+ * down, free: the audio it ramps is audio that would otherwise have
+ * started at full level from a standing start, and 0323's preroll means
+ * there are four seconds of it queued before a sample is heard.
+ */
+#define FADE_IN_MS              (3000)
+
+/*
  * How long a caller that wants the ramp FINISHED may wait for it.
  *
  * Only the station change needs this. play_file()'s fade paths end the
@@ -1218,6 +1229,24 @@ static const char * volatile s_flush_why = "seek";
  * this path: the writer must not block on anything but DMA.
  */
 static volatile bool     s_fade_out;
+
+/*
+ * The ramp UP, which is the fade-out read backwards and shares nothing
+ * with it but the shape.
+ *
+ * Its own position and length rather than reusing s_fade_pos: the two
+ * can overlap. A station change fades the old stream out over 3 s and
+ * the new one is connecting during that, so the in-ramp can be armed
+ * while the out-ramp is still running -- and the writer applies them to
+ * different chunks of the same ring.
+ *
+ * Applied by the writer, like the out-ramp, and for the reason given
+ * there: the gain has to land on the samples the hardware is about to
+ * take, and the writer is the only task that owns that read.
+ */
+static volatile bool     s_fade_in;
+static volatile uint32_t s_fade_in_pos;
+static volatile uint32_t s_fade_in_frames;
 static volatile uint32_t s_fade_frames;   /* length of the ramp, in frames */
 static volatile uint32_t s_fade_pos;      /* how far through it we are */
 
@@ -1321,6 +1350,33 @@ static void fade_out_begin(uint32_t rate)
     s_fade_pos    = 0;
     s_fade_frames = frames;
     s_fade_out    = true;                   /* last: see above */
+}
+
+/*
+ * Start a ramp up from silence over whatever plays next.
+ *
+ * Same argument as fade_out_begin() about the rate: the ring holds what
+ * the hardware is about to clock out, so a ramp counted in frames only
+ * lands on FADE_IN_MS if it is counted against the clock consuming them.
+ *
+ * Re-armed rather than refused if one is already running. Unlike the
+ * out-ramp -- where a second call would restart a descent that is
+ * already partly done and make the fade longer than it claims -- a
+ * second station arriving during an in-ramp genuinely does want its own
+ * ramp from wherever the gain has reached. The audible result of
+ * restarting from zero is a dip, which is worse than a slightly short
+ * ramp, so the position is kept.
+ */
+static void fade_in_begin(uint32_t rate)
+{
+    if (rate == 0) rate = 44100;
+
+    uint32_t frames = (uint32_t)((uint64_t)rate * FADE_IN_MS / 1000u);
+    if (frames == 0) frames = 1;
+
+    if (!s_fade_in) s_fade_in_pos = 0;
+    s_fade_in_frames = frames;
+    s_fade_in        = true;            /* last: see s_fade_out */
 }
 
 /*
@@ -1693,6 +1749,34 @@ static void tail_retire(bool audio_discarded, const char *why)
 
     ESP_LOGW(TAG, "tail on ring %d abandoned (%u KB DISCARDED): %s",
              s_tail_ring, (unsigned)(left / 1024), why);
+}
+
+/*
+ * The ramp up. fade_apply()'s gain, subtracted from full scale.
+ *
+ * A separate function rather than a flag on fade_apply(), because the
+ * two can be live at once: a station change has the old stream ramping
+ * down while the new one may already be ramping up, and the writer runs
+ * both over the same chunk. Sharing a position between them would make
+ * each one's arithmetic depend on the other's.
+ */
+static void fade_in_apply(int16_t *pcm, size_t frames)
+{
+    const uint32_t total = s_fade_in_frames;
+    uint32_t pos = s_fade_in_pos;
+
+    for (size_t f = 0; f < frames; f++) {
+        const int32_t g = (pos >= total)
+            ? 32768
+            : (int32_t)(((uint64_t)32768u * pos) / total);
+
+        pcm[2 * f + 0] = (int16_t)(((int32_t)pcm[2 * f + 0] * g) >> 15);
+        pcm[2 * f + 1] = (int16_t)(((int32_t)pcm[2 * f + 1] * g) >> 15);
+
+        if (pos < total) pos++;
+    }
+
+    s_fade_in_pos = pos;
 }
 
 static void fade_apply(int16_t *pcm, size_t frames)
@@ -2469,6 +2553,27 @@ static void i2s_writer_task(void *arg)
             if (s_fade_out) {
                 fade_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
                 ramp_over = (s_fade_pos >= s_fade_frames);
+            }
+
+            /*
+             * And up. After the out-ramp, not before: if both are
+             * somehow live the audio is on its way out, and a chunk
+             * that has been ramped down and then ramped up is quieter
+             * than either ramp asked for, which is the right answer for
+             * audio nobody is supposed to hear any more.
+             *
+             * Cleared here rather than by whoever armed it. The writer
+             * is the only task that knows the ramp has actually been
+             * clocked out, which is the same reason ramp_over is
+             * computed here.
+             */
+            if (s_fade_in) {
+                fade_in_apply((int16_t *)buf, got / PCM_BYTES_PER_FRAME);
+                if (s_fade_in_pos >= s_fade_in_frames) {
+                    s_fade_in = false;
+                    ESP_LOGI(TAG, "faded in over %" PRIu32 " ms",
+                             (uint32_t)FADE_IN_MS);
+                }
             }
 
             /*
@@ -9615,6 +9720,11 @@ static track_end_t play_stream(const char *url, const char *name)
         netstream_note_audio_ms(in.buffered_ms);
 
         if (out.audible && !first_sound) {
+            /* Up from silence, over FADE_IN_MS. Armed here because this
+             * is the moment the writer is first allowed to run for this
+             * stream -- before it, everything queued is preroll that
+             * nobody has heard. */
+            fade_in_begin(out_rate);
             first_sound = true;
             /*
              * The amplifier, because nothing else will do it here.
