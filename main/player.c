@@ -9609,6 +9609,10 @@ static track_end_t play_stream(const char *url, const char *name)
          * rather than on the edge: it is one word and the alternative is
          * a second piece of state saying whether this one is current. */
         s_stream_audible = out.audible;
+        /* And the figure netstream's statistics line was missing: its
+         * own "bytes" percentage is the byte ring, which is empty
+         * whenever the decoder is keeping up. This is the reserve. */
+        netstream_note_audio_ms(in.buffered_ms);
 
         if (out.audible && !first_sound) {
             first_sound = true;

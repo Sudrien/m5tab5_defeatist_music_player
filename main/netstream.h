@@ -233,6 +233,18 @@ bool netstream_has_title(void);
  */
 int netstream_declared_kbps(void);
 
+/*
+ * Tell netstream how much DECODED audio is queued, in milliseconds, so
+ * its statistics line can report it.
+ *
+ * The "bytes" figure on that line is netstream's own byte ring and is
+ * near zero whenever the decoder is keeping up, which is the healthy
+ * case and not a warning. The reserve that survives a network hiccup is
+ * the PCM ring, which belongs to the player -- so the player pushes the
+ * figure down rather than netstream reaching up for it.
+ */
+void netstream_note_audio_ms(int ms);
+
 #ifdef __cplusplus
 }
 #endif

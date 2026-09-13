@@ -203,6 +203,29 @@ static int  s_hdr_metaint;
  * line being missing.
  */
 static int  s_hdr_br;
+
+/*
+ * Seconds of DECODED audio the player has queued, x100, pushed in by
+ * play_stream() so the statistics line can report it.
+ *
+ * Because the "ring 0%" in that line is the BYTE ring, and reading it as
+ * the buffer is the mistake it invites. netdec pulls from the byte ring
+ * as fast as bytes arrive, so at a steady state it is empty BY DESIGN --
+ * 0% there means the decoder is keeping up, which is the good case.
+ * Every log of this series reports 0% beside 0 rebuffers, and the two
+ * facts agree.
+ *
+ * The reserve that protects against a network hiccup is the PCM ring,
+ * downstream of the decoder, and nothing printed it. So the one number
+ * a listener or a maintainer actually wants -- how many seconds of sound
+ * are in hand -- was the one number missing from the line that exists
+ * to answer that question.
+ *
+ * Pushed rather than pulled: the PCM ring is player.c's and netstream is
+ * below it. Same direction as s_ring_pct, opposite direction to the
+ * dependency.
+ */
+static volatile int s_audio_cs;
 static int  s_hdr_status_icy;
 static char s_hdr_location[NETSTREAM_URL_MAX];
 static char s_hdr_name[NETSTREAM_NAME_MAX];
@@ -524,8 +547,17 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
         if (now - last_window >= KBPS_WINDOW_US) {
             const int64_t ms = (now - last_window) / 1000;
             s_kbps = ms ? (int)((int64_t)window_bytes * 8 / ms) : 0;
-            ESP_LOGI(TAG, "%d kbit/s, ring %u%% (%u bytes), stalled %d ms, internal free %u, stack low water %u",
+            /* "bytes" is the byte ring and is meant to be near zero;
+             * "audio" is the decoded reserve and is the one that
+             * matters. Named rather than left as a second percentage,
+             * because two percentages on one line is how they got
+             * confused for each other. */
+            const int acs = s_audio_cs;
+            ESP_LOGI(TAG, "%d kbit/s, bytes %u%% (%u), audio %d.%02ds, "
+                          "stalled %d ms, internal free %u, "
+                          "stack low water %u",
                      s_kbps, netstream_ring_pct(), (unsigned)s_buffered,
+                     acs / 100, acs % 100,
                      stalled_ms,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
@@ -944,3 +976,10 @@ bool netstream_has_title(void) { return s_has_title; }
  * there is nothing to publish here the way s_ring_pct is.
  */
 int netstream_declared_kbps(void) { return s_hdr_br; }
+
+/* How much decoded audio the player has in hand, in hundredths of a
+ * second. Pushed in every pass of the stream loop; see s_audio_cs. */
+void netstream_note_audio_ms(int ms)
+{
+    s_audio_cs = ms > 0 ? ms / 10 : 0;
+}
