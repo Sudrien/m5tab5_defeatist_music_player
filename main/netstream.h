@@ -238,6 +238,20 @@ bool netstream_has_title(void);
 void netstream_set_actual_kbps(int kbps);
 
 /*
+ * The station's artwork URL from its icy-logo header, if it sent one.
+ *
+ * Copied into `out`; false and an empty string when there is none,
+ * which is most stations. Valid from the moment the headers are in --
+ * it is cleared per hop, so a redirect's artwork does not survive onto
+ * the mount it points at.
+ *
+ * This is a URL from a third party and nothing here has fetched it. The
+ * size cap, the content-type check and the redirect limit belong to
+ * whoever does.
+ */
+bool netstream_logo(char *out, size_t out_size);
+
+/*
  * The bitrate the station declared in its icy-br header, in kbit/s, or 0
  * if it sent none.
  *

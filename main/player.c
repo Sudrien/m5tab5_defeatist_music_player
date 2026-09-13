@@ -3156,6 +3156,15 @@ static volatile bool     s_reload_stations;
  * menu -- the list they want is the last one they asked for.
  */
 static volatile int      s_fetch_row = -1;
+
+/*
+ * The station's artwork URL, resolved once at first sound, or empty.
+ *
+ * Resolved and not fetched: 0421 does the fetching, where the size cap
+ * and the content-type check belong. Held here so the lookup happens
+ * once per station rather than once per redraw.
+ */
+static char              s_art_url[NETSTREAM_URL_MAX];
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -10416,6 +10425,41 @@ static track_end_t play_stream(const char *url, const char *name)
              * to be a resync landing mid-frame. Neither is diagnosable
              * from one number.
              */
+            /*
+             * THE DIRECTORY IS OWED A CLICK, AND THIS IS THE MOMENT.
+             *
+             * At first sound rather than at the tap, because a tap is
+             * not a play: a station that 404s or redirects into nothing
+             * was not listened to, and somebody scrolling fifty rows
+             * must not add fifty counts to the rankings this player's
+             * own menu is sorted by.
+             *
+             * The artwork is resolved in the same breath, from the same
+             * uuid, while the headers for this station are still the
+             * current ones. icy-logo first because it is free and
+             * already in hand; the directory only when the server said
+             * nothing.
+             */
+            s_art_url[0] = '\0';
+            {
+                station_t st;
+                const bool known = stations_get(stations_index(), &st) &&
+                                   st.uuid[0];
+
+                if (netstream_logo(s_art_url, sizeof(s_art_url))) {
+                    ESP_LOGI(TAG, "artwork from the station: %.120s", s_art_url);
+                } else if (known) {
+                    radiobrowser_favicon(st.uuid, s_art_url, sizeof(s_art_url));
+                }
+
+                /* After the artwork, so the two requests are naturally
+                 * spaced by the work between them rather than only by
+                 * the rate gap -- and so a slow lookup cannot delay the
+                 * click past the point where the listener has already
+                 * moved on. */
+                if (known) radiobrowser_click(st.uuid);
+            }
+
             const int decl = netstream_declared_kbps();
             /*
              * 64, and the arithmetic is the proof rather than a

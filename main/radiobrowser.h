@@ -575,6 +575,20 @@ bool radiobrowser_list(radiobrowser_kind_t kind, const char *value,
 bool radiobrowser_favicon(const char *uuid, char *out, size_t out_size);
 
 /*
+ * Tell the directory a station was played.
+ *
+ * Call it when audio actually reaches the speaker, not when a row is
+ * tapped: a station that 404s, or redirects into nothing, is not a
+ * play, and a listener scrolling through fifty rows must not inflate
+ * fifty counts. See radiobrowser.c for why this one call bypasses the
+ * cache.
+ *
+ * Blocks briefly. Player task. Failure is ignored on purpose -- no
+ * station may fail to play because a counter did not increment.
+ */
+void radiobrowser_click(const char *uuid);
+
+/*
  * Drop everything held.
  *
  * For the case the cache cannot see: the listener has been somewhere

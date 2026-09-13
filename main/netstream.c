@@ -291,6 +291,16 @@ static volatile int s_audio_cs;
 static int  s_hdr_status_icy;
 static char s_hdr_location[NETSTREAM_URL_MAX];
 static char s_hdr_name[NETSTREAM_NAME_MAX];
+/*
+ * icy-logo, the station's own artwork, straight from the server.
+ *
+ * The best of the three artwork sources and the only free one: it
+ * arrives in the headers that are already parsed and was being logged
+ * and dropped. Dance Wave sends it, walmradio sends it; SomaFM and
+ * zeno.fm do not, which is why 0417's directory lookup exists as the
+ * fallback rather than as the primary.
+ */
+static char s_hdr_logo[NETSTREAM_URL_MAX];
 static char s_hdr_ctype[64];
 
 static void set_state(netstream_state_t st)
@@ -340,6 +350,8 @@ static esp_err_t on_event(esp_http_client_event_t *e)
          * connection. */
         const int br = atoi(v);
         if (br > 0 && br < 10000) s_hdr_br = br;
+    } else if (strcasecmp(k, "icy-logo") == 0) {
+        snprintf(s_hdr_logo, sizeof(s_hdr_logo), "%s", v);
     } else if (strcasecmp(k, "icy-name") == 0) {
         snprintf(s_hdr_name, sizeof(s_hdr_name), "%s", v);
     } else if (strcasecmp(k, "content-type") == 0) {
@@ -403,6 +415,7 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         s_hdr_status_icy = 0;
         s_hdr_location[0] = '\0';
         s_hdr_name[0] = '\0';
+        s_hdr_logo[0] = '\0';
         s_hdr_ctype[0] = '\0';
 
         char url[NETSTREAM_URL_MAX];
@@ -1195,6 +1208,16 @@ bool netstream_has_title(void) { return s_has_title; }
  * there is nothing to publish here the way s_ring_pct is.
  */
 int netstream_declared_kbps(void) { return s_hdr_br; }
+
+bool netstream_logo(char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return false;
+    /* Copied, like the title and the name, and for the same reason: a
+     * pointer into a buffer the reader task rewrites on every hop is a
+     * race the caller cannot see. */
+    snprintf(out, out_size, "%s", s_hdr_logo);
+    return out[0] != '\0';
+}
 void netstream_set_actual_kbps(int kbps) { if (kbps > 0) s_actual_br = kbps; }
 
 /* How much decoded audio the player has in hand, in hundredths of a

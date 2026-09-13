@@ -476,3 +476,59 @@ bool radiobrowser_favicon(const char *uuid, char *out, size_t out_size)
     if (ok) ESP_LOGI(TAG, "artwork: %s", out);
     return ok;
 }
+
+/*
+ * Report a play against a station, which is what the directory asks for
+ * in return for having no key and no account.
+ *
+ * WHY THIS IS AN OBLIGATION AND NOT A NICETY. The browse menu is built
+ * entirely on counts other people contributed: `Most voted`, `Most
+ * listened`, and `order=votes` on every tag query. This player has been
+ * reading those rankings since 0402 and adding nothing to them -- it
+ * found Dance Wave because that station was second on Most voted. A
+ * client that consumes the ordering and never reports a play is a free
+ * rider on everyone else's clicks.
+ *
+ * NOT CACHED, AND THAT IS THE TRAP. Everything else here goes through
+ * the five-minute cache, and a click served from cache is a click that
+ * did not happen -- silently, and precisely for the station played most
+ * often, since that is the one whose entry stays warm. So this does not
+ * call cache_get() or cache_put() at all. The rate gap still applies,
+ * because that rule is about the service's load rather than about
+ * freshness.
+ *
+ * Fire and forget: the body is read and discarded, and a failure is one
+ * log line at debug level. Nothing the listener asked for depends on
+ * it, and a station must never fail to play because a counter did not
+ * increment.
+ */
+void radiobrowser_click(const char *uuid)
+{
+    if (!radiobrowser_uuid_ok(uuid)) return;
+    lock_init();
+
+    static const char *const hosts[RADIOBROWSER_HOST_COUNT] =
+        RADIOBROWSER_HOSTS;
+
+    char url[RADIOBROWSER_URL_MAX];
+    if (!radiobrowser_click_url(url, sizeof(url),
+                                hosts[s_host % RADIOBROWSER_HOST_COUNT], uuid)) {
+        return;
+    }
+
+    if (!radiobrowser_gap_ok(now_ms(), s_last_req_ms, s_ever_req)) {
+        vTaskDelay(pdMS_TO_TICKS(RADIOBROWSER_MIN_GAP_MS));
+    }
+    s_last_req_ms = now_ms();
+    s_ever_req = true;
+
+    /*
+     * One mirror, not both. A click is worth reporting once; retrying
+     * it on the second mirror would risk counting the same play twice,
+     * which is a worse failure than missing one -- the counts are the
+     * thing being protected here.
+     */
+    char small[512];
+    const size_t n = fetch_once(url, small, sizeof(small));
+    ESP_LOGI(TAG, "click reported for %.8s...: %s", uuid, n ? "ok" : "no answer");
+}
