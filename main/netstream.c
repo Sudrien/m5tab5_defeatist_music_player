@@ -265,21 +265,6 @@ static volatile int s_actual_br;
  * never reaches need is a station this link cannot carry.
  */
 static int  s_kbps_peak;
-/*
- * Bytes the decoder has taken out of the ring since the last window.
- *
- * THE DENOMINATOR, MEASURED RATHER THAN DECLARED. 0406 divided by the
- * decoded frame bitrate and 0404 by icy-br, and both fail on the
- * station that needs the figure most: WNZK is AAC, which reports no
- * bitrate at all, and sends no icy-br either, so its line has been
- * printing bare throughput with nothing to compare it against while its
- * reserve drained from 3.9 s to 1.3 s.
- *
- * The ring's own drain rate needs no codec knowledge, no header and no
- * cooperation from the decoder. It is also right for a VBR stream,
- * where every declared figure is a nominal one.
- */
-static volatile uint32_t s_consumed;
 
 /*
  * Seconds of DECODED audio the player has queued, x100, pushed in by
@@ -415,7 +400,6 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         s_hdr_br = 0;
         s_actual_br = 0;   /* a new station decodes to its own rate */
         s_kbps_peak = 0;
-        s_consumed = 0;
         s_hdr_status_icy = 0;
         s_hdr_location[0] = '\0';
         s_hdr_name[0] = '\0';
@@ -680,21 +664,23 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              */
             if (s_kbps > s_kbps_peak) s_kbps_peak = s_kbps;
             /*
-             * What the decoder actually took over this window, in
-             * kbit/s. Preferred over both declared figures: it is
-             * measured, it works for AAC and for VBR, and it is the
-             * only one of the three that is true of THIS window.
+             * THE DENOMINATOR IS THE DECODER'S, AND 0415 IS WHY.
              *
-             * The declared values stay as the fallback for the first
-             * window and for a paused stream, where nothing has been
-             * consumed yet and dividing by zero would be worse than
-             * dividing by a nominal figure.
+             * 0414 divided by the ring's drain rate measured here, and
+             * a board log came back reading 100% on almost every line:
+             * 212 of 210, 127 of 128, 487 of 483, 424 of 424. That is a
+             * tautology, not a measurement. The compressed ring sits at
+             * 0%, so everything that arrives is taken immediately and
+             * consumption EQUALS delivery by construction. The figure
+             * could not have said anything else, and it was printed
+             * beside a reserve visibly draining from 3.8 s to 1.0 s.
+             *
+             * What was wanted is bytes per SECOND OF AUDIO, which only
+             * the decoder can see -- it is the only thing holding both
+             * compressed bytes in and decoded samples out. netdec
+             * measures it on a decoded-audio clock and pushes it here.
              */
-            const uint32_t took = s_consumed;
-            s_consumed = 0;
-            const int used_kbps = ms ? (int)((uint64_t)took * 8 / (uint64_t)ms) : 0;
-            const int needed = used_kbps > 0 ? used_kbps
-                             : s_actual_br > 0 ? s_actual_br : s_hdr_br;
+            const int needed = s_actual_br > 0 ? s_actual_br : s_hdr_br;
             char rate_note[64] = "";
             if (needed > 0) {
                 snprintf(rate_note, sizeof(rate_note), " of %d needed (%d%%)%s",
@@ -1083,16 +1069,6 @@ size_t netstream_read(void *buf, size_t n, int timeout_ms)
     if (!s_ring || !buf || !n) return 0;
     const size_t got = xStreamBufferReceive(s_ring, buf, n,
                                             pdMS_TO_TICKS(timeout_ms));
-    /*
-     * What the decoder took, which is what the stream COSTS.
-     *
-     * One `+=` on the decode task against a read-and-reset on the
-     * reader task. A lost update here is one window's denominator being
-     * slightly low, in a figure that is already an average over five
-     * seconds; a lock between the decoder and the reader for a log
-     * statistic would be a worse trade than any error it prevents.
-     */
-    s_consumed += got;
     return got;
 }
 

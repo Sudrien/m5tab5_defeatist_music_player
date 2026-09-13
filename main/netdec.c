@@ -88,6 +88,25 @@ static esp_audio_simple_dec_handle_t s_aac;
 
 static uint32_t s_frames;
 static uint64_t s_samples;
+
+/*
+ * Compressed bytes in against decoded samples out, for the one figure
+ * that says what a stream COSTS.
+ *
+ * 0414 divided the reader's throughput by the ring's drain rate and got
+ * 100% on every line of a board log, which is a tautology rather than a
+ * measurement: the compressed ring sits at 0%, so whatever arrives is
+ * immediately taken, and delivery equals consumption by construction.
+ * It said nothing about whether the station fits.
+ *
+ * The real question is bytes per SECOND OF AUDIO -- the rate the stream
+ * has to be delivered at to play in real time -- and that is the one
+ * ratio the decoder alone can see, because only it knows both halves.
+ * It needs no header, works for AAC where nothing is declared, and is
+ * correct for VBR where every declared figure is nominal.
+ */
+static uint64_t s_cost_bytes;
+static uint64_t s_cost_samples;
 static uint32_t s_resyncs;
 static bool     s_reported;     /* the format line has been logged */
 
@@ -170,6 +189,8 @@ bool netdec_open(void)
 
     s_codec = STREAM_CODEC_NONE;
     s_not_audio = false;
+    s_cost_bytes = 0;
+    s_cost_samples = 0;
     s_frames = 0;
     s_samples = 0;
     s_resyncs = 0;
@@ -237,6 +258,7 @@ static size_t refill(void)
         return 0;
     }
     if (!got) framewin_commit(&s_win, 0);    /* counts a dry refill */
+    s_cost_bytes += got;
     return got;
 }
 
@@ -327,6 +349,30 @@ static bool aac_open(void)
 }
 
 /* One AAC frame out of the window. Same contract as netdec_read(). */
+/*
+ * Publish what the stream costs, about once per second of audio.
+ *
+ * On a DECODED-AUDIO clock rather than a wall clock, so a decoder
+ * running ahead to fill the ring reports the same figure as one pacing
+ * in real time. The number is a property of the stream and must not
+ * change with how far ahead this player happens to be -- which is
+ * exactly the trap 0414 fell into.
+ *
+ * Both accumulators reset, so each reading is its own second: a
+ * bitrate that changes mid-stream is followed rather than averaged away
+ * across a session.
+ */
+static void cost_report(uint32_t rate)
+{
+    if (!rate || s_cost_samples < rate) return;     /* under a second */
+
+    const uint64_t kbps = (s_cost_bytes * 8ull * (uint64_t)rate)
+                        / (s_cost_samples * 1000ull);
+    s_cost_bytes = 0;
+    s_cost_samples = 0;
+    if (kbps > 0 && kbps < 100000) netstream_set_actual_kbps((int)kbps);
+}
+
 static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
 {
     if (!aac_open()) return -1;
@@ -404,6 +450,8 @@ static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
     const int produced = (int)(frame.decoded_size / sizeof(int16_t));
     s_frames++;
     s_samples += (uint64_t)(produced / fi.channel);
+    s_cost_samples += (uint64_t)(produced / fi.channel);
+    cost_report((uint32_t)fi.sample_rate);
 
     if (info) {
         info->sample_rate = (int)fi.sample_rate;
@@ -520,6 +568,8 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
 
     s_frames++;
     s_samples += (uint64_t)samples;
+    s_cost_samples += (uint64_t)samples;
+    cost_report((uint32_t)fi.hz);
 
     if (info) {
         info->sample_rate = fi.hz;
@@ -530,9 +580,9 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
 
     if (!s_reported) {
         s_reported = true;
-        /* The reader's line compares delivery against this rather than
-         * against icy-br, so it has to be told. See
-         * netstream_set_actual_kbps(). */
+        /* A first figure straight away, so the very first statistics
+         * line has a denominator; cost_report() replaces it with a
+         * measured one a second later, and keeps replacing it. */
         netstream_set_actual_kbps(fi.bitrate_kbps);
         ESP_LOGI(TAG, "first frame: MPEG layer %d, %d Hz, %d ch, %d kbit/s, "
                       "%d bytes -> %d samples",
