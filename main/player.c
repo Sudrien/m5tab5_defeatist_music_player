@@ -5477,6 +5477,17 @@ static void sleep_timer_tick(void)
  * seconds worst case and normally under one; the alternative is a third
  * task whose only job is one request, and a task is not the answer to a
  * function that is occasionally slow.
+ *
+ * CALLED FROM play_stream()'s LOOP TOO, as of 0403, and that is the one
+ * caller where the block costs something other than latency: for its
+ * length the stream is not decoding, so the PCM ring drains without
+ * being refilled. The ring holds about twenty seconds and the ordinary
+ * fetch is under one, so the reserve covers it -- but the worst case is
+ * two mirror timeouts, and a station already running thin would see its
+ * buffer fall. The thing to look for is a `rebuffering` line following
+ * a fetch. If it appears, the answer is a shorter RB_TIMEOUT_MS rather
+ * than a task: the mirror that needs six seconds is not the one worth
+ * waiting for.
  */
 static void service_station_fetch(void)
 {
@@ -9882,6 +9893,24 @@ static track_end_t play_stream(const char *url, const char *name)
                 t_connect = esp_timer_get_time();
                 netstream_play(s_stream_url, s_stream_name);
             }
+        }
+
+        /*
+         * The chooser's two requests, on the third loop that has to
+         * service them.
+         *
+         * play_file()'s decode loop and player_loop()'s idle branch had
+         * these and play_stream() did not, so both buttons were dead
+         * for exactly as long as a stream was playing -- which, for the
+         * radio menu, is most of the time anyone is looking at it.
+         *
+         * Not run while leaving. The exit path below is a fade and a
+         * bounded wait, and a twelve-second fetch inside it would hold
+         * the station change the listener just asked for.
+         */
+        if (!leaving) {
+            service_station_reload();
+            service_station_fetch();
         }
 
         const netstream_state_t net = netstream_state();
