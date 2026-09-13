@@ -25,9 +25,44 @@
 *.swp
 .DS_Store
 
-# texttest host build artefacts
+# texttest host build artefacts.
+#
+# Every binary the Makefile builds, by name rather than by pattern:
+# texttest/ holds the sources too, and a pattern loose enough to catch
+# nineteen extensionless binaries also catches a .c file somebody
+# forgot the extension on. `make clean` removes these; the list is
+# here so a tree that has been built still reads as clean.
 texttest/texttest
+texttest/brightnesstest
+texttest/bufferplantest
+texttest/cachetest
+texttest/clocktest
+texttest/codecplantest
+texttest/ctrltest
+texttest/fadetest
+texttest/framewintest
+texttest/icydemuxtest
+texttest/netplantest
+texttest/portalwebtest
+texttest/radiobrowsertest
+texttest/sleeptimertest
+texttest/stationlisttest
+texttest/stationnavtest
+texttest/streamplantest
+texttest/streamsnifftest
+texttest/tailplantest
+texttest/wifistoretest
 texttest/*.dSYM/
+
+# git format-patch output. Patch files contain trailing whitespace by
+# construction -- context lines, and the "-- " before the version
+# trailer -- so committing them makes `git am` report hundreds of
+# whitespace errors on every subsequent patch that touches the
+# directory. See the patch that removed out/.
+/out/
+/allpatches/
+/patches/
+*.patch
 
 # python bytecode from tools/
 __pycache__/
