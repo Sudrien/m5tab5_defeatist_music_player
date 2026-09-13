@@ -203,6 +203,8 @@ static int  s_hdr_metaint;
  * line being missing.
  */
 static int  s_hdr_br;
+/* What the audio actually costs, from the decoder. See the header. */
+static volatile int s_actual_br;
 
 /*
  * Seconds of DECODED audio the player has queued, x100, pushed in by
@@ -336,6 +338,7 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
 
         s_hdr_metaint = 0;
         s_hdr_br = 0;
+        s_actual_br = 0;   /* a new station decodes to its own rate */
         s_hdr_status_icy = 0;
         s_hdr_location[0] = '\0';
         s_hdr_name[0] = '\0';
@@ -587,11 +590,23 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
             /* 64 for the same reason player.c's is: " of " plus two
              * ints at 11 apiece plus " declared (", "%)" and " SHORT"
              * is 46 in the worst case the types allow. */
+            /*
+             * THE DENOMINATOR IS WHAT THE AUDIO COSTS, NOT WHAT THE
+             * STATION CALLS ITSELF -- corrected from 0404, which used
+             * icy-br and got a station wrong by twenty points.
+             *
+             * `needed` is the decoded frame rate when there is one. A
+             * station declaring 320 and emitting 224 is not lying, it
+             * is describing a grade; the reader has to keep up with the
+             * 224. Falls back to the declared value, which is all the
+             * AAC path ever has.
+             */
+            const int needed = s_actual_br > 0 ? s_actual_br : s_hdr_br;
             char rate_note[64] = "";
-            if (s_hdr_br > 0) {
-                snprintf(rate_note, sizeof(rate_note), " of %d declared (%d%%)%s",
-                         s_hdr_br, (s_kbps * 100) / s_hdr_br,
-                         (s_kbps < s_hdr_br && s_audio_cs < 400) ? " SHORT" : "");
+            if (needed > 0) {
+                snprintf(rate_note, sizeof(rate_note), " of %d needed (%d%%)%s",
+                         needed, (s_kbps * 100) / needed,
+                         (s_kbps < needed && s_audio_cs < 400) ? " SHORT" : "");
             }
             ESP_LOGI(TAG, "%d kbit/s%s, bytes %u%% (%u), audio %d.%02ds, "
                           "stalled %d ms, internal free %u, "
@@ -1016,6 +1031,7 @@ bool netstream_has_title(void) { return s_has_title; }
  * there is nothing to publish here the way s_ring_pct is.
  */
 int netstream_declared_kbps(void) { return s_hdr_br; }
+void netstream_set_actual_kbps(int kbps) { if (kbps > 0) s_actual_br = kbps; }
 
 /* How much decoded audio the player has in hand, in hundredths of a
  * second. Pushed in every pass of the stream loop; see s_audio_cs. */

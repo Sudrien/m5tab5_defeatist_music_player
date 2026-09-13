@@ -218,6 +218,26 @@ void netstream_title(char *out, size_t out_size);
 bool netstream_has_title(void);
 
 /*
+ * Tell the reader what the audio actually costs, in kbit/s, as decoded.
+ *
+ * WHY THIS IS NOT icy-br. Classic Vinyl HD declares 320 and its frames
+ * decode as 224. Both numbers are honest about different things -- the
+ * station's nominal grade and what the encoder emitted -- and only one
+ * of them is the rate the reader has to keep up with. 0404's line
+ * compared delivery against the declared figure and called a station
+ * 52% short that was in fact 75% of what it needed, which is still
+ * short but is a different problem with a different cause.
+ *
+ * Called by netdec when it identifies a frame. Left at 0 by the AAC
+ * path, which reports no bitrate, and the declared value stands there
+ * because it is the only one there is.
+ *
+ * One int, written by the decode task and read by the reader task for a
+ * log line. A torn read is a wrong percentage for one line.
+ */
+void netstream_set_actual_kbps(int kbps);
+
+/*
  * The bitrate the station declared in its icy-br header, in kbit/s, or 0
  * if it sent none.
  *

@@ -530,6 +530,10 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
 
     if (!s_reported) {
         s_reported = true;
+        /* The reader's line compares delivery against this rather than
+         * against icy-br, so it has to be told. See
+         * netstream_set_actual_kbps(). */
+        netstream_set_actual_kbps(fi.bitrate_kbps);
         ESP_LOGI(TAG, "first frame: MPEG layer %d, %d Hz, %d ch, %d kbit/s, "
                       "%d bytes -> %d samples",
                  fi.layer, fi.hz, fi.channels, fi.bitrate_kbps,
