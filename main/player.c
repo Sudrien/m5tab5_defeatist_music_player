@@ -475,6 +475,22 @@ extern uint32_t g_tab5_dpi_underruns;
 #define FADE_OUT_MS             (3000)
 
 /*
+ * How long a caller that wants the ramp FINISHED may wait for it.
+ *
+ * Only the station change needs this. play_file()'s fade paths end the
+ * track, so nothing is waiting on the far side of the ramp; a station
+ * change has the next station's audio queueing into the same ring, and
+ * the ramp's own flush would throw it away.
+ *
+ * The margin covers the writer noticing: it picks the ramp up at the top
+ * of a pass, and a pass is one DMA chunk. The slice is short enough that
+ * a ring which runs dry mid-ramp -- the writer clears s_fade_out and the
+ * wait ends early -- costs nothing extra.
+ */
+#define FADE_WAIT_MARGIN_MS     (400)
+#define FADE_WAIT_SLICE_MS      (20)
+
+/*
  * Two rings, alternating, one track each.
  *
  * A track boundary is currently a drain: the decode loop waits for the
@@ -9264,13 +9280,49 @@ static track_end_t play_stream(const char *url, const char *name)
              * change the sample rate -- 44100 to 48000 between SomaFM
              * and WNZK.
              */
+            /*
+             * THE RAMP, AND THEN THE DROP -- IN THAT ORDER, WHICH 0323
+             * GOT WRONG.
+             *
+             * 0323 called fade_out_begin() and set s_pcm_flush in the
+             * same breath, and those are two different mechanisms for
+             * the same job. The writer flushes ITSELF when the ramp
+             * completes (s_flush_why = "fade"), so an explicit flush
+             * beside the fade dropped the ring on the writer's very next
+             * pass and left the ramp with nothing to ramp:
+             *
+             *   station change: fading out 3024 KB over 3000 ms
+             *   station change: dropped 3024 KB of queued audio   (+39 ms)
+             *   W fade: the ring emptied before the ramp finished
+             *
+             * Thirty-nine milliseconds, not three thousand. The warning
+             * is the writer saying exactly this, and it was right.
+             *
+             * play_file()'s two paths are the two cases and they do not
+             * overlap: media-gone fades and lets the writer drop the
+             * rest, interrupted drops with no fade because the listener
+             * has chosen something and wants it now. A station change
+             * wants both, so it takes the FADE path and waits.
+             *
+             * The wait is what makes the ordering real. Without it
+             * play_stream() returns, the next station connects, and its
+             * first PCM lands in the ring before the ramp finishes --
+             * where the ramp's own flush would then throw it away. The
+             * cap is FADE_OUT_MS plus a margin: if the ring runs dry
+             * mid-ramp the writer clears s_fade_out early and this
+             * returns early with it, which is the common case for a
+             * station whose buffer is thin.
+             */
             fade_out_begin(audio_out_rate());
             ESP_LOGI(TAG, "station change: fading out %u KB over %" PRIu32
                           " ms",
                      (unsigned)(xStreamBufferBytesAvailable(s_pcm) / 1024),
                      (uint32_t)FADE_OUT_MS);
-            s_flush_why = "station change";
-            s_pcm_flush = true;
+            for (int waited = 0; fade_out_active() &&
+                                 waited < FADE_OUT_MS + FADE_WAIT_MARGIN_MS;
+                 waited += FADE_WAIT_SLICE_MS) {
+                vTaskDelay(pdMS_TO_TICKS(FADE_WAIT_SLICE_MS));
+            }
         }
 
         /*
