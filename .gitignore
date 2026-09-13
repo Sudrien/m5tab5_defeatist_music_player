@@ -67,3 +67,4 @@ texttest/*.dSYM/
 # python bytecode from tools/
 __pycache__/
 *.pyc
+texttest/levelhisttest

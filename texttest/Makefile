@@ -151,7 +151,11 @@ STATIONNAV_BIN := stationnavtest
 # purpose: the encoder and the parser are checked against each other.
 RADIOBROWSER_BIN := radiobrowsertest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser
+# The minute-wide level strip: bucket arithmetic over a ring, plus the
+# reserve-to-columns conversion the drawing will use.
+LEVELHIST_BIN := levelhisttest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -217,7 +221,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -270,6 +274,13 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(LEVELHIST_BIN): levelhisttest.c ../main/levelhist.h
+	$(CC) $(WARNCFLAGS) -c levelhisttest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ levelhisttest.c $(LDFLAGS)
+
+run-levelhist: $(LEVELHIST_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(LEVELHIST_BIN)
+
 $(RADIOBROWSER_BIN): radiobrowsertest.c ../main/radiobrowser.h ../main/stationlist.h
 	$(CC) $(WARNCFLAGS) -c radiobrowsertest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ radiobrowsertest.c $(LDFLAGS)
@@ -318,4 +329,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser clean
+.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist clean
