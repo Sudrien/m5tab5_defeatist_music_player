@@ -446,10 +446,67 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
                      NETPLAN_HOPS_MAX);
             return NETPLAN_FATAL;
         }
-        if (!s_hdr_location[0] ||
-            esp_http_client_set_redirection(c) != ESP_OK) {
-            ESP_LOGE(TAG, "hop %d: %d with no usable Location", hop + 1, status);
+        if (!s_hdr_location[0]) {
+            ESP_LOGE(TAG, "hop %d: %d with no Location at all", hop + 1, status);
             return NETPLAN_FATAL;
+        }
+        if (esp_http_client_set_redirection(c) != ESP_OK) {
+            /*
+             * THE HTTPS -> HTTP DOWNGRADE, WHICH IS ORDINARY FOR RADIO.
+             *
+             * esp_http_client refuses to follow a secure origin to a
+             * plain one, which is right for anything carrying a
+             * credential and wrong for this. Found on a station from
+             * the directory:
+             *
+             *   HTTPS origin can only redirect to https:// targets
+             *   (got http://stream1.dancewave.online:8080/dance.mp3)
+             *   hop 1: 302 with no usable Location
+             *   giving up: status 302 is not going to change
+             *
+             * A dead station, permanently, over a policy that is not
+             * about it. The pattern is everywhere in the directory: an
+             * https entry pointing at a load balancer that hands out
+             * plain-http mount points, because Icecast mounts often are
+             * plain http. SomaFM is http end to end and has always
+             * played here.
+             *
+             * NOTHING IS BEING PROTECTED BY REFUSING. There is no
+             * account, no cookie, no credential and no request body --
+             * this player sends a GET and a user-agent. What TLS buys
+             * on the first hop is that the DIRECTORY's answer was not
+             * tampered with, and that hop stays encrypted; the audio
+             * that follows is public and identical to what the same
+             * station serves everyone. A listener who could not play an
+             * http station at all would be the safer design, and this
+             * program already plays them by name.
+             *
+             * So the scheme is checked and the hop is taken by hand,
+             * and it is LOGGED as a downgrade rather than slipped
+             * through -- somebody reading a log should be able to see
+             * that the encryption stopped, and where.
+             */
+            const bool http  = strncmp(s_hdr_location, "http://", 7) == 0;
+            const bool https = strncmp(s_hdr_location, "https://", 8) == 0;
+            if (!http && !https) {
+                /* Not a scheme this plays. A relative Location, or
+                 * something stranger; either way set_redirection() has
+                 * already declined and there is nothing to hand-build
+                 * that would be safe to guess at. */
+                ESP_LOGE(TAG, "hop %d: %d to an unusable Location",
+                         hop + 1, status);
+                return NETPLAN_FATAL;
+            }
+            if (esp_http_client_set_url(c, s_hdr_location) != ESP_OK) {
+                ESP_LOGE(TAG, "hop %d: %d and the Location will not open",
+                         hop + 1, status);
+                return NETPLAN_FATAL;
+            }
+            if (http) {
+                ESP_LOGW(TAG, "hop %d: following to plain http; "
+                              "the audio from here is not encrypted",
+                         hop + 1);
+            }
         }
         esp_http_client_close(c);
     }
