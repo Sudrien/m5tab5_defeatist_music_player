@@ -553,10 +553,47 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              * because two percentages on one line is how they got
              * confused for each other. */
             const int acs = s_audio_cs;
-            ESP_LOGI(TAG, "%d kbit/s, bytes %u%% (%u), audio %d.%02ds, "
+            /*
+             * THE FIRST FIGURE IS DELIVERY, NOT BITRATE, AND UNTIL 0404
+             * THE LINE DID NOT SAY SO.
+             *
+             * It is bytes off the socket over the window. The station's
+             * own rate is `icy-br`, twenty lines earlier in the log and
+             * printed once at connect, so reading this line as "the
+             * stream is 165 kbit/s" was the obvious mistake and it was
+             * made -- on a board log of a 320 kbit/s station being
+             * delivered at about half that, where the question asked
+             * was whether the station was VBR. It was not. It was
+             * starving, and every other figure on this line said so:
+             * the reserve sawtoothing between 1.0 and 3.7 seconds and
+             * never climbing.
+             *
+             * So the comparison is made here, where both numbers are in
+             * hand, rather than left to whoever reads it. This is the
+             * rule 0908 wrote down after the same thing cost a session
+             * twice: a document that answers a question nobody thinks
+             * to look up has not answered it, and neither has a log
+             * line that carries half of one.
+             *
+             * `of N declared` rather than a verdict, and the percentage
+             * beside it. Delivery below the declared rate is not
+             * automatically a fault -- a server ahead of real time
+             * catches up, and the window is five seconds -- so what is
+             * printed is the ratio and what reads it is a person.
+             * `SHORT` is appended only when the reserve is falling as
+             * well, which is the pair that means something: under-
+             * delivery with a full ring is a server pacing itself.
+             */
+            char rate_note[40] = "";
+            if (s_hdr_br > 0) {
+                snprintf(rate_note, sizeof(rate_note), " of %d declared (%d%%)%s",
+                         s_hdr_br, (s_kbps * 100) / s_hdr_br,
+                         (s_kbps < s_hdr_br && s_audio_cs < 400) ? " SHORT" : "");
+            }
+            ESP_LOGI(TAG, "%d kbit/s%s, bytes %u%% (%u), audio %d.%02ds, "
                           "stalled %d ms, internal free %u, "
                           "stack low water %u",
-                     s_kbps, netstream_ring_pct(), (unsigned)s_buffered,
+                     s_kbps, rate_note, netstream_ring_pct(), (unsigned)s_buffered,
                      acs / 100, acs % 100,
                      stalled_ms,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),

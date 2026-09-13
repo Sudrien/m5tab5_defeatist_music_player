@@ -10255,10 +10255,27 @@ static track_end_t play_stream(const char *url, const char *name)
              * transition, and agrees with this one.
              */
             audio_out_set_idle(false);
+            /*
+             * Both bitrates when they differ, because the difference is
+             * the news. The board printed `256 kbit/s` under an
+             * `icy-br: 320` header and a 960-byte first frame, which
+             * reads as a station lying about itself and is more likely
+             * to be a resync landing mid-frame. Neither is diagnosable
+             * from one number.
+             */
+            const int decl = netstream_declared_kbps();
+            char br[40];
+            if (decl > 0 && last_kbps > 0 && decl != last_kbps) {
+                snprintf(br, sizeof(br), "%d kbit/s declared, %d decoded",
+                         decl, last_kbps);
+            } else {
+                snprintf(br, sizeof(br), "%d kbit/s",
+                         decl > 0 ? decl : last_kbps);
+            }
             ESP_LOGI(TAG, "first sound at %" PRIu32 " ms, %" PRIu32 " Hz, "
-                          "%d ch decoded, %d kbit/s",
+                          "%d ch decoded, %s",
                      (uint32_t)((esp_timer_get_time() - t_connect) / 1000),
-                     out_rate, last_chans, last_kbps);
+                     out_rate, last_chans, br);
         }
 
         /*
@@ -10332,11 +10349,33 @@ static track_end_t play_stream(const char *url, const char *name)
          * value and a zero.
          */
         const stream_codec_t codec_now = netdec_codec();
-        /* The station's declared rate counts as a fact too: on the AAC
-         * path it is the only bitrate there will be, and it arrives with
-         * the headers rather than with a frame. */
-        const int br_now = last_kbps > 0 ? last_kbps
-                                         : netstream_declared_kbps();
+        /*
+         * THE CARD SHOWS WHAT THE STATION ADVERTISES, and falls back to
+         * the decoder only when the station said nothing.
+         *
+         * This was the other way round, and a board log caught the
+         * difference: `icy-br: 320`, a first frame decoding as
+         * `320 kbit/s, 960 bytes`, and the card saying 256, because
+         * last_kbps latches the last non-zero bitrate ANY frame
+         * reported and one of them had reported 256. A number that
+         * moves with whichever frame the decoder happened to finish on
+         * is not a fact about the station.
+         *
+         * Advertised is also the right KIND of fact for this square. It
+         * is what the listener is being offered -- the thing to compare
+         * against the delivery figure in netstream's line, which is the
+         * comparison that says whether a station is going to work here.
+         * The decoded frame's bitrate answers a different question,
+         * which nothing on this screen is asking.
+         *
+         * And it is the only bitrate there will be on the AAC path,
+         * where the simple decoder reports none at all: before this,
+         * that path took the declared value and the MP3 path did not,
+         * so two stations differed on screen for a reason that was
+         * about this player rather than about them.
+         */
+        const int declared = netstream_declared_kbps();
+        const int br_now = declared > 0 ? declared : last_kbps;
         const bool facts_moved = codec_now != shown_codec ||
                                  out_rate   != shown_rate  ||
                                  last_chans != shown_chans ||
@@ -10349,7 +10388,16 @@ static track_end_t play_stream(const char *url, const char *name)
             shown_rate  = out_rate;
             shown_chans = last_chans;
             shown_kbps  = br_now;
-            show_stream_card(codec_now, out_rate, last_chans, last_kbps);
+            /*
+             * br_now, not last_kbps. The redraw test above compares
+             * br_now and this drew last_kbps, so the two disagreed
+             * about what "the facts moved" meant: a declared rate
+             * arriving with the headers triggered a redraw that drew
+             * the same number as before, and a frame reporting a
+             * different bitrate changed the card without one. One
+             * value, computed once, compared and drawn.
+             */
+            show_stream_card(codec_now, out_rate, last_chans, br_now);
         }
 
         /*
