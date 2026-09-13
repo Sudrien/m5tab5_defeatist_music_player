@@ -23,6 +23,7 @@
 
 #include "icydemux.h"
 #include "streamsniff.h"
+#include "wifi.h"
 
 static const char *TAG = "tab5_netstream";
 
@@ -81,6 +82,18 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
  * API allows both.
  */
 #define CONNECT_TIMEOUT_MS  (5000)
+/*
+ * How long to wait for the radio to have an address before spending a
+ * connection attempt. Longer than a cold join takes on this board --
+ * about 16 s from boot in every log, and 14 s of that is the first
+ * association expiring and being retried -- with room for a slow DHCP.
+ *
+ * Sliced so the wait can be abandoned: a station change during it is
+ * serviced at the next slice rather than at the end.
+ */
+#define NET_WAIT_MAX_MS         (25000)
+#define NET_WAIT_SLICE_MS       (100)
+
 #define SOCKET_TIMEOUT_MS   (1000)
 #define DROP_SILENCE_MS     (5000)
 
@@ -587,6 +600,57 @@ static void netstream_task(void *arg)
         bool give_up = false;
         while (!give_up && !superseded(gen)) {
             set_state(NETSTREAM_CONNECTING);
+
+            /*
+             * WAIT FOR A NETWORK BEFORE SPENDING AN ATTEMPT ON ONE.
+             *
+             * A station tapped before the join completes fails DNS
+             * instantly -- `getaddrinfo() returns 202` -- and each of
+             * those counted as a real attempt, so the backoff schedule
+             * was consumed against a condition that had nothing to do
+             * with the station:
+             *
+             *   attempt 1 failed after 4 ms; retrying in 996 ms
+             *   attempt 2 failed after 5 ms; retrying in 1995 ms
+             *   attempt 3 failed after 5 ms; retrying in 3995 ms
+             *
+             * Three of the four attempts gone in fourteen milliseconds
+             * of work, and the fourth only succeeded because the
+             * backoff had grown long enough to outlast the join by
+             * accident. A slower join would have exhausted the schedule
+             * and reported a dead station.
+             *
+             * So it is not a failure and is not counted as one. Polled
+             * rather than waited on an event, because this loop already
+             * has to answer superseded() promptly -- a listener who
+             * changes their mind during the wait must not be held for
+             * the remainder of it.
+             *
+             * Bounded, because "no network" can also be permanent: no
+             * saved network in range, or the radio off. NET_WAIT_MAX_MS
+             * past that and the attempt goes ahead and fails honestly,
+             * which puts the real error in the log rather than leaving
+             * the screen on "Connecting" for ever.
+             */
+            if (!wifi_connected()) {
+                ESP_LOGI(TAG, "no network yet; waiting before the first "
+                              "lookup");
+                int waited = 0;
+                while (!wifi_connected() && waited < NET_WAIT_MAX_MS &&
+                       !superseded(gen)) {
+                    vTaskDelay(pdMS_TO_TICKS(NET_WAIT_SLICE_MS));
+                    waited += NET_WAIT_SLICE_MS;
+                }
+                if (superseded(gen)) break;
+                if (wifi_connected()) {
+                    ESP_LOGI(TAG, "network up after %d ms; connecting",
+                             waited);
+                } else {
+                    ESP_LOGW(TAG, "still no network after %d ms; trying "
+                                  "anyway", waited);
+                }
+            }
+
             const int64_t attempt_start = esp_timer_get_time();
 
             /* Always from the station URL. The redirect Zeno hands back
