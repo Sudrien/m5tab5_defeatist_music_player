@@ -8280,6 +8280,71 @@ did not have them.
   had a single retry, not five, so the fix is flashed and the fault it
   fixes has not been re-triggered. Held open deliberately.
 
+## WNZK starves on the device and not on a PC (measured, 0328)
+
+**The device is the limit, not the station.** Same three stations, same
+minute, 300 s each, measured with `tools/streamcheck.py` on a PC on the
+same network:
+
+| station | declared | PC mean | PC ratio | device mean | device ratio |
+| --- | --- | --- | --- | --- | --- |
+| WUOM | 64 | 74 | 1.15x | 62-72 | ~1.0x |
+| SomaFM | 128 | 135 | 1.05x | ~220 filling, then ~128 | ~1.0x |
+| WNZK | 512 (0200) | **522** | **1.02x** | **466** | **0.91x** |
+
+Zero simulated dropouts on the PC for all three, and a reserve that sits
+flat at 50 s, 21 s and (WNZK) never falls. The device sawtooths 4.1s ->
+1.4s on WNZK with a dropout every 35 s.
+
+### What this does and does not prove
+
+It rules out the station and the path to it. It does not prove a hard
+ceiling, and the honest reading is narrower than "the transport is
+capped": **the device's own windows ranged 392-552 kbit/s and its best
+window beat the PC's 300-second mean.** So the device is not blocked
+below 512; it averages just under while the PC averages just over. An
+11% shortfall on the one station in the list heavy enough to need the
+full rate.
+
+That is consistent with the `CP without SDIO SW_AGGR; compatible
+streaming mode enabled` hypothesis and does not confirm it. Aggregation
+would plausibly close 11%. So would several other things. **What is
+settled is only that no amount of buffering on the device fixes this,
+and that spoofing a user agent or a client identity would change
+nothing** -- the PC sends a different User-Agent and gets the same bytes.
+
+### Two corrections to earlier entries
+
+- **0322's icy-br fallback does not help WNZK.** The whole reason it was
+  written was that the AAC path reports no bitrate and WNZK's card had
+  no kbps line. It turns out **WNZK sends no `icy-br` either** -- not to
+  the PC, and not to the device, where the header dump has always shown
+  only `content-type`, `icy-name` and `icy-metaint`. The patch is still
+  right for stations that do send it; it simply does not fix the case
+  that motivated it. The card will still show `AAC` and `48000 Hz
+  stereo` and no rate for WNZK.
+- **The 512 kbit/s figure for WNZK is 0200's, not the station's.** With
+  no `icy-br` there is nothing to read it from, so every ratio in the
+  table above depends on a measurement taken months earlier. The PC's
+  522 kbit/s mean is consistent with it and is not independent
+  confirmation.
+
+### Do not act on the version mismatch without more than this
+
+`main/idf_component.yml` says, and said before any of this:
+
+>  DO NOT act on it without a reason: an OTA would replace M5's C6
+>  firmware with a stock slave build, which has never been tried on this
+>  board, and this tree has nothing that writes one.
+
+An 11% shortfall on one station is a reason to investigate and not yet a
+reason to reflash a coprocessor that cannot be recovered without hardware
+this project does not have. **Downgrading the host to 2.12.x to match is
+not the alternative it looks like:** SW_AGGR is a 3.x feature, so
+matching downward keeps the compatibility path and loses the Tab5 board
+preset that sets the reset line through Kconfig -- the one pin wifi.c
+cannot set from code.
+
 ## radio-browser.info, which had never been touched (0306)
 
 **The question that prompted this: wasn't radio-browser integration
