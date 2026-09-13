@@ -268,6 +268,23 @@ extern "C" {
  * gain will actually meet is the correct question whether or not the
  * old one was visible in a log.
  *
+ * CONFIRMED PROPERLY IN 0414, once 0412's line could show all three
+ * numbers at once. On WUOM the applied gain sits exactly on the ceiling
+ * again and again -- +0.28 with ceiling +0.28, +0.00 with +0.00, +0.37
+ * with +0.37, +0.51 with +0.51 -- while the gate asks for between
+ * +0.48 and +1.79 throughout. So the clamp really is what steers this
+ * station, which is what 0411 claimed on evidence that turned out to be
+ * a logging artifact. Right answer, wrong reason, and now a real one.
+ *
+ * AND THE CLAMP IS RIGHT TO BIND. The ceiling swings between 0.00 and
+ * +4.85 over tens of seconds, which looks like noise and is not: talk
+ * radio is limited hard enough that its true peaks touch full scale
+ * routinely, and a boost over audio already at full scale is clipping
+ * however much the loudness gate wants it. The gain wandering about a
+ * decibel is the headroom honestly changing. Nothing to fix here --
+ * only a soft limiter could take that boost, and that is a different
+ * feature with a different cost.
+ *
  * Three seconds, because that is the audio the gain chosen now will
  * actually be applied to. The slew moves a decibel a second, so by the
  * time the far end of a twenty-second window is played the gain will

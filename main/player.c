@@ -10412,9 +10412,16 @@ static track_end_t play_stream(const char *url, const char *name)
             if (decl > 0 && last_kbps > 0 && decl != last_kbps) {
                 snprintf(br, sizeof(br), "%d kbit/s declared, %d decoded",
                          decl, last_kbps);
-            } else {
+            } else if (decl > 0 || last_kbps > 0) {
                 snprintf(br, sizeof(br), "%d kbit/s",
                          decl > 0 ? decl : last_kbps);
+            } else {
+                /* WNZK: AAC, which reports no bitrate, from a server
+                 * that sends no icy-br. `0 kbit/s` in that line read as
+                 * a measurement of zero rather than as the absence of
+                 * one, which is the difference between a station that
+                 * is broken and one that simply did not say. */
+                snprintf(br, sizeof(br), "bitrate not stated");
             }
             ESP_LOGI(TAG, "first sound at %" PRIu32 " ms, %" PRIu32 " Hz, "
                           "%d ch decoded, %s",
