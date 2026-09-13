@@ -3165,6 +3165,16 @@ static volatile int      s_fetch_row = -1;
  * once per station rather than once per redraw.
  */
 static char              s_art_url[NETSTREAM_URL_MAX];
+/*
+ * The fetched picture, owned here, freed when the station ends.
+ *
+ * Fetched exactly once, at first sound, beside the click. Nothing on
+ * the drawing path fetches -- show_stream_card() runs on every format
+ * change and every time the chooser closes, and a network request per
+ * repaint would stall the decode loop whenever somebody closed a menu.
+ */
+static uint8_t          *s_art_img;
+static size_t            s_art_len;
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -9395,6 +9405,42 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
         return;
     }
 
+    /*
+     * THE STATION'S OWN PICTURE, WHEN THERE IS ONE.
+     *
+     * Drawn instead of the text card rather than beside it: the square
+     * is one square, and a station that has artwork has said more with
+     * it than "MP3 / 44100 Hz stereo" says. A station without falls
+     * through to the card exactly as before, which is nearly all of
+     * them.
+     *
+     * FETCHED AT FIRST SOUND, NOT HERE. This function runs on every
+     * format change and every time the chooser closes, and it is on the
+     * drawing path; a six-second network request inside a repaint would
+     * stall the decode loop at whichever moment the listener happened
+     * to close a menu. The bytes are already in hand by the time this
+     * runs, so this is a blit.
+     *
+     * Held in PSRAM for the life of the station, so returning from the
+     * chooser costs nothing.
+     */
+    if (s_art_img && s_art_len) {
+        const esp_err_t aerr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
+                                             s_art_img, s_art_len);
+        if (aerr == ESP_OK) return;
+        /*
+         * It decoded as far as the magic bytes and no further. Dropped
+         * rather than retried -- the bytes will not decode better next
+         * time -- and the text card is drawn instead, which is the
+         * behaviour of every station that never had a picture.
+         */
+        ESP_LOGW(TAG, "station artwork failed to decode (%s)",
+                 esp_err_to_name(aerr));
+        free(s_art_img);
+        s_art_img = NULL;
+        s_art_len = 0;
+    }
+
     char head[24] = "";
     char rline[48] = "";
     char cline[48] = "";
@@ -10452,6 +10498,16 @@ static track_end_t play_stream(const char *url, const char *name)
                     radiobrowser_favicon(st.uuid, s_art_url, sizeof(s_art_url));
                 }
 
+                /*
+                 * Fetched here, where blocking is already the rule and
+                 * the ring has twenty seconds in it, rather than on the
+                 * drawing path. A failure leaves the pointer NULL and
+                 * the card is drawn instead.
+                 */
+                if (s_art_url[0]) {
+                    radiobrowser_art_fetch(s_art_url, &s_art_img, &s_art_len);
+                }
+
                 /* After the artwork, so the two requests are naturally
                  * spaced by the work between them rather than only by
                  * the rate gap -- and so a slow lookup cannot delay the
@@ -10674,6 +10730,15 @@ static track_end_t play_stream(const char *url, const char *name)
      * "the writer's gain path belongs to streams" true at every instant
      * rather than on average.
      */
+    /* The picture belongs to the station that is ending. Freed here
+     * rather than left for the next one to overwrite, because the next
+     * station may have none -- and then this one's artwork would sit on
+     * screen under somebody else's name. */
+    free(s_art_img);
+    s_art_img = NULL;
+    s_art_len = 0;
+    s_art_url[0] = '\0';
+
     /* The badge goes with the station that earned it, before the fade
      * and the stop-wait below rather than after -- it describes a gain
      * that is no longer being applied the moment the flag drops. */

@@ -54,6 +54,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "albumart.h"
 #include "jsonpick.h"
 #include "radiobrowser.h"
 #include "stations.h"
@@ -531,4 +532,116 @@ void radiobrowser_click(const char *uuid)
     char small[512];
     const size_t n = fetch_once(url, small, sizeof(small));
     ESP_LOGI(TAG, "click reported for %.8s...: %s", uuid, n ? "ok" : "no answer");
+}
+
+/*
+ * Fetch a station's artwork.
+ *
+ * THESE ARE ARBITRARY THIRD-PARTY URLS AND THIS IS THE FILE THAT HAS TO
+ * SAY NO. The URL comes from an icy-logo header or from a directory
+ * entry anybody can edit; the bytes go to a hardware JPEG decoder. So
+ * the limits are here rather than at the call site, and each is one a
+ * station has a plausible way of tripping:
+ *
+ *   - SIZE. Bounded at RB_ART_MAX, and a response that fills the buffer
+ *     is refused whole rather than decoded truncated. A half JPEG is a
+ *     decoder reading a length field that describes bytes nobody sent,
+ *     which is the one input shape most likely to find a bug in a codec
+ *     this program did not write.
+ *   - CONTENT TYPE. Must be an image. Plenty of these URLs have rotted
+ *     into a parking page, and `<!DOCTYPE html>` reaching a JPEG
+ *     decoder is a pointless risk when one header says not to.
+ *   - MAGIC BYTES, checked against the same predicate the file path
+ *     uses. A server that says image/jpeg and sends something else is
+ *     not unusual, and albumart_is_supported_image() is already the one
+ *     place that question is answered -- 0417's header made the same
+ *     argument about not having two of anything.
+ *   - REDIRECTS, left to esp_http_client's own limit and NOT extended
+ *     to the plain-http downgrade 0418 allows for audio. A picture is
+ *     not worth relaxing a policy for; if it will not come over the
+ *     scheme it was advertised on, the screen stays blank.
+ *
+ * The caller owns the buffer on success and must free it.
+ *
+ * Blocks. Player task. Failure is the ordinary outcome and is a debug
+ * line, not a warning: most stations have no artwork, many have a dead
+ * link, and a blank square is not a fault.
+ */
+#define RB_ART_MAX      (192 * 1024)
+
+bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)
+{
+    if (!url || !url[0] || !out || !out_len) return false;
+    *out = NULL;
+    *out_len = 0;
+
+    if (strncmp(url, "http://", 7) != 0 && strncmp(url, "https://", 8) != 0) {
+        return false;
+    }
+
+    uint8_t *buf = heap_caps_malloc(RB_ART_MAX, MALLOC_CAP_SPIRAM);
+    if (!buf) return false;
+
+    const esp_app_desc_t *desc = esp_app_get_description();
+    char ua[64];
+    snprintf(ua, sizeof(ua), RADIOBROWSER_UA_FMT,
+             desc && desc->version[0] ? desc->version : "0");
+
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = RB_TIMEOUT_MS,
+        .buffer_size = 2048,
+        .user_agent = ua,
+    };
+    esp_http_client_handle_t c = esp_http_client_init(&cfg);
+    if (!c) { free(buf); return false; }
+
+    size_t got = 0;
+    bool ok = false;
+
+    if (esp_http_client_open(c, 0) != ESP_OK) goto done;
+    esp_http_client_fetch_headers(c);
+
+    if (esp_http_client_get_status_code(c) != 200) goto close;
+
+    {
+        char *ctype = NULL;
+        if (esp_http_client_get_header(c, "Content-Type", &ctype) == ESP_OK &&
+            ctype && strncasecmp(ctype, "image/", 6) != 0) {
+            ESP_LOGI(TAG, "artwork is %.32s, not an image; skipped", ctype);
+            goto close;
+        }
+    }
+
+    while (got < RB_ART_MAX) {
+        const int n = esp_http_client_read(c, (char *)buf + got,
+                                           (int)(RB_ART_MAX - got));
+        if (n <= 0) break;
+        got += (size_t)n;
+    }
+
+    if (got >= RB_ART_MAX) {
+        /* See above: refused whole rather than decoded truncated. */
+        ESP_LOGW(TAG, "artwork filled the %u KB buffer; not decoding it",
+                 (unsigned)(RB_ART_MAX / 1024));
+        goto close;
+    }
+    if (got < 16 || !albumart_is_supported_image(buf, got)) {
+        ESP_LOGI(TAG, "artwork is not a JPEG or PNG; skipped");
+        goto close;
+    }
+
+    ok = true;
+
+close:
+    esp_http_client_close(c);
+done:
+    esp_http_client_cleanup(c);
+    if (!ok) { free(buf); return false; }
+
+    ESP_LOGI(TAG, "artwork: %u bytes", (unsigned)got);
+    *out = buf;
+    *out_len = got;
+    return true;
 }

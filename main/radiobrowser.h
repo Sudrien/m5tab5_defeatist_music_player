@@ -589,6 +589,20 @@ bool radiobrowser_favicon(const char *uuid, char *out, size_t out_size);
 void radiobrowser_click(const char *uuid);
 
 /*
+ * Fetch a station's artwork from a URL that came from icy-logo or from
+ * the directory.
+ *
+ * Bounded, content-type checked and magic-byte checked -- see
+ * radiobrowser.c, which explains what each limit is for. On success the
+ * caller owns *out and must free() it, and the bytes are a JPEG or PNG
+ * that albumart_show() will accept.
+ *
+ * False is the ordinary outcome. Most stations have no artwork, many
+ * have a dead link, and a blank square is not a fault.
+ */
+bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len);
+
+/*
  * Drop everything held.
  *
  * For the case the cache cannot see: the listener has been somewhere
