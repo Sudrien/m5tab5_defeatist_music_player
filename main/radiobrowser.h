@@ -10,9 +10,13 @@
  * checked against the server's actual output, and nothing has ever
  * fetched anything.
  *
- * This is the first half of the first step: the URL, the headers, and
+ * This WAS the first half of the first step: the URL, the headers, and
  * the facts about the response, with a host test. No socket, no task, no
- * JSON parser, nothing that needs a board. Same order `stationlist.h`
+ * JSON parser, nothing that needs a board. 0401 adds the other half --
+ * radiobrowser.c, which consumes the endpoints below over TLS and
+ * caches what comes back -- and everything in this file that was pure
+ * string handling has stayed pure string handling, so the host test
+ * still covers the part a host can cover. Same order `stationlist.h`
  * went in before phases 2 and 3, and for the same reason -- this is
  * string handling over bytes a person typed, which a host can test
  * completely, and it is the part that decides whether the M3U bet holds.
@@ -259,6 +263,156 @@ static inline bool radiobrowser_term_ok(const char *term, char *out,
     return true;
 }
 
+/* ------------------------------------------------------------------ */
+/* Browsing, which is not searching                                     */
+/* ------------------------------------------------------------------ */
+
+/*
+ * WHY THERE IS A BROWSE PATH AT ALL, AND WHY IT CAME FIRST.
+ *
+ * This header was written around `search`, because a directory is a
+ * thing you search. This player has no keyboard. A search box on a
+ * device with no keyboard is a feature that can only be reached through
+ * the Wi-Fi portal -- which is an access point that only exists while
+ * Wi-Fi is DOWN, which is the one state in which the directory cannot
+ * be reached. The two halves of the obvious design are mutually
+ * exclusive and it took until somebody asked "is the directory too much
+ * for a browsing directory" to notice.
+ *
+ * Browsing needs no typing. The chooser is already a drill-down list --
+ * folders then files -- and a tag then its stations is the same gesture
+ * against the same rows.
+ *
+ * THE FIRST LEVEL IS HARDCODED AND THE SECOND IS LIVE, which is the
+ * only line in this file that is a compromise rather than a
+ * consequence:
+ *
+ *   - Every STATION list has an M3U form. `/m3u/stations/bytag/jazz`,
+ *     `bycountry`, `topvote`, `topclick` all parse with
+ *     stationlist_parse() and the corpus it already has. No new format,
+ *     no parser, no second thing to test.
+ *   - The INDEX lists -- `/json/tags`, `/json/countries` -- have no M3U
+ *     form, because they are not stations. A live first level therefore
+ *     costs a JSON parser on the P4, which stations.h chose M3U
+ *     specifically to avoid.
+ *
+ * So RADIOBROWSER_TAGS is a pinned list and the exit is written down:
+ * when something here needs JSON for another reason, the first level
+ * becomes /json/tags and this constant goes. Until then a pinned tag
+ * rots far more slowly than a pinned mirror -- genre names on
+ * radio-browser are years old -- and a tag that returns nothing is a
+ * line in the status row rather than a failure.
+ */
+typedef enum {
+    RADIOBROWSER_TOPVOTE,       /* most-voted overall; `value` unused */
+    RADIOBROWSER_TOPCLICK,      /* most-listened overall; `value` unused */
+    RADIOBROWSER_BYTAG,         /* `value` is a tag */
+    RADIOBROWSER_BYCOUNTRY,     /* `value` is a country name */
+    RADIOBROWSER_SEARCH,        /* `value` is a name fragment */
+} radiobrowser_kind_t;
+
+/*
+ * The pinned first level. Twelve, which is one screen of the chooser's
+ * rows and no scrolling, plus the two charts the caller adds above
+ * them. Ordered roughly by how many stations the directory has under
+ * each, so the first tap is the least likely to land on a thin one.
+ */
+#define RADIOBROWSER_TAGS   { "pop", "rock", "classical", "jazz", \
+                              "news", "talk", "dance", "electronic", \
+                              "country", "oldies", "metal", "ambient" }
+#define RADIOBROWSER_TAG_COUNT  (12)
+
+/*
+ * Build a list URL.
+ *
+ * `value` is percent-encoded into a QUERY parameter for every kind,
+ * including the ones radio-browser also exposes as a path segment. A
+ * path segment containing an encoded slash is rewritten or rejected by
+ * enough intermediaries that it is not worth finding out which, and a
+ * tag like `rock & roll` is exactly the case that would find one.
+ *
+ * TOPVOTE and TOPCLICK take no value and their endpoints are plain
+ * paths with a limit on the end, which is why they are a separate
+ * branch rather than a search with an empty term -- an empty term is
+ * refused by radiobrowser_term_ok(), deliberately and for its own
+ * reasons.
+ *
+ * Returns false if anything would not fit, leaving `url` empty.
+ */
+static inline bool radiobrowser_list_url(char *url, size_t url_size,
+                                         const char *host,
+                                         radiobrowser_kind_t kind,
+                                         const char *value)
+{
+    if (!url || url_size == 0) return false;
+    url[0] = '\0';
+    if (!host || !host[0]) return false;
+
+    char enc[RADIOBROWSER_TERM_MAX * 3 + 1];
+    enc[0] = '\0';
+    const bool needs_value = (kind == RADIOBROWSER_BYTAG ||
+                              kind == RADIOBROWSER_BYCOUNTRY ||
+                              kind == RADIOBROWSER_SEARCH);
+    if (needs_value) {
+        char clean[RADIOBROWSER_TERM_MAX];
+        if (!radiobrowser_term_ok(value, clean, sizeof(clean))) return false;
+        if (!radiobrowser_encode(enc, sizeof(enc), clean)) return false;
+    }
+
+    const char *path =
+        (kind == RADIOBROWSER_TOPVOTE)  ? "/m3u/stations/topvote/50" :
+        (kind == RADIOBROWSER_TOPCLICK) ? "/m3u/stations/topclick/50" :
+                                          "/m3u/stations/search?";
+    const char *param =
+        (kind == RADIOBROWSER_BYTAG)     ? "tag=" :
+        (kind == RADIOBROWSER_BYCOUNTRY) ? "country=" :
+        (kind == RADIOBROWSER_SEARCH)    ? "name=" : "";
+    /* The charts carry their limit in the path, so their query opens
+     * with `?` and the searches continue one already open. */
+    const char *tail = needs_value
+        ? "&hidebroken=true&order=votes&reverse=true&limit=50"
+        : "?hidebroken=true";
+
+    const char *parts[] = { "https://", host, path, param, enc, tail };
+    size_t o = 0;
+    for (size_t i = 0; i < sizeof(parts) / sizeof(parts[0]); i++) {
+        const size_t len = strlen(parts[i]);
+        if (o + len >= url_size) { url[0] = '\0'; return false; }
+        memcpy(url + o, parts[i], len);
+        o += len;
+    }
+    url[o] = '\0';
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* The two rules the service asks for, as arithmetic                    */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Both of these are policy the API states in prose -- two to three
+ * requests a second, results cached five to fifteen minutes -- and both
+ * are one comparison. They are here rather than in radiobrowser.c so
+ * that the rules can be tested on a host without a socket, which is the
+ * same split netplan.h and bufferplan.h use for the same reason.
+ *
+ * Tick counts are unsigned and wrap. Every comparison below is written
+ * as a difference against the stamp rather than as `now > stamp + N`,
+ * because the second form is wrong for 49 days out of every 49 days and
+ * right the rest of the time.
+ */
+static inline bool radiobrowser_gap_ok(uint32_t now_ms, uint32_t last_ms,
+                                       bool ever)
+{
+    if (!ever) return true;
+    return (uint32_t)(now_ms - last_ms) >= RADIOBROWSER_MIN_GAP_MS;
+}
+
+static inline bool radiobrowser_cache_fresh(uint32_t now_ms, uint32_t stamp_ms)
+{
+    return (uint32_t)(now_ms - stamp_ms) < RADIOBROWSER_CACHE_MS;
+}
+
 /*
  * Build the search URL for `host`, searching station names for `term`.
  *
@@ -314,6 +468,41 @@ static inline bool radiobrowser_search_url(char *url, size_t url_size,
     url[o] = '\0';
     return true;
 }
+
+/* ------------------------------------------------------------------ */
+/* The client, which is radiobrowser.c                                  */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Fetch a list, from the cache if it is there and from a mirror if it
+ * is not, as an M3U body ready for stationlist_parse().
+ *
+ * BLOCKS, for up to two mirror timeouts. Call it from the player task,
+ * which is where every other slow thing in this program happens, and
+ * never from ui_task -- the same rule stations_load() carries and for a
+ * stronger reason: this one waits on a network rather than on a card.
+ *
+ * `value` is the tag, country or name fragment for the kinds that take
+ * one and is ignored by the charts. `out` is NUL-terminated on success.
+ *
+ * False means no list, and the log says which of the three reasons it
+ * was: the URL would not build, no mirror answered, or the body did not
+ * fit. None of them is worth distinguishing at the call site -- what a
+ * caller does about it is the same in all three -- which is why this
+ * returns a bool rather than an esp_err_t.
+ */
+bool radiobrowser_list(radiobrowser_kind_t kind, const char *value,
+                       char *out, size_t out_size, size_t *out_len);
+
+/*
+ * Drop everything held.
+ *
+ * For the case the cache cannot see: the listener has been somewhere
+ * else, or has fixed their Wi-Fi, and wants the directory asked again
+ * rather than told what it said five minutes ago. The chooser's reload
+ * button is the natural caller.
+ */
+void radiobrowser_cache_clear(void);
 
 /*
  * The click-count URL for a station UUID.

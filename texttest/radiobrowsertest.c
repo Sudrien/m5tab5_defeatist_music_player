@@ -28,6 +28,9 @@
 #include <string.h>
 
 #include "radiobrowser.h"
+
+/* The first mirror, spelled once. */
+#define HOST "de1.api.radio-browser.info"
 #include "stationlist.h"
 
 static int failures;
@@ -284,6 +287,111 @@ int main(void)
     CHECK(RADIOBROWSER_LIMIT <= STATIONLIST_MAX,
           "limit %d must fit STATIONLIST_MAX %d",
           RADIOBROWSER_LIMIT, STATIONLIST_MAX);
+
+    /* ---------------------------------------------------------------- */
+    /* 0401: browsing, and the two rules the service asks for            */
+    /* ---------------------------------------------------------------- */
+
+    printf("  browse URLs\n");
+    {
+        char url[RADIOBROWSER_URL_MAX];
+
+        CHECK(radiobrowser_list_url(url, sizeof(url), HOST,
+                                    RADIOBROWSER_TOPVOTE, NULL),
+              "a chart needs no value");
+        CHECK(strstr(url, "/m3u/stations/topvote/50") != NULL,
+              "topvote path: %s", url);
+        CHECK(strstr(url, "?hidebroken=true") != NULL,
+              "and opens its own query: %s", url);
+
+        CHECK(radiobrowser_list_url(url, sizeof(url), HOST,
+                                    RADIOBROWSER_TOPCLICK, "ignored"),
+              "a chart ignores a value it was given");
+        CHECK(strstr(url, "topclick") != NULL, "topclick path: %s", url);
+
+        /*
+         * The case that decided the query-string form. A tag with a
+         * space and an ampersand in it is ordinary -- "rock & roll" is
+         * a real radio-browser tag -- and in a path segment it is a
+         * fight with every intermediary between here and Germany.
+         */
+        CHECK(radiobrowser_list_url(url, sizeof(url), HOST,
+                                    RADIOBROWSER_BYTAG, "rock & roll"),
+              "a tag with an ampersand builds");
+        CHECK(strstr(url, "tag=rock%20%26%20roll") != NULL,
+              "and is encoded whole: %s", url);
+        CHECK(strstr(url, "limit=50") != NULL, "limit is still there: %s", url);
+
+        CHECK(radiobrowser_list_url(url, sizeof(url), HOST,
+                                    RADIOBROWSER_BYCOUNTRY, "United Kingdom"),
+              "a country builds");
+        CHECK(strstr(url, "country=United%20Kingdom") != NULL,
+              "country encoded: %s", url);
+
+        /* A value that is empty once trimmed is refused for the same
+         * reason a search for nothing is: limit=50 would make it look
+         * like it worked. */
+        CHECK(!radiobrowser_list_url(url, sizeof(url), HOST,
+                                     RADIOBROWSER_BYTAG, "   "),
+              "an empty tag is refused");
+        CHECK(url[0] == '\0', "and leaves nothing behind");
+
+        /* No mirror name, no URL. */
+        CHECK(!radiobrowser_list_url(url, sizeof(url), "",
+                                     RADIOBROWSER_TOPVOTE, NULL),
+              "no host, no URL");
+
+        /* Every pinned tag has to produce a URL, because the first
+         * level of the browse tree is drawn from this list and a row
+         * that cannot be fetched is a row that does nothing. */
+        static const char *const tags[RADIOBROWSER_TAG_COUNT] =
+            RADIOBROWSER_TAGS;
+        for (int i = 0; i < RADIOBROWSER_TAG_COUNT; i++) {
+            CHECK(radiobrowser_list_url(url, sizeof(url), HOST,
+                                        RADIOBROWSER_BYTAG, tags[i]),
+                  "pinned tag %s builds", tags[i]);
+        }
+    }
+
+    printf("  the rate gap and the cache window\n");
+    {
+        /* Before there has ever been a request there is nothing to
+         * space against, and the first one must not be delayed. */
+        CHECK(radiobrowser_gap_ok(0, 0, false), "the first request goes");
+
+        CHECK(!radiobrowser_gap_ok(1000, 1000, true), "back to back is refused");
+        CHECK(!radiobrowser_gap_ok(1000 + RADIOBROWSER_MIN_GAP_MS - 1, 1000, true),
+              "one millisecond short is still short");
+        CHECK(radiobrowser_gap_ok(1000 + RADIOBROWSER_MIN_GAP_MS, 1000, true),
+              "exactly the gap is enough");
+
+        CHECK(radiobrowser_cache_fresh(0, 0), "a just-stored entry is fresh");
+        CHECK(radiobrowser_cache_fresh(RADIOBROWSER_CACHE_MS - 1, 0),
+              "and stays fresh to the last millisecond");
+        CHECK(!radiobrowser_cache_fresh(RADIOBROWSER_CACHE_MS, 0),
+              "and is stale on the one after");
+
+        /*
+         * THE WRAP, which is the whole reason these are functions
+         * rather than comparisons at the call site.
+         *
+         * A tick count is 32 bits of milliseconds and wraps after 49
+         * days -- and this player is a thing that gets left on. Written
+         * as `now > stamp + N` both of these are wrong across the wrap:
+         * the gap never opens and the cache never goes stale, so the
+         * directory is asked at whatever rate the chooser redraws at,
+         * for ever, having been polite for seven weeks.
+         */
+        const uint32_t before = 0xFFFFFF00u;      /* 256 ms before the wrap */
+        CHECK(radiobrowser_gap_ok(before + RADIOBROWSER_MIN_GAP_MS, before, true),
+              "the gap opens across the wrap");
+        CHECK(!radiobrowser_gap_ok(before + 10, before, true),
+              "and is still closed just after it");
+        CHECK(radiobrowser_cache_fresh(before + 1000, before),
+              "an entry stored before the wrap is fresh after it");
+        CHECK(!radiobrowser_cache_fresh(before + RADIOBROWSER_CACHE_MS, before),
+              "and goes stale on time across it");
+    }
 
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
