@@ -81,6 +81,7 @@
 #include "storage_io.h"
 #include "touch.h"
 #include "uac.h"
+#include "levelhist.h"
 #include "ui.h"
 #include "usbhost.h"
 #include "wifi.h"
@@ -1244,6 +1245,18 @@ static volatile bool     s_fade_out;
  * there: the gain has to land on the samples the hardware is about to
  * take, and the writer is the only task that owns that read.
  */
+/*
+ * The minute-wide level strip. Owned by the writer, published to
+ * ui_task as a copy under the same mutex the rest of the strip uses.
+ *
+ * One owner, because levelhist_t is a ring with a cursor: two tasks
+ * folding into it would interleave buckets. The writer is the right
+ * owner for the same reason it owns the fades -- it is the only task
+ * that knows what the hardware actually took.
+ */
+static levelhist_t       s_levelhist;
+static SemaphoreHandle_t s_levelhist_lock;
+
 static volatile bool     s_fade_in;
 static volatile uint32_t s_fade_in_pos;
 static volatile uint32_t s_fade_in_frames;
@@ -1777,6 +1790,101 @@ static void fade_in_apply(int16_t *pcm, size_t frames)
     }
 
     s_fade_in_pos = pos;
+}
+
+/*
+ * The loudest sample in a chunk, for the level strip.
+ *
+ * After the fades and the dip, because the strip is a picture of what
+ * came out of the speaker and not of what the decoder produced -- a
+ * three-second fade should be visible as a slope, which is most of what
+ * makes the strip readable at a station change.
+ *
+ * Every fourth frame. At 44.1 kHz a 250 ms column is eleven thousand
+ * frames and the peak of a quarter of them is the peak, to within
+ * something far below a pixel of a 72 px strip; scanning all of them
+ * would put a full pass over the audio on the one task that must not
+ * miss a DMA deadline.
+ */
+static int peak_of(const void *pcm, size_t bytes)
+{
+    const int16_t *p = (const int16_t *)pcm;
+    const size_t frames = bytes / PCM_BYTES_PER_FRAME;
+    int peak = 0;
+    for (size_t f = 0; f < frames; f += 4) {
+        int l = p[2 * f + 0]; if (l < 0) l = -l;
+        int r = p[2 * f + 1]; if (r < 0) r = -r;
+        const int m = l > r ? l : r;
+        if (m > peak) peak = m;
+    }
+    return peak;
+}
+
+/*
+ * Fold a level into the strip, attributing WALL TIME rather than frames.
+ *
+ * The strip is a minute of real time, and a dropout has no frames at
+ * all. Driving it from frame counts would make a rebuffer take up no
+ * width -- which is the one thing the strip exists to show -- so this
+ * measures the clock instead and calls whatever happened since the last
+ * fold `level`. A pass with no chunk calls it silence, which is what it
+ * sounded like.
+ *
+ * levelhist.h's `ms` argument is documented as play time for a caller
+ * that has frames and nothing else. This caller has a clock, and the
+ * clock is the truth about width.
+ */
+static void levelhist_note(int peak)
+{
+    static int64_t last_us;
+    const int64_t now = esp_timer_get_time();
+    if (last_us == 0) { last_us = now; return; }
+
+    int ms = (int)((now - last_us) / 1000);
+    if (ms <= 0) return;                 /* same millisecond; fold later */
+    if (ms > LEVELHIST_SPAN_MS) ms = LEVELHIST_SPAN_MS;  /* after a pause */
+    last_us = now;
+
+    if (!s_levelhist_lock) return;
+    if (xSemaphoreTake(s_levelhist_lock, 0) != pdTRUE) return;
+    levelhist_push(&s_levelhist, peak, ms);
+    xSemaphoreGive(s_levelhist_lock);
+}
+
+/* Silence, for a pass where the writer had nothing. Same bookkeeping;
+ * the separate name is so the call sites read as what they mean. */
+static void levelhist_note_silence(void)
+{
+    levelhist_note(0);
+}
+
+/*
+ * Hand ui_task a copy. Never a pointer: the writer is folding into the
+ * original between DMA chunks, and a strip read while it wraps would
+ * draw a minute with a seam in it.
+ *
+ * Static, because there is no player.h -- ui_task is in this file and
+ * the screen is reached through ui_state_t, which is how every other
+ * value the bar draws already travels.
+ *
+ * Returns false when the writer has the mutex. It folds between DMA
+ * chunks and must never be made to wait on the screen, so this gives up
+ * after 2 ms; the previous frame then stays up for another 50 ms, which
+ * is not a thing anybody can see.
+ */
+static bool level_strip_copy(uint8_t *out, int *ahead_cols, bool *clipped)
+{
+    if (!out || !s_levelhist_lock) return false;
+    if (xSemaphoreTake(s_levelhist_lock, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return false;   /* the writer has it; ui_task redraws in 50 ms */
+    }
+    levelhist_read(&s_levelhist, out);
+    xSemaphoreGive(s_levelhist_lock);
+
+    const int buffered = s_stream_buffered_ms;
+    if (ahead_cols) *ahead_cols = levelhist_ahead_columns(buffered);
+    if (clipped)    *clipped    = levelhist_ahead_clipped(buffered);
+    return true;
 }
 
 static void fade_apply(int16_t *pcm, size_t frames)
@@ -2603,6 +2711,7 @@ static void i2s_writer_task(void *arg)
             }
 
             audio_out_write(buf, got);
+            levelhist_note(peak_of(buf, got));
 
             /*
              * Written first, then dropped. The chunk that finished the
@@ -5562,6 +5671,14 @@ static void ui_task(void *arg)
         st.live = s_streaming;
         st.stream_status = streamplan_status_text(s_stream_status);
         st.stream_title = s_stream_bottom;
+        /* The level strip, only while streaming: a file's bar already
+         * has an envelope and a seek position, which say more. */
+        if (s_streaming) {
+            st.strip_valid = level_strip_copy(st.strip, &st.strip_ahead_cols,
+                                              &st.strip_clipped);
+        } else {
+            st.strip_valid = false;
+        }
         st.playing = s_playing;
         st.volume = s_volume;
         st.rg_active = s_rg_active;
@@ -10421,6 +10538,12 @@ void app_main(void)
      */
     for (int i = 0; i < PCM_RINGS; i++) {
         if (!s_pcm_store[i]) continue;
+        /* Before the rings, so the writer task started below can never
+         * find the strip's mutex missing. */
+        if (!s_levelhist_lock) {
+            s_levelhist_lock = xSemaphoreCreateMutex();
+            levelhist_reset(&s_levelhist);
+        }
         s_ring[i] = xStreamBufferCreateStatic(PCM_RING_BYTES, PCM_CHUNK_BYTES,
                                               s_pcm_store[i], &s_pcm_struct[i]);
     }

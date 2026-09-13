@@ -16,7 +16,8 @@
 #include "esp_err.h"
 #include "esp_lcd_panel_ops.h"
 
-#include "audio_out.h"   /* audio_out_route_t, drawn in the volume row */
+#include "audio_out.h"
+#include "levelhist.h"   /* LEVELHIST_COLUMNS, for the level strip */
 
 #ifdef __cplusplus
 extern "C" {
@@ -158,6 +159,27 @@ typedef struct {
      * player having switched station.
      */
     const char *stream_title;
+
+    /*
+     * A minute of output level, oldest column first, and how much of the
+     * strip ahead of the mark is audio that has arrived and not been
+     * heard.
+     *
+     * Only read when `live`. A file has a seek bar and an envelope, both
+     * of which say more than this would: where you are in a thing of
+     * known length beats how loud the last minute was. A stream has
+     * neither, and what it has instead is a reserve that can run out.
+     *
+     * `strip_valid` false means the writer held the strip when this
+     * frame was assembled. The bar leaves the last one up rather than
+     * drawing an empty minute -- a strip that blinks to silence
+     * whenever the mutex is busy would look exactly like a dropout,
+     * which is the thing it is supposed to report.
+     */
+    bool        strip_valid;
+    uint8_t     strip[LEVELHIST_COLUMNS];
+    int         strip_ahead_cols;
+    bool        strip_clipped;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
