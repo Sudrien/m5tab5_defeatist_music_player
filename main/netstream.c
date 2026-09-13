@@ -175,6 +175,21 @@ static char       *s_name_req;  /* NETSTREAM_NAME_MAX */
 
 /* Per-connection, owned by the task alone. */
 static int  s_hdr_metaint;
+/*
+ * icy-br, the bitrate the STATION declares, in kbit/s.
+ *
+ * Kept because the decoder cannot always supply one. minimp3 reports a
+ * bitrate per frame and the AAC decoder reports none, so WNZK decoded
+ * happily and logged `0 kbit/s` -- and the artwork card, which exists to
+ * say what the stream is, had nothing to put on its bitrate line.
+ *
+ * A declaration and not a measurement, which is the whole caveat: it is
+ * what the station says it sends, it is absent on plenty of servers, and
+ * on a variable-rate stream it is a nominal figure. That is still the
+ * number every other player shows for AAC, and it is better than the
+ * line being missing.
+ */
+static int  s_hdr_br;
 static int  s_hdr_status_icy;
 static char s_hdr_location[NETSTREAM_URL_MAX];
 static char s_hdr_name[NETSTREAM_NAME_MAX];
@@ -221,6 +236,12 @@ static esp_err_t on_event(esp_http_client_event_t *e)
         snprintf(s_hdr_location, sizeof(s_hdr_location), "%s", v);
     } else if (strcasecmp(k, "icy-metaint") == 0) {
         s_hdr_metaint = atoi(v);
+    } else if (strcasecmp(k, "icy-br") == 0) {
+        /* Some servers send a list for a multi-rate mount ("128,64").
+         * atoi() takes the first, which is the one being served on this
+         * connection. */
+        const int br = atoi(v);
+        if (br > 0 && br < 10000) s_hdr_br = br;
     } else if (strcasecmp(k, "icy-name") == 0) {
         snprintf(s_hdr_name, sizeof(s_hdr_name), "%s", v);
     } else if (strcasecmp(k, "content-type") == 0) {
@@ -278,6 +299,7 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         if (superseded(gen)) return NETPLAN_FATAL;
 
         s_hdr_metaint = 0;
+        s_hdr_br = 0;
         s_hdr_status_icy = 0;
         s_hdr_location[0] = '\0';
         s_hdr_name[0] = '\0';
@@ -847,3 +869,14 @@ void netstream_title(char *out, size_t out_size)
 }
 
 bool netstream_has_title(void) { return s_has_title; }
+
+/*
+ * The station's declared bitrate, or 0 if it did not say.
+ *
+ * Cleared on each hop's request rather than at stream start, so a
+ * redirect that lands on a mount with a different rate reports the
+ * mount's figure and not the first server's. Read from the decode loop
+ * and written from the HTTP event callback, which is the same task, so
+ * there is nothing to publish here the way s_ring_pct is.
+ */
+int netstream_declared_kbps(void) { return s_hdr_br; }

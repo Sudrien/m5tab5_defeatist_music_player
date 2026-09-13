@@ -217,6 +217,22 @@ void netstream_name(char *out, size_t out_size);
 void netstream_title(char *out, size_t out_size);
 bool netstream_has_title(void);
 
+/*
+ * The bitrate the station declared in its icy-br header, in kbit/s, or 0
+ * if it sent none.
+ *
+ * DECLARED, not measured. Use it only where the decoder cannot supply a
+ * figure -- the AAC path, which reports none -- and prefer the decoder's
+ * everywhere else: minimp3 reads the rate out of each frame, which is
+ * the truth about the bytes arriving, while this is what the server's
+ * configuration file says. On a variable-rate mount they disagree by
+ * design.
+ *
+ * Not the throughput either. netstream's own statistics line measures
+ * that and it runs well above the bitrate while a ring is filling.
+ */
+int netstream_declared_kbps(void);
+
 #ifdef __cplusplus
 }
 #endif

@@ -8867,8 +8867,24 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
         snprintf(rline, sizeof(rline), "%" PRIu32 " Hz  %s", rate,
                  chans == 1 ? "mono" : chans == 2 ? "stereo" : "multichannel");
     }
-    if (kbps > 0) {
-        snprintf(cline, sizeof(cline), "%s  %d kbps", head, kbps);
+    /*
+     * The decoder's bitrate if it has one, else the station's own claim.
+     *
+     * minimp3 reads a rate out of every frame; the AAC decoder reports
+     * nothing, which is why WNZK logged `0 kbit/s` and why this line was
+     * simply absent for it. icy-br is what the server says it sends --
+     * a declaration rather than a measurement, nominal on a
+     * variable-rate mount, and absent entirely on some servers -- so it
+     * is the fallback and never the preference.
+     *
+     * Not distinguished on screen. "128 kbps" from a frame header and
+     * "128 kbps" from icy-br mean the same thing to someone looking at
+     * an artwork square, and a card that hedged about its provenance
+     * would be worse than one that is occasionally a station's rounding.
+     */
+    const int shown_br = kbps > 0 ? kbps : netstream_declared_kbps();
+    if (shown_br > 0) {
+        snprintf(cline, sizeof(cline), "%s  %d kbps", head, shown_br);
     }
 
     const char *lines[4];
@@ -9598,10 +9614,15 @@ static track_end_t play_stream(const char *url, const char *name)
          * value and a zero.
          */
         const stream_codec_t codec_now = netdec_codec();
+        /* The station's declared rate counts as a fact too: on the AAC
+         * path it is the only bitrate there will be, and it arrives with
+         * the headers rather than with a frame. */
+        const int br_now = last_kbps > 0 ? last_kbps
+                                         : netstream_declared_kbps();
         const bool facts_moved = codec_now != shown_codec ||
                                  out_rate   != shown_rate  ||
                                  last_chans != shown_chans ||
-                                 last_kbps  != shown_kbps;
+                                 br_now     != shown_kbps;
 
         if (s_repaint_art || facts_moved || !art_shown) {
             s_repaint_art = false;
@@ -9609,7 +9630,7 @@ static track_end_t play_stream(const char *url, const char *name)
             shown_codec = codec_now;
             shown_rate  = out_rate;
             shown_chans = last_chans;
-            shown_kbps  = last_kbps;
+            shown_kbps  = br_now;
             show_stream_card(codec_now, out_rate, last_chans, last_kbps);
         }
 
