@@ -9486,6 +9486,27 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
  *         fifty seconds and 46 s of cumulative full-ring wait lost
  *         0 bytes.
  *
+ * MEASURED AGAIN IN 0416, WITH INSTRUMENTS RATHER THAN INFERENCE. The
+ * statistics line now carries what the stream costs in bytes per second
+ * of audio, so the probe's figures can be checked rather than trusted:
+ *
+ *   WNZK    512 kbit/s AAC. Confirmed: 511-522 needed against 401-483
+ *           delivered, every window SHORT, reserve between 1.0 and
+ *           3.9 s, the amplifier idling every twenty seconds. The
+ *           station does not fit this link and there is nothing in
+ *           netstream.c to fix -- the same verdict the two walmradio
+ *           stations got, on the one that could never prove it.
+ *   SomaFM  128 kbit/s MP3. Confirmed: 120-133 needed. Bursts to 238
+ *           while the ring fills, then sits at 95-103% of need with an
+ *           18 s reserve, which is delivery being PULL-limited by a
+ *           full buffer rather than held by a link.
+ *
+ * Those two readings are also what settled the 230 kbit/s "ceiling"
+ * that 0407 flashed a build to chase: it was the fill rate of a healthy
+ * stream and the starvation of an unhealthy one landing near each
+ * other. See READ_CHUNK in netstream.c, which carries the whole story
+ * at the constant so nobody runs that experiment twice.
+ *
  * So a rebuffer is nearly free on WUOM and expensive on WNZK, and the
  * station that must not be made worse is not the station the thresholds
  * are comfortable on. BUFPLAN_RESUME_MS is left where it is, but the

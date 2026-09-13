@@ -218,6 +218,21 @@ extern "C" {
  * this rate, on the station picked for having real dynamics, and there
  * is no reason to make it slower.
  *
+ * SECOND READING, 0416, on the station the note below asks for.
+ * WNZK's gate sits between -8.5 and -11.2 dB for a whole session --
+ * that station is about ten decibels hotter than reference, which is
+ * both the largest correction anything has asked for and exactly what a
+ * heavily processed AM talk feed should ask for. The applied gain
+ * follows it within a few tenths and the only excursions are the (held:
+ * thin) lines, where a 1.2 s reserve leaves nothing to measure and the
+ * last good answer is held. That is the design behaving on the hardest
+ * station available.
+ *
+ * It is still not the pumping test. WNZK's window is thin most of the
+ * time, so the slew rarely gets to travel; what this shows is the GATE
+ * being right about a station, not the SLEW being right about a
+ * transition.
+ *
  * WHAT THAT TEST DOES NOT SETTLE, in the listener's own words: it was a
  * song they had not heard before. Pumping is heard as a departure from
  * how something is SUPPOSED to sound, so an unfamiliar track is the

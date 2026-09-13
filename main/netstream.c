@@ -679,6 +679,29 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              * the decoder can see -- it is the only thing holding both
              * compressed bytes in and decoded samples out. netdec
              * measures it on a decoded-audio clock and pushes it here.
+             *
+             * CONFIRMED ON THE BOARD, 0416, on the two stations that
+             * bracket the problem:
+             *
+             *   WNZK    of 511-522 needed, delivery 401-483, SHORT on
+             *           every line, reserve sawtoothing 1.0-3.9 s.
+             *   SomaFM  of 120-133 needed, delivery 238 falling to 128
+             *           as the ring filled, then 95-103% with an 18 s
+             *           reserve and SHORT on none of it.
+             *
+             * The denominator moves independently of the numerator now,
+             * which is the whole thing 0414 could not do. And WNZK's
+             * 512 is not a number anyone here chose: play_stream()'s
+             * header recorded 512 kbit/s AAC from a probe run long
+             * before any of this, by a different method, on a station
+             * that declares nothing at all.
+             *
+             * THE GUARD IS WHAT MAKES THE FLAG MEAN SOMETHING. SomaFM
+             * prints 95%, 96% and 97% while perfectly healthy -- a full
+             * ring delivers exactly what is consumed and jitter does
+             * the rest -- and those lines are not SHORT because the
+             * reserve is 18 s. Under-delivery alone is not a fault.
+             * Under-delivery with a falling reserve is.
              */
             const int needed = s_actual_br > 0 ? s_actual_br : s_hdr_br;
             char rate_note[64] = "";
