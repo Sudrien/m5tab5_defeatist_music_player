@@ -547,6 +547,34 @@ bool radiobrowser_list(radiobrowser_kind_t kind, const char *value,
                        char *out, size_t out_size, size_t *out_len);
 
 /*
+ * The station's own artwork URL, from the directory, by uuid.
+ *
+ * WHY THIS ONE FIELD IS WORTH A JSON READER. stations.h chose M3U to
+ * keep a parser off the P4, and that stands for station lists. But M3U
+ * has nowhere to put artwork, so the choice quietly cost every station
+ * its picture, and `favicon` is the only field in the directory anyone
+ * has wanted since. jsonpick.h is a string search with quote-awareness,
+ * not a parser, and its header says at length why it must not grow into
+ * one.
+ *
+ * The uuid comes from `#RADIOBROWSERUUID:` in the M3U, which
+ * stationlist.h now carries on the station it belongs to. A
+ * hand-written stations.m3u has none, so this is a directory feature
+ * and callers must handle an empty uuid as the ordinary case rather
+ * than as an error.
+ *
+ * BLOCKS, cached and mirror-failed-over like radiobrowser_list(), and
+ * the same rule applies: the player task, never ui_task.
+ *
+ * False means no artwork, which is the COMMON answer -- most stations
+ * in the directory have no favicon, many have a dead link, and some
+ * have something that is not an image at all. Nothing here fetches the
+ * picture; that is the caller's, and it is where the size and
+ * content-type limits belong.
+ */
+bool radiobrowser_favicon(const char *uuid, char *out, size_t out_size);
+
+/*
  * Drop everything held.
  *
  * For the case the cache cannot see: the listener has been somewhere

@@ -337,6 +337,66 @@ int main(void)
         }
     }
 
+    printf("  the directory's uuid comment (0417)\n");
+    {
+        /*
+         * Exactly what radio-browser's M3U sends: the uuid above the
+         * #EXTINF, then the URL. The uuid belongs to the station below
+         * it, and it is the key to everything the directory knows that
+         * M3U cannot carry -- the station's artwork first.
+         */
+        static const char *m3u =
+            "#EXTM3U\n"
+            "#RADIOBROWSERUUID:9608f9a4-0601-11e8-ae97-52543be04c81\n"
+            "#EXTINF:-1,WNZK-AM\n"
+            "https://stream.zeno.fm/erunhwj5lekvv\n"
+            "#EXTINF:-1,No uuid here\n"
+            "http://example.com/two\n";
+        station_t st[8];
+        stationlist_stats_t stats;
+        const int n = stationlist_parse(m3u, strlen(m3u), st, 8, &stats);
+
+        CHECK(n == 2, "two stations, got %d", n);
+        CHECK(strcmp(st[0].name, "WNZK-AM") == 0, "name: %s", st[0].name);
+        CHECK(strcmp(st[0].uuid, "9608f9a4-0601-11e8-ae97-52543be04c81") == 0,
+              "uuid: %s", st[0].uuid);
+        /* The one that must not inherit. A uuid that survived onto the
+         * next station would have this player reporting clicks against
+         * somebody else's entry. */
+        CHECK(st[1].uuid[0] == '\0', "the next station has none: %s", st[1].uuid);
+
+        /* A hand-written file has none anywhere, which is the common
+         * case and must stay silent. */
+        static const char *plain =
+            "#EXTINF:-1,Michigan Radio\nhttps://example.com/wuom\n";
+        const int m = stationlist_parse(plain, strlen(plain), st, 8, &stats);
+        CHECK(m == 1 && st[0].uuid[0] == '\0', "a hand-written file has none");
+
+        /* Malformed uuids are dropped rather than stored: sending a
+         * wrong one to the API is a 404 on every station, which looks
+         * like the directory being down. */
+        static const char *bad =
+            "#RADIOBROWSERUUID:not-a-uuid\n"
+            "#EXTINF:-1,Short\nhttp://example.com/a\n"
+            "#RADIOBROWSERUUID:\n"
+            "#EXTINF:-1,Empty\nhttp://example.com/b\n";
+        const int k = stationlist_parse(bad, strlen(bad), st, 8, &stats);
+        CHECK(k == 2, "both still parse as stations, got %d", k);
+        CHECK(st[0].uuid[0] == '\0', "a short uuid is dropped");
+        CHECK(st[1].uuid[0] == '\0', "an empty one too");
+
+        /* A rejected URL must not leave its uuid to the station after
+         * it -- the same rule the pending NAME already follows. */
+        static const char *reject =
+            "#RADIOBROWSERUUID:9608f9a4-0601-11e8-ae97-52543be04c81\n"
+            "#EXTINF:-1,Bad scheme\nftp://example.com/x\n"
+            "#EXTINF:-1,Good\nhttp://example.com/y\n";
+        const int j = stationlist_parse(reject, strlen(reject), st, 8, &stats);
+        CHECK(j == 1, "one station survives, got %d", j);
+        CHECK(st[0].uuid[0] == '\0',
+              "and does not inherit the rejected one's uuid: %s", st[0].uuid);
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     printf(failures ? "FAILURES\n" : "all passed\n");
     return failures ? 1 : 0;

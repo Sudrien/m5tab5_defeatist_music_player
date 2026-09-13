@@ -54,6 +54,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
+#include "jsonpick.h"
 #include "radiobrowser.h"
 #include "stations.h"
 
@@ -387,5 +388,91 @@ bool radiobrowser_list(radiobrowser_kind_t kind, const char *value,
     }
 
     free(body);
+    return ok;
+}
+
+/*
+ * One station, as JSON, for the one field M3U cannot carry.
+ *
+ * The response is a single-element array holding one flat object, which
+ * is the shape jsonpick.h is bounded to and the reason it can be a
+ * scanner rather than a parser.
+ *
+ * 8 KB rather than RB_BODY_MAX: one station's record is a few hundred
+ * bytes and the bound is what stops a mirror answering this with a list
+ * of fifty thousand. A body that fills the buffer is refused outright
+ * rather than scanned, because a JSON document cut in half can still
+ * contain a perfectly well-formed field and there is no way to tell
+ * from inside it that the rest is missing.
+ */
+#define RB_JSON_MAX     (8 * 1024)
+
+bool radiobrowser_favicon(const char *uuid, char *out, size_t out_size)
+{
+    if (!out || out_size == 0) return false;
+    out[0] = '\0';
+    /* No uuid is the ordinary case -- every hand-written station -- so
+     * it is a quiet false rather than a warning. */
+    if (!uuid || strlen(uuid) != 36) return false;
+    lock_init();
+
+    for (size_t i = 0; i < strlen(uuid); i++) {
+        const char c = uuid[i];
+        const bool ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+                        (c >= 'A' && c <= 'F') || c == '-';
+        if (!ok) {
+            /* It goes into a URL path. Anything outside a uuid's own
+             * alphabet is either a mistake in the file or somebody
+             * putting a path in a comment, and neither is worth
+             * encoding for. */
+            ESP_LOGW(TAG, "station id is not a uuid; no artwork lookup");
+            return false;
+        }
+    }
+
+    static const char *const hosts[RADIOBROWSER_HOST_COUNT] =
+        RADIOBROWSER_HOSTS;
+
+    char *body = heap_caps_malloc(RB_JSON_MAX, MALLOC_CAP_SPIRAM);
+    if (!body) return false;
+
+    bool ok = false;
+    for (int h = 0; h < RADIOBROWSER_HOST_COUNT; h++) {
+        const int idx = (s_host + h) % RADIOBROWSER_HOST_COUNT;
+        char url[RADIOBROWSER_URL_MAX];
+        const int n = snprintf(url, sizeof(url),
+                               "https://%s/json/stations/byuuid/%s",
+                               hosts[idx], uuid);
+        if (n < 0 || (size_t)n >= sizeof(url)) break;
+
+        if (cache_get(url, body, RB_JSON_MAX, NULL)) {
+            ok = jsonpick_string(body, strlen(body), "favicon", out, out_size);
+            break;
+        }
+
+        if (!radiobrowser_gap_ok(now_ms(), s_last_req_ms, s_ever_req)) {
+            vTaskDelay(pdMS_TO_TICKS(RADIOBROWSER_MIN_GAP_MS));
+        }
+        s_last_req_ms = now_ms();
+        s_ever_req = true;
+
+        const size_t got = fetch_once(url, body, RB_JSON_MAX);
+        if (!got) continue;
+        if (got + 1 >= RB_JSON_MAX) {
+            /* See RB_JSON_MAX: a truncated document can still hold a
+             * well-formed field, so this refuses rather than reads. */
+            ESP_LOGW(TAG, "station record filled the buffer; not reading it");
+            break;
+        }
+
+        s_host = idx;
+        cache_put(url, body, got);
+        ok = jsonpick_string(body, got, "favicon", out, out_size);
+        break;
+    }
+
+    free(body);
+    if (ok && !out[0]) ok = false;      /* "" is no artwork */
+    if (ok) ESP_LOGI(TAG, "artwork: %s", out);
     return ok;
 }

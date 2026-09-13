@@ -192,6 +192,17 @@ run-fade: $(FADE_BIN)
 # The stream levelling carrier, its gate and its slew. Links the real
 # main/streamgain.c, and builds it once more at -O2 -Werror for the
 # reason FADE_BIN does.
+# The one-field JSON reader. Header-only, so the test is the only
+# compile it gets -- hence the -Werror pass as well.
+JSONPICK_BIN := jsonpicktest
+
+$(JSONPICK_BIN): jsonpicktest.c ../main/jsonpick.h
+	$(CC) $(WARNCFLAGS) -c jsonpicktest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ jsonpicktest.c $(LDFLAGS)
+
+run-jsonpick: $(JSONPICK_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(JSONPICK_BIN)
+
 SGAIN_BIN := streamgaintest
 
 $(SGAIN_BIN): streamgaintest.c ../main/streamgain.c ../main/streamgain.h
@@ -234,7 +245,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 

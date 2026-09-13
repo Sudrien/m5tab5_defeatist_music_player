@@ -69,9 +69,30 @@ extern "C" {
 #define STATION_NAME_MAX        (64)
 #define STATION_URL_MAX         (512)   /* matches NETSTREAM_URL_MAX */
 
+/* A radio-browser station id, as it appears in `#RADIOBROWSERUUID:`.
+ * 36 characters and a terminator; anything else is not one and is
+ * ignored rather than stored. */
+#define STATION_UUID_MAX     (37)
+
 typedef struct {
     char name[STATION_NAME_MAX];
     char url[STATION_URL_MAX];
+    /*
+     * The directory's id for this station, or empty.
+     *
+     * Empty for every hand-written stations.m3u and filled for anything
+     * the directory produced, because radio-browser's M3U carries it as
+     * a comment above the entry. The API asks for a click to be
+     * reported against it, and it is the key to everything the
+     * directory knows that M3U has nowhere to put -- the station's own
+     * artwork first.
+     *
+     * Parsed here rather than kept as a side table because it belongs
+     * to the station: a list that is sorted, truncated or replaced
+     * would otherwise leave the ids pointing at the wrong entries, and
+     * nothing would say so.
+     */
+    char uuid[STATION_UUID_MAX];
 } station_t;
 
 /* Why a line was not turned into a station. Counted, not just dropped:
@@ -211,7 +232,9 @@ static inline int stationlist_parse(const char *text, size_t n,
 
     int count = 0;
     char pending[STATION_NAME_MAX];
+    char pending_uuid[STATION_UUID_MAX];
     pending[0] = '\0';
+    pending_uuid[0] = '\0';
 
     while (i < n) {
         /* One line, CR or LF terminated, copied out so the caller's text
@@ -241,6 +264,19 @@ static inline int stationlist_parse(const char *text, size_t n,
                 if (!station_extinf_name(t, pending, sizeof(pending))) {
                     pending[0] = '\0';
                 }
+            } else if (strncmp(t, "#RADIOBROWSERUUID:", 18) == 0) {
+                /* Held like the name is, and attached to the next URL.
+                 * radio-browser emits it above the #EXTINF, so both are
+                 * pending at once and neither overwrites the other. */
+                const char *v = station_trim(t + 18);
+                if (strlen(v) == 36) {
+                    station_copy(pending_uuid, sizeof(pending_uuid), v);
+                } else {
+                    /* Not a uuid. Dropped rather than stored, because a
+                     * malformed one would be sent to the API as though
+                     * it were real and come back 404 on every station. */
+                    pending_uuid[0] = '\0';
+                }
             }
             continue;
         }
@@ -248,20 +284,25 @@ static inline int stationlist_parse(const char *text, size_t n,
         if (truncated || strlen(t) >= STATION_URL_MAX) {
             stats->too_long++;
             pending[0] = '\0';
+            pending_uuid[0] = '\0';
             continue;
         }
         if (!station_url_ok(t)) {
             stats->bad_scheme++;
             pending[0] = '\0';
+            pending_uuid[0] = '\0';
             continue;
         }
         if (count >= max || count >= STATIONLIST_MAX) {
             stats->overflowed++;
             pending[0] = '\0';
+            pending_uuid[0] = '\0';
             continue;
         }
 
         station_copy(out[count].url, sizeof(out[count].url), t);
+        station_copy(out[count].uuid, sizeof(out[count].uuid), pending_uuid);
+        pending_uuid[0] = '\0';
         if (pending[0]) {
             station_copy(out[count].name, sizeof(out[count].name), pending);
         } else {
