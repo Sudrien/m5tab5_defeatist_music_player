@@ -212,6 +212,32 @@ static void test_slew_and_clamp(void)
     streamgain_step(&g, 100);
     CHECK(streamgain_db(&g) <= 0.001f,
           "a window peaking at full scale gets no boost");
+
+    /*
+     * AND THE CLAMP LOOKS ONLY AT WHAT THIS GAIN WILL MEET.
+     *
+     * The case from WUOM: a quiet measurement wanting a boost, with one
+     * loud sample far out in the window. Over the whole window that one
+     * sample pins the ceiling at 0 and the gain oscillates with it as
+     * the window slides. Over STREAMGAIN_CLAMP_MS it does not, because
+     * by the time that audio is played the slew will have moved the
+     * gain anyway.
+     */
+    streamgain_reset(&g);
+    push_n(&g, 60, -30.0f, 100, 100);           /* 6 s, quiet, near */
+    push_n(&g, 60, -30.0f, 32767, 100);         /* then loud, far out */
+    streamgain_step(&g, 100);
+    CHECK(streamgain_db(&g) > 1.0f,
+          "a far-off peak does not hold down the gain now");
+
+    /* The same peak, close: it must still clamp. Protection is not
+     * weakened, only aimed at the right audio. */
+    streamgain_reset(&g);
+    push_n(&g, 5, -30.0f, 32767, 100);          /* loud within 3 s */
+    push_n(&g, 60, -30.0f, 100, 100);
+    streamgain_step(&g, 100);
+    CHECK(streamgain_db(&g) <= 0.001f,
+          "a peak about to be played still clamps");
 }
 
 static void test_thin_window_holds(void)

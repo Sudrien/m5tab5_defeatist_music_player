@@ -133,7 +133,12 @@ void streamgain_step(streamgain_t *g, int elapsed_ms)
      * clamp that does not hold.
      */
     int peak = 0;
-    const int n = streamgain_count(g);
+    int n = streamgain_count(g);
+    /* Only the records nearest the tail -- the audio this gain will be
+     * applied to. See STREAMGAIN_CLAMP_MS, which carries the board log
+     * that made the whole-window version indefensible. */
+    const int clamp_n = STREAMGAIN_CLAMP_MS / STREAMGAIN_BLOCK_MS;
+    if (n > clamp_n) n = clamp_n;
     const uint32_t tail = g->tail;
     for (int i = 0; i < n; i++) {
         const int p = g->rec[(tail + (uint32_t)i)

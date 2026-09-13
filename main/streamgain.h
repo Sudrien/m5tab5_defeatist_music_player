@@ -228,6 +228,46 @@ extern "C" {
 #define STREAMGAIN_SLEW_DB_S    (1.0f)
 
 /*
+ * How much of the window the clip clamp is computed over.
+ *
+ * NOT ALL OF IT, and this constant exists because using all of it was
+ * observed steering the gain on WUOM.
+ *
+ * The clamp asks "how loud is the loudest sample, and does the boost I
+ * want fit above it". The loudest sample of twenty seconds is ONE
+ * SAMPLE, and on heavily limited talk radio it sits within a decibel of
+ * full scale most of the time. So the ceiling lands right at zero, and
+ * as the window slides, one loud sample arriving or leaving moves it
+ * across that line and takes the whole gain with it. The board log:
+ *
+ *     320075  levelling: +1.01 dB, window 20100 ms
+ *     391823  levelling: +0.00 dB, window 20100 ms
+ *     412350  levelling: +1.01 dB, window 20100 ms
+ *     414745  levelling: +0.00 dB, window 20100 ms
+ *
+ * Exactly 0.00, twice, is not a loudness measurement landing there. It
+ * is `if (ceiling < 0) ceiling = 0` in streamgain_step(), which is the
+ * clamp refusing to become a cut. A gate over the K-weighted mean of
+ * two hundred blocks does not produce 0.00 to the centibel; a floor
+ * does.
+ *
+ * Three seconds, because that is the audio the gain chosen now will
+ * actually be applied to. The slew moves a decibel a second, so by the
+ * time the far end of a twenty-second window is played the gain will
+ * have moved a long way from whatever this pass decided -- clamping
+ * today's gain against a peak twenty seconds out constrains audio that
+ * will be played at a different gain entirely. The loudness target
+ * rightly looks at the whole window; the clip ceiling should not.
+ *
+ * This does not weaken clip protection. The peak within the next three
+ * seconds is the peak this gain meets, the margin below is unchanged,
+ * and a loud passage arriving still pulls the ceiling down three
+ * seconds before it is heard -- which at a decibel a second is more
+ * warning than the slew can use.
+ */
+#define STREAMGAIN_CLAMP_MS      (3000)
+
+/*
  * The least measured audio that makes a gain worth believing.
  *
  * Three seconds. BS.1770's relative gate compares blocks against the
