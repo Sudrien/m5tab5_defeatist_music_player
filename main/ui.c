@@ -881,7 +881,10 @@ static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
         if (cw < 1) cw = 1;
 
         if (i < LEVELHIST_NOW_COLUMN) {
-            const int v = st->strip[i];
+            /* The LAST 160 columns of the minute, not the first. See
+             * LEVELHIST_HISTORY_OFFSET: the newest sample is at the end
+             * of the read, and it belongs beside the mark. */
+            const int v = st->strip[LEVELHIST_HISTORY_OFFSET + i];
             if (!v) continue;
             /* At least one pixel for anything non-zero: the difference
              * between quiet and silent is the difference between playing

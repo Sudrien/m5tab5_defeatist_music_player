@@ -175,6 +175,46 @@ int main(void)
     CHECK(strip[0] == 0, "and the oldest is first, got %d", strip[0]);
 
     /* ---------------------------------------------------------------- */
+    /* The strip's newest column must land AT the mark                   */
+    /* ---------------------------------------------------------------- */
+    {
+        /*
+         * 0332 drew out[0..159] as the history, which is the OLDEST
+         * forty seconds of the minute -- so the newest twenty seconds
+         * were off the end of the strip and the red stayed empty for the
+         * first twenty seconds of every station. The offset is the fix
+         * and this is the check that it points at the right end.
+         */
+        CHECK(LEVELHIST_HISTORY_OFFSET + LEVELHIST_NOW_COLUMN
+              == LEVELHIST_COLUMNS,
+              "the drawn history must end exactly at the end of the read");
+        CHECK(LEVELHIST_HISTORY_OFFSET == LEVELHIST_AHEAD_COLUMNS,
+              "the undrawn head is the same width as the room ahead");
+
+        /* Ten seconds of audio from cold. The newest column must be the
+         * one immediately left of the mark, not somewhere past it. */
+        levelhist_reset(&h);
+        for (int i = 0; i < 40; i++)
+            levelhist_push(&h, 30000, LEVELHIST_BUCKET_MS);
+        levelhist_read(&h, strip);
+
+        const uint8_t *hist = strip + LEVELHIST_HISTORY_OFFSET;
+        CHECK(hist[LEVELHIST_NOW_COLUMN - 1] != 0,
+              "the column at the mark is the newest audio, got %d",
+              hist[LEVELHIST_NOW_COLUMN - 1]);
+        CHECK(hist[LEVELHIST_NOW_COLUMN - 40] != 0,
+              "and ten seconds of it are present");
+        CHECK(hist[LEVELHIST_NOW_COLUMN - 41] == 0,
+              "with silence before it, not after");
+
+        /* The bug, stated as a check: reading from the front would show
+         * nothing at all here. */
+        CHECK(strip[0] == 0 && strip[LEVELHIST_NOW_COLUMN - 1] == 0,
+              "the front of the read is still the zeroed part of the ring "
+              "-- which is what drawing it showed");
+    }
+
+    /* ---------------------------------------------------------------- */
     /* The reserve ahead of the mark                                     */
     /* ---------------------------------------------------------------- */
     CHECK(levelhist_ahead_columns(0) == 0, "no reserve, no grey");

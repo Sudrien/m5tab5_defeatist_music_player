@@ -88,6 +88,38 @@ extern "C" {
 #define LEVELHIST_NOW_COLUMN (LEVELHIST_COLUMNS * 2 / 3)     /* 160 */
 #define LEVELHIST_AHEAD_COLUMNS (LEVELHIST_COLUMNS - LEVELHIST_NOW_COLUMN)
 
+/*
+ * WHERE THE NEWEST COLUMN IS, WHICH IS NOT THE END OF THE ARRAY.
+ *
+ * levelhist_read() returns the whole ring -- a full minute, 240 columns,
+ * oldest first -- so the NEWEST sample is out[LEVELHIST_COLUMNS - 1].
+ * But the mark sits at LEVELHIST_NOW_COLUMN, 160, with the 80 columns
+ * past it reserved for the buffer. A drawing that took out[0..159] as
+ * the history would be showing the OLDEST forty seconds of the minute
+ * and putting the most recent twenty seconds off the end of the strip,
+ * behind the reserve.
+ *
+ * Which is what 0332 did, and on the board it looked like this: the red
+ * stayed empty for the first twenty seconds, because out[0..159] was
+ * still the zeroed part of the ring, and then crept in from the right.
+ * The grey filled normally the whole time, so the two looked like they
+ * were taking turns.
+ *
+ * So the history to draw is the LAST LEVELHIST_NOW_COLUMN columns of
+ * the read, and this is where that offset lives rather than as an
+ * expression in a draw loop -- it is a property of how the ring and the
+ * strip line up, and getting it wrong is invisible until somebody
+ * watches the screen for a minute.
+ *
+ * The oldest 20 s of the ring is therefore never drawn. Keeping a full
+ * minute and showing 40 s of it is deliberate: LEVELHIST_NOW_COLUMN is
+ * the one number here most likely to be revised after somebody looks at
+ * the panel, and a ring that already holds the wider span means moving
+ * the mark is a one-line change rather than a resize.
+ */
+#define LEVELHIST_HISTORY_OFFSET \
+    (LEVELHIST_COLUMNS - LEVELHIST_NOW_COLUMN)      /* 80 */
+
 typedef struct {
     uint8_t  col[LEVELHIST_COLUMNS]; /* ring; `head` is the NEXT to write */
     int      head;
