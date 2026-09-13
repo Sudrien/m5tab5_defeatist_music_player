@@ -8128,6 +8128,116 @@ and pick a station, and read the three text rows.**
   0304. **`stack low water 2756`** on the netstream task still stands,
   carried over from the 0200 list unchanged.
 
+## The level strip (0329-0333), and two ways of being wrong
+
+### What it is
+
+A minute of output level behind a mark, the buffered reserve ahead of
+it, in the envelope's own two colours -- `C_WAVE_PAST` behind,
+`C_WAVE_FUTURE` ahead, `C_PLAYHEAD` for now. A stream's bar says the
+same thing a file's envelope says; only the units differ, seconds of
+buffer instead of minutes of file. The grey is bufplan's `buffered_ms`,
+the same figure netstream's line prints as `audio Xs`, so a photograph
+and a log are the same quantity by construction.
+
+Built in the order the plan headers were: `levelhist.h` with 42 host
+checks and no data, then the writer filling it, then `ui.c` drawing it.
+
+**The grey is the PCM ring, not the encoded ring.** That question came up
+and is worth answering here: `stream_buffered_ms()` reads
+`xStreamBufferBytesAvailable(s_pcm)` over `rate * 4`. The encoded ring is
+the `bytes 0% (2048)` on the same line, and it is *meant* to sit near
+zero -- netdec drains it as fast as bytes arrive.
+
+### THE BUG NO TEST COULD HAVE CAUGHT
+
+`levelhist_read()` returns the whole ring, oldest first, so the newest
+column is at index 239. The mark is at 160. 0332 drew columns 0-159 as
+the history, which is **the oldest forty seconds**, putting the most
+recent twenty off the end of the strip behind the reserve.
+
+From cold that means nothing red is drawn for the first twenty seconds,
+while the grey grows normally throughout -- so the two looked like they
+were taking turns. It compiled, every existing test passed, and it was
+invisible to anything except a person watching the panel for a minute.
+
+**This is the class of fault the whole project is weakest against.** The
+0300 series' table is about values that answer the wrong question; this
+is a value that answers the right question and is *read from the wrong
+end*. Nothing in a compiler or a host test can see it. The only
+instrument is eyes on the panel, which is also what found the three
+faults in 0315-0316 after fifteen patches of clean logs.
+
+### AND TWO PROCESS FAILURES WORTH MORE THAN THE PATCHES
+
+**0330 did not build, and broke the rule this file states.**
+`s_stream_buffered_ms` was declared beside `s_stream_audible`, four
+thousand lines below its only reader. That is the exact fault 0301 fixed
+and that the table above tabulates under a heading saying *put a
+published value where its READER is*. **Writing a rule in CLAUDE.md does
+not enforce it.** What would have enforced it is a script, and the
+declaration-order audit that eventually caught the rest should have been
+running since 0301 rather than after the second failure of the same kind.
+
+**And 0330 shipped with an edit that silently never applied.** A script
+threw partway through and lost four changes without writing the file;
+the symbols were checked for existence rather than for *use*, so
+`levelhist_note_silence()` was defined and never called. The compiler
+said so, as a warning, and the warning was read as noise from an edit
+that had not landed yet rather than as the edit that had not landed.
+
+That one is the worse of the two and the reason it is written here: an
+unbuildable patch stops. That one would have built, run, and drawn an
+unbroken minute across every dropout the strip exists to report -- a
+display lying in exactly the case it was written for, with nothing in
+the log to contradict it.
+
+### Open
+
+- **The reserve is a flat block.** Deliberate -- nothing is known about
+  what the buffered audio sounds like, only that it exists -- and it
+  reads as featureless. Shaping it needs a carrier of per-block peaks,
+  because FreeRTOS stream buffers cannot be peeked and reaching into the
+  storage behind a blocked reader is 0507's fault. See `streamgain.h`,
+  which wants the same carrier and should own it.
+- **`LEVELHIST_NOW_COLUMN`, the band height fractions and the three-pixel
+  clip marker are all guesses** a photograph would settle in seconds. The
+  ring deliberately holds a full minute while only forty seconds is
+  drawn, so moving the mark is a one-line change rather than a resize.
+- **`stalled` climbs steadily while the reserve holds flat.** SomaFM
+  reached 1313 ms over two minutes with `audio` rock-steady at 17.6s.
+  That is the writer being held off, growing on a station that is not
+  short of audio, and nothing explains it yet.
+
+## streamgain.h (0334): a draft, and a name that was wrong
+
+Slow loudness levelling for a stream, written down before the decode
+loop is touched. Nothing calls it; two functions are declared
+unimplemented because the gating belongs lifted out of `loudness.c`
+rather than copied.
+
+**It is not ReplayGain and the first draft's title said it was.** The
+honest description: a gated mean over the blocks in a twenty-second
+window -- essentially a twenty-second average with BS.1770's weighting
+on top. Over a five-minute track the relative gate discards the quiet
+intro so the loud body sets the number, which is why ReplayGain is not
+an average; over twenty seconds the window can be *entirely* quiet
+intro, with nothing louder to gate against, so it degrades toward a
+windowed mean. The gain moves within a track. That is compression with a
+twenty-second time constant.
+
+**And there is no way around it.** Per-track gain needs the whole track
+before the first sample plays, and twenty seconds of lookahead gives
+that only for tracks under twenty seconds. The ICY title marks a
+boundary on SomaFM and never on WUOM or WNZK, and even then the
+measurement finishes after the audio it describes has been heard. The
+honest comparison is broadcast R128 with a slow follower.
+
+Which makes `STREAMGAIN_SLEW_DB_S` the entire design, and it has no
+measurement behind it. Of the three stations ever tested, only SomaFM
+has the dynamics to say whether a value is right -- WUOM is talk and
+WNZK has been `" - "` for its whole recorded history.
+
 ## A VALUE THAT ANSWERS A DIFFERENT QUESTION (read this one)
 
 **Five faults in this series were the same fault.** Not the same code,
