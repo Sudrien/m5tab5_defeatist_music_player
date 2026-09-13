@@ -1254,6 +1254,19 @@ static volatile bool     s_fade_out;
  * owner for the same reason it owns the fades -- it is the only task
  * that knows what the hardware actually took.
  */
+/*
+ * bufplan's buffered_ms -- the reserve, in milliseconds -- published for
+ * the level strip's grey. The same figure netstream's statistics line
+ * reports as `audio Xs`, so a photograph of the screen and a log line
+ * are the same quantity.
+ *
+ * DECLARED HERE, WITH THE STRIP, AND NOT WITH THE OTHER STREAM STATE.
+ * 0330 put it beside s_stream_audible -- four thousand lines below
+ * level_strip_copy(), which is its only reader -- and the build said so.
+ * Its reader is the strip, so it lives with the strip.
+ */
+static volatile int      s_stream_buffered_ms;
+
 static levelhist_t       s_levelhist;
 static SemaphoreHandle_t s_levelhist_lock;
 
@@ -2753,6 +2766,25 @@ static void i2s_writer_task(void *arg)
             s_fade_cleanup = true;
             ESP_LOGW(TAG, "fade: the ring emptied before the ramp finished");
         }
+
+        /*
+         * A pass with no chunk is silence, and the strip has to say so.
+         *
+         * Outside the `if (got)` on purpose. A rebuffer, a pause and the
+         * gap between stations all arrive here -- the receive times out,
+         * nothing is written, the speaker is quiet. Folding zero for
+         * that time is what gives a dropout its own width instead of
+         * closing the history up around it.
+         *
+         * MISSING FROM 0330, which is why levelhist_note_silence() was
+         * defined and never called. The compiler said that too, as a
+         * warning rather than an error -- and it is the worse of the two
+         * faults: an unbuildable patch stops, while this one would have
+         * built, run, and drawn an unbroken minute over every dropout it
+         * exists to report.
+         */
+        if (!got) levelhist_note_silence();
+
         /*
          * No exit, and no s_decode_done test any more.
          *
@@ -9835,6 +9867,7 @@ static track_end_t play_stream(const char *url, const char *name)
          * own "bytes" percentage is the byte ring, which is empty
          * whenever the decoder is keeping up. This is the reserve. */
         netstream_note_audio_ms(in.buffered_ms);
+        s_stream_buffered_ms = in.buffered_ms;
 
         if (out.audible && !first_sound) {
             /* Up from silence, over FADE_IN_MS. Armed here because this
@@ -10028,6 +10061,7 @@ static track_end_t play_stream(const char *url, const char *name)
     browser_set_station(-1);    /* nothing is playing; unmark the row */
     s_decoding = false;
     s_stream_audible = false;
+    s_stream_buffered_ms = 0;
     s_streaming = false;
     s_stream_status = STREAMPLAN_STATUS_NONE;
     /* Released last. A hold left standing would gate the next FILE's
