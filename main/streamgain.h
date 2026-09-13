@@ -125,13 +125,12 @@
  * WHAT IS STILL OPEN, AND SHOULD BE SETTLED BEFORE ANY OF THIS IS
  * WRITTEN
  *
- *  1. STREAMGAIN_SLEW_DB_S. It is the only thing standing between
- *     "levelling" and "compression", there is no measurement anywhere
- *     in this project that says what it should be, and no amount of
- *     further reasoning in this file will produce one. It needs a board
- *     and ears, on a station with real dynamics -- which of the three
- *     tested so far means SomaFM, since WUOM is talk and WNZK has been
- *     " - " for its entire recorded history.
+ *  1. STREAMGAIN_SLEW_DB_S. SETTLED ENOUGH TO LEAVE, 0410: it was
+ *     listened to on SomaFM with a full window and it sounded fine.
+ *     The constant's own comment carries the reading and, more
+ *     usefully, what that reading does not cover -- the track was
+ *     unfamiliar, which is the weakest form of the test. Still the
+ *     only thing standing between "levelling" and "compression".
  *  2. The window is bounded by the ring, so it shrinks when the reserve
  *     does. WNZK has been observed at 1.4 s. A 1.4 s window is not a
  *     loudness measurement and gating it is meaningless -- see
@@ -197,11 +196,34 @@ extern "C" {
 /*
  * How fast the gain may move, in dB per second.
  *
- * THE KNOB WITH NO MEASUREMENT BEHIND IT. 1.0 dB/s means a 6 dB
- * correction takes six seconds, which is slow enough not to be heard as
- * pumping and fast enough to catch an ad break within a sentence. That
- * is reasoning, not evidence, and it is the first thing to change once
- * somebody has listened.
+ * 1.0 dB/s means a 6 dB correction takes six seconds, which is slow
+ * enough not to be heard as pumping and fast enough to catch an ad
+ * break within a sentence. That was reasoning and not evidence, and the
+ * header said so.
+ *
+ * LISTENED TO, 0410, AND LEFT WHERE IT IS. Groove Salad, a full 17.3 s
+ * window, three quarters of an hour of board log. With the window full
+ * and steady the gain traced a slow triangle -- about -1.2, -0.2, +0.9,
+ * +1.9 and back, roughly forty seconds a side, every step the slew's
+ * own limit -- and the verdict from the room was that it sounded fine.
+ * So the correction is tracking the music rather than fighting it at
+ * this rate, on the station picked for having real dynamics, and there
+ * is no reason to make it slower.
+ *
+ * WHAT THAT TEST DOES NOT SETTLE, in the listener's own words: it was a
+ * song they had not heard before. Pumping is heard as a departure from
+ * how something is SUPPOSED to sound, so an unfamiliar track is the
+ * weakest version of this test -- a ±2 dB cycle is roughly the
+ * dynamics of the music and there was no reference to catch it
+ * against. The strong version is a track the listener knows well, and
+ * the stronger one still is talk radio, where a voice is about as close
+ * to a fixed reference as a stream offers and pumping has nowhere to
+ * hide.
+ *
+ * So: one real reading, positive, on the weakest of the three tests.
+ * Enough to stop calling this constant unexamined. Not enough to call
+ * it right, and the next person to hear something breathe on a station
+ * they know should change it here and say so.
  */
 #define STREAMGAIN_SLEW_DB_S    (1.0f)
 
