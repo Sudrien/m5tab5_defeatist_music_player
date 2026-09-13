@@ -841,6 +841,78 @@ static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
 #define LIVE_PAD_Y  (8)
 #define LIVE_GAP    (24)    /* pill to status text */
 
+/*
+ * The level strip: a minute of output, a mark for now, and the reserve.
+ *
+ * THE ENVELOPE'S OWN TWO COLOURS, and that is the whole design argument.
+ * A file's envelope says heard behind, not heard ahead, in C_WAVE_PAST
+ * and C_WAVE_FUTURE. This strip says exactly the same thing about a
+ * stream -- the only difference is that a stream's "ahead" is seconds of
+ * buffer rather than minutes of file. Inventing a third palette for the
+ * same statement would make two displays look unrelated when they are
+ * the same idea. C_PLAYHEAD marks now, as it does there.
+ *
+ * The second red beside the LIVE pill is deliberate and separated by
+ * LIVE_GAP. A pill with a word in it and a waveform are not confusable,
+ * and consistency with the envelope is worth more than avoiding a
+ * colour.
+ *
+ * The level is drawn centred on the band's midline, symmetric, because
+ * that is what a waveform looks like and a bottom-anchored bar chart
+ * would read as a graph of something else. The reserve is a flat block
+ * at a third of the height -- deliberately NOT waveform-shaped, because
+ * nothing is known about what it sounds like, only that it exists.
+ */
+static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
+{
+    const int w = x1 - sx;
+    if (w < LEVELHIST_COLUMNS / 4) return;   /* no room to say anything */
+
+    const int top = y - UI_WAVE_H;
+    const int mid = y - UI_WAVE_H / 2;
+    const int half = UI_WAVE_H / 2;
+
+    for (int i = 0; i < LEVELHIST_COLUMNS; i++) {
+        /* Both edges from the same expression, so columns tile exactly
+         * and rounding never leaves a one-pixel gap between them. */
+        const int cx0 = sx + (int)((int64_t)i * w / LEVELHIST_COLUMNS);
+        const int cx1 = sx + (int)((int64_t)(i + 1) * w / LEVELHIST_COLUMNS);
+        int cw = cx1 - cx0;
+        if (cw < 1) cw = 1;
+
+        if (i < LEVELHIST_NOW_COLUMN) {
+            const int v = st->strip[i];
+            if (!v) continue;
+            /* At least one pixel for anything non-zero: the difference
+             * between quiet and silent is the difference between playing
+             * and not, and it must not round away. */
+            int h = v * half / 255;
+            if (h < 1) h = 1;
+            gfx_fill_rect(cx0, mid - h, cw, h * 2, C_WAVE_PAST);
+            continue;
+        }
+
+        if (i == LEVELHIST_NOW_COLUMN) {
+            gfx_fill_rect(cx0, top, cw < 2 ? 2 : cw, UI_WAVE_H, C_PLAYHEAD);
+            continue;
+        }
+
+        if (i - LEVELHIST_NOW_COLUMN <= st->strip_ahead_cols) {
+            const int h = UI_WAVE_H / 6;
+            gfx_fill_rect(cx0, mid - h, cw, h * 2, C_WAVE_FUTURE);
+        }
+    }
+
+    /*
+     * The reserve is deeper than the strip can show, so say so rather
+     * than let the edge imply it stops there. The edge is exactly where
+     * a listener looks to see whether it is still growing.
+     */
+    if (st->strip_clipped) {
+        gfx_fill_rect(x1 - 3, top, 3, UI_WAVE_H, C_WAVE_FUTURE);
+    }
+}
+
 static void draw_live(const ui_state_t *st)
 {
     int x0, x1, y;
@@ -856,6 +928,26 @@ static void draw_live(const ui_state_t *st)
 
     fill_rrect(TEXT_X, py, pw, ph, ph / 2, C_LIVE);
     gfx_draw_text(TEXT_X + LIVE_PAD_X, py + LIVE_PAD_Y, "LIVE", 3, pw, C_BG);
+
+    /*
+     * THE MINUTE, in what is left of the band.
+     *
+     * Starts after the pill rather than under it, which is the layout
+     * chosen at the board: LIVE keeps the left. It costs about eight
+     * seconds off the oldest end of the history, which is the cheapest
+     * eight seconds on the strip -- the question is always what the
+     * reserve is doing NOW and what it did a moment ago.
+     *
+     * Not drawn while there is a status to show. Those two cannot share
+     * the space, and when the player has something to say about why
+     * there is no sound, that outranks a minute of how loud it used to
+     * be -- which at that moment is a minute of silence anyway.
+     */
+    const int sx0 = TEXT_X + pw + LIVE_GAP;
+    if ((!st->stream_status || !*st->stream_status) && st->strip_valid) {
+        draw_level_strip(st, sx0, x1, y);
+        return;
+    }
 
     if (!st->stream_status || !*st->stream_status) return;
 
