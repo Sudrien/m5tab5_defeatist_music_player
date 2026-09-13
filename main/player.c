@@ -10264,7 +10264,19 @@ static track_end_t play_stream(const char *url, const char *name)
              * from one number.
              */
             const int decl = netstream_declared_kbps();
-            char br[40];
+            /*
+             * 64, and the arithmetic is the proof rather than a
+             * comfortable-looking number. The fixed text is 29 bytes
+             * and each `%d` is up to 11 for a negative int, so the
+             * worst case is 47 -- which is what -Wformat-truncation
+             * said at -O2, correctly, about the 40 this was written
+             * with. Neither value can actually be negative or large
+             * (netstream refuses an icy-br outside 0..10000 and a frame
+             * bitrate is three digits), but the bound has to hold
+             * against the types the compiler can see, not against what
+             * the values happen to be.
+             */
+            char br[64];
             if (decl > 0 && last_kbps > 0 && decl != last_kbps) {
                 snprintf(br, sizeof(br), "%d kbit/s declared, %d decoded",
                          decl, last_kbps);

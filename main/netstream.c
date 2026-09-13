@@ -584,7 +584,10 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              * well, which is the pair that means something: under-
              * delivery with a full ring is a server pacing itself.
              */
-            char rate_note[40] = "";
+            /* 64 for the same reason player.c's is: " of " plus two
+             * ints at 11 apiece plus " declared (", "%)" and " SHORT"
+             * is 46 in the worst case the types allow. */
+            char rate_note[64] = "";
             if (s_hdr_br > 0) {
                 snprintf(rate_note, sizeof(rate_note), " of %d declared (%d%%)%s",
                          s_hdr_br, (s_kbps * 100) / s_hdr_br,
