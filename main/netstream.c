@@ -34,9 +34,46 @@ static const char *TAG = "tab5_netstream";
 _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
                "NETSTREAM_TITLE_MAX must match ICY_TITLE_MAX");
 
-/* Read chunk. The probe used 2048 and measured 50-64 KB/s through it,
- * which is 25-32 reads a second; no reason to change what was measured. */
-#define READ_CHUNK          (2048)
+/*
+ * Read chunk.
+ *
+ * THIS IS AN EXPERIMENT AND 0407 EXISTS TO SETTLE IT.
+ *
+ * The probe measured 50-64 KB/s through 2048-byte reads and that was
+ * the reason not to change it. Three board logs later the delivery
+ * figure has never once exceeded about 230 kbit/s -- 29 KB/s -- across
+ * three stations on two servers:
+ *
+ *   SomaFM, a 128 kbit/s stream       222, 230, 227
+ *   Adroit Jazz, 224 kbit/s of audio  averaged 165
+ *   Classic Vinyl, 224 kbit/s         averaged 167
+ *
+ * The first line is the one that does not fit a story about slow
+ * servers. A 128 kbit/s station delivered at 1.75x real time, steadily,
+ * three windows running, is a server with plenty to give being held to
+ * something -- and if it were the network there would be no reason for
+ * the number to be so close to the other two. Half the probe's figure,
+ * with TLS added to the path since, is the shape of a per-read cost
+ * that has grown.
+ *
+ * So: 8192, which is four times the reads' work per byte and the same
+ * loop otherwise. If the ceiling is ours it moves. If a 128 kbit/s
+ * station still reports about 230, the ceiling is the link, both
+ * walmradio stations are simply too big for it, and this constant goes
+ * back to 2048 with a comment saying so -- which is a better outcome
+ * than the guess, because it is the end of the question rather than
+ * another reading of it.
+ *
+ * Costs 12 KB of PSRAM: the rx and audio buffers below are one chunk
+ * each and the sniff buffer is unchanged. Nothing here is sized in
+ * chunks except those two.
+ *
+ * Safe against the demuxer by construction rather than by hope --
+ * icydemux_feed() is tested across every way a read boundary can cut a
+ * metadata block, at sizes from one byte up, and this station's metaint
+ * of 16000 is larger than either chunk size anyway.
+ */
+#define READ_CHUNK          (8192)
 
 /* How long a ring send waits for room before giving up on this pass.
  * When the decoder is not draining -- it has not started yet, or it is
@@ -163,7 +200,7 @@ static bool s_has_title;
  * freed.
  *
  * These were internal-RAM statics, which is the default for a `static
- * uint8_t buf[]`, and between the demuxer, the two 2 KB working buffers,
+ * uint8_t buf[]`, and between the demuxer, the two READ_CHUNK buffers,
  * the sniff buffer and an 8 KB stack this file claimed about 26 KB of
  * internal RAM -- with the probe's own buffers, 41 KB against the 53-63
  * KB free that netstream.h itself identifies as the scarce resource.
@@ -205,6 +242,16 @@ static int  s_hdr_metaint;
 static int  s_hdr_br;
 /* What the audio actually costs, from the decoder. See the header. */
 static volatile int s_actual_br;
+/*
+ * The best delivery window this station has managed.
+ *
+ * The ceiling above is a claim about a NUMBER NOT BEING EXCEEDED, and
+ * an average cannot show that -- a station that bursts to 600 and then
+ * idles averages the same as one held flat at 300. The peak is the
+ * figure the experiment turns on, so it is printed rather than
+ * reconstructed by hand from a column of windows.
+ */
+static int  s_kbps_peak;
 
 /*
  * Seconds of DECODED audio the player has queued, x100, pushed in by
@@ -339,6 +386,7 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         s_hdr_metaint = 0;
         s_hdr_br = 0;
         s_actual_br = 0;   /* a new station decodes to its own rate */
+        s_kbps_peak = 0;
         s_hdr_status_icy = 0;
         s_hdr_location[0] = '\0';
         s_hdr_name[0] = '\0';
@@ -601,6 +649,7 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              * 224. Falls back to the declared value, which is all the
              * AAC path ever has.
              */
+            if (s_kbps > s_kbps_peak) s_kbps_peak = s_kbps;
             const int needed = s_actual_br > 0 ? s_actual_br : s_hdr_br;
             char rate_note[64] = "";
             if (needed > 0) {
@@ -608,10 +657,12 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
                          needed, (s_kbps * 100) / needed,
                          (s_kbps < needed && s_audio_cs < 400) ? " SHORT" : "");
             }
-            ESP_LOGI(TAG, "%d kbit/s%s, bytes %u%% (%u), audio %d.%02ds, "
+            ESP_LOGI(TAG, "%d kbit/s%s, peak %d, bytes %u%% (%u), "
+                          "audio %d.%02ds, "
                           "stalled %d ms, internal free %u, "
                           "stack low water %u",
-                     s_kbps, rate_note, netstream_ring_pct(), (unsigned)s_buffered,
+                     s_kbps, rate_note, s_kbps_peak,
+                     netstream_ring_pct(), (unsigned)s_buffered,
                      acs / 100, acs % 100,
                      stalled_ms,
                      (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
@@ -933,9 +984,12 @@ bool netstream_init(void)
         ESP_LOGE(TAG, "no task for netstream");
         return false;
     }
+    /* The read size is on this line so a log says which arm of 0407's
+     * experiment it came from. A number that has to be inferred from
+     * the binary is not evidence. */
     ESP_LOGI(TAG, "ready: %d KB ring + %u byte working set in PSRAM, "
-                  "internal free %u",
-             NETSTREAM_RING_BYTES / 1024, (unsigned)work,
+                  "%d byte reads, internal free %u",
+             NETSTREAM_RING_BYTES / 1024, (unsigned)work, READ_CHUNK,
              (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
     return true;
 }
