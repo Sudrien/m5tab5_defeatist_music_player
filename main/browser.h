@@ -59,6 +59,20 @@ typedef enum {
      * actually been done.
      */
     BROWSER_RELOAD_STATIONS,
+
+    /*
+     * A row of the radio menu wants fetching from the directory.
+     * `index` is the row, which radiobrowser_menu_kind() turns into a
+     * request -- the chooser deliberately does not know what a row
+     * means, for the same reason it does not know what a station is:
+     * one table, in radiobrowser.h, and two callers that cannot drift.
+     *
+     * Requested rather than performed, like the reload beside it and
+     * more so: this one waits on a network. The chooser stays open and
+     * says it is fetching; the rows arrive through
+     * browser_stations_reloaded() when the player task has them.
+     */
+    BROWSER_FETCH_STATIONS,
 } browser_result_kind_t;
 
 typedef struct {
@@ -77,6 +91,16 @@ typedef struct {
  * listing would replace the listing with stations.
  */
 void browser_stations_reloaded(void);
+
+/*
+ * A line for the radio tab's status row, replacing the usual one until
+ * the next list arrives: "fetching jazz...", or why it did not.
+ *
+ * Copied. NULL clears it. Safe from the player task -- it is a string
+ * this task writes and ui_task reads, one buffer, and a torn line is a
+ * row of text that is briefly wrong rather than anything worse.
+ */
+void browser_set_radio_status(const char *line);
 
 /* Open on the folder of `start` when it is on a mounted volume, otherwise
  * on the first volume that is. Safe to call when nothing is mounted: the

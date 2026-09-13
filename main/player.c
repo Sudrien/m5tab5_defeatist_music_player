@@ -95,6 +95,7 @@
 #include "netdec.h"
 #include "netstream.h"
 #include "stations.h"
+#include "radiobrowser.h"
 #include "streamgain.h"
 #include "streamplan.h"
 
@@ -3073,6 +3074,16 @@ static volatile bool     s_open_chooser;
  * load and cannot be missed by a pass that ran at the wrong moment.
  */
 static volatile bool     s_reload_stations;
+/*
+ * A radio menu row the chooser wants fetched, or -1.
+ *
+ * A row number rather than a kind and a value, because the row is what
+ * was pressed and radiobrowser.h is what knows what a row means. One
+ * outstanding request: a second press while the first is in flight
+ * replaces it, which is the right answer for a person tapping around a
+ * menu -- the list they want is the last one they asked for.
+ */
+static volatile int      s_fetch_row = -1;
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -5449,6 +5460,99 @@ static void sleep_timer_tick(void)
  * there is nothing to move; the load's result is deliberately ignored
  * for the same reason 0209 ignores it -- the attempt is what happened.
  */
+/*
+ * Perform a requested directory fetch, if one is outstanding.
+ *
+ * Called from the same two places service_station_reload() is, and for
+ * the same reason: the button must not be dead while a track is
+ * playing.
+ *
+ * THIS BLOCKS, for up to two mirror timeouts, and that is why it is
+ * here rather than in the chooser. ui_task would freeze the screen --
+ * including the row that is supposed to say a fetch is happening, which
+ * would make the one visible sign of it the last thing to be drawn.
+ *
+ * It blocks the PLAYER task, which is what performs track changes, so a
+ * station chosen during a fetch waits for it. Bounded at about twelve
+ * seconds worst case and normally under one; the alternative is a third
+ * task whose only job is one request, and a task is not the answer to a
+ * function that is occasionally slow.
+ */
+static void service_station_fetch(void)
+{
+    const int row = s_fetch_row;
+    if (row < 0) return;
+    s_fetch_row = -1;
+
+    radiobrowser_kind_t kind;
+    const char *value = NULL;
+    if (!radiobrowser_menu_kind(row, &kind, &value)) return;
+
+    const char *label = radiobrowser_menu_label(row);
+
+    if (!wifi_connected()) {
+        /*
+         * Said plainly and early, because the alternative is twelve
+         * seconds of nothing followed by a failure that looks like the
+         * directory being down. Wi-Fi being off is the commonest reason
+         * this cannot work and the only one the listener can fix.
+         */
+        ESP_LOGW(TAG, "no Wi-Fi; cannot reach the directory");
+        browser_set_radio_status("no Wi-Fi - the directory needs a connection");
+        return;
+    }
+
+    char status[96];
+    snprintf(status, sizeof(status), "fetching %s...", label);
+    browser_set_radio_status(status);
+
+    char *body = heap_caps_malloc(STATIONS_FILE_MAX, MALLOC_CAP_SPIRAM);
+    station_t *list = heap_caps_calloc(STATIONLIST_MAX, sizeof(station_t),
+                                       MALLOC_CAP_SPIRAM);
+    if (!body || !list) {
+        ESP_LOGE(TAG, "no PSRAM for a directory fetch");
+        browser_set_radio_status("not enough memory for that list");
+        free(body);
+        free(list);
+        return;
+    }
+
+    size_t n = 0;
+    bool ok = false;
+    if (radiobrowser_list(kind, value, body, STATIONS_FILE_MAX, &n)) {
+        stationlist_stats_t stats;
+        const int count = stationlist_parse(body, n, list, STATIONLIST_MAX,
+                                            &stats);
+        if (count > 0) {
+            ok = stations_set_remote(list, count, label);
+        } else {
+            /*
+             * The request worked and the answer was empty, which is a
+             * different thing from the request failing and wants saying
+             * differently: a thin tag is the directory being honest.
+             */
+            ESP_LOGW(TAG, "%s: nothing usable (%d bad scheme, %d too long)",
+                     label, stats.bad_scheme, stats.too_long);
+            browser_set_radio_status("the directory has nothing there");
+        }
+    } else {
+        browser_set_radio_status("the directory did not answer");
+    }
+
+    free(body);
+    free(list);
+
+    if (ok) {
+        /*
+         * The epoch, exactly as a card reload does it. The chooser
+         * rebuilds its rows from the counter rather than from this
+         * call, so a fetch that finished while the listener was on the
+         * SD tab is not drawn over their listing.
+         */
+        s_stations_epoch++;
+    }
+}
+
 static void service_station_reload(void)
 {
     if (!s_reload_stations) return;
@@ -5673,6 +5777,15 @@ static void ui_task(void *arg)
                 browser_close();
                 touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
+                break;
+            case BROWSER_FETCH_STATIONS:
+                /*
+                 * Requested, not done, and for a stronger reason than
+                 * the reload beside it: this one waits on a network,
+                 * and ui_task is the task drawing the row that says so.
+                 * The chooser stays open and keeps the rows it has.
+                 */
+                s_fetch_row = r.index;
                 break;
             case BROWSER_RELOAD_STATIONS:
                 /*
@@ -7109,6 +7222,7 @@ static track_end_t play_file(const char *path)
          * at BACKGROUND class and has nothing to do with this track's
          * visuals, so none of the pending flags apply to it. */
         service_station_reload();
+        service_station_fetch();
 
         /* The envelope landed. Drawn here rather than on the loading
          * task so there is one writer to the framebuffer.
@@ -10453,6 +10567,7 @@ static void player_loop(void)
              * and that one is a poll, and a request that arrived on the
              * same pass should not wait for the next. */
             service_station_reload();
+            service_station_fetch();
 
             const uint32_t sgen = storage_generation();
             if (sgen != stations_gen) {

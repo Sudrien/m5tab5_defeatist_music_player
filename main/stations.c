@@ -23,6 +23,9 @@ static int                s_count;
 static int                s_index;
 static storage_id_t       s_vol = STORAGE_COUNT;
 static stationlist_stats_t s_stats;
+/* Where a list that is not on a volume came from. Written under the
+ * lock with the list it describes, so the two cannot disagree. */
+static char               s_label[48];
 static SemaphoreHandle_t  s_lock;
 
 static void lock_init(void)
@@ -139,6 +142,7 @@ bool stations_load(void)
     s_count = count;
     s_vol = from;
     s_stats = stats;
+    s_label[0] = '\0';   /* a volume names itself */
     /* The index is reset rather than kept. It indexed a different list,
      * and a station list reloaded because a card appeared is a different
      * list even when it happens to be the same length. */
@@ -156,6 +160,51 @@ bool stations_load(void)
         ESP_LOGI(TAG, "  %2d  %s", i + 1, s_list[i].name);
     }
     return true;
+}
+
+bool stations_set_remote(const station_t *list, int count, const char *label)
+{
+    lock_init();
+    if (!list || count <= 0) return false;
+    if (count > STATIONLIST_MAX) count = STATIONLIST_MAX;
+
+    station_t *fresh = heap_caps_calloc(STATIONLIST_MAX, sizeof(station_t),
+                                        MALLOC_CAP_SPIRAM);
+    if (!fresh) {
+        ESP_LOGE(TAG, "no PSRAM for %d stations", count);
+        return false;
+    }
+    memcpy(fresh, list, (size_t)count * sizeof(station_t));
+
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    station_t *old = s_list;
+    s_list = fresh;
+    s_count = count;
+    /*
+     * STORAGE_COUNT is the truth here rather than a placeholder: this
+     * list is on no volume, and stations_volume() answering SD would
+     * have the status line name a card that does not hold it.
+     */
+    s_vol = STORAGE_COUNT;
+    memset(&s_stats, 0, sizeof(s_stats));
+    snprintf(s_label, sizeof(s_label), "%s", label ? label : "the directory");
+    /* Reset for the same reason a reload resets it: this is a different
+     * list even when it happens to be the same length. */
+    s_index = 0;
+    xSemaphoreGive(s_lock);
+    free(old);
+
+    ESP_LOGI(TAG, "%d stations from %s", count, s_label);
+    return true;
+}
+
+const char *stations_source(void)
+{
+    if (s_vol != STORAGE_COUNT) {
+        const char *mount = storage_mount_path(s_vol);
+        if (mount) return mount;
+    }
+    return s_label[0] ? s_label : "?";
 }
 
 int stations_count(void)

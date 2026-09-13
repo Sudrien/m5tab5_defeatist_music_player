@@ -470,6 +470,58 @@ static inline bool radiobrowser_search_url(char *url, size_t url_size,
 }
 
 /* ------------------------------------------------------------------ */
+/* The menu, which is one table and two callers                         */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The first level of the radio tab, as rows.
+ *
+ * HERE RATHER THAN IN browser.c, because two things need it and they
+ * are on different tasks: the chooser draws the rows and the player
+ * turns a row number into a request. A second copy of the table is the
+ * thing that drifts -- and the way it would drift is the worst
+ * available: row N labelled one thing and fetching another, which looks
+ * like the directory being wrong rather than like this file being
+ * wrong.
+ *
+ * Row 0 is the card's own list, so the way back from the directory is
+ * the first row rather than a button somebody has to find. Then the two
+ * charts, then the pinned tags.
+ */
+#define RADIOBROWSER_MENU_ROWS  (RADIOBROWSER_TAG_COUNT + 3)
+
+static inline const char *radiobrowser_menu_label(int row)
+{
+    static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
+    if (row == 0) return "stations.m3u on the card";
+    if (row == 1) return "Most voted";
+    if (row == 2) return "Most listened";
+    if (row >= 3 && row < RADIOBROWSER_MENU_ROWS) return tags[row - 3];
+    return "";
+}
+
+/*
+ * What row `row` fetches. False for row 0, which is not a fetch at all
+ * -- it is the card, and the caller reloads rather than requests.
+ *
+ * `value` is left pointing at the table rather than copied, which is
+ * safe because the table is static const and outlives everything; a
+ * caller that wants to keep it past the call should copy it.
+ */
+static inline bool radiobrowser_menu_kind(int row, radiobrowser_kind_t *kind,
+                                          const char **value)
+{
+    static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
+    if (row <= 0 || row >= RADIOBROWSER_MENU_ROWS) return false;
+    if (value) *value = NULL;
+    if (row == 1) { if (kind) *kind = RADIOBROWSER_TOPVOTE;  return true; }
+    if (row == 2) { if (kind) *kind = RADIOBROWSER_TOPCLICK; return true; }
+    if (kind)  *kind  = RADIOBROWSER_BYTAG;
+    if (value) *value = tags[row - 3];
+    return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* The client, which is radiobrowser.c                                  */
 /* ------------------------------------------------------------------ */
 

@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "browser.h"
+#include "radiobrowser.h"
 #include "stations.h"
 #include "decoder.h"
 #include "gfx.h"
@@ -113,6 +114,23 @@ static browser_tab_t s_tab = BROWSER_TAB_SD;
  * appear until something reloads it.
  */
 static bool s_radio;
+/*
+ * THE RADIO TAB HAS TWO LEVELS AND THIS SAYS WHICH.
+ *
+ * Menu: the card's list, the two charts, the pinned tags. Stations:
+ * whatever list is loaded. It is the folders-then-files gesture the
+ * volume tabs already use, against the same rows, which is the whole
+ * argument for browsing a directory on a device with no keyboard --
+ * the interaction already exists and needed no typing.
+ *
+ * The menu is the level the tab opens on, always. Opening on the last
+ * list would mean the tab shows a tag somebody browsed twenty minutes
+ * ago as though it were theirs.
+ */
+static bool s_radio_menu;
+/* Set by the player task while a fetch is in flight, or after one
+ * failed. Cleared when a list arrives. */
+static char s_radio_status[96];
 static char s_dir[512];
 static char s_result[512];
 
@@ -389,6 +407,41 @@ static bool tab_present(browser_tab_t t)
     return storage_present((storage_id_t)t);
 }
 
+/*
+ * Fill the rows from the menu table.
+ *
+ * is_dir is true for every row, and that is not a lie told to get a
+ * folder icon: each one opens into a list of things to play, which is
+ * what is_dir means everywhere else in this file. The card row included
+ * -- it opens into the card's stations.
+ */
+static void load_radio_menu(void)
+{
+    entries_free();
+    if (!s_entries) {
+        s_entries = heap_caps_calloc(MAX_ENTRIES, sizeof(entry_t),
+                                     MALLOC_CAP_SPIRAM);
+        if (!s_entries) {
+            ESP_LOGE(TAG, "no PSRAM for the radio menu");
+            return;
+        }
+    }
+    for (int i = 0; i < RADIOBROWSER_MENU_ROWS && s_count < MAX_ENTRIES; i++) {
+        s_entries[s_count].name = strdup(radiobrowser_menu_label(i));
+        if (!s_entries[s_count].name) break;
+        s_entries[s_count].is_dir = true;
+        s_count++;
+    }
+    s_top = 0;
+    s_dirty = true;
+}
+
+void browser_set_radio_status(const char *line)
+{
+    snprintf(s_radio_status, sizeof(s_radio_status), "%s", line ? line : "");
+    s_dirty = true;
+}
+
 /* Fill the rows from the station list. Same entry_t the files use, so
  * everything downstream of here is unchanged. */
 static void load_stations(void)
@@ -433,6 +486,14 @@ static void load_stations(void)
 void browser_stations_reloaded(void)
 {
     if (!s_open || !s_radio) return;
+    /*
+     * A list arriving is what opens the second level. Both ways in lead
+     * here -- the card row and a directory row -- so there is one place
+     * that decides the tab is showing stations, rather than one per
+     * request kind.
+     */
+    s_radio_menu = false;
+    s_radio_status[0] = '\0';
     load_stations();
 }
 
@@ -449,7 +510,9 @@ static void select_tab(browser_tab_t id)
         s_prefix[0] = '\0';
         s_prefix_len = 0;
         s_dir[0] = '\0';
-        load_stations();
+        s_radio_status[0] = '\0';
+        s_radio_menu = true;
+        load_radio_menu();
         return;
     }
 
@@ -549,14 +612,18 @@ static const char *status_line(void)
 {
     if (s_radio) {
         static char line[96];
+        /* Whatever the player task last said, ahead of everything: a
+         * fetch in flight or a fetch that failed is the only thing on
+         * this tab worth the row while it is true. */
+        if (s_radio_status[0]) return s_radio_status;
+        if (s_radio_menu) return "radio - the card, the charts, or a tag";
         const int n = stations_count();
         if (n <= 0) {
             /* Names the file, because the fix is to make one. */
             return "no " STATIONS_FILENAME " on the card";
         }
-        const char *mount = storage_mount_path(stations_volume());
         snprintf(line, sizeof(line), "%d station%s from %s", n,
-                 n == 1 ? "" : "s", mount ? mount : "?");
+                 n == 1 ? "" : "s", stations_source());
         return line;
     }
     if (s_dir[0]) return s_dir;
@@ -832,8 +899,11 @@ void browser_draw(void)
          * list's order and does not sort, for exactly this kind of
          * reason.
          */
+        /* And not on the menu level, where row i is a tag rather than
+         * station i -- the marker would land on whichever genre happens
+         * to sit at the playing station's index. */
         const bool playing = s_radio
-            ? (i == s_playing_station)
+            ? (!s_radio_menu && i == s_playing_station)
             : (!s_entries[i].is_dir && is_current(s_entries[i].name));
 
         if (s_entries[i].is_dir) {
@@ -897,7 +967,15 @@ void browser_draw(void)
      */
     foot_box(0, &bx, &bw);
     if (s_radio) {
-        draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "RLOD", true);
+        /*
+         * UP on the second level, RLOD on the first, which is the same
+         * reuse of this slot the tab already makes and for the same
+         * reason. Going back up from a list of stations is exactly what
+         * UP means on a volume; reloading is what the menu level has to
+         * offer, and the two never want the slot at once.
+         */
+        draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16,
+                    s_radio_menu ? "RLOD" : "UP", true);
     } else {
         draw_button(bx + 4, fy + 8, bw - 8, FOOT_H - 16, "UP",   !at_root() && s_dir[0]);
     }
@@ -1010,8 +1088,14 @@ browser_result_t browser_touch(bool down, int x, int y)
             "reload stations", "play folder", "page up", "page down",
             "order", "cancel"
         };
+        static const char *const foot_name_menu[FOOT_BUTTONS] = {
+            "back to the menu", "play folder", "page up", "page down",
+            "order", "cancel"
+        };
         ESP_LOGI(TAG, "button: %s",
-                 s_radio ? foot_name_radio[which] : foot_name[which]);
+                 !s_radio ? foot_name[which]
+                          : s_radio_menu ? foot_name_radio[which]
+                                         : foot_name_menu[which]);
 
         /*
          * UP and FLDR are volume operations and the radio tab has
@@ -1024,6 +1108,18 @@ browser_result_t browser_touch(bool down, int x, int y)
          * below, which still owns slot 1.
          */
         if (s_radio && which == 0) {
+            if (!s_radio_menu) {
+                /* Back to the menu, and done here: the rows are this
+                 * task's to rebuild and there is nothing to ask the
+                 * player for. The list stays loaded, so a station
+                 * playing out of it keeps playing and next still moves
+                 * through it -- going up a level is a change of view
+                 * and not a change of what is on. */
+                s_radio_menu = true;
+                s_radio_status[0] = '\0';
+                load_radio_menu();
+                return res;
+            }
             res.kind = BROWSER_RELOAD_STATIONS;
             return res;
         }
@@ -1082,6 +1178,22 @@ browser_result_t browser_touch(bool down, int x, int y)
     ESP_LOGI(TAG, "button: row %d (%s) \"%s\"", i,
              s_radio ? "station" : s_entries[i].is_dir ? "dir" : "file",
              s_entries[i].name);
+
+    if (s_radio && s_radio_menu) {
+        /*
+         * A menu row. Row 0 is the card and is a reload; everything
+         * else is a request to the directory. What the row MEANS is
+         * radiobrowser.h's business -- this asks whether it is a fetch
+         * and passes the number on.
+         */
+        if (!radiobrowser_menu_kind(i, NULL, NULL)) {
+            res.kind = BROWSER_RELOAD_STATIONS;
+            return res;
+        }
+        res.kind = BROWSER_FETCH_STATIONS;
+        res.index = i;
+        return res;
+    }
 
     if (s_radio) {
         /* The index, not the URL. See BROWSER_PLAY_STREAM in browser.h:

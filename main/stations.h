@@ -94,6 +94,35 @@ extern "C" {
  */
 bool stations_load(void);
 
+/*
+ * Replace the list with one that did not come off a volume.
+ *
+ * The radio directory's answer, parsed, installed as THE station list --
+ * not a second list beside it. That is what makes the rest of this
+ * header go on being true: next and previous move through what is on
+ * screen, stations_index() counts in it, the chooser's marker means
+ * what it meant, and play_stream() needs no idea where a station came
+ * from.
+ *
+ * `label` is what the status line says instead of a mount path -- "Most
+ * voted", a tag name. Copied, not kept by pointer.
+ *
+ * NOTHING IS WRITTEN TO THE CARD. A directory listing is a view, and
+ * the card's own list comes back the moment stations_load() is called
+ * again -- which is what the first row of the radio menu does. Keeping
+ * a station is a separate act and is not this function.
+ *
+ * Allocates in PSRAM and frees the previous list, under the same lock
+ * and with the same swap-whole discipline stations_load() uses.
+ */
+bool stations_set_remote(const station_t *list, int count, const char *label);
+
+/*
+ * Where the current list came from, for the status line: a mount path
+ * for the card's, the label above for the directory's. Never NULL.
+ */
+const char *stations_source(void);
+
 /* How many stations are loaded. 0 before the first successful load. */
 int stations_count(void);
 

@@ -393,6 +393,46 @@ int main(void)
               "and goes stale on time across it");
     }
 
+    printf("  the menu table\n");
+    {
+        /*
+         * The table has two callers on two tasks -- the chooser draws
+         * the rows, the player turns a row into a request -- so what is
+         * checked is that the two questions agree about every row.
+         */
+        CHECK(radiobrowser_menu_label(0)[0] != '\0', "row 0 has a label");
+        CHECK(!radiobrowser_menu_kind(0, NULL, NULL),
+              "row 0 is the card, not a fetch");
+
+        radiobrowser_kind_t kind;
+        const char *value;
+        CHECK(radiobrowser_menu_kind(1, &kind, &value) &&
+              kind == RADIOBROWSER_TOPVOTE && value == NULL,
+              "row 1 is the votes chart and takes no value");
+        CHECK(radiobrowser_menu_kind(2, &kind, &value) &&
+              kind == RADIOBROWSER_TOPCLICK && value == NULL,
+              "row 2 is the clicks chart");
+
+        for (int i = 3; i < RADIOBROWSER_MENU_ROWS; i++) {
+            char url[RADIOBROWSER_URL_MAX];
+            CHECK(radiobrowser_menu_kind(i, &kind, &value), "row %d fetches", i);
+            CHECK(kind == RADIOBROWSER_BYTAG, "row %d is a tag", i);
+            CHECK(value && strcmp(value, radiobrowser_menu_label(i)) == 0,
+                  "row %d fetches what it is labelled", i);
+            CHECK(radiobrowser_list_url(url, sizeof(url), HOST, kind, value),
+                  "row %d builds a URL", i);
+        }
+
+        /* Off both ends, because a row number arrives from a tap and a
+         * scroll position and nothing between here and there bounds it
+         * a second time. */
+        CHECK(!radiobrowser_menu_kind(-1, &kind, &value), "no row -1");
+        CHECK(!radiobrowser_menu_kind(RADIOBROWSER_MENU_ROWS, &kind, &value),
+              "no row past the end");
+        CHECK(radiobrowser_menu_label(RADIOBROWSER_MENU_ROWS)[0] == '\0',
+              "and no label past the end");
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
