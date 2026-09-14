@@ -3208,6 +3208,32 @@ static size_t            s_art_len;
  * describe a buffer that no longer exists.
  */
 static bool               s_art_painted;
+/*
+ * The stream URL the art in s_art_img (and the click already sent for
+ * it) belong to.
+ *
+ * WITHOUT THIS, A PAUSE/RESUME LOOKED LIKE A NEW STATION. Pause
+ * disconnects the socket entirely and resume calls netstream_play()
+ * again, which reaches the same "first sound" branch a fresh station
+ * pick does -- and that branch used to clear the art state and re-fetch
+ * and re-click unconditionally. A board log showed exactly that: pause,
+ * resume, and the same 147 KB PNG fetched a second time, decoded a
+ * second time, and a second click reported against the same uuid for
+ * one continuous listening session -- which is the double-count 0420
+ * was written to avoid, reappearing through the one path that was never
+ * tested against a pause.
+ *
+ * s_stream_url survives a pause -- it is set once when a station is
+ * chosen and netstream_play() is handed the same string back on resume
+ * -- so comparing against it is what tells "the same station,
+ * reconnecting" apart from "a different station, chosen". A copy
+ * rather than a pointer, because s_stream_url can change under this one
+ * between the compare and the use if a new station is picked in the gap
+ * -- unlikely on one task, but the cost of a copy here is one string
+ * compare's worth of memory against a bug that reads as "sometimes"
+ * from a board.
+ */
+static char               s_art_stream_url[NETSTREAM_URL_MAX];
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -10506,8 +10532,20 @@ static track_end_t play_stream(const char *url, const char *name)
              * to be a resync landing mid-frame. Neither is diagnosable
              * from one number.
              */
-            s_art_url[0] = '\0';
-            s_art_painted = false;
+            /*
+             * SAME STATION RECONNECTING, OR A DIFFERENT ONE. See
+             * s_art_stream_url. Only a different station clears what is
+             * already held and known; a reconnect of the one already
+             * playing leaves the picture on screen and does not ask the
+             * directory to count it twice.
+             */
+            const bool same_station =
+                s_art_stream_url[0] &&
+                strcmp(s_art_stream_url, s_stream_url) == 0;
+            if (!same_station) {
+                s_art_url[0] = '\0';
+                s_art_painted = false;
+            }
             /* The click and the artwork fetch have moved: see below.
              * This branch now only does what its name says -- notices
              * that sound has started -- and nothing here blocks. */
@@ -10575,8 +10613,7 @@ static track_end_t play_stream(const char *url, const char *name)
              * shape of bug 0316 exists to prevent for the chooser
              * overlay, on the same call.
              */
-            s_art_url[0] = '\0';
-            {
+            if (!same_station) {
                 station_t st;
                 const bool known = stations_get(stations_index(), &st) &&
                                    st.uuid[0];
@@ -10592,8 +10629,14 @@ static track_end_t play_stream(const char *url, const char *name)
                 /* After the artwork, so a slow lookup cannot delay the
                  * click past the point where the listener has moved on. */
                 if (known) radiobrowser_click(st.uuid);
+
+                snprintf(s_art_stream_url, sizeof(s_art_stream_url), "%s",
+                        s_stream_url);
+                s_repaint_art = true;
             }
-            s_repaint_art = true;
+            /* Same station: s_art_img is still valid, still painted,
+             * and the directory has already had its click. Nothing to
+             * do -- which is the fix. */
         }
 
         /*
@@ -10785,6 +10828,7 @@ static track_end_t play_stream(const char *url, const char *name)
     s_art_len = 0;
     s_art_painted = false;
     s_art_url[0] = '\0';
+    s_art_stream_url[0] = '\0';
 
     /* The badge goes with the station that earned it, before the fade
      * and the stop-wait below rather than after -- it describes a gain
