@@ -3260,6 +3260,55 @@ static bool               s_art_screen_stale;   /* something else may have drawn
  * from a board.
  */
 static char               s_art_stream_url[NETSTREAM_URL_MAX];
+/*
+ * THE STREAM ARTWORK HANDOFF, PLAYER TASK <-> MEDIA_TASK.
+ *
+ * 0422 moved the fetch and the click out from in front of the "first
+ * sound" line, so they stopped delaying the SOUND. They still ran inline
+ * on the player task, and a board log says what that costs: the fetch
+ * spanned 38949 to 41534 and the click 41534 to 42742, so the decode
+ * loop spent 3.8 s inside esp_http_client instead of draining the ring
+ * -- with the reserve at four seconds, which is all BUFPLAN_START_MS
+ * asks for. The netstream lines bracket it exactly, `stalled` going 20
+ * to 34 to 64 ms across that window. For the whole of it a transport
+ * press had nowhere to land either.
+ *
+ * So the same split as everything else slow about a track: the player
+ * task states what it wants and media_task does it. That task already
+ * owns "fetch the picture for the thing that is playing" for files, is
+ * priority 1, and is where a second reader is supposed to live.
+ *
+ * THE REQUEST is resolved as far as it can be without blocking.
+ * netstream_logo() reads a header of the connection that has just
+ * delivered first sound, so it is answered here; radiobrowser_favicon()
+ * is a directory lookup over the network and goes with the fetch.
+ *
+ * THE REPLY IS A VALUE, NOT A HANDLE. media_task fetches into its own
+ * buffer, publishes the pointer and the station it belongs to, and sets
+ * the flag last; the player task installs it into s_art_img, which it
+ * alone owns and alone frees. The alternative -- media_task assigning
+ * s_art_img directly -- is a buffer freed by play_stream()'s teardown
+ * while another task is writing it, which is the class of bug this file
+ * has a rule against and which would read as a corrupted cover much
+ * later.
+ *
+ * THE STATION IS CARRIED WITH THE REPLY for the reason do_art() carries
+ * a generation: a fetch can outlive the station that asked for it, and a
+ * picture installed after the listener has moved on is somebody else's
+ * artwork under this station's name. A reply whose station does not
+ * match is freed by the consumer, which is also what drains one left
+ * over from a stream that has already ended.
+ */
+static char               s_stream_art_logo[NETSTREAM_URL_MAX];
+static char               s_stream_art_uuid[STATION_UUID_MAX];
+static char               s_stream_art_for[NETSTREAM_URL_MAX];
+static volatile bool      s_stream_art_want;
+
+static uint8_t           *s_stream_art_img;
+static size_t             s_stream_art_len;
+static char               s_stream_art_got_for[NETSTREAM_URL_MAX];
+static char               s_stream_art_got_url[NETSTREAM_URL_MAX];
+static volatile bool      s_stream_art_ready;
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -5291,6 +5340,70 @@ static void prefetch_next(void)
  * One stack rather than two, and it is the larger of the two, because the
  * cover path is the deeper one.
  */
+/*
+ * The station's picture and the directory's click, on the task that is
+ * allowed to block. See the handoff comment above s_stream_art_logo.
+ *
+ * Everything it reads is copied to the stack first. The request fields
+ * are written by the player task and can be rewritten by the next
+ * station while this one is inside a six-second HTTP request; a copy
+ * means this call finishes the job it was given rather than half of two.
+ */
+static void do_stream_art(void)
+{
+    char want[NETSTREAM_URL_MAX];
+    char uuid[STATION_UUID_MAX];
+    char url[NETSTREAM_URL_MAX];
+
+    snprintf(want, sizeof(want), "%s", s_stream_art_for);
+    snprintf(uuid, sizeof(uuid), "%s", s_stream_art_uuid);
+    snprintf(url,  sizeof(url),  "%s", s_stream_art_logo);
+
+    /* The directory only when the station itself did not say. Same
+     * order as before; what changed is which task waits for it. */
+    if (!url[0] && uuid[0]) {
+        radiobrowser_favicon(uuid, url, sizeof(url));
+    }
+
+    uint8_t *img = NULL;
+    size_t   len = 0;
+    if (url[0]) {
+        ESP_LOGI(TAG, "artwork for the station: %.120s", url);
+        radiobrowser_art_fetch(url, &img, &len);
+    }
+
+    /* After the artwork, as before: a slow lookup must not delay the
+     * click past the point where the listener has moved on. */
+    if (uuid[0]) radiobrowser_click(uuid);
+
+    if (!img) return;
+
+    /*
+     * A reply already waiting means the player task has not looked
+     * since the last station -- it only consumes inside play_stream()'s
+     * loop. Drop the older one rather than leaking it; it is for a
+     * station that is no longer playing by construction, since this
+     * request was made after it.
+     */
+    if (s_stream_art_ready) {
+        s_stream_art_ready = false;
+        free(s_stream_art_img);
+        s_stream_art_img = NULL;
+        s_stream_art_len = 0;
+    }
+
+    /* Payload, then the station, then the flag. The flag is the only
+     * thing the other task polls, so it is written last. */
+    s_stream_art_img = img;
+    s_stream_art_len = len;
+    snprintf(s_stream_art_got_for, sizeof(s_stream_art_got_for), "%s", want);
+    /* The URL as RESOLVED, which is the logo header or the directory's
+     * favicon. s_stream_art_logo holds only the first of those, so the
+     * consumer cannot work it out from the request. */
+    snprintf(s_stream_art_got_url, sizeof(s_stream_art_got_url), "%s", url);
+    s_stream_art_ready = true;
+}
+
 static void media_task(void *arg)
 {
     (void)arg;
@@ -5301,6 +5414,20 @@ static void media_task(void *arg)
          * boundary is written even while the next track's cover work is
          * queued behind it. */
         rg_write_pending();
+
+        /*
+         * Ahead of the file work and not behind it. A station's picture
+         * has no prefetch, no cache and no second chance -- it is
+         * fetched once per station -- while everything below is about a
+         * file that is not playing yet. They never both have work: a
+         * stream leaves s_media_want false because play_stream() does
+         * not call load_track_visuals().
+         */
+        if (s_stream_art_want) {
+            s_stream_art_want = false;
+            do_stream_art();
+            continue;
+        }
 
         if (!s_media_want) {
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -10625,55 +10752,63 @@ static track_end_t play_stream(const char *url, const char *name)
                      out_rate, last_chans, br);
 
             /*
-             * THE CLICK AND THE ARTWORK, MOVED HERE FROM ABOVE 0422.
+             * 0422's reasoning, kept because this patch only moves the
+             * calls one step further and the first step is why: they
+             * used to sit AHEAD of the "first sound" line and ahead of
+             * audio_out_set_idle(false), and a board log showed 12.2 s
+             * to first sound on a station that connects in under six,
+             * with the artwork line timestamped before the sound rather
+             * than after it. 0422 put them below, so they delayed the
+             * picture instead of the sound. What it left behind is that
+             * they still blocked the decode loop, which is what the
+             * block below fixes.
              *
-             * They were sitting ahead of the "first sound" line and
-             * ahead of audio_out_set_idle(false), which is not where a
-             * blocking network call belongs: a board log showed 12.2 s
-             * to first sound on a station that has connected in under
-             * six every other time, with the artwork line timestamped
-             * BEFORE first sound rather than after it. The fetch itself
-             * was never the mistake -- it was already kept off the
-             * repaint path, as the original comment here argued -- the
-             * mistake was leaving it and the click inline in the one
-             * branch that also has to report that sound has started.
+             * 0422 also set s_repaint_art here, because a fetched image
+             * otherwise sat correct in memory and invisible until
+             * something else happened to call show_stream_card(). That
+             * requirement has not gone away; what changed is who is in a
+             * position to state it, which is now the install.
+             */
+            /*
+             * THE CLICK AND THE ARTWORK, REQUESTED RATHER THAN DONE.
              *
-             * Now: the amplifier is already unmuted, the timestamp is
-             * already taken and logged, and only then does this block.
-             * The listener hears audio at the true first-sound time:
-             * these two network calls delay the PICTURE arriving, which
-             * is a cosmetic wait, rather than delaying the SOUND, which
-             * is not.
+             * 0422 moved them below the "first sound" line so they
+             * stopped delaying the sound. They were still two blocking
+             * network calls on the decode loop, and the board measured
+             * 3.8 s of it with a four-second reserve in the ring. See
+             * the handoff comment above s_stream_art_logo.
              *
-             * s_repaint_art IS SET, rather than relying on the next
-             * organic redraw. Without it the fetched image sat correct
-             * in memory but invisible until something else -- the
-             * device sleeping and waking, in the case that shipped --
-             * happened to call show_stream_card() again. A card that is
-             * silently one repaint behind the data it holds is the same
-             * shape of bug 0316 exists to prevent for the chooser
-             * overlay, on the same call.
+             * netstream_logo() is answered here because it is a header
+             * of the connection that just delivered first sound and
+             * costs nothing; the directory lookup and the fetch go with
+             * the request.
+             *
+             * s_repaint_art is NOT set here any more. There is nothing
+             * to repaint yet -- the card is already up, put there by
+             * the !art_shown pass -- and the arrival of the picture is
+             * what should ask for the square, which is what the install
+             * below does.
              */
             if (!same_station) {
                 station_t st;
                 const bool known = stations_get(stations_index(), &st) &&
                                    st.uuid[0];
 
-                if (netstream_logo(s_art_url, sizeof(s_art_url))) {
-                    ESP_LOGI(TAG, "artwork from the station: %.120s", s_art_url);
-                } else if (known) {
-                    radiobrowser_favicon(st.uuid, s_art_url, sizeof(s_art_url));
+                if (!netstream_logo(s_stream_art_logo,
+                                    sizeof(s_stream_art_logo))) {
+                    s_stream_art_logo[0] = '\0';
                 }
-                if (s_art_url[0]) {
-                    radiobrowser_art_fetch(s_art_url, &s_art_img, &s_art_len);
-                }
-                /* After the artwork, so a slow lookup cannot delay the
-                 * click past the point where the listener has moved on. */
-                if (known) radiobrowser_click(st.uuid);
+                snprintf(s_stream_art_uuid, sizeof(s_stream_art_uuid), "%s",
+                         known ? st.uuid : "");
+                snprintf(s_stream_art_for, sizeof(s_stream_art_for), "%s",
+                         s_stream_url);
 
+                /* Claimed before the request goes out, so a reconnect
+                 * arriving while the fetch is in flight is recognised
+                 * as the same station and does not ask again. */
                 snprintf(s_art_stream_url, sizeof(s_art_stream_url), "%s",
                         s_stream_url);
-                s_repaint_art = true;
+                s_stream_art_want = true;
             }
             /* Same station: s_art_img is still valid, still painted,
              * and the directory has already had its click. Nothing to
@@ -10713,6 +10848,47 @@ static track_end_t play_stream(const char *url, const char *name)
             ESP_LOGI(TAG, "title: \"%s\"", s_stream_bottom);
         }
         s_stream_status = streamplan_status(net, plan.phase, out.audible);
+
+        /*
+         * THE PICTURE ARRIVING, INSTALLED BY THE TASK THAT OWNS IT.
+         *
+         * s_art_img is allocated, replaced and freed on this task and
+         * nowhere else -- play_stream()'s teardown frees it, and a
+         * media_task that assigned it directly would be writing a
+         * pointer this function is entitled to free at any moment. So
+         * the reply is a value with the station it belongs to attached,
+         * and this is the one place it becomes the artwork.
+         *
+         * A reply for a different station is freed rather than shown.
+         * That is also what drains one left over from a station that
+         * ended while its fetch was in flight: the next stream's first
+         * pass through this loop finds it, does not match, and disposes
+         * of it.
+         */
+        if (s_stream_art_ready) {
+            s_stream_art_ready = false;
+            uint8_t *img = s_stream_art_img;
+            const size_t len = s_stream_art_len;
+            s_stream_art_img = NULL;
+            s_stream_art_len = 0;
+
+            if (img && strcmp(s_stream_art_got_for, s_stream_url) == 0) {
+                free(s_art_img);
+                s_art_img = img;
+                s_art_len = len;
+                s_art_decoded = false;
+                s_art_screen_stale = false;
+                snprintf(s_art_url, sizeof(s_art_url), "%s",
+                         s_stream_art_got_url);
+                /* The reason 0422 set this: without it the picture is
+                 * correct in memory and invisible until something else
+                 * happens to redraw the square. */
+                s_repaint_art = true;
+            } else {
+                ESP_LOGI(TAG, "artwork arrived for another station; dropped");
+                free(img);
+            }
+        }
 
         /*
          * THE ARTWORK SQUARE, WHICH play_stream() WAS NOT REPAINTING AT
@@ -10905,6 +11081,25 @@ static track_end_t play_stream(const char *url, const char *name)
     s_art_screen_stale = false;
     s_art_url[0] = '\0';
     s_art_stream_url[0] = '\0';
+
+    /*
+     * A request nobody has picked up is about a station that is over.
+     * A reply that has already landed is 192 KB at most and there is
+     * nothing left to show it on, so it goes here rather than waiting
+     * for the next station's install to reject it.
+     *
+     * A fetch still IN FLIGHT is not covered and cannot be: media_task
+     * is inside an HTTP request and will publish when it returns. That
+     * reply is dropped by the first pass of the next stream, which is
+     * the same disposal path and one station later.
+     */
+    s_stream_art_want = false;
+    if (s_stream_art_ready) {
+        s_stream_art_ready = false;
+        free(s_stream_art_img);
+        s_stream_art_img = NULL;
+        s_stream_art_len = 0;
+    }
 
     /* The badge goes with the station that earned it, before the fade
      * and the stop-wait below rather than after -- it describes a gain
