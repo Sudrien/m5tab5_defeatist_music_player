@@ -3207,7 +3207,33 @@ static size_t            s_art_len;
  * Cleared whenever s_art_img is replaced or freed, so it can never
  * describe a buffer that no longer exists.
  */
-static bool               s_art_painted;
+/*
+ * WRONG NAME FOR WHAT THIS ACTUALLY TRACKS, AND THE WRONGNESS WAS THE
+ * 0424 BUG.
+ *
+ * s_art_painted meant "these bytes have been decoded and blitted since
+ * they last changed" -- which is true forever once it happens, because
+ * the bytes for a station never change. It does NOT mean "the panel
+ * currently shows them", and those are only the same fact until
+ * something else draws over the square. The sleep page does exactly
+ * that: it takes the whole panel, and its own close path correctly sets
+ * s_repaint_art so show_stream_card() runs again -- and then this flag,
+ * still true from the FIRST paint, made it return with nothing drawn.
+ * The square came back to a sleep page's leftover pixels rather than
+ * the picture, on the very first sleep/close in the reported session,
+ * board log confirmed: no `cover fitted to` line anywhere near the
+ * close.
+ *
+ * Renamed to say what it is actually for -- skipping the DECODE, not
+ * skipping the DRAW -- and cleared wherever screen_covered() was true,
+ * because that is precisely "something else may have drawn over the
+ * square since", which is the only condition under which the square's
+ * current contents are in doubt. Everywhere else the decode is still
+ * skipped on the same bytes; only the two of these together decide
+ * whether a blit onto the panel is needed.
+ */
+static bool               s_art_decoded;
+static bool               s_art_screen_stale;   /* something else may have drawn over it */
 /*
  * The stream URL the art in s_art_img (and the click already sent for
  * it) belong to.
@@ -9461,6 +9487,8 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
      */
     if (screen_covered()) {
         s_repaint_art = true;
+        s_art_screen_stale = true;   /* the panel is no longer known-good --
+                                       * see s_art_decoded just below */
         return;
     }
 
@@ -9484,10 +9512,24 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
      * chooser costs nothing.
      */
     if (s_art_img && s_art_len) {
-        if (s_art_painted) return;    /* already on screen, same bytes */
+        /*
+         * Redraw if the panel might not show this any more, EVEN
+         * THOUGH the bytes were decoded once already -- that is the
+         * distinction 0424 fixes over 0423's s_art_painted, which
+         * conflated the two. There is no cheaper path here:
+         * albumart_show() always decodes from the raw bytes, so a stale
+         * redraw costs exactly what the first paint cost. Accepted
+         * because it is bounded by something covering the whole panel
+         * -- the sleep page, the chooser, settings -- which is a
+         * deliberate action and not a repaint storm, and because the
+         * alternative is a square that stays wrong until the station
+         * changes.
+         */
+        if (s_art_decoded && !s_art_screen_stale) return;
+        s_art_screen_stale = false;
         const esp_err_t aerr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                              s_art_img, s_art_len);
-        if (aerr == ESP_OK) { s_art_painted = true; return; }
+        if (aerr == ESP_OK) { s_art_decoded = true; return; }
         /*
          * It decoded as far as the magic bytes and no further. Dropped
          * rather than retried -- the bytes will not decode better next
@@ -9499,7 +9541,7 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
         free(s_art_img);
         s_art_img = NULL;
         s_art_len = 0;
-        s_art_painted = false;
+        s_art_decoded = false;
     }
 
     char head[24] = "";
@@ -10544,7 +10586,8 @@ static track_end_t play_stream(const char *url, const char *name)
                 strcmp(s_art_stream_url, s_stream_url) == 0;
             if (!same_station) {
                 s_art_url[0] = '\0';
-                s_art_painted = false;
+                s_art_decoded = false;
+                s_art_screen_stale = false;
             }
             /* The click and the artwork fetch have moved: see below.
              * This branch now only does what its name says -- notices
@@ -10826,7 +10869,8 @@ static track_end_t play_stream(const char *url, const char *name)
     free(s_art_img);
     s_art_img = NULL;
     s_art_len = 0;
-    s_art_painted = false;
+    s_art_decoded = false;
+    s_art_screen_stale = false;
     s_art_url[0] = '\0';
     s_art_stream_url[0] = '\0';
 
