@@ -6,6 +6,8 @@ the design document; this file is the set of things that are easy to get
 Claude should create `git am`-able patches authored as
 `Claude <noreply@anthropic.com>`.
 
+Claude should present patches as soon as available, as the might get stuck behind an ending session.
+
 **Patches are cumulative.** Each one applies on top of what is already
 here. Do not hand back a rewritten copy of a file, and do not reissue a
 corrected version of a patch that has been pushed -- send a follow-up
