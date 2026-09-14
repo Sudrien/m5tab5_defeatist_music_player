@@ -9487,8 +9487,6 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
      */
     if (screen_covered()) {
         s_repaint_art = true;
-        s_art_screen_stale = true;   /* the panel is no longer known-good --
-                                       * see s_art_decoded just below */
         return;
     }
 
@@ -10786,6 +10784,40 @@ static track_end_t play_stream(const char *url, const char *name)
                                  br_now     != shown_kbps;
 
         if (s_repaint_art || facts_moved || !art_shown) {
+            /*
+             * WHY THIS SETS s_art_screen_stale RATHER THAN
+             * show_stream_card() DOING IT ITSELF, WHICH 0425 TRIED AND
+             * WHICH DID NOT WORK.
+             *
+             * 0425 set the stale flag from inside show_stream_card()'s
+             * own screen_covered() check, on the theory that a call
+             * made while the screen was covered was the signal. It is
+             * not: the sleep page's own close handler runs
+             * sleeppage_close() and THEN falls through into the same
+             * loop iteration that reaches show_stream_card() -- by the
+             * time that call happens, sleeppage_is_open() is already
+             * false, screen_covered() is already false, and the branch
+             * that was meant to catch this never fires. Board log
+             * confirmed: still nothing after a close, on a station that
+             * had painted correctly once already.
+             *
+             * s_repaint_art is already the flag every one of the
+             * thirteen places that can cover the screen sets, for
+             * exactly the reason that something needs repainting. This
+             * is where all thirteen converge to be read. So the screen
+             * is marked stale HERE, at the read, rather than trying to
+             * duplicate a second flag at every site that sets the
+             * first one -- which is the same mistake in a different
+             * shape, since missing even one of those thirteen sites
+             * reproduces this exact bug on whatever covers the screen
+             * from that site.
+             *
+             * facts_moved and !art_shown do not set it: neither implies
+             * anything drew over the square, only that the text card's
+             * own numbers changed or that nothing has been shown yet,
+             * and the decoded-bytes cache is still valid in both cases.
+             */
+            if (s_repaint_art) s_art_screen_stale = true;
             s_repaint_art = false;
             art_shown = true;
             shown_codec = codec_now;
