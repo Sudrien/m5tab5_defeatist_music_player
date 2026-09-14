@@ -57,13 +57,17 @@ Note: the goal of this project is to max out the potential of this hardware with
 - 3 second fade on media pull
 - configurable crossfade
 - actually paying attention to gapless playback data
+- Internet Radio via https://www.radio-browser.info API, or manual list entry. This is "power tether" territory.
+- Sleep timer (up t 2 hours, 15 minute intervals)
+- brightness control
+- Network Time Protocol (if wifi has been setup)
+- captive portal wifi config (multiple routers)
 
 ## v0.4.0 targets
-- Internet Radio. Though this is "power tether" territory.
-  - https://www.radio-browser.info 
-- Sleep timer
-- NTP
-- captive portal wifi config (multiple routers)
+- captive portal manual Internet Radio station entry 
+- Internet radio favorites
+
+
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
