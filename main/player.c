@@ -3268,8 +3268,8 @@ static char               s_art_stream_url[NETSTREAM_URL_MAX];
  * on the player task, and a board log says what that costs: the fetch
  * spanned 38949 to 41534 and the click 41534 to 42742, so the decode
  * loop spent 3.8 s inside esp_http_client instead of draining the ring
- * -- with the reserve at four seconds, which is all BUFPLAN_START_MS
- * asks for. The netstream lines bracket it exactly, `stalled` going 20
+ * -- with the reserve at four seconds, which was all the start
+ * threshold asked for at the time. The netstream lines bracket it exactly, `stalled` going 20
  * to 34 to 64 ms across that window. For the whole of it a transport
  * press had nowhere to land either.
  *
@@ -9824,6 +9824,30 @@ static int stream_buffered_ms(uint32_t rate)
 }
 
 /*
+ * What the ring could hold, in the same units, for bufplan's start
+ * target.
+ *
+ * The ring is bytes and the threshold is time, and that conversion is
+ * the whole reason this exists: PCM_RING_BYTES is 20.4 s at 44.1 kHz
+ * and 18.7 s at 48 kHz, so a start threshold stated in milliseconds is
+ * a different share of the ring on every station -- and at a high
+ * enough rate, a share greater than one, which is a preroll that can
+ * never complete. bufferplan.h takes the capacity and works out the
+ * share itself; this is the only place that knows the ring's size.
+ *
+ * Same `rate` argument as stream_buffered_ms(), for the same reason:
+ * the ring holds samples at the rate audio_out was last set to, not
+ * whatever the decoder most recently reported. Zero before the first
+ * frame, which bufplan reads as "not known" rather than as "no room".
+ */
+static int stream_capacity_ms(uint32_t rate)
+{
+    if (!s_pcm || rate == 0) return 0;
+    const uint32_t per_sec = rate * 4;          /* 2 ch * int16 */
+    return (int)((uint64_t)PCM_RING_BYTES * 1000 / per_sec);
+}
+
+/*
  * Play one station until it ends, fails, or the listener leaves.
  *
  * Returns the same track_end_t play_file() does so that player_loop()
@@ -10169,8 +10193,7 @@ static track_end_t play_stream(const char *url, const char *name)
              * switch over", which is exactly what that is.
              *
              * AND IT DEFEATED THE PREROLL GATE. bufplan holds PREROLL
-             * until BUFPLAN_START_MS of decoded audio is queued -- 4 s
-             * -- but the ring still held seconds of the PREVIOUS
+             * until its start target of decoded audio is queued -- but the ring still held seconds of the PREVIOUS
              * station, so the watermark was already satisfied and the
              * new stream went audible on its first frame. WNZK reached
              * "first sound" five milliseconds after its first frame,
@@ -10513,6 +10536,7 @@ static track_end_t play_stream(const char *url, const char *name)
                         bufplan_in_t in = {
                             .now_ms = esp_timer_get_time() / 1000,
                             .buffered_ms = stream_buffered_ms(out_rate),
+                            .capacity_ms = stream_capacity_ms(out_rate),
                             .source_done = false,
                             .stop_requested = false,
                         };
@@ -10567,6 +10591,7 @@ static track_end_t play_stream(const char *url, const char *name)
         bufplan_in_t in = {
             .now_ms = esp_timer_get_time() / 1000,
             .buffered_ms = stream_buffered_ms(out_rate),
+            .capacity_ms = stream_capacity_ms(out_rate),
             .source_done = source_done,
             .stop_requested = leaving,
         };

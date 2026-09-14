@@ -61,8 +61,76 @@ extern "C" {
 #endif
 
 /* Milliseconds of decoded audio in the PCM ring. */
-#define BUFPLAN_START_MS        (4000)
+/*
+ * THE START TARGET IS A SHARE OF THE RING, NOT A NUMBER OF SECONDS.
+ *
+ * BUFPLAN_START_MS was 4000, and the request was for the buffer to be
+ * substantially used before playback rather than barely started. Simply
+ * raising it does not work, and the way it fails is worth stating
+ * because it is not a tuning problem:
+ *
+ * The PCM ring is BYTES. It holds stereo int16 at the output rate, so
+ * PCM_RING_BYTES of 3520 KB is 20.4 s at 44.1 kHz and 18.7 s at 48 kHz.
+ * A fixed millisecond target is therefore a different share of the ring
+ * on every station, and at a high enough output rate it is a share
+ * greater than one -- at which point preroll can never complete. What
+ * that looks like on the board is not a long wait: the ring saturates,
+ * the decode loop parks in xStreamBufferSend(), the compressed ring
+ * backs up, netstream stops reading the socket (it waits rather than
+ * dropping, and says so), and the stream dies either at
+ * BUFPLAN_PREROLL_GIVEUP_MS or when the server drops a client that
+ * stopped reading. A station delivering perfectly is declared
+ * unplayable, and the log reads as a network fault.
+ *
+ * So the caller states the ring's capacity in the same units as the
+ * level, and the target is a percentage of it. It cannot ask for more
+ * than exists, by construction, and it does not have to be revisited
+ * when PCM_RING_BYTES moves -- which it has, three times.
+ */
+#define BUFPLAN_START_PCT       (75)
+
+/*
+ * AND THE FLOOR, WHICH IS THE OTHER HALF AND FAILS THE OTHER WAY.
+ *
+ * Reaching 75% requires delivery above 1.0x, sustained. Dance Wave!
+ * settles at `136 kbit/s of 136 needed (100%)` and `130 of 134 (97%)`:
+ * a station arriving at exactly its own bitrate never grows the reserve
+ * at all, so the target is unreachable for a completely healthy stream
+ * and raising the giveup only lengthens the silence before the same
+ * teardown.
+ *
+ * 4000 is the value BUFPLAN_START_MS had and is a known-good floor --
+ * every station that plays today reaches it. Kept as the floor rather
+ * than raised, so the stations that cannot do better behave exactly as
+ * they do now and only the ones with headroom get the deeper reserve.
+ */
+#define BUFPLAN_START_MIN_MS    (4000)
+
+/*
+ * HOW LONG THE LEVEL HAS TO SIT FLAT before the target is given up on.
+ *
+ * Five seconds because netstream's own delivery figures are
+ * five-second windows, and a decision taken faster than the measurement
+ * is a decision about noise. Growth below BUFPLAN_START_GROWTH_MS
+ * across one window means this link is not going to do better, so the
+ * floor is what there is going to be.
+ *
+ * 500 ms of growth in five seconds is 1.1x delivery. Below that the
+ * target is minutes away even when it is reachable at all, which is not
+ * a wait anybody would choose over starting.
+ */
+#define BUFPLAN_START_WINDOW_MS (5000)
+#define BUFPLAN_START_GROWTH_MS (500)
+
 #define BUFPLAN_LOW_MS          (1000)
+/*
+ * RESUME IS NOT THE START TARGET, deliberately. A mid-stream rebuffer
+ * to 75% is fifteen seconds of silence in the middle of a station
+ * somebody is listening to, which is worse than the rebuffer it is
+ * trying to prevent a repeat of. Preroll is a wait the listener has
+ * already accepted by choosing the station; a rebuffer is an
+ * interruption, and the two want different answers.
+ */
 #define BUFPLAN_RESUME_MS       (4000)
 
 /*
@@ -107,11 +175,22 @@ typedef struct {
     uint32_t rebuffers;
     int64_t  silent_ms;         /* total time the writer was held off */
     int64_t  last_now_ms;
+    /* The stall detector's sample: the level when the current window
+     * opened, and when that was. Only meaningful in PREROLL, and reset
+     * on entering it so a second station cannot inherit the first's
+     * window. */
+    int      preroll_mark_ms;
+    int64_t  preroll_mark_at;
 } bufplan_t;
 
 typedef struct {
     int64_t now_ms;
     int     buffered_ms;    /* decoded audio in the PCM ring */
+    /* What the ring could hold, same units. The start target is a share
+     * of this rather than a constant, so it can never exceed capacity.
+     * 0 means the caller does not know -- a rate of zero before the
+     * first decoded frame -- and the floor is used alone. */
+    int     capacity_ms;
     /* The source will produce no more bytes, ever: netstream is FAILED,
      * or it is IDLE because it was stopped. Not the same as "currently
      * retrying", which is still live. */
@@ -134,12 +213,39 @@ static inline void bufplan_init(bufplan_t *b, int64_t now_ms)
     memset(b, 0, sizeof(*b));
     b->phase = BUFPLAN_PREROLL;
     b->phase_since_ms = now_ms;
+    b->preroll_mark_at = now_ms;
     b->last_now_ms = now_ms;
+}
+
+/*
+ * The start target and the floor, both clamped to what the ring can
+ * actually hold.
+ *
+ * The floor is clamped too, and that is not belt-and-braces: on a ring
+ * whose capacity is below BUFPLAN_START_MIN_MS the floor is the
+ * unreachable one, and the failure is the same saturate-and-die.
+ * Neither number is allowed to name a level that cannot exist.
+ */
+static inline int bufplan_start_target_ms(int capacity_ms)
+{
+    if (capacity_ms <= 0) return BUFPLAN_START_MIN_MS;
+    const int target = (int)(((int64_t)capacity_ms * BUFPLAN_START_PCT) / 100);
+    return target > 0 ? target : 1;
+}
+
+static inline int bufplan_start_floor_ms(int capacity_ms)
+{
+    const int target = bufplan_start_target_ms(capacity_ms);
+    return target < BUFPLAN_START_MIN_MS ? target : BUFPLAN_START_MIN_MS;
 }
 
 static inline void bufplan_enter(bufplan_t *b, bufplan_phase_t p, int64_t now_ms)
 {
     if (b->phase == p) return;
+    if (p == BUFPLAN_PREROLL) {
+        b->preroll_mark_ms = 0;
+        b->preroll_mark_at = now_ms;
+    }
     if (p == BUFPLAN_REBUFFERING) b->rebuffers++;
     b->phase = p;
     b->phase_since_ms = now_ms;
@@ -178,8 +284,30 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
     const int buffered = in->buffered_ms > 0 ? in->buffered_ms : 0;
 
     switch (b->phase) {
-    case BUFPLAN_PREROLL:
-        if (buffered >= BUFPLAN_START_MS) {
+    case BUFPLAN_PREROLL: {
+        const int target = bufplan_start_target_ms(in->capacity_ms);
+        const int floor  = bufplan_start_floor_ms(in->capacity_ms);
+
+        /*
+         * The window closes on its own schedule whether or not it
+         * decides anything, so a station that is climbing is measured
+         * against the last five seconds rather than against the start
+         * of the phase. Growth across a whole preroll is not the
+         * question; growth right now is.
+         */
+        bool stalled = false;
+        if (in->now_ms - b->preroll_mark_at >= BUFPLAN_START_WINDOW_MS) {
+            stalled = (buffered - b->preroll_mark_ms) < BUFPLAN_START_GROWTH_MS;
+            b->preroll_mark_ms = buffered;
+            b->preroll_mark_at = in->now_ms;
+        }
+
+        if (buffered >= target) {
+            bufplan_enter(b, BUFPLAN_PLAYING, in->now_ms);
+        } else if (stalled && buffered >= floor) {
+            /* This link is not going to do better. The floor is what
+             * there is going to be, and waiting longer buys silence
+             * rather than reserve. */
             bufplan_enter(b, BUFPLAN_PLAYING, in->now_ms);
         } else if (in->source_done) {
             /* Never reached the watermark and nothing more is coming.
@@ -190,6 +318,7 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
             bufplan_enter(b, BUFPLAN_ENDED, in->now_ms);
         }
         break;
+    }
 
     case BUFPLAN_PLAYING:
         if (in->source_done) {

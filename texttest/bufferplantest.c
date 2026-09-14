@@ -38,11 +38,32 @@ static int checks;
 static bufplan_t b;
 static bufplan_out_t out;
 
+/*
+ * The ring the cases below are played on.
+ *
+ * 5334 ms of capacity puts the 75% target at exactly 4000, which is the
+ * fixed threshold every case in this file was written against. So the
+ * older cases are unchanged in meaning and still say what they said:
+ * what moved is where the number comes from, not what it is. The cases
+ * that exercise a DIFFERENT ring set this for themselves.
+ */
+#define CAPACITY_4000   (5334)
+
+static int g_capacity = CAPACITY_4000;
+static int START = 4000;
+
+static void set_capacity(int capacity_ms)
+{
+    g_capacity = capacity_ms;
+    START = bufplan_start_target_ms(capacity_ms);
+}
+
 /* One step at a given time with a given buffer level. */
 static void step(int64_t now, int buffered, bool done, bool stop)
 {
     bufplan_in_t in = {
         .now_ms = now, .buffered_ms = buffered,
+        .capacity_ms = g_capacity,
         .source_done = done, .stop_requested = stop,
     };
     bufplan_step(&b, &in, &out);
@@ -51,6 +72,8 @@ static void step(int64_t now, int buffered, bool done, bool stop)
 int main(void)
 {
     printf("bufferplantest\n");
+    set_capacity(CAPACITY_4000);
+    CHECK(START == 4000, "the shim ring's target is %d, not 4000", START);
 
     /* ---------------------------------------------------------------- */
     /* The ordinary life of a stream                                     */
@@ -66,10 +89,10 @@ int main(void)
          * whole point of the watermark is the dip that comes after. */
         step(1000, 1500, false, false);
         CHECK(!out.audible, "sound started at 1.5 s of buffer");
-        step(2000, BUFPLAN_START_MS - 1, false, false);
+        step(2000, START - 1, false, false);
         CHECK(!out.audible, "sound started one millisecond early");
 
-        step(3000, BUFPLAN_START_MS, false, false);
+        step(3000, START, false, false);
         CHECK(out.audible && !out.show_buffering,
               "sound did not start at the watermark");
         CHECK(b.phase == BUFPLAN_PLAYING, "phase is %s",
@@ -90,7 +113,7 @@ int main(void)
     /* ---------------------------------------------------------------- */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         CHECK(out.audible, "setup: not playing");
 
         step(1000, BUFPLAN_LOW_MS - 1, false, false);
@@ -124,7 +147,7 @@ int main(void)
     /* ---------------------------------------------------------------- */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         CHECK(out.audible, "setup: not playing");
 
         /* The socket closes with eight seconds in the ring. Those bytes
@@ -152,7 +175,7 @@ int main(void)
      * RESUME_MS that will never arrive. */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(1000, 0, false, false);
         CHECK(b.phase == BUFPLAN_REBUFFERING, "setup: phase is %s",
               bufplan_phase_name(b.phase));
@@ -165,7 +188,7 @@ int main(void)
     /* Ending during a rebuffer with nothing buffered ends outright. */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(1000, 0, false, false);
         step(2000, 0, true, false);
         CHECK(b.phase == BUFPLAN_ENDED, "phase is %s", bufplan_phase_name(b.phase));
@@ -215,7 +238,7 @@ int main(void)
               BUFPLAN_STALL_GIVEUP_MS);
 
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(100, 0, false, false);
         CHECK(b.phase == BUFPLAN_REBUFFERING, "setup: %s",
               bufplan_phase_name(b.phase));
@@ -231,7 +254,7 @@ int main(void)
     /* A rebuffer that recovers just before the limit is not punished. */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(100, 0, false, false);
         step(100 + BUFPLAN_STALL_GIVEUP_MS - 1, BUFPLAN_RESUME_MS, false, false);
         CHECK(b.phase == BUFPLAN_PLAYING, "a recovery one ms early was refused: %s",
@@ -243,7 +266,7 @@ int main(void)
     /* ---------------------------------------------------------------- */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         /* Nobody wants four more seconds of a station they just left. */
         step(1000, 10000, false, true);
         CHECK(!out.audible && out.finished,
@@ -267,7 +290,7 @@ int main(void)
               bufplan_phase_name(b.phase));
 
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(100, 0, false, false);
         step(200, 0, false, true);
         CHECK(b.phase == BUFPLAN_ENDED, "stop during rebuffer: %s",
@@ -290,9 +313,9 @@ int main(void)
     /* Repeated identical steps change nothing (idempotent at rest). */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         const uint32_t r = b.rebuffers;
-        for (int i = 0; i < 50; i++) step(1000, BUFPLAN_START_MS, false, false);
+        for (int i = 0; i < 50; i++) step(1000, START, false, false);
         CHECK(b.phase == BUFPLAN_PLAYING && b.rebuffers == r,
               "repeated identical steps moved it to %s (%u rebuffers)",
               bufplan_phase_name(b.phase), b.rebuffers);
@@ -301,7 +324,7 @@ int main(void)
     /* Negative and absurd buffer readings are clamped, not trusted. */
     {
         bufplan_init(&b, 0);
-        step(0, BUFPLAN_START_MS, false, false);
+        step(0, START, false, false);
         step(1000, -5000, false, false);
         CHECK(!out.audible, "a negative buffer reading stayed audible");
         bufplan_init(&b, 0);
@@ -321,6 +344,134 @@ int main(void)
         CHECK(b.phase == BUFPLAN_PREROLL, "a clock step changed phase to %s",
               bufplan_phase_name(b.phase));
     }
+
+    /* ---------------------------------------------------------------- */
+    /* The start target as a share of the ring                           */
+    /* ---------------------------------------------------------------- */
+
+    /* A 44.1 kHz station on the real ring: 3520 KB is 20.4 s, so the
+     * target is a little over fifteen seconds. A link with headroom
+     * must wait for it and must NOT start at the old four. */
+    {
+        set_capacity(20400);
+        CHECK(START == 15300, "target on a 20.4 s ring is %d", START);
+
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        /* Climbing fast enough that the stall detector never fires:
+         * three seconds of audio per five of wall clock is 1.6x. */
+        for (int64_t t = 1000; t <= 26000; t += 1000) {
+            const int level = (int)(t * 3 / 5);
+            step(t, level < 20400 ? level : 20400, false, false);
+            if (level < START) {
+                CHECK(!out.audible, "sound started at %d of %d", level, START);
+            }
+        }
+        CHECK(out.audible, "sound never started on a fast link");
+    }
+
+    /* The same ring, a station delivering at almost exactly its own
+     * bitrate. The reserve stops growing around four seconds and the
+     * target is unreachable forever. This is the case that decides
+     * whether the feature is usable: without the floor it is a healthy
+     * station declared dead at PREROLL_GIVEUP_MS. */
+    {
+        set_capacity(20400);
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+
+        step(2000, 3000, false, false);
+        CHECK(!out.audible, "started below the floor");
+        step(4000, 4100, false, false);
+        CHECK(!out.audible, "started at the floor without waiting a window");
+
+        /* Flat from here. The first window closes at 5000 and finds
+         * 4100 against a mark of 0 -- that is growth, so it does not
+         * fire. The second closes at 10000 with no growth at all. */
+        step(5000, 4150, false, false);
+        CHECK(!out.audible, "the first window mistook the ramp for a stall");
+        step(8000, 4180, false, false);
+        CHECK(!out.audible, "started before a window had closed flat");
+        step(10000, 4200, false, false);
+        CHECK(out.audible, "a flat link never started at all");
+        CHECK(b.phase == BUFPLAN_PLAYING, "phase is %s",
+              bufplan_phase_name(b.phase));
+    }
+
+    /* Flat but BELOW the floor is not a start. There is a level below
+     * which four seconds of audio is not a reserve, and a link stuck
+     * there is the one PREROLL_GIVEUP_MS is for. */
+    {
+        set_capacity(20400);
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        for (int64_t t = 1000; t < BUFPLAN_PREROLL_GIVEUP_MS; t += 1000) {
+            step(t, 1200, false, false);
+            CHECK(!out.audible, "started on 1.2 s at t=%lld", (long long)t);
+        }
+        step(BUFPLAN_PREROLL_GIVEUP_MS, 1200, false, false);
+        CHECK(b.phase == BUFPLAN_ENDED, "a stuck link did not give up: %s",
+              bufplan_phase_name(b.phase));
+    }
+
+    /* A ring smaller than the floor. Neither number may name a level
+     * that cannot exist: the failure this guards is the ring
+     * saturating, the decode loop parking in the send, and the station
+     * dying of a threshold rather than of the network. */
+    {
+        set_capacity(3000);
+        CHECK(START == 2250, "target on a 3 s ring is %d", START);
+        CHECK(bufplan_start_floor_ms(3000) == 2250,
+              "the floor was not clamped to the ring");
+
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        step(1000, 2249, false, false);
+        CHECK(!out.audible, "started one millisecond early on a small ring");
+        step(2000, 2250, false, false);
+        CHECK(out.audible, "a small ring never reached its own target");
+    }
+
+    /* Capacity unknown -- the rate is zero until the first frame
+     * decodes, and the caller says so rather than guessing. The floor
+     * alone applies, which is what this did before the share existed. */
+    {
+        set_capacity(0);
+        CHECK(START == BUFPLAN_START_MIN_MS, "unknown capacity gave %d", START);
+
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        step(1000, BUFPLAN_START_MIN_MS - 1, false, false);
+        CHECK(!out.audible, "started early with no capacity known");
+        step(2000, BUFPLAN_START_MIN_MS, false, false);
+        CHECK(out.audible, "never started with no capacity known");
+    }
+
+    /* The window belongs to the phase, not to the machine: a second
+     * station must not inherit the first one's mark and start on a
+     * stall it never observed. */
+    {
+        set_capacity(20400);
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        for (int64_t t = 1000; t <= 12000; t += 1000) step(t, 4200, false, false);
+        CHECK(out.audible, "the first station did not start");
+
+        /* A new station, well past the first one's window boundaries. */
+        bufplan_init(&b, 20000);
+        step(20000, 0, false, false);
+        step(20500, 4200, false, false);
+        CHECK(!out.audible,
+              "the second station inherited the first one's stall window");
+        /* Its own first window closes at 25000 and sees the ramp from
+         * zero, which is growth. The one after it is the flat one. */
+        step(26000, 4250, false, false);
+        CHECK(!out.audible, "the second station started on its ramp window");
+        step(31500, 4260, false, false);
+        CHECK(out.audible, "the second station never started");
+    }
+
+    set_capacity(CAPACITY_4000);
 
     /* ---------------------------------------------------------------- */
     /* Random walks: the invariants, on 20000 hostile sequences          */
