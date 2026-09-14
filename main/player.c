@@ -3175,6 +3175,39 @@ static char              s_art_url[NETSTREAM_URL_MAX];
  */
 static uint8_t          *s_art_img;
 static size_t            s_art_len;
+/*
+ * Has THIS buffer already been decoded and blitted, at the panel's
+ * current size.
+ *
+ * albumart_show() has no memory of its own -- it decodes and fits from
+ * raw bytes on every call, which is right for a file: art is drawn once
+ * per track, and the next redraw is a different track with different
+ * bytes. A station's bytes do not change for the life of the
+ * connection, and show_stream_card() is called on every unrelated
+ * repaint -- the sleep page closing, settings closing, the chooser
+ * opening and cancelling. A board log showed the same 1024x1024 PNG
+ * decoded and re-fitted to 720x720 four times in ninety seconds with
+ * nothing about the picture having changed:
+ *
+ *   cover is 1024x1024 (png)         -- sleep page closed
+ *   cover fitted to 720x720
+ *   cover is 1024x1024 (png)         -- settings closed
+ *   cover fitted to 720x720
+ *   cover is 1024x1024 (png)         -- chooser opened
+ *   cover fitted to 720x720
+ *   cover is 1024x1024 (png)         -- chooser cancelled
+ *   cover fitted to 720x720
+ *
+ * A full JPEG or PNG decode plus a scale to the panel is real CPU on
+ * the player task, which also owns keeping the PCM ring fed -- the same
+ * cost show_format_card()'s cover path already avoids for files by not
+ * re-running albumart_show() when the path has not changed. This is
+ * that same guard, extended to the station path, which had none.
+ *
+ * Cleared whenever s_art_img is replaced or freed, so it can never
+ * describe a buffer that no longer exists.
+ */
+static bool               s_art_painted;
 static volatile uint32_t s_stations_epoch;
 /* The gear's request, and a request rather than a call for the same
  * reason the chooser's is: the press arrives partway through a UI
@@ -9425,9 +9458,10 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
      * chooser costs nothing.
      */
     if (s_art_img && s_art_len) {
+        if (s_art_painted) return;    /* already on screen, same bytes */
         const esp_err_t aerr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                              s_art_img, s_art_len);
-        if (aerr == ESP_OK) return;
+        if (aerr == ESP_OK) { s_art_painted = true; return; }
         /*
          * It decoded as far as the magic bytes and no further. Dropped
          * rather than retried -- the bytes will not decode better next
@@ -9439,6 +9473,7 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
         free(s_art_img);
         s_art_img = NULL;
         s_art_len = 0;
+        s_art_painted = false;
     }
 
     char head[24] = "";
@@ -10472,6 +10507,7 @@ static track_end_t play_stream(const char *url, const char *name)
              * from one number.
              */
             s_art_url[0] = '\0';
+            s_art_painted = false;
             /* The click and the artwork fetch have moved: see below.
              * This branch now only does what its name says -- notices
              * that sound has started -- and nothing here blocks. */
@@ -10747,6 +10783,7 @@ static track_end_t play_stream(const char *url, const char *name)
     free(s_art_img);
     s_art_img = NULL;
     s_art_len = 0;
+    s_art_painted = false;
     s_art_url[0] = '\0';
 
     /* The badge goes with the station that earned it, before the fade
