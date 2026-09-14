@@ -10471,50 +10471,10 @@ static track_end_t play_stream(const char *url, const char *name)
              * to be a resync landing mid-frame. Neither is diagnosable
              * from one number.
              */
-            /*
-             * THE DIRECTORY IS OWED A CLICK, AND THIS IS THE MOMENT.
-             *
-             * At first sound rather than at the tap, because a tap is
-             * not a play: a station that 404s or redirects into nothing
-             * was not listened to, and somebody scrolling fifty rows
-             * must not add fifty counts to the rankings this player's
-             * own menu is sorted by.
-             *
-             * The artwork is resolved in the same breath, from the same
-             * uuid, while the headers for this station are still the
-             * current ones. icy-logo first because it is free and
-             * already in hand; the directory only when the server said
-             * nothing.
-             */
             s_art_url[0] = '\0';
-            {
-                station_t st;
-                const bool known = stations_get(stations_index(), &st) &&
-                                   st.uuid[0];
-
-                if (netstream_logo(s_art_url, sizeof(s_art_url))) {
-                    ESP_LOGI(TAG, "artwork from the station: %.120s", s_art_url);
-                } else if (known) {
-                    radiobrowser_favicon(st.uuid, s_art_url, sizeof(s_art_url));
-                }
-
-                /*
-                 * Fetched here, where blocking is already the rule and
-                 * the ring has twenty seconds in it, rather than on the
-                 * drawing path. A failure leaves the pointer NULL and
-                 * the card is drawn instead.
-                 */
-                if (s_art_url[0]) {
-                    radiobrowser_art_fetch(s_art_url, &s_art_img, &s_art_len);
-                }
-
-                /* After the artwork, so the two requests are naturally
-                 * spaced by the work between them rather than only by
-                 * the rate gap -- and so a slow lookup cannot delay the
-                 * click past the point where the listener has already
-                 * moved on. */
-                if (known) radiobrowser_click(st.uuid);
-            }
+            /* The click and the artwork fetch have moved: see below.
+             * This branch now only does what its name says -- notices
+             * that sound has started -- and nothing here blocks. */
 
             const int decl = netstream_declared_kbps();
             /*
@@ -10548,6 +10508,56 @@ static track_end_t play_stream(const char *url, const char *name)
                           "%d ch decoded, %s",
                      (uint32_t)((esp_timer_get_time() - t_connect) / 1000),
                      out_rate, last_chans, br);
+
+            /*
+             * THE CLICK AND THE ARTWORK, MOVED HERE FROM ABOVE 0422.
+             *
+             * They were sitting ahead of the "first sound" line and
+             * ahead of audio_out_set_idle(false), which is not where a
+             * blocking network call belongs: a board log showed 12.2 s
+             * to first sound on a station that has connected in under
+             * six every other time, with the artwork line timestamped
+             * BEFORE first sound rather than after it. The fetch itself
+             * was never the mistake -- it was already kept off the
+             * repaint path, as the original comment here argued -- the
+             * mistake was leaving it and the click inline in the one
+             * branch that also has to report that sound has started.
+             *
+             * Now: the amplifier is already unmuted, the timestamp is
+             * already taken and logged, and only then does this block.
+             * The listener hears audio at the true first-sound time:
+             * these two network calls delay the PICTURE arriving, which
+             * is a cosmetic wait, rather than delaying the SOUND, which
+             * is not.
+             *
+             * s_repaint_art IS SET, rather than relying on the next
+             * organic redraw. Without it the fetched image sat correct
+             * in memory but invisible until something else -- the
+             * device sleeping and waking, in the case that shipped --
+             * happened to call show_stream_card() again. A card that is
+             * silently one repaint behind the data it holds is the same
+             * shape of bug 0316 exists to prevent for the chooser
+             * overlay, on the same call.
+             */
+            s_art_url[0] = '\0';
+            {
+                station_t st;
+                const bool known = stations_get(stations_index(), &st) &&
+                                   st.uuid[0];
+
+                if (netstream_logo(s_art_url, sizeof(s_art_url))) {
+                    ESP_LOGI(TAG, "artwork from the station: %.120s", s_art_url);
+                } else if (known) {
+                    radiobrowser_favicon(st.uuid, s_art_url, sizeof(s_art_url));
+                }
+                if (s_art_url[0]) {
+                    radiobrowser_art_fetch(s_art_url, &s_art_img, &s_art_len);
+                }
+                /* After the artwork, so a slow lookup cannot delay the
+                 * click past the point where the listener has moved on. */
+                if (known) radiobrowser_click(st.uuid);
+            }
+            s_repaint_art = true;
         }
 
         /*
