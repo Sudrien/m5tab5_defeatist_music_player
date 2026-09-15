@@ -7358,6 +7358,9 @@ Two decisions worth naming:
   which is luck rather than design, so it is 24 KB and the test asserts
   4 KB of margin rather than a bare inequality. `framewin_stuck()` is
   the runtime answer for a stream that is simply not what it claimed.
+  **160 KB since 0500**, by the same arithmetic against an Ogg page's
+  65307 bytes; the reasoning above is unchanged and only the format with
+  the widest frame is.
 
 Nothing calls it yet. The decoder glue is next, and it wants minimp3's
 frame decoder rather than `mp3dec_ex` -- **MP3 first rather than AAC**,
@@ -9512,3 +9515,173 @@ about the line beneath it.
   both ALAC opens in `decoder.c` and restored before the M4A fallback
   open below them, which has every reason to be heard. The entry
   outlived the fix by the rest of the 0900 series.
+
+## The 0500 series: Ogg, and two numbers that were measured in the wrong place
+
+0500 was asked for by a log in which a station connected, delivered, and
+gave up three seconds later on `Ogg streams are not supported yet`. What
+came out of it was one feature and two measurement faults, and the two
+faults are the part worth keeping.
+
+### The feature was one line of routing and a constant
+
+**The refusal was never a statement about capability.** `decoder.c` has
+played `.ogg` and `.opus` files through
+`ESP_AUDIO_SIMPLE_DEC_TYPE_OGG` since the beginning, and `netdec.c`
+already drove that same component for ADTS AAC. Nothing was missing
+except the wire between them.
+
+What makes it work is that **`_OGG` is the container parser, not a
+codec.** netdec.h's list of decoders a sliding window cannot reach names
+`_RAW_OPUS` and `_VORBIS` and both belong on it -- they want exactly one
+encoded frame per call. `_OGG` takes arbitrary lengths, finds its own
+page boundaries, and decides for itself what is inside. That is the same
+property `_AAC` with `use_frame_dec = false` has, and the same argument
+`decoder.c` already makes for files. Broadcast Opus is Ogg-encapsulated
+without exception, so the restriction that rules out the bare codec
+never reaches a station.
+
+So the AAC half of netdec.c was generalised rather than copied:
+`esp_dec_open()` and `esp_read()` serve both, differing by one
+`dec_type` ternary. Most of that diff is a rename. The alternative was
+two functions identical in their window handling, their
+consume-before-error ordering and their format checks -- four places to
+fix a fault twice.
+
+Measured on the board, first run:
+
+    first frame: Ogg, 48000 Hz, 2 ch, 16-bit, 704 bytes -> 960 samples
+    Ogg decoder open (parser-framed); internal free 107607 -> 107783
+
+**The Opus decoder costs nothing measurable in internal RAM.** Two runs
+reported +176 and -176 bytes, which is noise on a heap that moves by
+kilobytes in the same second. AAC cost 15.8 KB and 0115 exists because
+that pool is what the Wi-Fi transport needs; this one is not competing
+for it. The figure was unknown when 0500 was written and the open's
+free-before/free-after line is what answered it -- which is the only
+reason that line exists.
+
+### THE WINDOW IS SIZED BY THE FORMAT WITH THE WIDEST FRAME, AND OGG IS NOW IT
+
+framewin.h's rule has not changed: a window smaller than the largest
+frame means a frame that never fits, a decoder that consumes nothing,
+and a **hang rather than a glitch**. What changed is the number. ADTS
+carries a 13-bit length field and stops at 8191 bytes; **an Ogg page
+runs to 65307** -- 27 of header, 255 segment lengths, 255 * 255 of
+payload. 24 KB could not hold one.
+
+160 KB: two maximum pages and half of a third, in PSRAM where the extra
+136 KB is nothing. A real Opus page from a radio station is a couple of
+KB and none of this is visible on the board. The constant is for the
+station that pages coarsely, and that station is not rare enough to meet
+with a spin.
+
+### AND WIDENING IT BROKE A FIGURE THAT HAD BEEN CORRECT BY ACCIDENT
+
+This is the entry to read twice, because it is **the third instance of
+the same fault in this file**.
+
+The delivery line's denominator comes from `cost_report()`: compressed
+bytes per second of decoded audio, which is what a station costs. On the
+first Ogg run it read like this, on one station, one encoder,
+`icy-br: 192`, with a 16 second reserve and no drops:
+
+    163 kbit/s of 524 needed  (31%) SHORT
+    221 kbit/s of  16 needed (1381%)
+    205 kbit/s of 606 needed  (34%)
+
+**It was counting bytes into the WINDOW, not bytes into the decoder.**
+`s_cost_bytes += got` lived in `refill()`. Bytes sit in the window until
+a frame is complete, so each reading divided one second of samples by
+whatever happened to arrive while they were produced -- and those two
+points are separated by however much audio the window holds. At 24 KB
+that was about a second at broadcast rates, the error stayed inside a
+reading, and 0416 confirmed the figure on two stations. **0500 made the
+window 6.6 seconds wide and multiplied a latent fault by six and a
+half.** `of 16 needed` is the window full; `of 606 needed` is the window
+refilling. Neither is the station.
+
+The fix is to take the delta of `framewin_t`'s own `out` -- the bytes
+the decoder consumed, which are exactly the bytes that became these
+samples. Correct at any window size, which the old one never was.
+Confirmed on the next run: 202-205 on every line against a declared 192,
+delivery 189-225 around it, SHORT on the preroll line only.
+
+**THE RULE, WHICH HAS NOW COST THREE PATCHES.** A ratio whose two halves
+are measured at different points is not a measurement:
+
+- 0414 divided delivery by consumption where both were the compressed
+  ring, and got 100% on every line. A tautology.
+- 0502 divided samples by arrivals where only one end was the decoder,
+  and got a number that followed the buffer instead of the station.
+- The general shape is already written down as A VALUE THAT ANSWERS A
+  DIFFERENT QUESTION, above, and neither of these was caught by reading
+  it.
+
+When a figure changes because a BUFFER changed size, the figure was
+never about the thing it names. The board is what found both of these,
+and in both cases the wrongness was visible as an implausible SPREAD --
+a factor of 38 here -- rather than as an obviously wrong value.
+
+### A stop is not a drop (0501)
+
+The same first log ended with `only 12288 audio bytes before the drop`
+after the decoder had given up and `play_stream()` had torn the stream
+down. `pump()` returns on a stop request as much as on a dead socket.
+The branch beside it already withheld its line during a teardown, for
+exactly this reason and with a comment saying so; the failure branch
+never got the same treatment, and incremented `s_failures` as well.
+Found only because 0500's fault caused a stop early enough to fall under
+`netplan_made_progress()`'s threshold -- a station stopped by the
+listener after a minute takes the other branch and never showed it.
+
+### Progressive JPEG: what was tried, and what is actually left
+
+WALM's `icy-logo` is a progressive JPEG and neither decoder here reads
+one. **This is settled, not open**, and the reasons are worth recording
+so nobody re-derives them:
+
+- The P4's engine handles SOF0 only. TJpgDec handles SOF0 only: in
+  `tjpgd.c`, SOF1 through SOF15 fall to `return JDR_FMT3` inside
+  `jd_prepare()`, before a scan byte is read. There is no configuration
+  that changes it. `decode_software()` is a fallback for MEMORY, not for
+  FORMAT -- it exists for the cover the hardware cannot get a contiguous
+  block for, and a progressive file fails it identically.
+- **TJpgDec's 1/8 path is DC-only**, and the first scan of a progressive
+  file is DC-only, so decoding just that first scan is a real
+  possibility -- roughly fifty lines against a vendored fork of
+  `tjpgd.c`. It yields width/8: a 150x150 logo becomes 18x18, which is a
+  smear. It would be worth having for a 3000px cover and is worthless
+  for a station logo, which is the size stations actually use.
+- A progressive decoder cannot be low-memory. Progressive is defined as
+  coefficients spread across scans, so the whole coefficient array must
+  exist before any IDCT: **3 x W x H bytes for 4:2:0**, MCU-padded. 77 KB
+  for this logo, 3 MB for a 1000px cover, 27 MB for a 3000px one. PSRAM
+  makes the first two free and the third impossible.
+- The candidate, if this is ever wanted: **`stb_image.h`**, which states
+  baseline and progressive support with the stock IJG exclusions, is one
+  public-domain C header, and has `STBI_ONLY_JPEG`, `STBI_NO_STDIO` and
+  `STBI_MALLOC`. Same vendoring pattern as minimp3 and pngle. It cannot
+  downscale, so it needs a pixel ceiling above which the current refusal
+  stands.
+
+0503 took the cheap route first: ask the directory for a different
+picture when the logo will not decode. `radiobrowser_favicon()` had
+existed since 0311 and was reached only when `icy-logo` was ABSENT --
+absent and unusable are not the same thing. **The board answered it in
+one run: WALM's favicon is byte-for-byte the same URL as its logo**, so
+the `strcmp` guard fired and the second fetch was not spent. The station
+shows the text card, and the patch is still right for the stations whose
+two URLs differ.
+
+Two things 0503 got slightly wrong, for whoever is next:
+
+- When there is no alternative URL, the undecodable bytes are still
+  handed to the draw path, which calls `cover_drop()` and walks the
+  markers again before logging the same refusal. Freeing them in that
+  branch is one line.
+- The check is asked in `do_stream_art()`, on media_task, with a marker
+  walk rather than a trial decode. That placement is the correct half
+  and should not be moved: the draw path is a blit on a repaint and has
+  nowhere to go, which is why the failure was useless where it was found
+  originally.
