@@ -29,18 +29,32 @@
  *
  * WHAT IS HERE AND WHAT IS NOT
  *
- * MP3 through minimp3 and ADTS AAC through `esp_audio_simple_dec` --
- * the same two backends, and the same division of labour, as the file
- * path. MP3 landed first, against the order in the plan, because the
- * benchmark station had become WUOM and the path that can be watched on
- * hardware is worth more than the one written down first.
+ * MP3 through minimp3, and ADTS AAC and Ogg through
+ * `esp_audio_simple_dec` -- the same two backends, and the same
+ * division of labour, as the file path. MP3 landed first, against the
+ * order in the plan, because the benchmark station had become WUOM and
+ * the path that can be watched on hardware is worth more than the one
+ * written down first. Ogg landed last, in 0500, on a WALM Opus mount.
  *
- * AAC is opened with `use_frame_dec = false`, which lets the decoder's
- * own parser find ADTS boundaries in whatever the window hands it. That
- * is the same setting the file path uses for a file read as a stream,
- * and it is the reason `_AAC` works here when `_ALAC`, `_VORBIS`,
- * `_RAW_OPUS`, `_ADPCM` and `_LC3` could not: those require exactly one
- * encoded frame per call, and a sliding window cannot promise that.
+ * Both esp_audio_codec decoders are opened with
+ * `use_frame_dec = false`, which lets the decoder's own parser find
+ * boundaries in whatever the window hands it. That is the same setting
+ * the file path uses for a file read as a stream, and it is the reason
+ * `_AAC` and `_OGG` work here when `_ALAC`, `_VORBIS`, `_RAW_OPUS`,
+ * `_ADPCM` and `_LC3` could not: those require exactly one encoded
+ * frame per call, and a sliding window cannot promise that.
+ *
+ * **`_OGG` is the container parser, not a codec**, which is what makes
+ * the difference: it takes arbitrary input lengths and finds page
+ * boundaries itself, and what is inside -- Opus or Vorbis -- is its
+ * business rather than this file's. Broadcast Opus is always
+ * Ogg-encapsulated, so the `_RAW_OPUS` restriction never applies to a
+ * station. `decoder.c` routes `.ogg` and `.opus` files the same way,
+ * for the same reason.
+ *
+ * A native FLAC stream (`fLaC`, not in an Ogg) is still refused by
+ * name. FLAC inside an Ogg reaches `_OGG` like anything else does; what
+ * that parser makes of it is untested here.
  *
  * No seeking, no duration, no pause. A live stream has no position to
  * hold; phase 3's pause is a stop and a fresh connection.

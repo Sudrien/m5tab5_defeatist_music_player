@@ -105,7 +105,11 @@ int main(void)
           "leading space");
     CHECK(codecplan_from_type("audio/aac") == STREAM_CODEC_AAC_ADTS, "audio/aac");
     CHECK(codecplan_from_type("audio/x-aac") == STREAM_CODEC_AAC_ADTS, "x-aac");
-    CHECK(codecplan_from_type("audio/ogg") == STREAM_CODEC_NONE, "ogg mapped");
+    CHECK(codecplan_from_type("audio/ogg") == STREAM_CODEC_OGG, "audio/ogg");
+    CHECK(codecplan_from_type("application/ogg") == STREAM_CODEC_OGG,
+          "application/ogg");
+    CHECK(codecplan_from_type("AUDIO/OGG; charset=utf-8") == STREAM_CODEC_OGG,
+          "audio/ogg with case and parameters");
     CHECK(codecplan_from_type("text/html") == STREAM_CODEC_NONE, "html mapped");
     CHECK(codecplan_from_type("") == STREAM_CODEC_NONE, "empty mapped");
     CHECK(codecplan_from_type(NULL) == STREAM_CODEC_NONE, "NULL mapped");
@@ -132,11 +136,6 @@ int main(void)
 
         r = choose(SNIFF_HTML, "text/html");
         CHECK(r.why == CODECPLAN_IS_PAGE, "html gave why %d", (int)r.why);
-
-        r = choose(SNIFF_OGG, NULL);
-        CHECK(r.why == CODECPLAN_UNSUPPORTED, "ogg gave why %d", (int)r.why);
-        CHECK(strstr(r.message, "Ogg") != NULL,
-              "the Ogg message does not name Ogg: \"%s\"", r.message);
 
         r = choose(SNIFF_FLAC, NULL);
         CHECK(r.why == CODECPLAN_UNSUPPORTED, "flac gave why %d", (int)r.why);
@@ -169,6 +168,44 @@ int main(void)
             CHECK(r.message && r.message[0],
                   "sniff %d has no message", (int)all[i]);
         }
+    }
+
+    /* ---------------------------------------------------------------- */
+    /* Ogg is decoded, not refused (0500)                                */
+    /* ---------------------------------------------------------------- */
+    {
+        /* WALM's Christmas mount: OggS bytes, audio/ogg header, and
+         * before 0500 this pair produced "Ogg streams are not supported
+         * yet" three seconds after connecting. */
+        codecplan_t r = choose(SNIFF_OGG, "audio/ogg");
+        CHECK(r.codec == STREAM_CODEC_OGG && r.why == CODECPLAN_FROM_BYTES,
+              "OggS bytes gave %s (why %d)", stream_codec_name(r.codec),
+              (int)r.why);
+        CHECK(codecplan_ready(&r), "an Ogg stream was not reported as ready");
+
+        /* The header alone is enough when the bytes say nothing, which
+         * is what a station joined mid-page looks like. */
+        r = choose(SNIFF_UNKNOWN, "application/ogg");
+        CHECK(r.codec == STREAM_CODEC_OGG && r.why == CODECPLAN_FROM_TYPE,
+              "application/ogg with unremarkable bytes gave %s",
+              stream_codec_name(r.codec));
+        CHECK(strstr(r.message, "Ogg") != NULL,
+              "the from-type message does not name Ogg: \"%s\"", r.message);
+
+        /* The message for a header-chosen codec used to be a ternary
+         * over two codecs, so a third came out labelled AAC. */
+        r = choose(SNIFF_UNKNOWN, "audio/mpeg");
+        CHECK(strstr(r.message, "MP3") != NULL,
+              "MP3 from header is labelled \"%s\"", r.message);
+        CHECK(strstr(r.message, "AAC") == NULL,
+              "an Ogg or MP3 header produced an AAC label: \"%s\"",
+              r.message);
+
+        /* A native FLAC stream is still refused by name: fLaC is not in
+         * a container and _OGG is the only parser reachable here. */
+        r = choose(SNIFF_FLAC, "audio/ogg");
+        CHECK(r.why == CODECPLAN_UNSUPPORTED,
+              "fLaC bytes with an audio/ogg header gave why %d", (int)r.why);
     }
 
     /* ---------------------------------------------------------------- */
@@ -294,7 +331,8 @@ int main(void)
                           s, t, have);
                     if (codecplan_ready(&r)) {
                         CHECK(r.codec == STREAM_CODEC_MP3 ||
-                              r.codec == STREAM_CODEC_AAC_ADTS,
+                              r.codec == STREAM_CODEC_AAC_ADTS ||
+                              r.codec == STREAM_CODEC_OGG,
                               "sniff %d type %zu: ready with codec %d",
                               s, t, (int)r.codec);
                     }
@@ -313,7 +351,8 @@ int main(void)
             for (size_t i = 0; i < n; i++) buf[i] = (uint8_t)(rand() % 256);
             const codecplan_t r = codecplan_choose(sniff_bytes(buf, n), n, NULL);
             if (codecplan_ready(&r) && r.codec != STREAM_CODEC_MP3 &&
-                r.codec != STREAM_CODEC_AAC_ADTS) {
+                r.codec != STREAM_CODEC_AAC_ADTS &&
+                r.codec != STREAM_CODEC_OGG) {
                 CHECK(0, "iter %d: random bytes gave codec %d", iter, (int)r.codec);
                 break;
             }

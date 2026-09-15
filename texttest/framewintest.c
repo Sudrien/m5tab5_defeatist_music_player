@@ -70,6 +70,14 @@ int main(void)
           FRAMEWIN_BYTES, FRAMEWIN_MAX_FRAME,
           FRAMEWIN_BYTES - 2 * FRAMEWIN_MAX_FRAME);
 
+    /* And an Ogg page, which since 0500 is the widest thing the window
+     * is shown. Same rule, larger number: 24 KB satisfied the line above
+     * and would have been a hang on a coarsely paged stream. */
+    CHECK(FRAMEWIN_BYTES >= 2 * FRAMEWIN_MAX_PAGE + 4096,
+          "the window (%d) clears two maximum Ogg pages (%d) by only %d bytes",
+          FRAMEWIN_BYTES, FRAMEWIN_MAX_PAGE,
+          FRAMEWIN_BYTES - 2 * FRAMEWIN_MAX_PAGE);
+
     /* ---------------------------------------------------------------- */
     /* Basic bookkeeping                                                 */
     /* ---------------------------------------------------------------- */

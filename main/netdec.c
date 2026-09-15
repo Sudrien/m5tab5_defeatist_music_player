@@ -84,7 +84,15 @@ static stream_codec_t s_codec;
  * never going to change.
  */
 static bool s_not_audio;
-static esp_audio_simple_dec_handle_t s_aac;
+
+/*
+ * One esp_audio_codec handle, opened for whichever of the two codecs it
+ * serves. AAC and Ogg differ here only in `dec_type`: both are
+ * parser-framed, both take arbitrary input lengths, and both report
+ * their format the same way. Naming it for AAC, which is what it was
+ * called until 0500, is how the second caller ends up as a copy.
+ */
+static esp_audio_simple_dec_handle_t s_esp;
 
 static uint32_t s_frames;
 static uint64_t s_samples;
@@ -207,9 +215,9 @@ void netdec_close(void)
     if (!s_open) return;
     ESP_LOGI(TAG, "closing after %u frames, %llu samples, %u bytes resynced",
              s_frames, (unsigned long long)s_samples, s_resyncs);
-    if (s_aac) {
-        esp_audio_simple_dec_close(s_aac);
-        s_aac = NULL;
+    if (s_esp) {
+        esp_audio_simple_dec_close(s_esp);
+        s_esp = NULL;
     }
     free(s_win_buf);
     s_win_buf = NULL;
@@ -227,13 +235,19 @@ void netdec_reconnect(void)
      * the station's, not the connection's, and survive. */
     framewin_reset(&s_win);
     mp3dec_init(s_mp3);
-    if (s_aac) {
+    if (s_esp) {
         /* Closed and reopened rather than carried over: the decoder
          * holds parser state for a body that has ended, and an ADTS
          * stream resumed mid-frame is the one thing its parser cannot
-         * be told about. Cheap, and it happens once per drop. */
-        esp_audio_simple_dec_close(s_aac);
-        s_aac = NULL;
+         * be told about. Cheap, and it happens once per drop.
+         *
+         * Ogg needs it more, not less. The Opus and Vorbis headers are
+         * the first pages of a body, and a reconnected body has its own
+         * -- Icecast sends them to every client at the top of the
+         * stream. A decoder kept across the drop would be handed a
+         * second OggS header page while already configured. */
+        esp_audio_simple_dec_close(s_esp);
+        s_esp = NULL;
     }
     ESP_LOGI(TAG, "reconnect: window dropped, %s kept",
              stream_codec_name(s_codec));
@@ -304,26 +318,41 @@ static void identify(void)
 }
 
 /*
- * Open the AAC decoder. Deferred until the codec is known, so an MP3
- * stream never pays for it.
+ * Open the esp_audio_codec decoder for whichever codec was identified.
+ * Deferred until then, so an MP3 stream never pays for it.
+ *
+ * _AAC and _OGG are the two members of that component reachable from a
+ * sliding window. Both let the decoder's own parser find boundaries in
+ * whatever it is shown, which is the property that matters here and the
+ * only thing this function has to know about either of them.
  */
-static bool aac_open(void)
+static bool esp_dec_open(void)
 {
-    if (s_aac) return true;
+    if (s_esp) return true;
 
     /* One owner for the registration flag; see decoder.h. */
     decoder_register_codecs();
 
     esp_audio_simple_dec_cfg_t cfg = {
-        .dec_type = ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,
+        /*
+         * _OGG is the CONTAINER parser and takes arbitrary input
+         * lengths. _RAW_OPUS and _VORBIS are the bare codecs and want
+         * exactly one encoded frame per call, which a window cannot
+         * promise -- decoder.c routes .ogg and .opus files through _OGG
+         * for that same reason, and a broadcast Opus stream is
+         * Ogg-encapsulated in any case.
+         */
+        .dec_type = (s_codec == STREAM_CODEC_OGG)
+                        ? ESP_AUDIO_SIMPLE_DEC_TYPE_OGG
+                        : ESP_AUDIO_SIMPLE_DEC_TYPE_AAC,
         .dec_cfg = NULL,
         .cfg_size = 0,
         /*
-         * false: the decoder's own parser finds ADTS frame boundaries in
-         * whatever the window hands it. true would mean "this buffer is
-         * exactly one frame", which a sliding window cannot promise --
-         * and which is why _ALAC, _VORBIS, _RAW_OPUS, _ADPCM and _LC3
-         * are not reachable from here at all.
+         * false: the decoder's own parser finds frame or page boundaries
+         * in whatever the window hands it. true would mean "this buffer
+         * is exactly one frame", which a sliding window cannot promise
+         * -- and which is why _ALAC, _VORBIS, _RAW_OPUS, _ADPCM and
+         * _LC3 are not reachable from here at all.
          */
         .use_frame_dec = false,
     };
@@ -335,20 +364,26 @@ static bool aac_open(void)
      * minimum was 43560. That is close enough that the cost wants
      * attributing to a line in the log rather than inferred by
      * subtracting two runs.
+     *
+     * Opus has not been measured at all and the same line will say so
+     * on the first run: it carries a resampler and a 48 kHz frame, so
+     * there is no reason to expect the AAC figure to transfer.
      */
     const unsigned before = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    if (esp_audio_simple_dec_open(&cfg, &s_aac) != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "esp_audio_simple_dec_open(AAC) failed");
-        s_aac = NULL;
+    if (esp_audio_simple_dec_open(&cfg, &s_esp) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "esp_audio_simple_dec_open(%s) failed",
+                 stream_codec_name(s_codec));
+        s_esp = NULL;
         return false;
     }
     const unsigned after = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "AAC decoder open (ADTS, parser-framed); internal free "
-                  "%u -> %u (cost %d)", before, after, (int)before - (int)after);
+    ESP_LOGI(TAG, "%s decoder open (parser-framed); internal free "
+                  "%u -> %u (cost %d)", stream_codec_name(s_codec),
+             before, after, (int)before - (int)after);
     return true;
 }
 
-/* One AAC frame out of the window. Same contract as netdec_read(). */
+/* One frame out of the window. Same contract as netdec_read(). */
 /*
  * Publish what the stream costs, about once per second of audio.
  *
@@ -373,9 +408,9 @@ static void cost_report(uint32_t rate)
     if (kbps > 0 && kbps < 100000) netstream_set_actual_kbps((int)kbps);
 }
 
-static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
+static int esp_read(int16_t *out, int max_int16, netdec_info_t *info)
 {
-    if (!aac_open()) return -1;
+    if (!esp_dec_open()) return -1;
     if (framewin_avail(&s_win) == 0) return 0;
 
     esp_audio_simple_dec_raw_t raw = {
@@ -391,27 +426,30 @@ static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
     };
 
     const esp_audio_err_t err =
-        esp_audio_simple_dec_process(s_aac, &raw, &frame);
+        esp_audio_simple_dec_process(s_esp, &raw, &frame);
 
     /* Consumed first, and whatever the error: the decoder has moved past
      * those bytes and showing them again would decode them twice. */
     if (raw.consumed && !framewin_consume(&s_win, (size_t)raw.consumed)) {
-        ESP_LOGE(TAG, "AAC consumed %u of %u shown",
+        ESP_LOGE(TAG, "%s consumed %u of %u shown", stream_codec_name(s_codec),
                  (unsigned)raw.consumed, (unsigned)framewin_avail(&s_win));
         return -1;
     }
 
     if (err == ESP_AUDIO_ERR_BUFF_NOT_ENOUGH) {
-        /* NETDEC_MAX_INT16 is sized for HE-AAC's doubled frame; a
-         * stream needing more than that has a block size nothing here
-         * budgeted for, and truncating it would be silent damage. */
-        ESP_LOGE(TAG, "AAC frame needs %u bytes, buffer is %u",
-                 (unsigned)frame.needed_size,
+        /* NETDEC_MAX_INT16 is sized for HE-AAC's doubled frame, which
+         * also clears Vorbis's 8192-sample block and Opus's 120 ms
+         * frame; a stream needing more than that has a block size
+         * nothing here budgeted for, and truncating it would be silent
+         * damage. */
+        ESP_LOGE(TAG, "%s frame needs %u bytes, buffer is %u",
+                 stream_codec_name(s_codec), (unsigned)frame.needed_size,
                  (unsigned)(max_int16 * sizeof(int16_t)));
         return -1;
     }
     if (err != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "AAC decode error %d", (int)err);
+        ESP_LOGE(TAG, "%s decode error %d", stream_codec_name(s_codec),
+                 (int)err);
         return -1;
     }
     if (frame.decoded_size == 0) {
@@ -428,22 +466,24 @@ static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
      * it is asked here rather than at open. */
     esp_audio_simple_dec_info_t fi;
     memset(&fi, 0, sizeof(fi));
-    if (esp_audio_simple_dec_get_info(s_aac, &fi) != ESP_AUDIO_ERR_OK) {
-        ESP_LOGE(TAG, "AAC decoded %u bytes but reports no format",
-                 (unsigned)frame.decoded_size);
+    if (esp_audio_simple_dec_get_info(s_esp, &fi) != ESP_AUDIO_ERR_OK) {
+        ESP_LOGE(TAG, "%s decoded %u bytes but reports no format",
+                 stream_codec_name(s_codec), (unsigned)frame.decoded_size);
         return -1;
     }
     if (fi.bits_per_sample != 16) {
-        /* The file path folds 24-bit and refuses 32. No broadcast AAC is
-         * either, so this refuses both rather than carrying that
-         * machinery into a path that would never exercise it. */
-        ESP_LOGE(TAG, "AAC is %d-bit; only 16 is handled here",
-                 fi.bits_per_sample);
+        /* The file path folds 24-bit and refuses 32. No broadcast AAC
+         * or Opus is either -- both decode to 16 -- so this refuses
+         * both rather than carrying that machinery into a path that
+         * would never exercise it. */
+        ESP_LOGE(TAG, "%s is %d-bit; only 16 is handled here",
+                 stream_codec_name(s_codec), fi.bits_per_sample);
         return -1;
     }
     if (fi.channel < 1 || fi.channel > 2 || fi.sample_rate <= 0) {
-        ESP_LOGE(TAG, "AAC reports %d channels at %" PRIu32 " Hz",
-                 fi.channel, (uint32_t)fi.sample_rate);
+        ESP_LOGE(TAG, "%s reports %d channels at %" PRIu32 " Hz",
+                 stream_codec_name(s_codec), fi.channel,
+                 (uint32_t)fi.sample_rate);
         return -1;
     }
 
@@ -461,8 +501,8 @@ static int aac_read(int16_t *out, int max_int16, netdec_info_t *info)
     }
     if (!s_reported) {
         s_reported = true;
-        ESP_LOGI(TAG, "first frame: AAC, %" PRIu32 " Hz, %d ch, %d-bit, "
-                      "%u bytes -> %d samples",
+        ESP_LOGI(TAG, "first frame: %s, %" PRIu32 " Hz, %d ch, %d-bit, "
+                      "%u bytes -> %d samples", stream_codec_name(s_codec),
                  (uint32_t)fi.sample_rate, fi.channel, fi.bits_per_sample,
                  (unsigned)raw.consumed, produced / fi.channel);
     }
@@ -498,7 +538,9 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
          * mean wait. */
         return 0;
     }
-    if (s_codec == STREAM_CODEC_AAC_ADTS) return aac_read(out, max_int16, info);
+    if (s_codec == STREAM_CODEC_AAC_ADTS || s_codec == STREAM_CODEC_OGG) {
+        return esp_read(out, max_int16, info);
+    }
     if (s_codec != STREAM_CODEC_MP3) {
         ESP_LOGE(TAG, "%s is not decoded here", stream_codec_name(s_codec));
         return -1;

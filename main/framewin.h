@@ -36,12 +36,22 @@
  *
  *   MPEG1 Layer II, 384 kbit/s, 32 kHz, padded   1441 bytes
  *   ADTS, 13-bit frame length field              8191 bytes
+ *   Ogg page, 27 + 255 + 255 * 255              65307 bytes
  *
- * So 8191 is the real bound, and a window has to hold one whole frame
- * plus whatever partial frame precedes it -- twice that is 16382. A
- * 16 KB window would satisfy that by two bytes, which is luck rather
- * than design, so this is 24 KB: two maximum frames and half of a third.
- * In PSRAM that is nothing; a hang is not.
+ * The Ogg figure is the format's maximum and not a typical page: a
+ * broadcast Opus stream pages every few tens of milliseconds and those
+ * pages are a couple of KB. But the bound is what this constant is for,
+ * and a station that pages coarsely is not a rare enough event to meet
+ * with a hang.
+ *
+ * So a window has to hold one whole frame plus whatever partial frame
+ * precedes it -- twice 65307 is 130614. 128 KB would satisfy that by
+ * 458 bytes, which is luck rather than design, so this is 160 KB: two
+ * maximum pages and half of a third. In PSRAM that is nothing; a hang
+ * is not.
+ *
+ * It was 24 KB until 0500, sized the same way against ADTS when ADTS
+ * was the widest thing here.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -57,7 +67,8 @@ extern "C" {
 #endif
 
 #define FRAMEWIN_MAX_FRAME  (8191)          /* ADTS, 13-bit length field */
-#define FRAMEWIN_BYTES      (24 * 1024)
+#define FRAMEWIN_MAX_PAGE   (65307)         /* Ogg: 27 + 255 + 255 * 255 */
+#define FRAMEWIN_BYTES      (160 * 1024)
 
 typedef struct {
     uint8_t *buf;

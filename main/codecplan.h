@@ -24,11 +24,12 @@
  *
  * WHAT IS DECODED, AND WHAT IS REFUSED WITH A REASON
  *
- * Phase 2's scope is ADTS AAC through esp_audio_codec's simple decoder
- * -- the path `decoder.c` already uses for `.aac` files -- and MP3
- * through minimp3's frame decoder rather than `mp3dec_ex`, which wants
- * to seek. Everything else is refused, but refused *by name*: a station
- * URL that turns out to be an Ogg stream, an HLS playlist or an error
+ * The scope is ADTS AAC and -- since 0500 -- Ogg through
+ * esp_audio_codec's simple decoder, the paths `decoder.c` already uses
+ * for `.aac` and for `.ogg`/`.opus` files, and MP3 through minimp3's
+ * frame decoder rather than `mp3dec_ex`, which wants to seek.
+ * Everything else is refused, but refused *by name*: a station URL that
+ * turns out to be a native FLAC stream, an HLS playlist or an error
  * page are three different things to say on a screen, and "failed" for
  * all three is the version that generates the bug report nobody can
  * act on.
@@ -66,6 +67,7 @@ typedef enum {
     STREAM_CODEC_NONE = 0,  /* nothing decodable decided yet */
     STREAM_CODEC_MP3,       /* minimp3, frame at a time */
     STREAM_CODEC_AAC_ADTS,  /* esp_audio_codec simple decoder */
+    STREAM_CODEC_OGG,       /* esp_audio_codec's Ogg container parser */
 } stream_codec_t;
 
 /* Why, in enough detail to put on a screen. */
@@ -92,6 +94,7 @@ static inline const char *stream_codec_name(stream_codec_t c)
     switch (c) {
     case STREAM_CODEC_MP3:      return "MP3";
     case STREAM_CODEC_AAC_ADTS: return "AAC (ADTS)";
+    case STREAM_CODEC_OGG:      return "Ogg";
     default:                    return "none";
     }
 }
@@ -151,6 +154,15 @@ static inline stream_codec_t codecplan_from_type(const char *ct)
     if (strcmp(t, "audio/aac") == 0 || strcmp(t, "audio/aacp") == 0 ||
         strcmp(t, "audio/x-aac") == 0 || strcmp(t, "audio/mp4a-latm") == 0) {
         return STREAM_CODEC_AAC_ADTS;
+    }
+    /* audio/ogg is what WALM's Opus mount announces, and application/ogg
+     * is what the spec prefers for a stream whose contents are not
+     * declared. Both are the container, which is all this has to say --
+     * see the SNIFF_OGG case below. */
+    if (strcmp(t, "audio/ogg") == 0 || strcmp(t, "application/ogg") == 0 ||
+        strcmp(t, "audio/opus") == 0 || strcmp(t, "audio/vorbis") == 0 ||
+        strcmp(t, "audio/x-ogg") == 0 || strcmp(t, "application/x-ogg") == 0) {
+        return STREAM_CODEC_OGG;
     }
     return STREAM_CODEC_NONE;
 }
@@ -226,8 +238,14 @@ static inline codecplan_t codecplan_choose(sniff_t sniffed, size_t have_bytes,
         r.message = "The station returned a web page";
         return r;
     case SNIFF_OGG:
-        r.why = CODECPLAN_UNSUPPORTED;
-        r.message = "Ogg streams are not supported yet";
+        /* A container, not a codec: what is inside may be Opus, Vorbis
+         * or FLAC, and the parser is the thing that finds out. Naming
+         * the contents here would mean reading the first page, which is
+         * work the decoder is about to do anyway and would then be the
+         * second place that knows how. */
+        r.codec = STREAM_CODEC_OGG;
+        r.why = CODECPLAN_FROM_BYTES;
+        r.message = "Ogg";
         return r;
     case SNIFF_FLAC:
         r.why = CODECPLAN_UNSUPPORTED;
@@ -258,7 +276,9 @@ static inline codecplan_t codecplan_choose(sniff_t sniffed, size_t have_bytes,
     if (from_type != STREAM_CODEC_NONE) {
         r.codec = from_type;
         r.why = CODECPLAN_FROM_TYPE;
-        r.message = from_type == STREAM_CODEC_MP3 ? "MP3" : "AAC";
+        /* Was `from_type == STREAM_CODEC_MP3 ? "MP3" : "AAC"`, which
+         * silently labels every codec added after the second as AAC. */
+        r.message = stream_codec_name(from_type);
         return r;
     }
     return r;
