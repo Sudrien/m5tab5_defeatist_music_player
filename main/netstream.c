@@ -966,6 +966,35 @@ static void netstream_task(void *arg)
                                  (unsigned long long)produced);
                     }
                     s_failures = 0;
+                } else if (superseded(gen)) {
+                    /*
+                     * A STOP IS NOT A DROP, AND THIS IS THE HALF THAT
+                     * STILL SAID IT WAS.
+                     *
+                     * pump() returns on a stop request as well as on a
+                     * dead socket, which the branch above already
+                     * accounts for -- it withholds its line when the
+                     * stream is being stopped, for exactly this reason.
+                     * This branch did not, so a station ended
+                     * deliberately and early enough to be under
+                     * netplan_made_progress()'s threshold was announced
+                     * as a network failure.
+                     *
+                     * The Ogg refusal is how it was found: the decoder
+                     * gave up, play_stream() stopped the stream, and
+                     * the log's last word on a station that had been
+                     * delivering perfectly was `only 12288 audio bytes
+                     * before the drop`. Two faults in one run, and the
+                     * second one blames the network for the first.
+                     *
+                     * The count goes with the message. s_failures is
+                     * reset when a station is requested, so the stray
+                     * increment changes nothing today -- it is wrong in
+                     * the same way the line is, and a failure count that
+                     * counts stops is a trap for whatever reads it next.
+                     */
+                    ESP_LOGI(TAG, "stopped after %llu audio bytes",
+                             (unsigned long long)produced);
                 } else {
                     s_failures++;
                     ESP_LOGW(TAG, "only %llu audio bytes before the drop",
