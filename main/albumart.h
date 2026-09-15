@@ -53,6 +53,27 @@ esp_err_t albumart_extract_at(FILE *f, storage_io_class_t cls, long base,
  * than the file. */
 bool albumart_is_supported_image(const uint8_t *p, size_t len);
 
+/*
+ * Is this JPEG one the decoders here can take? SOI and a SOF0, found by
+ * walking the markers; the P4's engine and TJpgDec are both
+ * baseline-only, so a progressive file is refused whichever of them it
+ * reaches. `*sof_out` is the marker that was found, or 0 for none, and
+ * the dimensions come from its payload.
+ *
+ * DELIBERATELY NOT FOLDED INTO albumart_is_supported_image(), which
+ * answers a different question: that one is "are these bytes a picture
+ * at all", asked by every container's picture block, and a progressive
+ * JPEG is a picture. Merging them would make a file whose only cover is
+ * progressive report no cover, silently, instead of reaching
+ * albumart_draw()'s line naming the SOF marker -- which is the line
+ * that tells you to re-encode it.
+ *
+ * Exported for the caller that has somewhere else to go when the answer
+ * is no. A station has two possible pictures; a file has one.
+ */
+bool albumart_jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out,
+                               uint32_t *w_out, uint32_t *h_out);
+
 /* Decode and blit centred, cropping anything larger than the panel.
  * JPEG goes through the P4's hardware codec; PNG is streamed by pngle
  * straight into the framebuffer. albumart_show() picks by magic bytes. */

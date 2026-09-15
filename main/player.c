@@ -5341,6 +5341,27 @@ static void prefetch_next(void)
  * cover path is the deeper one.
  */
 /*
+ * Will albumart_show() get a picture out of these bytes?
+ *
+ * Magic first, then -- for a JPEG -- the SOF, because both decoders in
+ * albumart.c are baseline-only. This is a marker walk over a header and
+ * allocates nothing; it is not a trial decode, and it is not allowed to
+ * become one. The question being asked is "should I go and look
+ * somewhere else", which has to be cheaper than the looking.
+ *
+ * A PNG passes on its magic alone: pngle has no equivalent of a
+ * progressive mode, and an interlaced PNG it handles.
+ */
+static bool stream_art_decodable(const uint8_t *img, size_t len)
+{
+    if (!albumart_is_supported_image(img, len)) return false;
+    if (img[0] != 0xFF) return true;                /* PNG */
+    uint8_t sof = 0;
+    uint32_t w = 0, h = 0;
+    return albumart_jpeg_is_baseline(img, len, &sof, &w, &h);
+}
+
+/*
  * The station's picture and the directory's click, on the task that is
  * allowed to block. See the handoff comment above s_stream_art_logo.
  *
@@ -5361,6 +5382,7 @@ static void do_stream_art(void)
 
     /* The directory only when the station itself did not say. Same
      * order as before; what changed is which task waits for it. */
+    const bool from_logo = url[0] != '\0';
     if (!url[0] && uuid[0]) {
         radiobrowser_favicon(uuid, url, sizeof(url));
     }
@@ -5373,8 +5395,68 @@ static void do_stream_art(void)
     }
 
     /* After the artwork, as before: a slow lookup must not delay the
-     * click past the point where the listener has moved on. */
+     * click past the point where the listener has moved on. And before
+     * the second fetch below, for the same reason and more so -- that
+     * one is a directory lookup AND a download. */
     if (uuid[0]) radiobrowser_click(uuid);
+
+    /*
+     * THE STATION HAS A SECOND PICTURE, AND THIS IS THE ONE CASE WORTH
+     * SPENDING IT ON.
+     *
+     * icy-logo wins over the directory because the station knows its own
+     * artwork better than a volunteer-edited index does. But WALM's
+     * logo is a progressive JPEG, which neither decoder here can read,
+     * and the failure was discovered on the DRAWING path -- a fetch, a
+     * blit attempt and `station artwork failed to decode` -- by which
+     * point the alternative was five seconds and a station change away.
+     *
+     * Asked here instead, where the bytes are in hand on the task that
+     * is allowed to block, and asked with a marker walk rather than a
+     * decode. A no is cheap and the answer is actionable: the directory
+     * may be holding a different file.
+     *
+     * ONLY WHEN IT IS A DIFFERENT FILE. A great many stations set
+     * icy-logo and the directory's favicon to the same URL, and
+     * refetching that gets the same progressive bytes at the cost of
+     * two requests. The URLs are compared exactly: a string match means
+     * the same file, and two URLs that differ only in case or a
+     * trailing slash are not worth the code to normalise, since the
+     * failure of guessing wrong is one wasted fetch.
+     *
+     * Only for a logo, too. When the directory was already the source
+     * there is nothing left to fall back to.
+     */
+    if (img && from_logo && uuid[0] &&
+        !stream_art_decodable(img, len)) {
+        char alt[NETSTREAM_URL_MAX];
+        alt[0] = '\0';
+        if (radiobrowser_favicon(uuid, alt, sizeof(alt)) && alt[0] &&
+            strcmp(alt, url) != 0) {
+            ESP_LOGI(TAG, "the station's logo cannot be decoded; trying the "
+                          "directory's: %.120s", alt);
+            free(img);
+            img = NULL;
+            len = 0;
+            radiobrowser_art_fetch(alt, &img, &len);
+            if (img && !stream_art_decodable(img, len)) {
+                /* Both refused. Dropped here rather than handed on, so
+                 * the draw path is not asked to decode a second picture
+                 * it has already been told about -- the text card is
+                 * what a station with no usable picture gets. */
+                ESP_LOGW(TAG, "the directory's picture cannot be decoded "
+                              "either; no artwork for this station");
+                free(img);
+                img = NULL;
+                len = 0;
+            } else if (img) {
+                snprintf(url, sizeof(url), "%s", alt);
+            }
+        } else {
+            ESP_LOGI(TAG, "the station's logo cannot be decoded, and the "
+                          "directory has no other picture for it");
+        }
+    }
 
     if (!img) return;
 

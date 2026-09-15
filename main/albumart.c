@@ -623,8 +623,8 @@ esp_err_t id3_read_tags(FILE *f, id3_tags_t *out)
  * ends the header, so the SOF has to appear before it or there is not
  * one.
  */
-static bool jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out,
-                             uint32_t *w_out, uint32_t *h_out)
+bool albumart_jpeg_is_baseline(const uint8_t *p, size_t len, uint8_t *sof_out,
+                               uint32_t *w_out, uint32_t *h_out)
 {
     *sof_out = 0;
     *w_out = 0;
@@ -899,7 +899,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
 
     uint8_t sof = 0;
     uint32_t sof_w = 0, sof_h = 0;
-    if (!jpeg_is_baseline(jpeg, jpeg_len, &sof, &sof_w, &sof_h)) {
+    if (!albumart_jpeg_is_baseline(jpeg, jpeg_len, &sof, &sof_w, &sof_h)) {
         ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X), %"PRIu32"x%"PRIu32"; "
                       "this decoder is baseline-only", sof_name(sof), sof,
                  sof_w, sof_h);
