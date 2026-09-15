@@ -113,7 +113,33 @@ static uint64_t s_samples;
  * It needs no header, works for AAC where nothing is declared, and is
  * correct for VBR where every declared figure is nominal.
  */
-static uint64_t s_cost_bytes;
+/*
+ * AND THE BYTES ARE THE ONES THE DECODER TOOK, NOT THE ONES THE WINDOW
+ * ACCEPTED -- corrected in 0502.
+ *
+ * This counted at refill(), which is bytes entering the WINDOW. The
+ * window is not the decoder: bytes sit in it until a frame is complete,
+ * so a reading covers one second of samples against whatever arrived
+ * during it, and those two are separated by however much audio the
+ * window holds.
+ *
+ * At 24 KB that was about a second at broadcast rates and the error
+ * stayed inside a reading; WNZK and SomaFM both measured correctly in
+ * 0416. 0500 made the window 160 KB to hold an Ogg page, which is 6.6
+ * seconds of 192 kbit/s audio, and the same code then reported a
+ * healthy Opus station as needing between 16 and 606 kbit/s -- `of 16
+ * needed (1381%)` on one line and `of 606 needed (34%)` on another,
+ * with a 16 second reserve and no drops throughout. Two lines flagged
+ * SHORT while the reserve was climbing.
+ *
+ * `framewin_t` already keeps a running total of bytes consumed, which
+ * is the exact quantity wanted: the compressed bytes that became these
+ * samples. Taking the delta of that against the samples decoded from
+ * them makes the ratio a property of the stream again, whatever size
+ * the window is. Bytes dropped by framewin_reset() on a reconnect are
+ * in neither total, which is right -- they produced no audio.
+ */
+static uint64_t s_cost_out_mark;    /* s_win.out at the last report */
 static uint64_t s_cost_samples;
 static uint32_t s_resyncs;
 static bool     s_reported;     /* the format line has been logged */
@@ -197,7 +223,7 @@ bool netdec_open(void)
 
     s_codec = STREAM_CODEC_NONE;
     s_not_audio = false;
-    s_cost_bytes = 0;
+    s_cost_out_mark = 0;
     s_cost_samples = 0;
     s_frames = 0;
     s_samples = 0;
@@ -272,7 +298,6 @@ static size_t refill(void)
         return 0;
     }
     if (!got) framewin_commit(&s_win, 0);    /* counts a dry refill */
-    s_cost_bytes += got;
     return got;
 }
 
@@ -393,17 +418,18 @@ static bool esp_dec_open(void)
  * change with how far ahead this player happens to be -- which is
  * exactly the trap 0414 fell into.
  *
- * Both accumulators reset, so each reading is its own second: a
- * bitrate that changes mid-stream is followed rather than averaged away
- * across a session.
+ * The samples reset and the byte mark advances, so each reading is its
+ * own second: a bitrate that changes mid-stream is followed rather than
+ * averaged away across a session.
  */
 static void cost_report(uint32_t rate)
 {
     if (!rate || s_cost_samples < rate) return;     /* under a second */
 
-    const uint64_t kbps = (s_cost_bytes * 8ull * (uint64_t)rate)
+    const uint64_t taken = s_win.out - s_cost_out_mark;
+    const uint64_t kbps = (taken * 8ull * (uint64_t)rate)
                         / (s_cost_samples * 1000ull);
-    s_cost_bytes = 0;
+    s_cost_out_mark = s_win.out;
     s_cost_samples = 0;
     if (kbps > 0 && kbps < 100000) netstream_set_actual_kbps((int)kbps);
 }
