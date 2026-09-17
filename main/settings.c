@@ -82,7 +82,10 @@ static const char *TAG = "tab5_settings";
  */
 /* Raised again, from 384, when brightness arrived: 17 more bytes of keys
  * would otherwise have come straight out of the path. */
-#define SETTINGS_MAX_LINE       (448)
+/* Raised again, from 448, when the screen flip arrived: "screen_flipped"
+ * plus its value is 24 more bytes of keys, and the path is what pays
+ * otherwise. */
+#define SETTINGS_MAX_LINE       (480)
 
 /*
  * The file is append-only, and this is where it stops growing.
@@ -120,6 +123,9 @@ static bool       s_rg_enabled = true;
 static uint8_t    s_crossfade_sec;
 static bool       s_crossfade_album;
 static uint8_t    s_brightness = SETTINGS_BRIGHTNESS_DEFAULT;
+/* Right way up. A player that has never been told otherwise is the one
+ * on the desk in front of whoever flashed it. */
+static bool       s_screen_flipped;
 
 /* Off. The radio does not come up because a firmware update happened.
  * See settings_wifi_enabled(). */
@@ -216,6 +222,16 @@ void settings_set_brightness(uint8_t pct)
     if (pct > SETTINGS_BRIGHTNESS_MAX) pct = SETTINGS_BRIGHTNESS_MAX;
     if (pct == s_brightness) return;
     s_brightness = pct;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+bool settings_screen_flipped(void) { return s_screen_flipped; }
+
+void settings_set_screen_flipped(bool flipped)
+{
+    if (flipped == s_screen_flipped) return;
+    s_screen_flipped = flipped;
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -454,6 +470,12 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        const cJSON *fl = cJSON_GetObjectItemCaseSensitive(root, "screen_flipped");
+        if (take_settings && cJSON_IsBool(fl)) {
+            s_screen_flipped = cJSON_IsTrue(fl);
+            any = true;
+        }
+
         const cJSON *xa = cJSON_GetObjectItemCaseSensitive(root, "crossfade_album");
         if (take_settings && cJSON_IsBool(xa)) {
             s_crossfade_album = cJSON_IsTrue(xa);
@@ -548,6 +570,10 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
         if (v < SETTINGS_BRIGHTNESS_MIN) v = SETTINGS_BRIGHTNESS_MIN;
         if (v > SETTINGS_BRIGHTNESS_MAX) v = SETTINGS_BRIGHTNESS_MAX;
         s_brightness = (uint8_t)v;
+        return true;
+    }
+    if (strcmp(key, "screen_flipped") == 0) {
+        s_screen_flipped = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
     }
     if (strcmp(key, "crossfade_album") == 0) {
@@ -670,6 +696,7 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
     const char *const rg = s_rg_enabled ? "true" : "false";
     const char *const xa = s_crossfade_album ? "true" : "false";
+    const char *const fl = s_screen_flipped ? "true" : "false";
     const char *const wf = s_wifi_enabled ? "true" : "false";
     /* The stored preference, not the effective one. Writing the gated
      * value would mean turning the radio off and on again silently
@@ -699,11 +726,11 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
 #define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
                             "\"crossfade\":%u,\"crossfade_album\":%s," \
-                            "\"brightness\":%u," \
+                            "\"brightness\":%u,\"screen_flipped\":%s," \
                             "\"wifi\":%s,\"ntp\":%s," \
                             "\"ntp_epoch\":%s,\"ntp_boot_us\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
-                             (unsigned)s_brightness, \
+                             (unsigned)s_brightness, fl, \
                              wf, np, nte, ntb
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {

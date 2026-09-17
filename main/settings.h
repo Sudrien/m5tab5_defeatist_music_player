@@ -179,6 +179,32 @@ uint8_t settings_brightness(void);
 void settings_set_brightness(uint8_t pct);
 
 /*
+ * Whether the screen is upside down -- portrait, rotated 180 degrees.
+ *
+ * PORTRAIT ONLY, AND ON PURPOSE.
+ *
+ * Every screen in this program is written with fixed pixel offsets into
+ * a 720x1280 framebuffer: LIST_TOP in sleeppage.c, UI_BAR_H and
+ * UI_ART_H in ui.c, the tab strip in panel.c and browser.c. A 90-degree
+ * rotation changes what gfx_w() and gfx_h() mean and every one of those
+ * numbers with it -- that is a re-layout of four screens, not a
+ * setting. 180 degrees leaves all of them alone, because the
+ * framebuffer keeps its shape and only the mapping to the glass
+ * changes, which is why this is a bool and not an orientation enum.
+ *
+ * What it is FOR: the USB-C port and the headphone jack are at one end
+ * of the Tab5. Which end that should be depends on whether the cable
+ * runs up or down from wherever the thing is propped, and that is not a
+ * decision a firmware can make for somebody.
+ *
+ * Applied at blit time in gfx.c and to the touch coordinates in
+ * touch.c, which are the two places the framebuffer meets the world.
+ * Nothing that draws knows about it.
+ */
+bool settings_screen_flipped(void);
+void settings_set_screen_flipped(bool flipped);
+
+/*
  * Whether to crossfade between two tracks from the same album.
  *
  * Off by default, and that default is the whole reason this is a

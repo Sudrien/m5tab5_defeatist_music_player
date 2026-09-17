@@ -81,6 +81,32 @@ int gfx_filter(void);
  * to reach the panel should not be reported as shown. */
 esp_err_t gfx_blit_err(int y0, int y1);
 
+/*
+ * Turn the picture 180 degrees on its way to the glass.
+ *
+ * Nothing that draws knows about this, which is the point. The shadow
+ * buffer is always the right way up -- every offset in ui.c, panel.c,
+ * browser.c and sleeppage.c keeps meaning what it meant -- and the flip
+ * happens in the blit, where a band of rows [y0, y1) goes out to rows
+ * [h - y1, h - y0) with each row reversed.
+ *
+ * That mapping is why this is cheap and why it is 180 degrees only: a
+ * flipped full-width band is still a full-width band, so it is still
+ * one contiguous transfer of the same size, which is the shape the DPI
+ * driver wants and the shape BLIT_BAND_ROWS was tuned for. A quarter
+ * turn would transpose the buffer and make every transfer a column.
+ *
+ * Costs a pass through the scratch while it is on -- the same scratch
+ * the filter uses, and the same pass when both are on -- and nothing
+ * while it is off.
+ *
+ * Takes effect at the next blit of each band, so a caller that turns it
+ * over blits the whole screen. Touch is not this file's business; see
+ * touch_set_flipped().
+ */
+void gfx_set_flipped(bool flipped);
+bool gfx_flipped(void);
+
 void gfx_px(int x, int y, uint16_t c);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t c);
 void gfx_fill_circle(int cx, int cy, int r, uint16_t c);

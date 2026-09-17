@@ -64,6 +64,22 @@ bool touch_get(int *x, int *y);
  */
 void touch_swallow(void);
 
+/*
+ * Turn the coordinates over with the screen.
+ *
+ * The controller reports in panel-native portrait space whatever the
+ * picture is doing, so when gfx is flipping the picture 180 degrees this
+ * has to flip the point to match, or every control is where its mirror
+ * image used to be. x becomes (w-1-x) and y becomes (h-1-y), using the
+ * dimensions touch_init() was given.
+ *
+ * Kept here rather than in the caller because the caller is four
+ * screens' worth of hit tests -- ui.c, browser.c, panel.c, sleeppage.c
+ * -- and they all want the point in the space they drew in. One flip at
+ * the source is one place to be wrong.
+ */
+void touch_set_flipped(bool flipped);
+
 bool touch_present(void);
 
 #ifdef __cplusplus

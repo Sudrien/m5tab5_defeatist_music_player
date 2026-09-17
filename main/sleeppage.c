@@ -102,12 +102,30 @@ static void slider_track(int *x0, int *x1)
     *x1 = gfx_w() - SLIDER_INSET - SLIDER_KNOB;
 }
 
-static void timer_box(int *x, int *y, int *w, int *h)
+/*
+ * Rotation sits under Brightness rather than under the timer: the three
+ * rows above it are what the screen is doing, and the timer is what the
+ * music is about to stop doing. Grouping by that is why it is not simply
+ * appended to the bottom.
+ */
+#define ROT_NOTE_LINES  (1)
+
+static void rotation_box(int *x, int *y, int *w, int *h)
 {
     int bx, by, bw, bh;
     brightness_box(&bx, &by, &bw, &bh);
     *x = 0;
     *y = by + bh + GAP;
+    *w = gfx_w();
+    *h = OPTION_H;
+}
+
+static void timer_box(int *x, int *y, int *w, int *h)
+{
+    int rx, ry, rw, rh;
+    rotation_box(&rx, &ry, &rw, &rh);
+    *x = 0;
+    *y = ry + rh + NOTE_GAP + ROT_NOTE_LINES * NOTE_STEP + GAP;
     *w = gfx_w();
     *h = SLIDER_H;
 }
@@ -186,6 +204,32 @@ void sleeppage_draw(void)
         const int mw = gfx_text_w("100%", LABEL_SCALE);
         gfx_draw_text(w - SLIDER_INSET - mw, ty + SLIDER_KNOB, "100%",
                       LABEL_SCALE, 80, C_FAINT);
+    }
+
+    /* --- Rotation --------------------------------------------------- */
+    rotation_box(&x, &y, &bw, &bh);
+    {
+        const bool flipped = settings_screen_flipped();
+        gfx_fill_rect(x, y, bw, bh, C_ROW);
+        gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Rotation",
+                      NAME_SCALE, 400, C_TEXT);
+
+        /* The Screen row's pill, same size and place. Wider text than
+         * ON/OFF, so it is the same box with a smaller scale rather than
+         * a box that does not line up with the one above. */
+        const int pw = 132, ph = 56;
+        const int px = w - 24 - pw, py = y + (bh - ph) / 2;
+        const char *text = flipped ? "180" : "0";
+        gfx_fill_rect(px, py, pw, ph, flipped ? C_ON : C_BTN);
+        const int tw = gfx_text_w(text, NAME_SCALE);
+        gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(NAME_SCALE)) / 2,
+                      text, NAME_SCALE, pw - 8, flipped ? C_BG : C_DIM);
+    }
+    {
+        static const char *const note[] = {
+            "Upside down, for when the cable is at the wrong end.",
+        };
+        gfx_draw_text(24, y + bh + NOTE_GAP, note[0], LABEL_SCALE, w - 48, C_DIM);
     }
 
     /* --- Sleep timer ----------------------------------------------- */
@@ -321,6 +365,27 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
     }
 
     int bx, by, bw, bh;
+
+    /*
+     * Rotation, before the Screen row, because both are whole-row
+     * targets and the Screen row's test is the one that turns the
+     * backlight off -- a row that fell through to it would be a
+     * misplaced tap with a consequence.
+     *
+     * The page does not turn the screen over itself; it records the
+     * setting and reports it, the same way the Screen switch does not
+     * fade its own backlight. The caller's repaint is what makes it
+     * visible.
+     */
+    rotation_box(&bx, &by, &bw, &bh);
+    if (y >= by && y < by + bh) {
+        const bool want = !settings_screen_flipped();
+        settings_set_screen_flipped(want);
+        ESP_LOGI(TAG, "rotation: %s", want ? "180" : "0");
+        s_dirty = true;
+        return SLEEPPAGE_FLIP;
+    }
+
     /* Whole row, not a pill, for panel.c's reason: a row is the target a
      * thumb actually hits. */
     screen_box(&bx, &by, &bw, &bh);

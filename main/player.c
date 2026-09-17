@@ -837,6 +837,21 @@ static void screen_apply_filter(void)
 }
 
 /* The release of a brightness drag, with what the page cannot see. */
+/*
+ * Put the flip into effect: the picture and the touch coordinates
+ * together, because either one alone is worse than neither.
+ *
+ * Does not repaint. The caller does, because what wants repainting
+ * depends on which screen is up -- the Sleep page redraws itself, and
+ * the transport bar needs the artwork behind it back.
+ */
+static void screen_apply_flip(void)
+{
+    const bool f = settings_screen_flipped();
+    gfx_set_flipped(f);
+    touch_set_flipped(f);
+}
+
 static void log_brightness(void)
 {
     const brightness_t b = brightness_map(settings_brightness());
@@ -3325,6 +3340,16 @@ static volatile bool     s_open_sleep;   /* the moon: see sleeppage.h */
 static volatile bool     s_brightness_pending;
 
 /*
+ * The same, for the screen flip -- see settings_screen_flipped().
+ *
+ * Raised at the same two load sites and consumed in the same place, for
+ * the same reason: the setting arrives with the file, and turning the
+ * picture over means repainting the whole screen, which is ui_task's to
+ * do and nobody else's.
+ */
+static volatile bool     s_flip_pending;
+
+/*
  * The sleep timer -- see sleeptimer.h. ui_task only, all of it: the page
  * sets it, the tick fades and pauses, and a press cancels a ramp.
  *
@@ -5750,6 +5775,53 @@ static void request_stream(const char *url, const char *name)
      * the handshake complete with the discriminator not yet set. */
     s_pending_stream = true;
     s_pending_ready = true;
+
+    /*
+     * THE GATE, OPENED HERE, BECAUSE CHOOSING A STATION IS ASKING TO
+     * HEAR IT.
+     *
+     * s_playing was left out of this function and the bug it caused is
+     * worth stating rather than just fixing. Pause a stream, then pick
+     * a station from the radio menu: the connection comes up and
+     * reaches PLAYING, but the gate is still closed from the pause, so
+     * play_stream()'s `if (!s_playing && !leaving)` skips the decode
+     * entirely. netdec is never asked to identify, so nothing is
+     * sniffed, nothing is decoded and no sound comes out -- while the
+     * log says `buffering -> playing` and the socket really is open.
+     *
+     * The next press is then a RESUME, and streamplan_transport() is
+     * asked only whether a socket is open. It is, so the press is
+     * mapped to DISCONNECT and tears down the station the listener just
+     * asked for. On the board: chosen at 77236, connected at 83293,
+     * pressed at 86159, and `first sound at 5475 ms` immediately
+     * followed by `closing after 1 frames` -- one frame of audio and an
+     * amplifier click for a station that had been sitting connected and
+     * silent for 2.9 seconds.
+     *
+     * Opening the gate here makes that state unreachable: a chosen
+     * station is always connected AND playing, which is the pair
+     * streamplan.h's "there is no third state to be in" assumes. All
+     * three callers -- the chooser, next and previous -- are a
+     * deliberate choice of something to listen to, so there is no call
+     * site where this is a surprise.
+     *
+     * ui_task only, like the rest of this function, and s_playing is
+     * written by ui_task, so there is no cross-task race on the value
+     * itself.
+     *
+     * LAST, AFTER s_pending_ready, AND THAT ORDER MATTERS. play_stream()
+     * tests s_pending_ready as the first thing in its loop and sets
+     * `leaving`, and its press block is guarded by `!leaving`. Setting
+     * the gate first would leave a window where the loop for the stream
+     * being LEFT sees s_playing change without yet seeing that
+     * something else was chosen -- which it would read as a press and,
+     * its own connection now being IDLE, map to CONNECT: a reconnect of
+     * the station the listener just navigated away from. Set last, any
+     * iteration that can see the gate move has already seen the
+     * handover, which is the same argument as the discriminator
+     * ordering above.
+     */
+    s_playing = true;
 }
 
 /* Put the volume back and forget the timer. ui_task only. */
@@ -5985,6 +6057,29 @@ static void ui_task(void *arg)
             screen_apply_filter();
         }
 
+        /*
+         * The flip from the settings file. Unlike the brightness this is
+         * applied whether the screen is on or off -- it costs no
+         * backlight write, and the blit it forces is of a shadow buffer
+         * that is already correct, so a dark screen simply wakes up the
+         * right way up.
+         */
+        if (s_flip_pending) {
+            s_flip_pending = false;
+            static bool applied;                  /* upright, as gfx starts */
+            const bool want = settings_screen_flipped();
+            if (want != applied) {
+                screen_apply_flip();
+                applied = want;
+                ESP_LOGI(TAG, "rotation %s from settings", want ? "180" : "0");
+                /* Everything on the glass is now at the wrong end, so
+                 * this is the one place a whole-screen reblit is the
+                 * cheap option rather than the expensive one. */
+                gfx_blit(0, gfx_h());
+                s_repaint_art = true;
+            }
+        }
+
         /* The chooser, when it is up, is the whole screen and the whole
          * interaction. It is driven from here rather than from its own
          * task so there is exactly one writer to the framebuffer -- the
@@ -6085,6 +6180,24 @@ static void ui_task(void *arg)
                 sleeppage_draw();
             } else if (r == SLEEPPAGE_BRIGHTNESS_DONE) {
                 log_brightness();
+            } else if (r == SLEEPPAGE_FLIP) {
+                /*
+                 * The page stays open and redraws itself, which is the
+                 * confirmation: the row that was tapped comes back at
+                 * the other end of the screen. sleeppage_draw() blits
+                 * the whole screen, so there is nothing left over from
+                 * the old orientation to clear.
+                 *
+                 * The press is swallowed because the finger is still on
+                 * the glass and the coordinates under it have just
+                 * changed meaning -- the same trap touch_swallow()
+                 * exists for on every other screen transition, arrived
+                 * at without changing screens.
+                 */
+                screen_apply_flip();
+                sleeppage_draw();
+                touch_swallow();
+                s_repaint_art = true;
             } else if (r != SLEEPPAGE_NONE) {
                 if (r == SLEEPPAGE_SCREEN_OFF) {
                     sleeppage_draw();
@@ -9518,6 +9631,7 @@ static void restore_last_track(void)
         audio_out_set_volume((uint8_t)s_volume);
         ESP_LOGI(TAG, "volume %d from settings", s_volume);
         s_brightness_pending = true;
+        s_flip_pending = true;
 
         /* The radio is one of the things the file decides, so it belongs
          * to this push and not to app_main(). See wifi.h.
@@ -11484,6 +11598,7 @@ static void player_loop(void)
             audio_out_set_volume((uint8_t)s_volume);
             ESP_LOGI(TAG, "volume %d from settings", s_volume);
             s_brightness_pending = true;
+            s_flip_pending = true;
         }
 
         /*

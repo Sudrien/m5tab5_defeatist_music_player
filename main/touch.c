@@ -75,9 +75,18 @@ static esp_lcd_touch_handle_t s_touch;
 static bool s_swallow;
 static TickType_t s_swallow_until;
 
+/* The panel's extent, kept for touch_set_flipped()'s arithmetic. */
+static int s_w, s_h;
+static bool s_flipped;
+
+void touch_set_flipped(bool flipped) { s_flipped = flipped; }
+
 esp_err_t touch_init(i2c_master_bus_handle_t bus, int panel_w, int panel_h)
 {
     esp_lcd_panel_io_handle_t tp_io = NULL;
+
+    s_w = panel_w;
+    s_h = panel_h;
 
     /* Coordinates come out in panel-native portrait space, which is
      * exactly the framebuffer layout, so nothing is swapped or mirrored. */
@@ -249,7 +258,14 @@ bool touch_get(int *x, int *y)
 
     if (swallow_active(true)) return false;
 
-    *x = pt[0].x;
-    *y = pt[0].y;
+    /* The flip last, so the trace above logs what the glass reported
+     * and this returns what the screens expect. */
+    if (s_flipped) {
+        *x = s_w - 1 - (int)pt[0].x;
+        *y = s_h - 1 - (int)pt[0].y;
+    } else {
+        *x = pt[0].x;
+        *y = pt[0].y;
+    }
     return true;
 }

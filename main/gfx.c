@@ -32,8 +32,14 @@ static int s_w, s_h;
  * each blit reads it once. s_dim is the scratch a dimmed band is built in,
  * allocated the first time the filter is on, sized for the largest band a
  * blit sends, and only touched under s_blit_lock.
+ *
+ * s_flipped shares the scratch, because it needs the same thing for the
+ * same reason: a band that is not going out of the shadow buffer
+ * verbatim has to be built somewhere first. When both are on, one pass
+ * does both -- see gfx_blit_err().
  */
 static volatile int s_filter = BRIGHTNESS_FILTER_FULL;
+static volatile bool s_flipped;
 static uint16_t *s_dim;
 
 /*
@@ -141,6 +147,9 @@ void gfx_set_filter(int filter)
 }
 
 int gfx_filter(void) { return s_filter; }
+
+void gfx_set_flipped(bool flipped) { s_flipped = flipped; }
+bool gfx_flipped(void) { return s_flipped; }
 int gfx_w(void) { return s_w; }
 int gfx_h(void) { return s_h; }
 
@@ -201,23 +210,68 @@ esp_err_t gfx_blit_err(int y0, int y1)
      * scaled into the scratch and that is what goes out. A band is never
      * taller than BLIT_BAND_ABOVE here -- the split above sees to it. */
     const int filter = s_filter;
+    const bool flipped = s_flipped;
     const uint16_t *src = &s_fb[(size_t)y0 * s_w];
-    if (filter < BRIGHTNESS_FILTER_FULL) {
+
+    /*
+     * Where this band lands. Upright it is where it was drawn; flipped
+     * it is the same distance from the other end, which keeps it
+     * full-width and contiguous -- see gfx_set_flipped().
+     */
+    int dy0 = y0, dy1 = y1;
+    if (flipped) {
+        dy0 = s_h - y1;
+        dy1 = s_h - y0;
+    }
+
+    if (filter < BRIGHTNESS_FILTER_FULL || flipped) {
         if (!s_dim) {
             s_dim = heap_caps_malloc((size_t)s_w * BLIT_BAND_ABOVE * sizeof(uint16_t),
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         }
         if (s_dim) {
-            const size_t n = (size_t)(y1 - y0) * s_w;
-            for (size_t i = 0; i < n; i++) s_dim[i] = brightness_dim565(src[i], filter);
+            const int rows = y1 - y0;
+            if (flipped) {
+                /*
+                 * Reversed in both axes at once: source row r becomes
+                 * destination row rows-1-r, read backwards. One pass,
+                 * and the dim -- when it is on -- happens on the way
+                 * past rather than in a second sweep.
+                 */
+                for (int r = 0; r < rows; r++) {
+                    const uint16_t *in = &src[(size_t)r * s_w];
+                    uint16_t *out = &s_dim[(size_t)(rows - 1 - r) * s_w];
+                    if (filter < BRIGHTNESS_FILTER_FULL) {
+                        for (int i = 0; i < s_w; i++) {
+                            out[s_w - 1 - i] = brightness_dim565(in[i], filter);
+                        }
+                    } else {
+                        for (int i = 0; i < s_w; i++) out[s_w - 1 - i] = in[i];
+                    }
+                }
+            } else {
+                const size_t n = (size_t)rows * s_w;
+                for (size_t i = 0; i < n; i++) s_dim[i] = brightness_dim565(src[i], filter);
+            }
             src = s_dim;
+        } else if (flipped) {
+            /*
+             * No scratch and a flip asked for. Unlike the dim, this one
+             * cannot degrade gracefully -- sending the band unflipped
+             * would put it at the wrong end of the screen, upright, in
+             * the middle of a flipped picture. Better to drop the band
+             * and leave what was there.
+             */
+            xSemaphoreGive(s_blit_lock);
+            ESP_LOGW(TAG, "no scratch for a flipped blit %d..%d", y0, y1);
+            return ESP_ERR_NO_MEM;
         }
-        /* No scratch: sent undimmed rather than not at all. */
+        /* No scratch, no flip: sent undimmed rather than not at all. */
     }
 
     esp_err_t err = ESP_OK;
     for (int i = 0; i < BLIT_RETRIES; i++) {
-        err = esp_lcd_panel_draw_bitmap(s_panel, 0, y0, s_w, y1, src);
+        err = esp_lcd_panel_draw_bitmap(s_panel, 0, dy0, s_w, dy1, src);
         if (err != ESP_ERR_INVALID_STATE) break;
         /* One tick, which is longer than a band transfer takes. Sleeping
          * rather than spinning: the task that owns the previous transfer
