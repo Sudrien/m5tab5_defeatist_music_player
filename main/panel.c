@@ -703,8 +703,10 @@ static void draw_net(void)
     char lines[NET_SETUP_NOTE_LINES][64];
     setup_lines(&st, wifi, running, lines);
     const char *setup_note[NET_SETUP_NOTE_LINES] = { lines[0], lines[1], lines[2] };
-    const int setup_used = draw_note(y + bh + AUDIO_NOTE_GAP, setup_note,
-                                     NET_SETUP_NOTE_LINES);
+    /* Discarded, like the ntp note above: draw_note() returns the y it
+     * reached, so the only one worth keeping is the last. */
+    (void)draw_note(y + bh + AUDIO_NOTE_GAP, setup_note,
+                    NET_SETUP_NOTE_LINES);
 
     /* --- Benchmark --------------------------------------------------- */
     bench_result_t bs;
@@ -724,7 +726,7 @@ static void draw_net(void)
     const char *bench_note[NET_BENCH_NOTE_LINES] = { blines[0], blines[1],
                                                      blines[2] };
     const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, bench_note,
-                                   NET_BENCH_NOTE_LINES) + setup_used;
+                                   NET_BENCH_NOTE_LINES);
 
     /*
      * No zone row, and see settings.h: nothing on this device displays a
