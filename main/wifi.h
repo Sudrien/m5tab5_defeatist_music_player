@@ -250,6 +250,38 @@ esp_err_t wifi_scan_log(void);
  *
  * Never logs the secret.
  */
+/*
+ * AN EXPERIMENT, AND IT IS MEANT TO BE FLIPPED BY HAND.
+ *
+ * Set to 1 to refuse WPA3 and join transition-mode APs as WPA2-PSK.
+ *
+ * Why it exists: lossless streams could not be fed on one network and
+ * could on another, and the benchmark (see bench.h) showed the
+ * transport pulling 314 kbit/s with nothing decoding, against 1283
+ * previously measured on the other AP. Two things differ between those
+ * networks. One is the RF neighbourhood -- channel 3 with crowded
+ * channels 1 and 6 either side, which is the worst place to be on 2.4
+ * GHz because partial overlap cannot be deferred to. The other is the
+ * security: the fast network was WPA/WPA2 and the slow one is
+ * WPA2/WPA3. This switch tests the second.
+ *
+ * THERE IS NO EVIDENCE YET THAT WPA3 COSTS THROUGHPUT HERE. It is the
+ * second of two differences, not a diagnosis, and the RF explanation is
+ * at least as plausible. If flipping this changes nothing, that is a
+ * result worth having and the switch should come out.
+ *
+ * Not a setting, on purpose. PMF is what protects management frames
+ * from forged deauths -- the class of frame portal.c spends its life
+ * among -- so leaving it off permanently is a real downgrade rather
+ * than a preference, and a person should not be able to choose it from
+ * a menu without that being said out loud. If the experiment comes
+ * back positive, a proper setting can be written and can say it.
+ *
+ * The join logs the security the AP actually chose, so an A/B does not
+ * depend on believing this comment.
+ */
+#define WIFI_FORCE_WPA2  (0)
+
 esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms);
 
 /* Whether the station has an address. A value, safe anywhere. */

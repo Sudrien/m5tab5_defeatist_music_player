@@ -371,11 +371,36 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
     wifi_config_t cfg = { 0 };
     memcpy(cfg.sta.ssid, ssid, sl);
     memcpy(cfg.sta.password, secret, pl);     /* 64 bytes, no NUL needed */
-    /* WPA2 as the floor, SAE allowed, PMF offered: the combination that
-     * joins WPA2, WPA3 and transition-mode APs alike. */
+
+    /*
+     * WPA2 as the floor, SAE allowed, PMF offered: the combination that
+     * joins WPA2, WPA3 and transition-mode APs alike.
+     *
+     * threshold.authmode IS A FLOOR AND NOT A CEILING, which is worth
+     * stating because it reads like one. It rejects anything weaker
+     * than WPA2-PSK and does nothing whatever to stop WPA3 being
+     * chosen. The knob that decides between them on a transition-mode
+     * AP is pmf_cfg.capable, below.
+     */
     cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+
+#if WIFI_FORCE_WPA2
+    /*
+     * PMF NOT OFFERED, SO WPA3 CANNOT BE CHOSEN. WPA3 requires
+     * protected management frames; a station that does not advertise
+     * the capability cannot be given SAE, and a WPA2/WPA3 AP falls back
+     * to WPA2-PSK. sae_pwe_h2e is left out because it only chooses how
+     * SAE derives its password element, and there is no SAE here.
+     *
+     * A WPA3-ONLY AP WILL REFUSE THIS JOIN. That is the cost of the
+     * switch and the reason it is not the default.
+     */
+    cfg.sta.pmf_cfg.capable = false;
+    cfg.sta.pmf_cfg.required = false;
+#else
     cfg.sta.pmf_cfg.capable = true;
     cfg.sta.sae_pwe_h2e = WPA3_SAE_PWE_BOTH;
+#endif
 
     /*
      * ONE RETRY, FOR REASON 2 (AUTH_EXPIRE), AND IT IS A WHOLE ATTEMPT:
@@ -444,6 +469,24 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
         xSemaphoreGive(s_ssid_lock);
         err = ESP_OK;
         ESP_LOGI(TAG, "joined %.32s", ssid);
+
+        /*
+         * WHAT WAS NEGOTIATED, NOT WHAT WAS ASKED FOR.
+         *
+         * The whole point of WIFI_FORCE_WPA2 is an A/B against the same
+         * AP, and an A/B is worthless if the log only repeats the
+         * request. The AP decides; this asks it what it decided. On a
+         * transition-mode network the answer should read WPA2_PSK with
+         * the switch on and WPA3_PSK or WPA2_WPA3_PSK with it off, and
+         * if it reads the same either way then the switch did nothing
+         * and the experiment is over before the throughput is measured.
+         */
+        wifi_ap_record_t got = { 0 };
+        if (esp_wifi_sta_get_ap_info(&got) == ESP_OK) {
+            ESP_LOGI(TAG, "security: %s, channel %d, %d dBm%s",
+                     authmode(got.authmode), got.primary, got.rssi,
+                     WIFI_FORCE_WPA2 ? " (PMF not offered)" : "");
+        }
     } else {
         /* Stop the driver retrying on its own, so a failed attempt does
          * not keep hopping channels under an AP the portal is serving. */
