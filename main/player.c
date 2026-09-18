@@ -10586,6 +10586,33 @@ static track_end_t play_stream(const char *url, const char *name)
         if (!s_playing && !leaving) {
             s_stream_hold = true;
             s_stream_status = STREAMPLAN_STATUS_NONE;
+
+            /*
+             * THE BENCHMARK HAS TO BE SERVICED HERE TOO, and finding
+             * that out is what this patch is.
+             *
+             * bench.h claimed player_loop()'s idle branch was the only
+             * place it could run, and that "nothing may be playing" was
+             * therefore structural. Half right. Nothing IS decoding
+             * here -- that is what this branch exists to arrange -- but
+             * play_stream() does not RETURN when a stream is paused, it
+             * sits in this skip. So player_loop() never comes back
+             * round, bench_service() is never called, and a request
+             * made after pausing a stream wedges: the row shows BUSY
+             * for ever and the next press answers "not now".
+             *
+             * That is exactly the state somebody is in when they want to
+             * measure -- they paused the stream that would not play --
+             * so it was the likeliest path rather than a corner.
+             *
+             * The invariant the measurement needs is "no decoder
+             * competing", not "play_stream() has returned", and
+             * !s_playing gives it. A press arriving mid-run is handled
+             * by bench_service() itself, which stops the drain when the
+             * state leaves BUFFERING or PLAYING.
+             */
+            bench_service();
+
             vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }

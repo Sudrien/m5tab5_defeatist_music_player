@@ -76,7 +76,16 @@ bool bench_request(void)
 {
     lock_init();
     if (!s_mu) return false;
-    if (s_want) return false;
+    /*
+     * A REQUEST STILL WAITING IS NOT A RUN IN PROGRESS.
+     *
+     * s_want set means nobody has serviced the last request yet, which
+     * used to leave the row reading BUSY for ever and the next press
+     * answering "not now" -- with nothing running and nothing to wait
+     * for. Re-arming is the honest answer: the press means the same
+     * thing it meant the first time.
+     */
+    if (s_want) return true;
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
     const bool busy = s_st.running;

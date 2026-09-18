@@ -116,9 +116,9 @@ bool bench_request(void);
  * about values rather than pointers applies here for the same reason. */
 void bench_state(bench_result_t *out);
 
-/* PLAYER TASK ONLY, and only from player_loop(). Blocks for up to
- * BENCH_CONNECT_MS + BENCH_RUN_MS while a run is pending; returns
- * immediately when none is. */
+/* PLAYER TASK ONLY, from a place where nothing is decoding -- see
+ * above. Blocks for up to BENCH_CONNECT_MS + BENCH_RUN_MS while a run
+ * is pending; returns immediately when none is. */
 void bench_service(void);
 
 #ifdef __cplusplus
