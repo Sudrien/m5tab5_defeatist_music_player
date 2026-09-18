@@ -3164,6 +3164,9 @@ static bool              s_notice_said_no_media;
  * card that re-blits 720x720 ten times a second is a cover that
  * flickers and a decoder that waits. */
 static char              s_portal_card[96];
+/* Whether the low-battery card is the one currently up, so it is drawn
+ * on the edge rather than every pass. */
+static bool              s_batt_card;
 
 /* Asked for by the decode loop, honoured by the UI task: the chooser is
  * opened from whichever task polls touch, so there is one writer to the
@@ -6102,6 +6105,34 @@ static void notice_post(const char *head, const char *body)
  * the wrong one of the two to show, and it will still be there to show
  * afterwards.
  */
+/*
+ * The battery is low and nothing is charging it.
+ *
+ * A CONDITION and not an event: plugging in makes it untrue, and the
+ * card should go when it does. The gauge on the volume row already
+ * shows a number, and a number does not say "this is about to stop" --
+ * which is the only part a listener can act on.
+ *
+ * 10% with 3 points of hysteresis, so a reading that wobbles across the
+ * line does not blit the artwork square every second. -1 is "no
+ * reading" and is not low: a gauge that invents a number when it has
+ * none is the thing battery.h already refuses to do, and a card that
+ * did it would be worse.
+ */
+#define NOTICE_BATT_LOW     (10)
+#define NOTICE_BATT_CLEAR   (13)
+
+static bool notice_battery_low(void)
+{
+    static bool low;
+    const int pct = battery_pct();
+
+    if (pct < 0 || battery_charging()) { low = false; return false; }
+    if (low)  low = (pct <= NOTICE_BATT_CLEAR);
+    else      low = (pct <= NOTICE_BATT_LOW);
+    return low;
+}
+
 static void service_notices(void)
 {
     portal_state_t ps;
@@ -6144,6 +6175,37 @@ static void service_notices(void)
         s_repaint_art = true;
         return;
     }
+
+    /*
+     * The battery, under the portal and over the dismissible queue.
+     *
+     * Under the portal because somebody is reading an address off the
+     * screen right now. Over the queue because a flat battery makes
+     * every other card moot -- and because it is a condition, so it
+     * comes back the moment a dismissible one is cleared anyway.
+     */
+    const bool batt = notice_battery_low();
+    /*
+     * Redrawn when the condition CHANGES, and also when it is still
+     * true but no card is on screen -- the portal's card, the format
+     * card and a cover blit all paint this square, and any of them can
+     * have taken the battery card down while the battery stayed flat.
+     * Tracking only the edge left it gone for good in that case.
+     */
+    if (batt != s_batt_card || (batt && !ui_notice_active())) {
+        s_batt_card = batt;
+        if (batt) {
+            const char *lines[1] = { "plug in to keep playing" };
+            ui_show_notice("Battery low", lines, 1, false);
+        } else {
+            /* Charging, or back over the line. Nothing else will take a
+             * non-dismissible card down. */
+            ui_notice_clear();
+            s_repaint_art = true;
+        }
+        return;
+    }
+    if (batt) return;   /* the card is up and still true; leave it alone */
 
     if (s_notice_pending) {
         s_notice_pending = false;
@@ -6216,6 +6278,16 @@ static void service_favorite_toggle(void)
     station_t st;
     if (!stations_get(index, &st) || !st.url[0]) {
         ESP_LOGW(TAG, "no station %d to star", index);
+        return;
+    }
+    /*
+     * The cap, checked here rather than left to favorites_add()'s log.
+     * At STATIONLIST_MAX the star simply does not light and nothing on
+     * the panel says why, which reads as the button being broken.
+     */
+    if (!favorites_contains(st.url) && favorites_count() >= STATIONLIST_MAX) {
+        notice_post("Favourites are full", "unstar one to make room");
+        s_stations_epoch++;
         return;
     }
     const bool now = favorites_toggle(st.name, st.url);
@@ -8079,6 +8151,11 @@ static track_end_t play_file(const char *path)
         if (vol < STORAGE_COUNT && !storage_present(vol)) {
             ESP_LOGW(TAG, "media removed; stopping playback");
             why = TRACK_MEDIA_GONE;
+            /* The fade already handled the sound. Nothing said why the
+             * screen went empty, and "the drive was pulled" is the one
+             * thing the listener already knows but the player never
+             * confirmed. */
+            notice_post("Media removed", "playback stopped");
             break;
         }
 
@@ -11656,6 +11733,36 @@ static track_end_t play_stream(const char *url, const char *name)
                   " ms silent, %" PRIu32 " frames, %" PRIu32 " resyncs",
              bufplan_phase_name(plan.phase), plan.rebuffers, plan.silent_ms,
              netdec_frames(), netdec_resyncs());
+
+    /*
+     * A card, but only for the two endings a listener can act on, and
+     * they are told apart by whether ANY frame was decoded.
+     *
+     * No frames at all: nothing answered, or what answered was not
+     * audio. "Not answering" is the honest summary and the status code
+     * belongs in the log -- see the note in ui.h about what fits on one
+     * line of a card.
+     *
+     * Frames decoded and then the silence limit fired: the stream WAS
+     * working and was cut off for being slow. This is the FLAC and WNZK
+     * case in CLAUDE.md -- 30037 and 30098 ms with the ring filling the
+     * whole time -- and calling it a failure of the station would be a
+     * lie. It is this link against this bitrate.
+     *
+     * TRACK_INTERRUPTED is excluded outright: the listener picked
+     * something else, which is not a failure and does not want telling.
+     * A station that simply stopped ends with frames decoded and little
+     * silence, so it falls through both tests.
+     */
+    if (why != TRACK_INTERRUPTED) {
+        if (netdec_frames() == 0) {
+            notice_post("Station not answering", s_stream_name[0]
+                        ? s_stream_name : "the stream did not start");
+        } else if (plan.silent_ms >= BUFPLAN_PREROLL_GIVEUP_MS) {
+            notice_post("Stream too slow here",
+                        "it played, then ran out of buffer");
+        }
+    }
 
     free(pcm);
     free(st);
