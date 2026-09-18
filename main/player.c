@@ -61,7 +61,6 @@
 #include "albumart.h"
 #include "audio_out.h"
 #include "battery.h"
-#include "bench.h"
 #include "player_diag.h"
 #include "covertag.h"
 #include "heapcheck.h"
@@ -11543,17 +11542,6 @@ static void player_loop(void)
              * same pass should not wait for the next. */
             service_station_reload();
             service_station_fetch();
-
-            /*
-             * The transport benchmark -- see bench.h. HERE AND NOWHERE
-             * ELSE, because here is the loop that runs when nothing is
-             * decoding: the measurement exists to separate the
-             * transport from the decode loop, and one taken while the
-             * decoder competed for the same link would measure both
-             * together. It blocks for up to twenty seconds, which this
-             * loop can afford and no other can.
-             */
-            bench_service();
 
             const uint32_t sgen = storage_generation();
             if (sgen != stations_gen) {
