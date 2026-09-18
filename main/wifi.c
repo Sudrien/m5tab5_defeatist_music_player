@@ -80,6 +80,41 @@ static const char *TAG = "tab5_wifi";
 #define SDIO_PIN_RESET          (15)    /* SOC_EXTRF_RST -> the C6's EN */
 
 /*
+ * The SDIO clock, in kHz. AN EXPERIMENT -- SEE BELOW BEFORE BELIEVING IT.
+ *
+ * The default is CONFIG_ESP_HOSTED_HOST_SDIO_CLK_KHZ, which is 40000 on
+ * this build, and the setup docs cap SDIO at 50 MHz. This raises it to
+ * the cap. `struct eh_host_sdio_config.clock_freq_khz` reaches
+ * `sdmmc_host_t.max_freq_khz` in the port layer, so it is the same
+ * override path the pins above already take -- not a Kconfig edit, and
+ * it does not disturb CONFIG_ESP32P4_TAB5_C6_BOARD or the reset line.
+ *
+ * WHAT THIS IS EXPECTED TO BUY, WHICH IS PROBABLY NOTHING. The measured
+ * shortfall is about 8-11% on WNZK, and the standing hypothesis for it
+ * is that the C6 runs a 2.12.6 slave with no SDIO SW_AGGR -- one packet
+ * per transaction -- so the cost is per-transaction overhead and a
+ * faster clock does not reduce the number of transactions. A 25% clock
+ * increase closing an 11% gap would be evidence AGAINST that
+ * hypothesis, which is the reason to run it.
+ *
+ * `max_freq_khz` is a ceiling and not a demand: the peripheral picks
+ * the highest divider it can reach at or below this, so a board that
+ * cannot clock 50 MHz gets a lower rate rather than a failure. The
+ * failure mode to watch for is not a refusal but CRC errors and
+ * retries under load -- `eh_sdio` logging dropped or skipped reads
+ * where 40 MHz logged none. Trace length and the 22R series resistors
+ * on D2/D3 decide that, and the schematic cannot say whether it holds.
+ * REVERT THIS FIRST if the link gets less reliable rather than faster.
+ *
+ * HOW TO MEASURE IT, GIVEN THIS NETWORK. Two-to-one run-to-run variance
+ * is documented on the same AP and station minutes apart (314 against
+ * 543 kbit/s), so a before-and-after across sessions measures the
+ * weather -- that is what made 0919's read-size A/B inconclusive.
+ * Paired runs inside one session, alternating, or it says nothing.
+ */
+#define SDIO_CLOCK_KHZ          (50000)
+
+/*
  * How many APs a scan keeps. 32 was plenty while hidden networks were
  * dropped; once 0018 kept them, both scans on the seventh flash came back
  * "scan: 32 networks, 16 hidden" and "32 networks, 17 hidden" -- full,
@@ -952,6 +987,7 @@ esp_err_t wifi_start(void)
     sdio.pin_d2.pin    = SDIO_PIN_D2;
     sdio.pin_d3.pin    = SDIO_PIN_D3;
     sdio.pin_reset.pin = SDIO_PIN_RESET;
+    sdio.clock_freq_khz = SDIO_CLOCK_KHZ;
 
     esp_err_t err = esp_hosted_sdio_set_config(&sdio);
     if (err != ESP_OK) {
@@ -973,9 +1009,10 @@ esp_err_t wifi_start(void)
      */
     struct esp_hosted_sdio_config *live = NULL;
     if (esp_hosted_sdio_get_config(&live) == ESP_OK && live) {
-        ESP_LOGI(TAG, "SDIO in use: slot %u, %u-bit, CLK %d CMD %d "
+        ESP_LOGI(TAG, "SDIO in use: slot %u, %u-bit, %lu kHz, CLK %d CMD %d "
                       "D0 %d D1 %d D2 %d D3 %d",
                  (unsigned)live->slot, (unsigned)live->bus_width,
+                 (unsigned long)live->clock_freq_khz,
                  live->pin_clk.pin, live->pin_cmd.pin, live->pin_d0.pin,
                  live->pin_d1.pin, live->pin_d2.pin, live->pin_d3.pin);
         ESP_LOGI(TAG, "the eh_sdio banner below prints build-time defaults, "
