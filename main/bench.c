@@ -201,7 +201,13 @@ void bench_service(void)
         const int64_t now = esp_timer_get_time();
         const int64_t win_us = now - win_start;
         if (win_us >= BENCH_WINDOW_MS * 1000) {
-            const int kbps = (int)((uint64_t)win_bytes * 8ull * 1000ull
+            /* bytes * 8 / ms IS kbit/s already: bits over
+             * milliseconds is kilobits over seconds, because the two
+             * thousands cancel. The extra * 1000 that used to be here
+             * made it bits per second and reported 383228 for a link
+             * doing 383. The mean below never had it, which is why one
+             * number looked sane and the other did not. */
+            const int kbps = (int)((uint64_t)win_bytes * 8ull
                                    / (uint64_t)(win_us / 1000));
             if (kbps > peak) peak = kbps;
             win_bytes = 0;
