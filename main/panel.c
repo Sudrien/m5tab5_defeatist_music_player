@@ -17,6 +17,7 @@
 #include "esp_log.h"
 
 #include "audio_out.h"
+#include "bench.h"
 #include "gfx.h"
 #include "panel.h"
 #include "settings.h"
@@ -483,6 +484,77 @@ static void setup_box(int *x, int *y, int *w, int *h)
 }
 
 /*
+ * The benchmark row -- see bench.h.
+ *
+ * ON THIS TAB rather than the radio menu, even though it measures a
+ * station, because what it answers is a question about the network: the
+ * radio tab is where somebody chooses something to listen to, and this
+ * is where they come when it will not play.
+ */
+#define NET_BENCH_NOTE_LINES (3)
+static int bench_y(void) { return setup_y() + AUDIO_SWITCH_H
+                                  + AUDIO_NOTE_GAP
+                                  + NET_SETUP_NOTE_LINES * AUDIO_NOTE_STEP
+                                  + AUDIO_GAP; }
+static void bench_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0; *y = bench_y(); *w = gfx_w(); *h = AUDIO_SWITCH_H;
+}
+
+/*
+ * The benchmark row's three lines.
+ *
+ * The numbers are given as they were measured and not graded. A verdict
+ * would need to know what the station needs, what the decoder costs and
+ * what the link is capable of, and if this file knew those three things
+ * the benchmark would not have been necessary.
+ */
+static void bench_lines(const bench_result_t *b, bool wifi,
+                        char l[NET_BENCH_NOTE_LINES][64])
+{
+    for (int i = 0; i < NET_BENCH_NOTE_LINES; i++) l[i][0] = '\0';
+
+    if (!wifi) {
+        snprintf(l[0], 64, "Needs Wi-Fi.");
+        return;
+    }
+    if (b->running) {
+        /* Widths counted, not guessed: this file has met
+         * -Werror=format-truncation before. "Reading " is 8, the name
+         * is capped at 20, " without decoding..." is 19, and the NUL is
+         * one -- 48 of the 64 there are. */
+        snprintf(l[0], 64, "Reading %.20s without decoding...",
+                 b->name[0] ? b->name : "the station");
+        snprintf(l[1], 64, "About twenty seconds.");
+        return;
+    }
+    if (!b->have) {
+        snprintf(l[0], 64, "Reads the selected station without decoding it,");
+        snprintf(l[1], 64, "to tell a slow network from a slow decoder.");
+        snprintf(l[2], 64, "Stop playback first.");
+        return;
+    }
+    if (b->note[0]) {
+        snprintf(l[0], 64, "%.60s", b->note);
+        return;
+    }
+
+    /* 16 + ": " + 11 + " mean, " + 11 + " peak kbit/s" + NUL = 60. The
+     * two %d are counted at their widest rather than their likely
+     * width, which is the whole point of the check. */
+    snprintf(l[0], 64, "%.16s: %d mean, %d peak kbit/s", b->name,
+             b->kbps_avg, b->kbps_peak);
+    if (b->declared_kbps > 0) {
+        snprintf(l[1], 64, "Station needs %d -- that is %d%%",
+                 b->declared_kbps, (b->kbps_avg * 100) / b->declared_kbps);
+    } else {
+        snprintf(l[1], 64, "The station does not say what it needs.");
+    }
+    snprintf(l[2], 64, "%u KB in %u ms, connected in %d ms",
+             (unsigned)(b->bytes / 1024), (unsigned)b->ms, b->connect_ms);
+}
+
+/*
  * The setup row's three lines, from a copy of the portal's state and
  * nothing else -- see portal.h on why it is a copy. `busy` is "a track is
  * playing", which the panel learns from storage like the USB row does.
@@ -631,8 +703,28 @@ static void draw_net(void)
     char lines[NET_SETUP_NOTE_LINES][64];
     setup_lines(&st, wifi, running, lines);
     const char *setup_note[NET_SETUP_NOTE_LINES] = { lines[0], lines[1], lines[2] };
-    const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, setup_note,
-                                   NET_SETUP_NOTE_LINES);
+    const int setup_used = draw_note(y + bh + AUDIO_NOTE_GAP, setup_note,
+                                     NET_SETUP_NOTE_LINES);
+
+    /* --- Benchmark --------------------------------------------------- */
+    bench_result_t bs;
+    bench_state(&bs);
+    bench_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Benchmark",
+                  NAME_SCALE, 400, wifi ? C_TEXT : C_DISABLED);
+    {
+        const int pw = 132, ph = 56;
+        draw_state_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                        bs.running ? "BUSY" : "RUN", bs.running, wifi,
+                        NAME_SCALE);
+    }
+    char blines[NET_BENCH_NOTE_LINES][64];
+    bench_lines(&bs, wifi, blines);
+    const char *bench_note[NET_BENCH_NOTE_LINES] = { blines[0], blines[1],
+                                                     blines[2] };
+    const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, bench_note,
+                                   NET_BENCH_NOTE_LINES) + setup_used;
 
     /*
      * No zone row, and see settings.h: nothing on this device displays a
@@ -968,6 +1060,21 @@ bool panel_touch(bool down, int x, int y)
                 ESP_LOGI(TAG, "network setup: start%s",
                          err == ESP_OK ? "" : " refused (radio off)");
             }
+            s_dirty = true;
+        }
+
+        /*
+         * The benchmark, which like the row above only ASKS. The work
+         * blocks for twenty seconds on the player task and this is
+         * ui_task; bench_request() raises a flag and player_loop()
+         * picks it up, which also means it cannot start while anything
+         * is playing, because that loop is not running then.
+         */
+        bench_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            const bool asked = bench_request();
+            ESP_LOGI(TAG, "benchmark: %s", asked ? "requested"
+                                                 : "not now");
             s_dirty = true;
         }
         return false;
