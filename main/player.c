@@ -3142,6 +3142,29 @@ static char s_stream_bottom[STREAMPLAN_LINE_MAX];
  * art is the one thing on screen ui_draw() does not own. */
 static volatile bool     s_repaint_art;
 
+/*
+ * THE NOTICE CARD, and which of the two kinds is up.
+ *
+ * A pending message, set by whatever noticed the problem, and the
+ * condition card, which is recomputed every pass because the thing it
+ * describes -- the web server -- stops on its own.
+ *
+ * s_notice_msg is a copy and not a pointer: the thing that set it was a
+ * string on some other task's stack as often as not, and the card is
+ * drawn a pass later.
+ */
+static char              s_notice_head[48];
+static char              s_notice_body[96];
+static volatile bool     s_notice_pending;
+/* Said once per absence, not once per pass. Cleared when a volume
+ * appears, so the next removal says it again. */
+static bool              s_notice_said_no_media;
+/* What the portal card last said, so it is redrawn only when the
+ * address or the state actually changes rather than every pass -- a
+ * card that re-blits 720x720 ten times a second is a cover that
+ * flickers and a decoder that waits. */
+static char              s_portal_card[96];
+
 /* Asked for by the decode loop, honoured by the UI task: the chooser is
  * opened from whichever task polls touch, so there is one writer to the
  * framebuffer. */
@@ -6052,6 +6075,81 @@ static void service_station_reload(void)
 }
 
 /*
+ * Put a dismissible card up. Safe from any task: it copies, sets a
+ * flag, and the UI task draws it.
+ *
+ * A second notice before the first is read REPLACES it, which loses one
+ * -- and the alternative is a queue of stale complaints that have to be
+ * tapped through one at a time, several of them about a card that was
+ * pulled out two minutes ago.
+ */
+static void notice_post(const char *head, const char *body)
+{
+    snprintf(s_notice_head, sizeof(s_notice_head), "%s", head ? head : "");
+    snprintf(s_notice_body, sizeof(s_notice_body), "%s", body ? body : "");
+    s_notice_pending = true;
+}
+
+/*
+ * The cards, drawn from the ui_task pass.
+ *
+ * ORDER MATTERS: the portal's card wins. It is up because somebody
+ * asked for it thirty seconds ago and is holding a phone; a "no media"
+ * card over the top of the address they are trying to read would be
+ * the wrong one of the two to show, and it will still be there to show
+ * afterwards.
+ */
+static void service_notices(void)
+{
+    portal_state_t ps;
+    const bool running = portal_running();
+    portal_state(&ps);
+
+    if (running && ps.url_ip[0]) {
+        char body[96];
+        if (ps.mode == PORTAL_MODE_SETUP) {
+            /* The SSID, because on the player's own AP the phone has to
+             * find the network before any address means anything. */
+            snprintf(body, sizeof(body), "join %s", ps.ap_ssid);
+        } else {
+            snprintf(body, sizeof(body), "http://%s/", ps.url_ip);
+        }
+
+        if (strcmp(body, s_portal_card) != 0) {
+            const char *lines[2];
+            int n = 0;
+            lines[n++] = body;
+            if (ps.mode == PORTAL_MODE_SETUP) {
+                static char addr[32];
+                snprintf(addr, sizeof(addr), "then http://%s/", ps.url_ip);
+                lines[n++] = addr;
+            }
+            ui_show_notice("Web setup is open", lines, n, false);
+            snprintf(s_portal_card, sizeof(s_portal_card), "%s", body);
+        }
+        return;
+    }
+
+    /*
+     * The portal stopped and its card is still on the cover. Nothing
+     * else will take it down -- that is what "not dismissible" means --
+     * so this does, and puts the artwork back.
+     */
+    if (s_portal_card[0]) {
+        s_portal_card[0] = '\0';
+        ui_notice_clear();
+        s_repaint_art = true;
+        return;
+    }
+
+    if (s_notice_pending) {
+        s_notice_pending = false;
+        const char *lines[1] = { s_notice_body };
+        ui_show_notice(s_notice_head, lines, s_notice_body[0] ? 1 : 0, true);
+    }
+}
+
+/*
  * Show the starred stations as the station list.
  *
  * stations_set_remote() and not a second list beside the first: it is
@@ -6913,6 +7011,13 @@ static void ui_task(void *arg)
         case UI_ACTION_SETTINGS:
             s_open_panel = true;
             break;
+        case UI_ACTION_DISMISS_NOTICE:
+            /* Clearing the card is uncovering the cover, and the cover
+             * is this task's to paint -- ui.c does not own it. */
+            ui_notice_clear();
+            s_repaint_art = true;
+            break;
+
         case UI_ACTION_FAVORITE:
             /*
              * The star on the panel, acting on what is playing. Deferred
@@ -7901,6 +8006,7 @@ static track_end_t play_file(const char *path)
         service_station_fetch();
         service_favorites_load();
         service_favorite_toggle();
+        service_notices();
 
         /* The envelope landed. Drawn here rather than on the loading
          * task so there is one writer to the framebuffer.
@@ -10685,6 +10791,7 @@ static track_end_t play_stream(const char *url, const char *name)
             service_station_fetch();
             service_favorites_load();
             service_favorite_toggle();
+            service_notices();
         }
 
         const netstream_state_t net = netstream_state();
@@ -11715,6 +11822,7 @@ static void player_loop(void)
             service_station_fetch();
             service_favorites_load();
             service_favorite_toggle();
+            service_notices();
 
             /*
              * The transport benchmark -- see bench.h. HERE AND NOWHERE
@@ -11773,6 +11881,21 @@ static void player_loop(void)
                 s_repaint_art = false;
                 if (s_path[0]) load_track_visuals(s_path);
                 else           ui_clear_art();
+            }
+            /* Nothing is playing and no volume is mounted: say so,
+             * once. The card is dismissible because this is a state
+             * somebody can do something about -- and once dismissed it
+             * does not come back until a volume has been and gone. */
+            const bool any_media = storage_present(STORAGE_SD) ||
+                                   storage_present(STORAGE_USB);
+            if (any_media) {
+                /* Armed again by something being there. The card is
+                 * about an absence, so the absence has to end before it
+                 * is worth saying a second time. */
+                s_notice_said_no_media = false;
+            } else if (!s_notice_said_no_media) {
+                s_notice_said_no_media = true;
+                notice_post("No media", "insert a card or a USB drive");
             }
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;

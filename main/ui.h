@@ -242,6 +242,14 @@ typedef enum {
      * Never produced while `fav` is UI_FAV_HIDDEN.
      */
     UI_ACTION_FAVORITE,
+    /*
+     * The notice card was tapped and should go.
+     *
+     * Only ever produced for a dismissible card -- see ui_notice_hit().
+     * The player repaints the artwork, because clearing the card is
+     * uncovering the cover and ui.c does not own that.
+     */
+    UI_ACTION_DISMISS_NOTICE,
 } ui_action_kind_t;
 
 /* Name of an action, for logging. Never NULL. Lives beside the enum so a
@@ -277,6 +285,83 @@ void ui_clear_art(void);
  * blits immediately; not part of ui_draw().
  */
 void ui_show_art_info(const char *const *lines, int n);
+
+/* ------------------------------------------------------------------ */
+/* The notice card                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A card over most of the artwork, for things the listener has to be
+ * told while the transport stays usable.
+ *
+ * WHY IT IS OVER THE ART AND NOT A ROW IN THE BAR. The bar is eight
+ * rows of controls and every one of them is doing something; an error
+ * that needed a ninth would push the transport, and the transport is
+ * where every finger goes. The artwork is 720x720 of decoration -- the
+ * largest thing on the panel and the only part of it that can be
+ * covered without taking a control away. Playback is not interrupted,
+ * so a stream keeps running behind an address somebody is typing into
+ * a phone.
+ *
+ * NOT part of ui_draw(). ui_draw() owns the bottom UI_BAR_H rows and
+ * never the cover; this blits the card itself, like ui_show_art_info()
+ * and ui_clear_art() already do. The cost is that the caller has to
+ * repaint the artwork when the card goes away, which is the same thing
+ * it already does after the format card.
+ *
+ * TWO KINDS, AND THE DIFFERENCE IS WHO CLEARS THEM.
+ *
+ * `dismissible` false is for a condition that is TRUE RIGHT NOW and
+ * will stop being true on its own -- the web server is running, and
+ * when it stops the card should go with it. There is no close button,
+ * because a card the listener can dismiss while the thing it describes
+ * is still happening leaves them with no way back to the address.
+ *
+ * `dismissible` true is for something that HAPPENED -- no media, a
+ * station that would not play. Nothing will clear it but the person
+ * reading it, so it draws a close box and ui_notice_hit() answers for
+ * it.
+ *
+ * `head` is one line, larger. `body` is up to four lines under it.
+ * Neither is copied: this draws immediately and keeps nothing but the
+ * card's geometry.
+ */
+void ui_show_notice(const char *head, const char *const *body, int n,
+                    bool dismissible);
+
+/*
+ * Is a card up, and is it one the listener can dismiss?
+ *
+ * The caller needs both: a notice that is up at all suppresses the
+ * artwork repaint that would paint over it, and only a dismissible one
+ * should be closed by a tap.
+ */
+bool ui_notice_active(void);
+bool ui_notice_dismissible(void);
+
+/*
+ * Did this tap land on the card?
+ *
+ * The WHOLE CARD and not just the close box. A card is the only thing
+ * on that part of the screen and a person dismissing it aims at the
+ * text as readily as at the corner; a 40 px target inside a 600 px one
+ * is a hit box that is technically discoverable and practically not.
+ * The close box is drawn so that it is obvious the card CAN be
+ * dismissed, not so that it is the only way to.
+ *
+ * False when no card is up, or when the one that is cannot be
+ * dismissed -- so the caller does not have to ask first.
+ */
+bool ui_notice_hit(int x, int y);
+
+/*
+ * Forget the card without painting anything.
+ *
+ * For the caller that is about to repaint the artwork anyway, which is
+ * every caller: clearing and then blitting the cover twice would show
+ * the card's background for a frame.
+ */
+void ui_notice_clear(void);
 
 /* Repaint the bar. Cheap enough to call at 20 Hz: it touches only the
  * bottom UI_BAR_H rows, never the cover art above them. */

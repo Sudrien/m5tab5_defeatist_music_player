@@ -191,6 +191,16 @@ static int s_w, s_h;
 static int s_bar_top;
 
 /* Live drag state. -1 = nothing being dragged. */
+/*
+ * The notice card. Declared up here with the rest of the file's state
+ * rather than beside ui_show_notice(), because ui_clear_art() -- which
+ * is above it -- drops the card, and a static cannot be used before it
+ * is declared.
+ */
+static bool s_notice_up;
+static bool s_notice_dismissible;
+static int  s_notice_x, s_notice_y, s_notice_w, s_notice_h;
+
 static int s_drag = -1;         /* 0 = seek, 1 = volume */
 /* s_drag_x is still tracked: draw_slider_c() and the envelope both need
  * the finger's x to show where the value is. Only the bubble wanted it in
@@ -215,6 +225,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_SETTINGS:    return "gear (settings)";
     case UI_ACTION_SCREEN_OFF:  return "moon (sleep page)";
     case UI_ACTION_FAVORITE:    return "star (favourite)";
+    case UI_ACTION_DISMISS_NOTICE: return "notice dismissed";
     case UI_ACTION_SCREEN_ON:   return "wake";
     case UI_ACTION_PREV:        return "prev";
     case UI_ACTION_PREV_AGAIN:  return "prev x2";
@@ -1192,6 +1203,12 @@ static void draw_battery(int pct, bool charging, bool ext)
 
 void ui_clear_art(void)
 {
+    /* The card lived on the artwork, so painting the artwork out takes
+     * it. Dropped here rather than left for the caller because every
+     * caller would have to remember, and one that forgot would leave
+     * ui_notice_hit() answering for a card nobody can see. */
+    s_notice_up = false;
+
     if (!s_fb) return;
     gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
     gfx_blit(0, s_bar_top);
@@ -1235,6 +1252,120 @@ void ui_show_art_info(const char *const *lines, int n)
         y += GFX_GLYPH_H(scale) + ART_INFO_GAP;
     }
 
+    gfx_blit(0, s_bar_top);
+}
+
+/* ------------------------------------------------------------------ */
+/* The notice card                                                      */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Lighter than C_BG so the card reads as something laid ON the screen
+ * rather than a hole in it, and edged so it still has a boundary
+ * against a dark cover. C_NOTICE_WARN is the head colour for a
+ * dismissible card: something went wrong is worth a different colour
+ * from an address somebody asked to see.
+ */
+#define C_NOTICE_BG     RGB(0x26, 0x26, 0x26)
+#define C_NOTICE_EDGE   RGB(0x4A, 0x4A, 0x4A)
+#define C_NOTICE_WARN   RGB(0xE8, 0x9A, 0x3C)
+
+/*
+ * The card's inset from the artwork square, and its padding.
+ *
+ * MOST of the art and not all of it: a margin is what says the cover is
+ * still there behind this. 56 px each side leaves 608 of 720, which is
+ * wide enough for an address at body scale with room to spare.
+ */
+#define NOTICE_INSET    (56)
+#define NOTICE_PAD      (40)
+#define NOTICE_HEAD_SC  (4)
+#define NOTICE_BODY_SC  (3)
+#define NOTICE_GAP      (20)
+#define NOTICE_CLOSE    (22)    /* half-width of the close box */
+
+bool ui_notice_active(void)      { return s_notice_up; }
+bool ui_notice_dismissible(void) { return s_notice_up && s_notice_dismissible; }
+void ui_notice_clear(void)       { s_notice_up = false; }
+
+bool ui_notice_hit(int x, int y)
+{
+    if (!s_notice_up || !s_notice_dismissible) return false;
+    return x >= s_notice_x && x < s_notice_x + s_notice_w &&
+           y >= s_notice_y && y < s_notice_y + s_notice_h;
+}
+
+/* An x, for the close box. Two strokes, drawn as a stack of short rows
+ * so that gfx needs no line primitive -- the same trick the folder and
+ * the note icons use. */
+static void draw_close(int cx, int cy, int r, uint16_t c)
+{
+    for (int i = -r; i <= r; i++) {
+        gfx_fill_rect(cx + i - 1, cy + i - 1, 3, 3, c);
+        gfx_fill_rect(cx + i - 1, cy - i - 1, 3, 3, c);
+    }
+}
+
+void ui_show_notice(const char *head, const char *const *body, int n,
+                    bool dismissible)
+{
+    if (!s_fb || !head) return;
+    if (n < 0) n = 0;
+    if (n > 4) n = 4;   /* see ui.h: four body lines, and the card is sized
+                         * for them rather than growing off the square */
+
+    /* Height from the content, so a one-line card is not a tall box
+     * with a sentence floating in it. */
+    int text_h = GFX_GLYPH_H(NOTICE_HEAD_SC);
+    for (int i = 0; i < n; i++) {
+        text_h += NOTICE_GAP + GFX_GLYPH_H(NOTICE_BODY_SC);
+    }
+
+    s_notice_w = s_w - 2 * NOTICE_INSET;
+    s_notice_h = text_h + 2 * NOTICE_PAD;
+    s_notice_x = NOTICE_INSET;
+    s_notice_y = (s_bar_top - s_notice_h) / 2;
+    if (s_notice_y < NOTICE_INSET) s_notice_y = NOTICE_INSET;
+    /* A card taller than the square is clamped rather than allowed to
+     * run under the transport bar, which it would otherwise cover. */
+    if (s_notice_h > s_bar_top - 2 * NOTICE_INSET) {
+        s_notice_h = s_bar_top - 2 * NOTICE_INSET;
+    }
+
+    gfx_fill_rect(s_notice_x, s_notice_y, s_notice_w, s_notice_h, C_NOTICE_EDGE);
+    gfx_fill_rect(s_notice_x + 2, s_notice_y + 2, s_notice_w - 4,
+                  s_notice_h - 4, C_NOTICE_BG);
+
+    int y = s_notice_y + NOTICE_PAD;
+    const int avail = s_notice_w - 2 * NOTICE_PAD;
+
+    const int hw = gfx_text_w(head, NOTICE_HEAD_SC);
+    int hx = s_notice_x + (s_notice_w - hw) / 2;
+    if (hx < s_notice_x + NOTICE_PAD) hx = s_notice_x + NOTICE_PAD;
+    gfx_draw_text(hx, y, head, NOTICE_HEAD_SC, avail,
+                  dismissible ? C_NOTICE_WARN : C_THUMB);
+    y += GFX_GLYPH_H(NOTICE_HEAD_SC) + NOTICE_GAP;
+
+    for (int i = 0; i < n; i++) {
+        const char *t = body && body[i] ? body[i] : "";
+        const int tw = gfx_text_w(t, NOTICE_BODY_SC);
+        int tx = s_notice_x + (s_notice_w - tw) / 2;
+        if (tx < s_notice_x + NOTICE_PAD) tx = s_notice_x + NOTICE_PAD;
+        gfx_draw_text(tx, y, t, NOTICE_BODY_SC, avail, C_ICON);
+        y += GFX_GLYPH_H(NOTICE_BODY_SC) + NOTICE_GAP;
+    }
+
+    if (dismissible) {
+        draw_close(s_notice_x + s_notice_w - NOTICE_PAD,
+                   s_notice_y + NOTICE_PAD, NOTICE_CLOSE / 2, C_ICON);
+    }
+
+    s_notice_up = true;
+    s_notice_dismissible = dismissible;
+
+    /* The whole square, for ui_show_art_info()'s reason: this blits
+     * itself rather than waiting for ui_draw(), which never comes up
+     * this far. */
     gfx_blit(0, s_bar_top);
 }
 
@@ -1616,6 +1747,31 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
         if (tapped) act.kind = UI_ACTION_SCREEN_ON;
         return act;
     }
+
+    /*
+     * The card, first, because it is drawn over everything above the
+     * bar and a control that is covered must not still be pressable.
+     *
+     * Only on the tap edge, and only for a dismissible card: a
+     * persistent one is describing something still happening, and a tap
+     * that made the address vanish while the server was still up would
+     * leave no way back to it.
+     *
+     * Ahead of the drag branch as well -- a drag cannot have started
+     * under a card, since this returns before any drag could begin.
+     */
+    if (tapped && ui_notice_hit(x, y)) {
+        act.kind = UI_ACTION_DISMISS_NOTICE;
+        return act;
+    }
+
+    /*
+     * A tap anywhere on the artwork while a card is up does nothing.
+     * There is nothing under there to press -- the cover is not a
+     * control -- and swallowing it means a person jabbing at a card
+     * that cannot be dismissed does not also do something else.
+     */
+    if (s_notice_up && y < s_bar_top) return act;
 
     if (s_drag >= 0) {
         int x0, x1, sy;
