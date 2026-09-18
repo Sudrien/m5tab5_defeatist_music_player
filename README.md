@@ -62,9 +62,9 @@ Note: the goal of this project is to max out the potential of this hardware with
 - brightness control
 - Network Time Protocol (if wifi has been setup)
 - captive portal wifi config (multiple routers)
+- wifi network portal manual Internet Radio station entry 
 
 ## v0.4.0 targets
-- captive portal manual Internet Radio station entry 
 - Internet radio favorites
 
 
