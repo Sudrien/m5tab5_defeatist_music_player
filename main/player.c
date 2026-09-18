@@ -95,6 +95,7 @@
 #include "bufferplan.h"
 #include "netdec.h"
 #include "netstream.h"
+#include "favorites.h"
 #include "stations.h"
 #include "radiobrowser.h"
 #include "streamgain.h"
@@ -3174,6 +3175,23 @@ static volatile bool     s_reload_stations;
 static volatile int      s_fetch_row = -1;
 
 /*
+ * The chooser wants the starred list shown, and a station it wants
+ * starred or unstarred (an index into the LOADED list, or -1).
+ *
+ * Both deferred for s_reload_stations' reason and not a weaker one:
+ * each opens a file, and the toggle WRITES one. ui_task must not be the
+ * task that waits for a card.
+ *
+ * One outstanding toggle. A second star pressed while the first is in
+ * flight replaces it, which loses a press -- and that is better than a
+ * queue, because the presses are on different rows and a queue would
+ * apply them in an order nobody watched. The epoch redraws whatever
+ * actually landed.
+ */
+static volatile bool     s_load_favorites;
+static volatile int      s_fav_row = -1;
+
+/*
  * The station's artwork URL, resolved once at first sound, or empty.
  *
  * Resolved and not fetched: 0421 does the fetching, where the size cap
@@ -6027,6 +6045,80 @@ static void service_station_reload(void)
     if (!s_reload_stations) return;
     s_reload_stations = false;
     stations_load();
+    /* The stars belong to the volume the list came from, so they are
+     * re-read with it. A card swapped for another swaps both. */
+    favorites_load();
+    s_stations_epoch++;
+}
+
+/*
+ * Show the starred stations as the station list.
+ *
+ * stations_set_remote() and not a second list beside the first: it is
+ * what the charts and the tags already do, and it is what keeps next,
+ * previous and stations_index() meaning one thing. The favourites are
+ * "a list that did not come off a volume" in exactly the sense that
+ * header means -- they came off a FILE on a volume, but not off
+ * stations.m3u, and the distinction that matters to stations.c is
+ * whether reloading the card would replace them. It would.
+ */
+static void service_favorites_load(void)
+{
+    if (!s_load_favorites) return;
+    s_load_favorites = false;
+
+    favorites_load();
+
+    const int n = favorites_count();
+    if (n <= 0) {
+        /*
+         * Said rather than shown as an empty list, because an empty
+         * list on a tab that was full a moment ago reads as a failure.
+         * The star is how one gets here and the line says so.
+         */
+        browser_set_radio_status("nothing starred yet - tap a star to keep one");
+        return;
+    }
+
+    station_t *list = heap_caps_calloc(STATIONLIST_MAX, sizeof(station_t),
+                                       MALLOC_CAP_SPIRAM);
+    if (!list) {
+        ESP_LOGE(TAG, "no PSRAM for the starred list");
+        browser_set_radio_status("not enough memory for that list");
+        return;
+    }
+
+    int count = 0;
+    for (int i = 0; i < n && count < STATIONLIST_MAX; i++) {
+        if (favorites_get(i, &list[count])) count++;
+    }
+
+    if (count > 0 && stations_set_remote(list, count, "Starred")) {
+        s_stations_epoch++;
+    }
+    free(list);
+}
+
+/*
+ * Star or unstar one station of the loaded list, by index.
+ *
+ * The epoch is bumped whether or not the write worked: the chooser has
+ * to redraw either way, and after a failure the row must go back to
+ * showing what is actually on the card rather than what was asked for.
+ */
+static void service_favorite_toggle(void)
+{
+    const int index = s_fav_row;
+    if (index < 0) return;
+    s_fav_row = -1;
+
+    station_t st;
+    if (!stations_get(index, &st) || !st.url[0]) {
+        ESP_LOGW(TAG, "no station %d to star", index);
+        return;
+    }
+    const bool now = favorites_toggle(st.name, st.url);
+    ESP_LOGI(TAG, "%s: %s", now ? "starred" : "unstarred", st.name);
     s_stations_epoch++;
 }
 
@@ -6323,6 +6415,21 @@ static void ui_task(void *arg)
                 touch_swallow();
                 break;
 
+            case BROWSER_LOAD_FAVORITES:
+                /* Requested, not done -- it opens a file. Same shape as
+                 * the reload below, including leaving the chooser open
+                 * on the rows it has until the epoch moves. */
+                s_load_favorites = true;
+                break;
+
+            case BROWSER_TOGGLE_FAVORITE:
+                /* Requested, not done, and this one WRITES to the card.
+                 * The row keeps showing what the file says until the
+                 * player has changed it -- see BROWSER_TOGGLE_FAVORITE
+                 * in browser.h for why it is not optimistic. */
+                s_fav_row = r.index;
+                break;
+
             case BROWSER_RELOAD_STATIONS:
                 /*
                  * Requested, not done. The chooser stays open and stays
@@ -6390,6 +6497,27 @@ static void ui_task(void *arg)
          */
         st.has_next = s_streaming ? stations_have_other()
                                   : playlist_has_next(browser_order());
+
+        /*
+         * The star. Shown only for a stream: a file has nothing to
+         * star, and favourites are a station list.
+         *
+         * Resolved from the URL of the station at stations_index(),
+         * which is the station PLAYING -- request_stream() sets the
+         * index before it starts, so the two cannot disagree. Asked
+         * every frame because favorites_contains() is a scan of memory
+         * under a mutex and never touches the card; the file is read
+         * only when something calls favorites_load().
+         */
+        if (s_streaming) {
+            station_t fst;
+            const bool known = stations_get(stations_index(), &fst) && fst.url[0];
+            st.fav = !known    ? UI_FAV_HIDDEN
+                   : favorites_contains(fst.url) ? UI_FAV_ON
+                                                 : UI_FAV_OFF;
+        } else {
+            st.fav = UI_FAV_HIDDEN;
+        }
 
         /*
          * The staged text becomes the shown text when the art has
@@ -6785,6 +6913,17 @@ static void ui_task(void *arg)
         case UI_ACTION_SETTINGS:
             s_open_panel = true;
             break;
+        case UI_ACTION_FAVORITE:
+            /*
+             * The star on the panel, acting on what is playing. Deferred
+             * to the player task exactly as the chooser's star is, and
+             * through the same one slot -- the two cannot both be
+             * outstanding, and if they race the later press wins, which
+             * is the one the finger meant.
+             */
+            s_fav_row = stations_index();
+            break;
+
         case UI_ACTION_SCREEN_OFF:
             /* The moon opens the sleep page; "Screen off" is its first
              * option, handled where the page is touched above. */
@@ -7760,6 +7899,8 @@ static track_end_t play_file(const char *path)
          * visuals, so none of the pending flags apply to it. */
         service_station_reload();
         service_station_fetch();
+        service_favorites_load();
+        service_favorite_toggle();
 
         /* The envelope landed. Drawn here rather than on the loading
          * task so there is one writer to the framebuffer.
@@ -10542,6 +10683,8 @@ static track_end_t play_stream(const char *url, const char *name)
         if (!leaving) {
             service_station_reload();
             service_station_fetch();
+            service_favorites_load();
+            service_favorite_toggle();
         }
 
         const netstream_state_t net = netstream_state();
@@ -11570,6 +11713,8 @@ static void player_loop(void)
              * same pass should not wait for the next. */
             service_station_reload();
             service_station_fetch();
+            service_favorites_load();
+            service_favorite_toggle();
 
             /*
              * The transport benchmark -- see bench.h. HERE AND NOWHERE

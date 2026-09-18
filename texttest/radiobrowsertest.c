@@ -406,10 +406,12 @@ int main(void)
               "the card row is not a fetch");
 
         /*
-         * THE TWO ACTION ROWS ARE BOTH NOT-FETCHES, and the caller
+         * THE THREE ACTION ROWS ARE ALL NOT-FETCHES, and the caller
          * tells them apart by number, so the numbers must differ and
-         * both must be labelled. This is the assertion that would have
-         * caught the row that was inserted without moving the charts.
+         * all must be labelled. This is the assertion that would have
+         * caught the row that was inserted without moving the charts --
+         * and it did: adding the starred row moved first_fetch and four
+         * checks below failed until the boundary followed it.
          */
         CHECK(radiobrowser_menu_label(RADIOBROWSER_MENU_ADD)[0] != '\0',
               "the add-a-station row has a label");
@@ -421,18 +423,52 @@ int main(void)
                      radiobrowser_menu_label(RADIOBROWSER_MENU_ADD)) != 0,
               "the two action rows share a label");
 
+        CHECK(radiobrowser_menu_label(RADIOBROWSER_MENU_FAV)[0] != '\0',
+              "the starred row has a label");
+        CHECK(!radiobrowser_menu_kind(RADIOBROWSER_MENU_FAV, NULL, NULL),
+              "the starred row is not a fetch");
+        CHECK(RADIOBROWSER_MENU_FAV != RADIOBROWSER_MENU_CARD &&
+              RADIOBROWSER_MENU_FAV != RADIOBROWSER_MENU_ADD,
+              "the starred row collides with another action row");
+        CHECK(strcmp(radiobrowser_menu_label(RADIOBROWSER_MENU_FAV),
+                     radiobrowser_menu_label(RADIOBROWSER_MENU_CARD)) != 0 &&
+              strcmp(radiobrowser_menu_label(RADIOBROWSER_MENU_FAV),
+                     radiobrowser_menu_label(RADIOBROWSER_MENU_ADD)) != 0,
+              "the starred row shares a label with another action row");
+
+        /*
+         * The actions are CONTIGUOUS from row 0, which is what
+         * menu_kind()'s `row <= RADIOBROWSER_MENU_FAV` guard means: it
+         * is a range test, so an action row added anywhere but the top
+         * of the block would be called a fetch. Asserted because the
+         * guard cannot say this about itself.
+         */
+        CHECK(RADIOBROWSER_MENU_FAV == RADIOBROWSER_MENU_ADD + 1 &&
+              RADIOBROWSER_MENU_ADD == RADIOBROWSER_MENU_CARD + 1,
+              "the action rows are not contiguous from row 0");
+
         /* Every row above the actions is a fetch, and no row below is.
          * Stated as a boundary rather than as two numbers so that
          * inserting another action row fails here loudly. */
         radiobrowser_kind_t kind;
         const char *value;
-        const int first_fetch = RADIOBROWSER_MENU_ADD + 1;
+        /* The last action row plus one. Named off MENU_FAV rather than
+         * MENU_ADD so that the next action row moves this by moving the
+         * constant, instead of by failing four checks. */
+        const int first_fetch = RADIOBROWSER_MENU_FAV + 1;
         CHECK(radiobrowser_menu_kind(first_fetch, &kind, &value) &&
               kind == RADIOBROWSER_TOPVOTE && value == NULL,
               "the first fetch row is the votes chart and takes no value");
         CHECK(radiobrowser_menu_kind(first_fetch + 1, &kind, &value) &&
               kind == RADIOBROWSER_TOPCLICK && value == NULL,
               "the second fetch row is the clicks chart");
+
+        /* The tags start where the charts end, and RADIOBROWSER_MENU_TAG0
+         * says so in the header. If the two ever disagree the tag rows
+         * fetch the wrong tag, which is the drift this whole block
+         * exists to catch. */
+        CHECK(first_fetch + 2 == RADIOBROWSER_MENU_TAG0,
+              "the tag base and the fetch rows disagree");
 
         for (int i = first_fetch + 2; i < RADIOBROWSER_MENU_ROWS; i++) {
             char url[RADIOBROWSER_URL_MAX];

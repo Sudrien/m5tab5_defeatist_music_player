@@ -193,6 +193,27 @@ typedef struct {
     uint8_t     strip_ahead[LEVELHIST_AHEAD_COLUMNS];
     int         strip_ahead_cols;
     bool        strip_clipped;
+
+    /*
+     * The star, on the transport row between `next` and the moon.
+     *
+     * Three-valued because "not shown" is not the same as "not
+     * starred": the button is absent for a FILE, which has nothing to
+     * star, and an empty outline there would be a control that does
+     * nothing. UI_FAV_HIDDEN draws no glyph and ui_touch() does not
+     * test the box, so the space belongs to nobody rather than to a
+     * dead button.
+     *
+     * The player resolves this from the URL of the station playing, so
+     * it is the panel's answer to the same question the chooser's gold
+     * row answers -- one source, favorites_contains(), and two places
+     * that show it.
+     */
+    enum {
+        UI_FAV_HIDDEN = 0,  /* not a stream: no button */
+        UI_FAV_OFF,         /* a stream, not starred */
+        UI_FAV_ON,          /* a stream, starred */
+    } fav;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
@@ -209,6 +230,18 @@ typedef enum {
     UI_ACTION_SEEK,         /* value = target percent 0..100 */
     UI_ACTION_VOLUME,       /* value = target percent 0..100 */
     UI_ACTION_MUTE,         /* speaker icon, or the headset's mute key */
+    /*
+     * The star: star or unstar what is playing.
+     *
+     * A request, like everything else here -- the UI never acts. The
+     * player owns it because it writes to the card, and the panel does
+     * not change until the player has done it and published a new
+     * state. A star that lit on the press and went out on the failure
+     * would be the only optimistic control on this screen.
+     *
+     * Never produced while `fav` is UI_FAV_HIDDEN.
+     */
+    UI_ACTION_FAVORITE,
 } ui_action_kind_t;
 
 /* Name of an action, for logging. Never NULL. Lives beside the enum so a

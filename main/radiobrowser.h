@@ -488,37 +488,57 @@ static inline bool radiobrowser_search_url(char *url, size_t url_size,
  * the first row rather than a button somebody has to find. Row 1 opens
  * the web form that adds one -- next to the card's list because that is
  * the file it writes to, and near the top because somebody who has just
- * found a station in the directory is about to want it. Then the two
- * charts, then the pinned tags.
+ * found a station in the directory is about to want it. Row 2 is the
+ * starred ones, with the other two lists that live on the card rather
+ * than out on the network. Then the two charts, then the pinned tags.
  *
- * ROWS 0 AND 1 ARE BOTH ACTIONS, NOT FETCHES, which is why
- * radiobrowser_menu_kind() answers false for both and the caller
+ * ROWS 0, 1 AND 2 ARE ALL ACTIONS, NOT FETCHES, which is why
+ * radiobrowser_menu_kind() answers false for them and the caller
  * switches on the row instead. The alternative -- a kind meaning "not a
  * fetch" -- would put a directory request and a web server behind the
  * same enum.
+ *
+ * THE NON-FETCH ROWS COME FIRST AND menu_kind() DEPENDS ON IT. Its
+ * guard is `row <= RADIOBROWSER_MENU_FAV`, a range and not a list, so a
+ * fourth action row has to be added at the top and everything below it
+ * shifted -- including the tag base, which appears in BOTH functions
+ * below. Adding one in the middle would make menu_kind() call it a
+ * fetch and the directory would be asked for a tag named after a
+ * button.
  */
-#define RADIOBROWSER_MENU_ROWS  (RADIOBROWSER_TAG_COUNT + 4)
+#define RADIOBROWSER_MENU_ROWS  (RADIOBROWSER_TAG_COUNT + 5)
 
 /* The card's own list. */
 #define RADIOBROWSER_MENU_CARD  (0)
 /* The station form, served by portal.c in PORTAL_MODE_STATION. */
 #define RADIOBROWSER_MENU_ADD   (1)
+/* The starred ones, from favorites.m3u on the same volume. */
+#define RADIOBROWSER_MENU_FAV   (2)
+
+/* The first tag row. The two charts sit between the actions and the
+ * tags, so this is MENU_FAV + 1 + 2. Named because it was a bare 4 in
+ * two places and they have to move together. */
+#define RADIOBROWSER_MENU_TAG0  (5)
 
 static inline const char *radiobrowser_menu_label(int row)
 {
     static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
     if (row == RADIOBROWSER_MENU_CARD) return "stations.m3u on the card";
     if (row == RADIOBROWSER_MENU_ADD)  return "Add a station by phone...";
-    if (row == 2) return "Most voted";
-    if (row == 3) return "Most listened";
-    if (row >= 4 && row < RADIOBROWSER_MENU_ROWS) return tags[row - 4];
+    if (row == RADIOBROWSER_MENU_FAV)  return "Starred stations";
+    if (row == 3) return "Most voted";
+    if (row == 4) return "Most listened";
+    if (row >= RADIOBROWSER_MENU_TAG0 && row < RADIOBROWSER_MENU_ROWS) {
+        return tags[row - RADIOBROWSER_MENU_TAG0];
+    }
     return "";
 }
 
 /*
- * What row `row` fetches. False for rows 0 and 1, which are not fetches
- * at all -- the card, which the caller reloads, and the station form,
- * which the caller opens.
+ * What row `row` fetches. False for rows 0, 1 and 2, which are not
+ * fetches at all -- the card, which the caller reloads, the station
+ * form, which the caller opens, and the starred list, which is read off
+ * the same volume.
  *
  * `value` is left pointing at the table rather than copied, which is
  * safe because the table is static const and outlives everything; a
@@ -528,12 +548,12 @@ static inline bool radiobrowser_menu_kind(int row, radiobrowser_kind_t *kind,
                                           const char **value)
 {
     static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
-    if (row <= RADIOBROWSER_MENU_ADD || row >= RADIOBROWSER_MENU_ROWS) return false;
+    if (row <= RADIOBROWSER_MENU_FAV || row >= RADIOBROWSER_MENU_ROWS) return false;
     if (value) *value = NULL;
-    if (row == 2) { if (kind) *kind = RADIOBROWSER_TOPVOTE;  return true; }
-    if (row == 3) { if (kind) *kind = RADIOBROWSER_TOPCLICK; return true; }
+    if (row == 3) { if (kind) *kind = RADIOBROWSER_TOPVOTE;  return true; }
+    if (row == 4) { if (kind) *kind = RADIOBROWSER_TOPCLICK; return true; }
     if (kind)  *kind  = RADIOBROWSER_BYTAG;
-    if (value) *value = tags[row - 4];
+    if (value) *value = tags[row - RADIOBROWSER_MENU_TAG0];
     return true;
 }
 

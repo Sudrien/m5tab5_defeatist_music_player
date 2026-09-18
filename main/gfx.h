@@ -110,6 +110,11 @@ bool gfx_flipped(void);
 void gfx_px(int x, int y, uint16_t c);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t c);
 void gfx_fill_circle(int cx, int cy, int r, uint16_t c);
+/* Three points, filled. A degenerate triangle draws nothing. See gfx.c:
+ * this exists for the star, which is the one glyph here that a circle
+ * and a rectangle cannot make between them. */
+void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                       uint16_t c);
 
 /* Seven-segment metrics, exported because callers lay out around them. */
 #define GFX_DIG_W       (20)

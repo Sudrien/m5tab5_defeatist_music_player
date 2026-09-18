@@ -331,6 +331,59 @@ void gfx_fill_circle(int cx, int cy, int r, uint16_t c)
     }
 }
 
+/*
+ * A filled triangle, by scanlines.
+ *
+ * Added for the star in the chooser and the panel, which is two
+ * overlapping triangles -- the one shape in this program that a circle
+ * and a rectangle cannot make between them.
+ *
+ * Flat-sided rather than anti-aliased, like everything else here: the
+ * panel is 294 PPI and a one-pixel stair on a 36 px glyph is under a
+ * tenth of a millimetre. The edges are walked with integer cross
+ * products rather than slopes so that a degenerate triangle -- two
+ * vertices equal, which a star at r=1 produces -- fills nothing instead
+ * of dividing by zero.
+ */
+void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
+                       uint16_t c)
+{
+    int min_y = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
+    int max_y = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
+    int min_x = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
+    int max_x = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+
+    /* Signed area. Zero is a line or a point: nothing to fill, and the
+     * inside test below would be a comparison against no interior. */
+    const int area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
+    if (area == 0) return;
+
+    for (int y = min_y; y <= max_y; y++) {
+        /*
+         * The row's span, found by walking x rather than solving for
+         * the edges: the spans are at most a glyph wide, and the
+         * alternative is three slope cases and their degeneracies. The
+         * first and last inside pixel bound one fill_rect, so the write
+         * is still one span per row.
+         */
+        int lo = max_x + 1, hi = min_x - 1;
+        for (int x = min_x; x <= max_x; x++) {
+            const int w0 = (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0);
+            const int w1 = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1);
+            const int w2 = (x0 - x2) * (y - y2) - (y0 - y2) * (x - x2);
+            /* All three the same sign as the area means inside, with
+             * zero counting as on the edge and therefore in. */
+            const bool inside = area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
+                                         : (w0 <= 0 && w1 <= 0 && w2 <= 0);
+            if (inside) {
+                if (x < lo) lo = x;
+                if (x > hi) hi = x;
+            }
+        }
+        if (hi >= lo) gfx_fill_rect(lo, y, hi - lo + 1, 1, c);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Seven-segment digits                                                */
 /* ------------------------------------------------------------------ */

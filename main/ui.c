@@ -28,6 +28,10 @@ static const char *TAG = "tab5_ui";
 #define C_FILL      RGB(0xD1, 0x3B, 0x2C)   /* played / set volume */
 #define C_THUMB     RGB(0xFF, 0xFF, 0xFF)
 #define C_ICON      RGB(0xCC, 0xCC, 0xCC)
+/* Starred. The same gold the chooser's rows use -- one mark, one
+ * colour, two screens. Not C_FILL, which means "played" on the seek bar
+ * eight pixels away. */
+#define C_STAR      RGB(0xE8, 0xB3, 0x2C)
 /* Album row. Dimmer than artist, but its own value rather than reusing
  * C_TRACK -- that is 0x3A, chosen to be a slider groove that does not
  * compete with the fill, and it is too dark to read as text. */
@@ -210,6 +214,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_CHOOSE_FILE: return "folder";
     case UI_ACTION_SETTINGS:    return "gear (settings)";
     case UI_ACTION_SCREEN_OFF:  return "moon (sleep page)";
+    case UI_ACTION_FAVORITE:    return "star (favourite)";
     case UI_ACTION_SCREEN_ON:   return "wake";
     case UI_ACTION_PREV:        return "prev";
     case UI_ACTION_PREV_AGAIN:  return "prev x2";
@@ -352,13 +357,32 @@ static void folder_centre(int *cx, int *cy)
  * 64 + ICON_HALF + HIT_PAD_X = 104; prev's starts at 360 - 112 - SKIP_HALF
  * - HIT_PAD_X = 199. A gear at 156 spans 116..196, which clears both.
  *
- * The right-hand side has no such gap: next ends at 521 and the moon
- * starts at 616, so a sixth control over there would have had to move
- * the transport, and the transport is where every finger already goes.
+ * The right-hand side has one too, and this comment used to deny it.
+ * Next ends at 521 and the moon starts at 616, which is 95 px -- as
+ * much slack as the gear's gap and more than the 80 px the gear's box
+ * occupies. What was true is that there was no gap LEFT once the moon
+ * sat at s_w - 64; what was written was that the side had none. The
+ * star at 568 spans 528..608 and clears both by 7 and 8 px, which is
+ * the same order of clearance the gear has at 12 and 3.
+ *
+ * So: row 7 is seven controls in four groups, and it is full. An eighth
+ * would have to move the transport, and the transport is where every
+ * finger already goes.
  */
 static void gear_centre(int *cx, int *cy)
 {
     *cx = 156;
+    *cy = s_bar_top + ROW_Y;
+}
+
+/*
+ * The star, between next and the moon. See the note above row 7 for the
+ * arithmetic; 568 is the midpoint of 521 and 616 rounded to the pixel
+ * that leaves the clearance even.
+ */
+static void star_centre(int *cx, int *cy)
+{
+    *cx = 568;
     *cy = s_bar_top + ROW_Y;
 }
 
@@ -480,6 +504,40 @@ static void draw_gear(void)
 
     gfx_fill_circle(cx, cy, r, C_ICON);
     gfx_fill_circle(cx, cy, 8, C_BG);   /* the hole */
+}
+
+/*
+ * The star, filled when this station is starred and an outline when it
+ * is not. Nothing at all when there is no station -- see ui_state_t's
+ * `fav`.
+ *
+ * The same two-triangle construction the chooser's rows use, at the
+ * icon size the rest of row 7 is drawn at, so the two stars are
+ * recognisably the same mark. They are not shared code: browser.c fills
+ * its hole with C_ROW and this one with C_BG, and a shared helper would
+ * have to be told the background, which is the only thing that differs.
+ */
+static void draw_star_btn(int state)
+{
+    if (state == UI_FAV_HIDDEN) return;
+
+    int cx, cy;
+    star_centre(&cx, &cy);
+    const int r = ICON_HALF;
+    const uint16_t c = (state == UI_FAV_ON) ? C_STAR : C_ICON;
+
+    gfx_fill_triangle(cx, cy - r, cx - (r * 87) / 100, cy + (r * 50) / 100,
+                      cx + (r * 87) / 100, cy + (r * 50) / 100, c);
+    gfx_fill_triangle(cx, cy + r, cx - (r * 87) / 100, cy - (r * 50) / 100,
+                      cx + (r * 87) / 100, cy - (r * 50) / 100, c);
+
+    if (state == UI_FAV_OFF) {
+        const int in = (r * 60) / 100;
+        gfx_fill_triangle(cx, cy - in, cx - (in * 87) / 100, cy + (in * 50) / 100,
+                          cx + (in * 87) / 100, cy + (in * 50) / 100, C_BG);
+        gfx_fill_triangle(cx, cy + in, cx - (in * 87) / 100, cy - (in * 50) / 100,
+                          cx + (in * 87) / 100, cy - (in * 50) / 100, C_BG);
+    }
 }
 
 static void draw_moon(void)
@@ -1512,6 +1570,7 @@ void ui_draw(const ui_state_t *st)
     draw_battery(st->battery_pct, st->battery_charging, st->ext_power);
     draw_folder();
     draw_gear();
+    draw_star_btn(st->fav);
     draw_moon();
 
     int cx, cy;
@@ -1637,6 +1696,20 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
     if (in_box(x, y, cx, cy, ICON_HALF)) {
         act.kind = UI_ACTION_SETTINGS;
         return act;
+    }
+
+    /*
+     * The star, and only when there is one. With no station the box is
+     * not tested at all, so the gap between next and the moon is dead
+     * space rather than an invisible button -- which is what a hidden
+     * control that still answers would be.
+     */
+    if (st->fav != UI_FAV_HIDDEN) {
+        star_centre(&cx, &cy);
+        if (in_box(x, y, cx, cy, ICON_HALF)) {
+            act.kind = UI_ACTION_FAVORITE;
+            return act;
+        }
     }
 
     moon_centre(&cx, &cy);

@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "browser.h"
+#include "favorites.h"
 #include "radiobrowser.h"
 #include "stations.h"
 #include "decoder.h"
@@ -29,6 +30,12 @@ static const char *TAG = "tab5_browser";
 #define C_DIM       RGB(0x77, 0x77, 0x77)
 #define C_DISABLED  RGB(0x44, 0x44, 0x44)
 #define C_ACCENT    RGB(0xD1, 0x3B, 0x2C)
+/*
+ * Starred. Gold rather than a second use of C_ACCENT, which already
+ * means "this is the one playing" -- two states on the same row need
+ * two colours or the row says one thing and means either.
+ */
+#define C_STAR      RGB(0xE8, 0xB3, 0x2C)
 #define C_TAB_ON    RGB(0x22, 0x22, 0x22)
 #define C_TAB_OFF   RGB(0x10, 0x10, 0x10)
 #define C_BTN       RGB(0x26, 0x26, 0x26)
@@ -58,6 +65,21 @@ static const char *TAG = "tab5_browser";
  * enough to reach the right edge are already being clipped there.
  */
 #define SCROLL_W        (16)
+
+/*
+ * The star's column, at the right of a station row and clear of the
+ * scrollbar.
+ *
+ * STAR_W is the whole tappable strip, not the glyph: the glyph is
+ * STAR_R across and a 72 px strip is 6 mm at 294 PPI, which is what a
+ * thumb needs for a target that sits beside a much larger one. The row
+ * tap still owns everything to the left of it, so the common action --
+ * play this station -- keeps the whole width it had minus this strip,
+ * and the name's draw width shrinks by the same amount so a long name
+ * cannot run under the star.
+ */
+#define STAR_W          (72)
+#define STAR_R          (18)
 #define SCROLL_HIT_W    (72)
 #define NAME_SCALE  (3)
 #define LABEL_SCALE (2)
@@ -70,6 +92,18 @@ static const char *TAG = "tab5_browser";
 typedef struct {
     char *name;
     bool is_dir;
+    /*
+     * Starred, resolved when the row was built and not while drawing.
+     *
+     * favorites_contains() is a scan of up to STATIONLIST_MAX entries.
+     * Once per row per list load is 64x64 comparisons; once per row per
+     * FRAME is that at the panel's refresh rate, for an answer that
+     * cannot change without something calling browser_stations_reloaded()
+     * anyway. The URL is not kept -- only the answer -- so this stays
+     * true to BROWSER_PLAY_STREAM's rule that stations.c is the only
+     * thing that knows what station i is.
+     */
+    bool fav;
 } entry_t;
 
 static bool s_open;
@@ -462,6 +496,7 @@ static void load_stations(void)
         s_entries[s_count].name = strdup(st.name);
         if (!s_entries[s_count].name) break;
         s_entries[s_count].is_dir = false;
+        s_entries[s_count].fav = favorites_contains(st.url);
         s_count++;
     }
     /* NOT sorted. The file's order is the listener's order -- it is what
@@ -664,6 +699,40 @@ static void draw_folder_icon(int cx, int cy, uint16_t c)
     gfx_fill_rect(cx - 20, cy - 14, 16, 5, c);
     gfx_fill_rect(cx - 20, cy - 9, 40, 25, c);
     gfx_fill_rect(cx - 16, cy - 5, 32, 17, C_ROW);
+}
+
+/*
+ * A five-pointed star, filled when starred and an outline when not.
+ *
+ * Drawn from two overlapping triangles rather than a polygon fill,
+ * because gfx has no polygon fill and a star is exactly the shape that
+ * decomposes into two. The outline case draws the same two triangles in
+ * the row colour inside a slightly larger pair, which is a stroke
+ * without a stroke primitive.
+ */
+static void draw_star(int cx, int cy, int r, bool filled, uint16_t c,
+                      uint16_t bg)
+{
+    /* Upright triangle, then the inverted one, which together read as a
+     * star at any size a finger can aim at.
+     *
+     * `bg` and not C_ROW: the rows alternate C_ROW and C_ROW_ALT, and a
+     * hole punched in the wrong one of those is a star with a shadow on
+     * every second line. */
+    gfx_fill_triangle(cx, cy - r, cx - (r * 87) / 100, cy + (r * 50) / 100,
+                      cx + (r * 87) / 100, cy + (r * 50) / 100, c);
+    gfx_fill_triangle(cx, cy + r, cx - (r * 87) / 100, cy - (r * 50) / 100,
+                      cx + (r * 87) / 100, cy - (r * 50) / 100, c);
+    if (!filled) {
+        /* The same shape, smaller, in the row's colour: what is left is
+         * a ring. The inner star is 60% because anything thinner than
+         * about 3 px of rim disappears at this pitch. */
+        const int in = (r * 60) / 100;
+        gfx_fill_triangle(cx, cy - in, cx - (in * 87) / 100, cy + (in * 50) / 100,
+                          cx + (in * 87) / 100, cy + (in * 50) / 100, bg);
+        gfx_fill_triangle(cx, cy + in, cx - (in * 87) / 100, cy - (in * 50) / 100,
+                          cx + (in * 87) / 100, cy - (in * 50) / 100, bg);
+    }
 }
 
 /* A note: stem and head. Two rectangles and a circle is enough to read as
@@ -884,7 +953,8 @@ void browser_draw(void)
             gfx_fill_rect(0, y, w, ROW_H, C_BG);
             continue;
         }
-        gfx_fill_rect(0, y, w, ROW_H, (r & 1) ? C_ROW_ALT : C_ROW);
+        const uint16_t row_bg = (r & 1) ? C_ROW_ALT : C_ROW;
+        gfx_fill_rect(0, y, w, ROW_H, row_bg);
 
         /*
          * On the radio tab the marker is the station index, because
@@ -916,8 +986,27 @@ void browser_draw(void)
          * place it happens. */
         const char *label = s_entries[i].name
                           + (s_entries[i].is_dir ? 0 : s_prefix_len);
+
+        /*
+         * The star, on station rows only -- not on the menu level,
+         * where a row is a chart or a tag and there is nothing to star,
+         * and not on the volume tabs, where a row is a file.
+         *
+         * An empty outline on every unstarred row rather than nothing
+         * at all: a control that appears only once it has been used is
+         * one nobody finds. It is drawn dim so that a list with none
+         * starred does not read as a column of decorations.
+         */
+        const bool starrable = s_radio && !s_radio_menu;
+        const int  name_w = w - 112 - SCROLL_W - (starrable ? STAR_W : 0);
         gfx_draw_text(96, y + (ROW_H - GFX_GLYPH_H(NAME_SCALE)) / 2, label,
-                      NAME_SCALE, w - 112 - SCROLL_W, playing ? C_ACCENT : C_TEXT);
+                      NAME_SCALE, name_w, playing ? C_ACCENT : C_TEXT);
+
+        if (starrable) {
+            draw_star(w - SCROLL_W - STAR_W / 2, y + ROW_H / 2, STAR_R,
+                      s_entries[i].fav,
+                      s_entries[i].fav ? C_STAR : C_DIM, row_bg);
+        }
     }
 
     /*
@@ -1187,10 +1276,11 @@ browser_result_t browser_touch(bool down, int x, int y)
          * and passes the number on.
          */
         if (!radiobrowser_menu_kind(i, NULL, NULL)) {
-            /* Two rows are not fetches, and they are different actions.
-             * radiobrowser.h names them so this does not hard-code
-             * which number is which. */
+            /* Three rows are not fetches, and they are three different
+             * actions. radiobrowser.h names them so this does not
+             * hard-code which number is which. */
             res.kind = (i == RADIOBROWSER_MENU_ADD) ? BROWSER_ADD_STATION
+                     : (i == RADIOBROWSER_MENU_FAV) ? BROWSER_LOAD_FAVORITES
                                                     : BROWSER_RELOAD_STATIONS;
             return res;
         }
@@ -1200,6 +1290,17 @@ browser_result_t browser_touch(bool down, int x, int y)
     }
 
     if (s_radio) {
+        /*
+         * The star's strip, tested before the row: it is inside the
+         * row's box and has to win, which is the rule row 7 of the
+         * panel already follows. The scrollbar has had its own test
+         * long before this point, so this strip never reaches it.
+         */
+        if (x >= gfx_w() - SCROLL_W - STAR_W && x < gfx_w() - SCROLL_W) {
+            res.kind = BROWSER_TOGGLE_FAVORITE;
+            res.index = i;
+            return res;
+        }
         /* The index, not the URL. See BROWSER_PLAY_STREAM in browser.h:
          * the rows were built from the station list in its own order, so
          * row i IS station i, and stations.c stays the only thing that

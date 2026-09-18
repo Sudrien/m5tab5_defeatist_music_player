@@ -84,12 +84,38 @@ typedef enum {
      * which is where the address to type into a phone is shown.
      */
     BROWSER_ADD_STATION,
+
+    /*
+     * The radio menu's "Starred stations" row: load favorites.m3u and
+     * show it as the station list.
+     *
+     * Requested rather than performed, like the three above, and for
+     * stations_load()'s reason -- it opens a file on the card and the
+     * task that polls touch must not. The rows arrive through
+     * browser_stations_reloaded() once the player has them.
+     */
+    BROWSER_LOAD_FAVORITES,
+
+    /*
+     * Star or unstar the station on row `index`.
+     *
+     * The chooser's half of the star. The panel's button acts on what
+     * is PLAYING; this acts on what was tapped, which is not the same
+     * station and usually not playing at all -- starring something off
+     * a chart without listening to it first is the ordinary case.
+     *
+     * Requested rather than performed: it writes to the card. The
+     * chooser stays open and the row does not change until the player
+     * has done it and called browser_stations_reloaded().
+     */
+    BROWSER_TOGGLE_FAVORITE,
 } browser_result_kind_t;
 
 typedef struct {
     browser_result_kind_t kind;
     const char *path;       /* owned by browser.c, valid until the next call */
-    int index;              /* BROWSER_PLAY_STREAM only; -1 otherwise */
+    int index;              /* BROWSER_PLAY_STREAM, _FETCH_STATIONS and
+                             * _TOGGLE_FAVORITE; -1 otherwise */
 } browser_result_t;
 
 /*

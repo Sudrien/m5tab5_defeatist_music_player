@@ -57,6 +57,11 @@ FADE_BIN := fadetest
 
 # The track-boundary rules. Header-only, so this compiles tailplan.h
 # itself and there is nothing to drift from.
+# The "same station?" rule behind the gold star. Header-only, like
+# tailplantest, so this compiles favmatch.h itself and there is nothing
+# to drift from.
+FAVMATCH_BIN := favmatchtest
+
 TAIL_BIN := tailplantest
 
 # The setup portal's form parsing, HTML escaping and DNS replies: the
@@ -160,7 +165,7 @@ RADIOBROWSER_BIN := radiobrowsertest
 # reserve-to-columns conversion the drawing will use.
 LEVELHIST_BIN := levelhisttest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -218,6 +223,13 @@ $(SGAIN_BIN): streamgaintest.c ../main/streamgain.c ../main/streamgain.h
 run-sgain: $(SGAIN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(SGAIN_BIN)
 
+$(FAVMATCH_BIN): favmatchtest.c ../main/favmatch.h
+	$(CC) $(WARNCFLAGS) -c favmatchtest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ favmatchtest.c $(LDFLAGS)
+
+run-favmatch: $(FAVMATCH_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FAVMATCH_BIN)
+
 $(TAIL_BIN): tailplantest.c ../main/tailplan.h
 	$(CC) $(WARNCFLAGS) -c tailplantest.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ tailplantest.c $(LDFLAGS)
@@ -250,7 +262,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -365,4 +377,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch clean
