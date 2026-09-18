@@ -397,6 +397,90 @@ int main(void)
               "and does not inherit the rejected one's uuid: %s", st[0].uuid);
     }
 
+    /* ---------------------------------------------------------------- */
+    /* Writing an entry back: station_entry() and its two validators     */
+    /* ---------------------------------------------------------------- */
+    {
+        puts("  writing an entry back");
+        char buf[STATION_NAME_MAX + STATION_URL_MAX + 32];
+
+        /* THE ROUND TRIP, which is the property the writer exists for:
+         * anything station_entry() writes, stationlist_parse() reads
+         * back as the same name and URL. */
+        station_t st[8];
+        stationlist_stats_t stats;
+        const size_t n = station_entry("Groove Salad", "http://a.example/gs",
+                                       buf, sizeof(buf));
+        CHECK(n > 0, "a plain entry was refused");
+        const int c = stationlist_parse(buf, n, st, 8, &stats);
+        CHECK(c == 1, "written entry parsed to %d stations", c);
+        CHECK(strcmp(st[0].name, "Groove Salad") == 0,
+              "name did not round trip: \"%s\"", st[0].name);
+        CHECK(strcmp(st[0].url, "http://a.example/gs") == 0,
+              "url did not round trip: \"%s\"", st[0].url);
+
+        /* A comma in the name survives: #EXTINF splits on the FIRST
+         * comma and the name is everything after it. */
+        const size_t nc = station_entry("Jazz, mostly", "http://a.example/j",
+                                        buf, sizeof(buf));
+        CHECK(nc > 0, "a comma in the name was refused");
+        CHECK(stationlist_parse(buf, nc, st, 8, &stats) == 1, "comma entry lost");
+        CHECK(strcmp(st[0].name, "Jazz, mostly") == 0,
+              "comma name did not round trip: \"%s\"", st[0].name);
+
+        /* No name: no #EXTINF line, and the parser labels it by host. */
+        const size_t nb = station_entry("", "http://bare.example/x",
+                                        buf, sizeof(buf));
+        CHECK(nb > 0, "a bare URL was refused");
+        CHECK(strstr(buf, "#EXTINF") == NULL,
+              "an empty name still wrote an #EXTINF line");
+        CHECK(stationlist_parse(buf, nb, st, 8, &stats) == 1, "bare entry lost");
+        CHECK(strcmp(st[0].name, "bare.example") == 0,
+              "bare URL was not labelled by host: \"%s\"", st[0].name);
+
+        /*
+         * INJECTION, which is the reason these validators exist. A
+         * newline in either field would append lines nobody asked for.
+         */
+        CHECK(!station_name_ok("two\nlines"), "LF in a name accepted");
+        CHECK(!station_name_ok("two\rlines"), "CR in a name accepted");
+        CHECK(station_entry("x\nhttp://evil.example/y", "http://a.example/x",
+                            buf, sizeof(buf)) == 0,
+              "a name forging a second station was written");
+        CHECK(buf[0] == '\0', "a refused entry left bytes in the buffer");
+        CHECK(!station_url_writable("http://a.example/x\nhttp://evil.example/"),
+              "LF in a url accepted");
+        CHECK(station_entry("Fine", "http://a.example/x\n#EXTINF:-1,Evil",
+                            buf, sizeof(buf)) == 0,
+              "a url forging a directive was written");
+
+        /* A leading '#' would make the name's line look like a
+         * directive rather than a station. */
+        CHECK(!station_name_ok("#EXTM3U"), "a leading # in a name accepted");
+        CHECK(station_name_ok("C# radio") == true, "# elsewhere refused");
+
+        /* Interior whitespace in a URL means it was never one. */
+        CHECK(!station_url_writable("http://a.example/a b"), "space in a url accepted");
+        CHECK(!station_url_writable("http://a.example/a\tb"), "tab in a url accepted");
+
+        /* The scheme rules are station_url_ok()'s and still apply. */
+        CHECK(!station_url_writable("ftp://a.example/x"), "ftp written");
+        CHECK(!station_url_writable("javascript:alert(1)"), "javascript written");
+
+        /* Lengths. A name at the cap is refused rather than truncated:
+         * truncation would store something the person did not type. */
+        char longname[STATION_NAME_MAX + 8];
+        memset(longname, 'a', sizeof(longname) - 1);
+        longname[sizeof(longname) - 1] = '\0';
+        CHECK(!station_name_ok(longname), "an over-long name accepted");
+
+        /* Too small a buffer writes nothing at all. */
+        char tiny[8];
+        CHECK(station_entry("Name", "http://a.example/x", tiny, sizeof(tiny)) == 0,
+              "a short buffer produced a partial entry");
+        CHECK(tiny[0] == '\0', "a short buffer left bytes behind");
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     printf(failures ? "FAILURES\n" : "all passed\n");
     return failures ? 1 : 0;

@@ -53,6 +53,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>      /* snprintf, for station_entry() */
 #include <string.h>
 
 #ifdef __cplusplus
@@ -319,6 +320,105 @@ static inline int stationlist_parse(const char *text, size_t n,
 
     stats->stations = count;
     return count;
+}
+
+/* ------------------------------------------------------------------ */
+/* Writing one entry back                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * WHY THE WRITER LIVES HERE, NEXT TO THE PARSER.
+ *
+ * stations.m3u is now written as well as read -- the portal's station
+ * form appends to it -- and the format is this file's business. A writer
+ * anywhere else is a second place that knows what an entry looks like,
+ * and the way that drifts is the worst available: a line this file
+ * cannot read back, in a file the listener cannot edit out without a
+ * card reader.
+ *
+ * Host-tested in `texttest/stationlisttest.c` alongside the parser, and
+ * the property worth asserting is the round trip -- anything
+ * station_entry() writes, stationlist_parse() reads back as the same
+ * name and URL.
+ */
+
+/*
+ * Is this a name that can be written as an `#EXTINF:` line?
+ *
+ * CR AND LF ARE THE WHOLE POINT. The name arrives from a web form, and
+ * a name containing a newline does not produce a badly labelled station
+ * -- it produces EXTRA LINES in the file. "x\nhttp://evil/" submitted as
+ * a name is a second station that nobody added, written by a form that
+ * only claimed to set a label. Everything else here is tidiness; this is
+ * the check that matters.
+ *
+ * An empty name is allowed and is not the same as a rejected one: the
+ * parser already falls back to the host for an entry with no #EXTINF,
+ * which is the better label for a pasted URL anyway. station_entry()
+ * writes no #EXTINF line at all in that case.
+ */
+static inline bool station_name_ok(const char *name)
+{
+    if (!name) return false;
+    size_t n = 0;
+    for (; name[n]; n++) {
+        if (name[n] == '\r' || name[n] == '\n') return false;
+        /* A comma is fine -- #EXTINF splits on the FIRST one, and
+         * station_extinf_name() takes everything after it -- but a
+         * leading '#' would make the line look like a directive. */
+        if (n == 0 && name[0] == '#') return false;
+    }
+    return n < STATION_NAME_MAX;
+}
+
+/*
+ * The same for a URL, on top of the scheme check station_url_ok()
+ * already does. Separate rather than folded into that function because
+ * station_url_ok() is asked about lines ALREADY IN the file, where a
+ * newline cannot occur -- the parser split on it to get there. This one
+ * is asked about bytes a stranger just posted.
+ */
+static inline bool station_url_writable(const char *url)
+{
+    if (!station_url_ok(url)) return false;
+    size_t n = 0;
+    for (; url[n]; n++) {
+        if (url[n] == '\r' || url[n] == '\n') return false;
+        /* Whitespace inside a URL means it was not one. The parser
+         * trims the ends; an interior space would split the line. */
+        if (url[n] == ' ' || url[n] == '\t') return false;
+    }
+    return n < STATION_URL_MAX;
+}
+
+/*
+ * One entry, as the bytes to append to stations.m3u.
+ *
+ * Returns the length written, or 0 if either field is refused or the
+ * buffer is too small -- 0 is "wrote nothing", so a caller that ignores
+ * the reason still cannot append a partial entry.
+ *
+ * Always ends in a newline, and does not assume the file already did:
+ * see stations_append(), which is what makes that true.
+ */
+static inline size_t station_entry(const char *name, const char *url,
+                                   char *out, size_t out_size)
+{
+    if (!out || !out_size) return 0;
+    out[0] = '\0';
+    if (!station_name_ok(name) || !station_url_writable(url)) return 0;
+
+    int n;
+    if (name[0]) {
+        n = snprintf(out, out_size, "#EXTINF:-1,%s\n%s\n", name, url);
+    } else {
+        n = snprintf(out, out_size, "%s\n", url);
+    }
+    if (n <= 0 || (size_t)n >= out_size) {
+        out[0] = '\0';
+        return 0;
+    }
+    return (size_t)n;
 }
 
 #ifdef __cplusplus

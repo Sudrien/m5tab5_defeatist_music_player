@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -160,6 +161,125 @@ bool stations_load(void)
         ESP_LOGI(TAG, "  %2d  %s", i + 1, s_list[i].name);
     }
     return true;
+}
+
+/*
+ * Does this file end in a newline?
+ *
+ * Asked before appending, because a hand-edited stations.m3u whose last
+ * line has no terminator is common -- editors differ, and the parser
+ * does not care, so nothing has ever forced the issue. Appending to
+ * such a file without checking would join the new entry to the old last
+ * line and lose both.
+ *
+ * True for a file that does not exist or is empty: nothing to separate
+ * from, so no separator wanted.
+ */
+static bool ends_with_newline(const char *path)
+{
+    FILE *f = storage_io_open(path, "r");
+    if (!f) return true;
+
+    bool ok = true;
+    if (fseek(f, -1, SEEK_END) == 0) {
+        char last = '\n';
+        /* One byte, and the file position is already where it belongs,
+         * so this is a plain fread rather than storage_io_read_at(). */
+        if (fread(&last, 1, 1, f) == 1) ok = (last == '\n');
+    }
+    /* fseek failing means the file is empty (or unseekable), and an
+     * empty file needs no separator. */
+    storage_io_close(f);
+    return ok;
+}
+
+bool stations_append(const char *name, const char *url)
+{
+    lock_init();
+
+    char entry[STATION_NAME_MAX + STATION_URL_MAX + 32];
+    const size_t len = station_entry(name, url, entry, sizeof(entry));
+    if (len == 0) {
+        ESP_LOGW(TAG, "refusing to add a station: bad name or URL");
+        return false;
+    }
+
+    /*
+     * The cap, checked against the list rather than the file. They agree
+     * -- the list was parsed from the file -- and the list is the thing
+     * already in memory. Refused rather than written and silently
+     * dropped by the next parse, which is what stats.overflowed counts
+     * and which would look like the write having failed anyway.
+     */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    const int have = s_count;
+    const storage_id_t listed = s_vol;
+    xSemaphoreGive(s_lock);
+    if (have >= STATIONLIST_MAX) {
+        ESP_LOGW(TAG, "station list is full (%d); not adding", STATIONLIST_MAX);
+        return false;
+    }
+
+    /* The list's own volume, or the first one there. See stations.h. */
+    storage_id_t target = STORAGE_COUNT;
+    if (listed < STORAGE_COUNT && storage_present(listed)) {
+        target = listed;
+    } else {
+        for (int id = 0; id < STORAGE_COUNT; id++) {
+            if (storage_present((storage_id_t)id)) {
+                target = (storage_id_t)id;
+                break;
+            }
+        }
+    }
+    if (target == STORAGE_COUNT) {
+        ESP_LOGW(TAG, "no volume to write %s to", STATIONS_FILENAME);
+        return false;
+    }
+
+    const char *mount = storage_mount_path(target);
+    if (!mount) return false;
+    char path[128];
+    snprintf(path, sizeof(path), "%s/%s", mount, STATIONS_FILENAME);
+
+    const bool separate = !ends_with_newline(path);
+
+    /*
+     * Append, the way settings.c appends: one open, one write, one
+     * close, no lease held across it. "a" creates the file, so the first
+     * station added to a volume that has never had a list works without
+     * a special case.
+     */
+    FILE *f = storage_io_open(path, "a");
+    if (!f) {
+        ESP_LOGW(TAG, "cannot append to %s (%s)", path, strerror(errno));
+        return false;
+    }
+
+    bool wrote = true;
+    if (separate) wrote = (fwrite("\n", 1, 1, f) == 1);
+    if (wrote) wrote = (fwrite(entry, 1, len, f) == len);
+    const bool flushed = (fflush(f) == 0);
+    const int  flush_errno = errno;
+    const bool closed = (storage_io_close(f) == 0);
+
+    if (!wrote || !flushed || !closed) {
+        /*
+         * A partial line may now be on the card. That is survivable in
+         * exactly the way a partial settings record is: stationlist_parse()
+         * skips a line it cannot read, and every entry before it was
+         * whole when it was written.
+         */
+        ESP_LOGW(TAG, "append to %s failed (%s)", path,
+                 strerror(flushed ? errno : flush_errno));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "added a station to %s: %s", path, url);
+
+    /* Read it back. The entry counts as added only if the parser agrees
+     * -- see stations.h. */
+    return stations_load();
 }
 
 bool stations_set_remote(const station_t *list, int count, const char *label)

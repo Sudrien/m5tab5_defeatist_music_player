@@ -118,6 +118,39 @@ bool stations_load(void);
 bool stations_set_remote(const station_t *list, int count, const char *label);
 
 /*
+ * Append one station to stations.m3u on the card, then reload.
+ *
+ * This is the write half of a file that was read-only until the portal
+ * got a station form. `name` may be empty, in which case no `#EXTINF:`
+ * line is written and the parser labels the entry by its host -- see
+ * station_entry(), which owns the format and refuses anything that
+ * would forge extra lines.
+ *
+ * WHICH VOLUME. The one the current list came from, when there is one:
+ * a person adding a station means "add it to my list", and the list
+ * they are looking at is on a particular card. When the list came from
+ * the directory instead -- stations_volume() is STORAGE_COUNT -- the
+ * first present volume gets it, because the alternative is refusing to
+ * save a station while the directory is on screen, which is exactly
+ * when somebody has found one worth keeping.
+ *
+ * Reloads through stations_load() on success, so the caller does not
+ * have to and so the list is parsed by the same code that reads the
+ * file at boot. That means the entry is only in the list if it can be
+ * read back -- the round trip station_entry() is tested for.
+ *
+ * NOT FROM ui_task, for stations_load()'s reason and one more: this
+ * writes to a card, and a write that lands behind a decode lease would
+ * hold the frame the transport bar is drawing. The portal's HTTP task
+ * is the intended caller.
+ *
+ * False when the fields are refused, the list is already
+ * STATIONLIST_MAX long, there is no volume to write to, or the write
+ * or the reload failed. The file is left alone in every one of those.
+ */
+bool stations_append(const char *name, const char *url);
+
+/*
  * Where the current list came from, for the status line: a mount path
  * for the card's, the label above for the directory's. Never NULL.
  */
