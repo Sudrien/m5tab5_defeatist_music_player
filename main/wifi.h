@@ -280,7 +280,7 @@ esp_err_t wifi_scan_log(void);
  * The join logs the security the AP actually chose, so an A/B does not
  * depend on believing this comment.
  */
-#define WIFI_FORCE_WPA2  (0)
+#define WIFI_FORCE_WPA2  (1)
 
 esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms);
 

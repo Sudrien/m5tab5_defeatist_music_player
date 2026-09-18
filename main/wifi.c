@@ -486,6 +486,30 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
             ESP_LOGI(TAG, "security: %s, channel %d, %d dBm%s",
                      authmode(got.authmode), got.primary, got.rssi,
                      WIFI_FORCE_WPA2 ? " (PMF not offered)" : "");
+            /*
+             * WHAT THAT LINE IS AND IS NOT WORTH.
+             *
+             * On hardware it prints 0 dBm where the scan a few seconds
+             * earlier said -38, so esp_wifi_sta_get_ap_info() is only
+             * partly populated under esp-hosted. The authmode it
+             * returns is the AP's ADVERTISED mode -- WPA2/WPA3 for a
+             * transition network -- and not the suite this station
+             * ended up using, so it reads the same either way and
+             * cannot settle the experiment on its own.
+             *
+             * It is kept because it costs nothing and a populated field
+             * would be useful. The thing that actually shows the switch
+             * took effect is the suffix above, which reports what was
+             * ASKED for, plus the fact that the join succeeded at all:
+             * PMF not offered and a join completed means the AP
+             * accepted a non-PMF association, which WPA3 does not
+             * allow. The number that decides whether it MATTERS is the
+             * benchmark, not this line.
+             */
+            if (got.rssi == 0) {
+                ESP_LOGD(TAG, "security: rssi unpopulated; ap_info is "
+                              "partial under esp-hosted");
+            }
         }
     } else {
         /* Stop the driver retrying on its own, so a failed attempt does
