@@ -17,6 +17,7 @@
 #include "player_diag.h"
 
 #include "decoder.h"
+#include "pcmfold.h"
 #include "storage_io.h"
 
 /* minimp3_ex's default file IO uses open()/mmap(), which FatFs does not
@@ -845,56 +846,11 @@ static esp_err_t esp_codec_open(decoder_t *d, const char *path, int fmt,
 }
 
 /*
- * 24-bit PCM folded to the 16 bits everything downstream is built from.
- *
- * WHY THE FOLD IS HERE AND NOT ANYWHERE ELSE
- *
- * This is the first moment the samples exist and the last moment before
- * they belong to the rest of the player. The ring is int16, the
- * ReplayGain scale is int16, the crossfade, the envelope, the loudness
- * gate and the volume are all int16, and the I2S slot config is 16-bit.
- * Converting here means none of them learn that the file was ever
- * anything else.
- *
- * In place, forward, three bytes read for every two written, so the
- * destination trails the source by a growing margin and never catches
- * it. The count returned shrinks accordingly -- decoded_size / 3 rather
- * than / 2 -- and is smaller than the buffer the caller sized for
- * int16, so there is nothing to overflow.
- *
- * ROUNDED, NOT TRUNCATED. Dropping the low byte biases every sample
- * toward zero, which is a DC-ish error that costs exactly as much
- * arithmetic as rounding does. Half an LSB and a clamp: the clamp only
- * fires on a sample within 128 of full scale, where rounding up would
- * wrap the sign, and that is the one input that makes truncation look
- * correct by accident.
- *
- * No dither. The noise it would replace sits at -96 dBFS, under a
- * headphone amp on a tablet, and it would cost two RNG calls a sample
- * at 2.6 million samples a minute to hide something nothing here can
- * resolve.
+ * The fold itself now lives in pcmfold.h, because netdec.c needs it too:
+ * 24-bit Ogg FLAC over the network reached the streaming path and was
+ * refused by it while this sat here behind a `static`. The reasoning
+ * about rounding, the clamp and the in-place direction went with it.
  */
-static int fold_24_to_16(int16_t *buf, uint32_t bytes)
-{
-    const uint8_t *src = (const uint8_t *)buf;
-    int16_t *dst = buf;
-    const uint32_t n = bytes / 3;
-
-    for (uint32_t i = 0; i < n; i++) {
-        /* Little-endian, sign in the top byte: the cast to int8_t is
-         * what extends it, rather than a shift pair that would depend
-         * on the signedness of a right shift. */
-        int32_t s = ((int32_t)(int8_t)src[2] << 16) |
-                    ((int32_t)src[1] << 8) | (int32_t)src[0];
-        src += 3;
-
-        s = (s + 128) >> 8;
-        if (s > 32767) s = 32767;
-        else if (s < -32768) s = -32768;
-        *dst++ = (int16_t)s;
-    }
-    return (int)n;
-}
 
 static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
 {
@@ -1028,7 +984,7 @@ static int esp_codec_read(decoder_t *d, int16_t *out, int max_int16)
                 d->info.channels = (int)fi.channel;
                 d->info.bitrate_kbps = (int)(fi.bitrate / 1000);
             }
-            if (fold) return fold_24_to_16(out, frame.decoded_size);
+            if (fold) return pcmfold_24_to_16(out, frame.decoded_size);
             return (int)(frame.decoded_size / sizeof(int16_t));
         }
         /* Header-only chunk (container boxes, metadata blocks). Consumed

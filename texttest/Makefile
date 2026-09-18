@@ -113,6 +113,11 @@ NETPLAN_BIN := netplantest
 # is a wider input and a worse one.
 STATION_BIN := stationlisttest
 
+# 24-bit PCM down to the 16 everything downstream is built from. The
+# arithmetic ran untested from 0803 until 0003 moved it to a header: it
+# was a static in decoder.c, and decoder.c does not build on a host.
+PCMFOLD_BIN := pcmfoldtest
+
 # When a stream is allowed to make a sound. Two thresholds and not one,
 # because a single one flaps at the watermark and that is heard as
 # chopping rather than as a pause.
@@ -155,7 +160,7 @@ RADIOBROWSER_BIN := radiobrowsertest
 # reserve-to-columns conversion the drawing will use.
 LEVELHIST_BIN := levelhisttest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -288,6 +293,13 @@ $(STATION_BIN): stationlisttest.c ../main/stationlist.h
 	$(CC) $(WARNCFLAGS) -c stationlisttest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ stationlisttest.c $(LDFLAGS)
 
+$(PCMFOLD_BIN): pcmfoldtest.c ../main/pcmfold.h
+	$(CC) $(WARNCFLAGS) -c pcmfoldtest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ pcmfoldtest.c $(LDFLAGS)
+
+run-pcmfold: $(PCMFOLD_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(PCMFOLD_BIN)
+
 run-stations: $(STATION_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STATION_BIN)
 
@@ -353,4 +365,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist clean

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "netdec.h"
+#include "pcmfold.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -143,6 +144,10 @@ static uint64_t s_cost_out_mark;    /* s_win.out at the last report */
 static uint64_t s_cost_samples;
 static uint32_t s_resyncs;
 static bool     s_reported;     /* the format line has been logged */
+/* The stream is 24-bit and is being folded -- see pcmfold.h. Reset with
+ * s_reported at open, because a reconnect to a different station is a
+ * different stream and may be a different width. */
+static bool     s_folding;
 
 bool netdec_open(void)
 {
@@ -229,6 +234,7 @@ bool netdec_open(void)
     s_samples = 0;
     s_resyncs = 0;
     s_reported = false;
+    s_folding = false;
     s_open = true;
 
     ESP_LOGI(TAG, "ready: %u byte window + %u byte decoder in PSRAM",
@@ -497,12 +503,36 @@ static int esp_read(int16_t *out, int max_int16, netdec_info_t *info)
                  stream_codec_name(s_codec), (unsigned)frame.decoded_size);
         return -1;
     }
-    if (fi.bits_per_sample != 16) {
-        /* The file path folds 24-bit and refuses 32. No broadcast AAC
-         * or Opus is either -- both decode to 16 -- so this refuses
-         * both rather than carrying that machinery into a path that
-         * would never exercise it. */
-        ESP_LOGE(TAG, "%s is %d-bit; only 16 is handled here",
+    /*
+     * 24-BIT IS FOLDED HERE NOW, NOT REFUSED.
+     *
+     * This used to refuse everything that was not 16, on the reasoning
+     * that no broadcast AAC or Opus is anything else and carrying the
+     * fold into a path that would never exercise it was machinery for
+     * nothing. That reasoning had a hole in it the shape of Ogg FLAC:
+     * lossless streams are routinely 24-bit, the Ogg container carries
+     * FLAC perfectly well through the parser, and the first one tried
+     * -- LapFox Radio -- decoded its header, reported 24, and was
+     * refused a frame later by a player that has folded 24-bit files
+     * since 0803.
+     *
+     * So the fold moved to pcmfold.h and both paths call it. 32 stays
+     * refused for the reason given there: the decoder reports a bit
+     * count and not how to read it, and a 32-bit stream is integer or
+     * float with no way to tell from here.
+     */
+    bool fold = false;
+    if (fi.bits_per_sample == 24) {
+        fold = true;
+        /* Once, on the first frame: it is a property of the stream, not
+         * an event, and a stream is thousands of frames long. */
+        if (!s_folding) {
+            s_folding = true;
+            ESP_LOGI(TAG, "%s is 24-bit; rounding to 16",
+                     stream_codec_name(s_codec));
+        }
+    } else if (fi.bits_per_sample != 16) {
+        ESP_LOGE(TAG, "%s is %d-bit; 16 and 24 are handled here",
                  stream_codec_name(s_codec), fi.bits_per_sample);
         return -1;
     }
@@ -513,7 +543,15 @@ static int esp_read(int16_t *out, int max_int16, netdec_info_t *info)
         return -1;
     }
 
-    const int produced = (int)(frame.decoded_size / sizeof(int16_t));
+    /*
+     * Folded before it is counted, because everything below counts
+     * int16 samples: the frame and sample totals, the cost report, and
+     * what is returned to the ring. A 24-bit frame yields decoded_size
+     * / 3 samples rather than / 2, which is fewer than the caller's
+     * buffer holds -- see pcmfold.h -- so nothing overflows.
+     */
+    const int produced = fold ? pcmfold_24_to_16(out, frame.decoded_size)
+                              : (int)(frame.decoded_size / sizeof(int16_t));
     s_frames++;
     s_samples += (uint64_t)(produced / fi.channel);
     s_cost_samples += (uint64_t)(produced / fi.channel);
@@ -527,9 +565,10 @@ static int esp_read(int16_t *out, int max_int16, netdec_info_t *info)
     }
     if (!s_reported) {
         s_reported = true;
-        ESP_LOGI(TAG, "first frame: %s, %" PRIu32 " Hz, %d ch, %d-bit, "
+        ESP_LOGI(TAG, "first frame: %s, %" PRIu32 " Hz, %d ch, %d-bit%s, "
                       "%u bytes -> %d samples", stream_codec_name(s_codec),
                  (uint32_t)fi.sample_rate, fi.channel, fi.bits_per_sample,
+                 fold ? " folded to 16" : "",
                  (unsigned)raw.consumed, produced / fi.channel);
     }
     return produced;
