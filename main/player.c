@@ -4554,6 +4554,9 @@ static void do_art(const char *path, uint32_t gen)
      * decoded cover into whatever rectangle it is handed; handing it
      * a square is what stops it letterboxing a square cover into a
      * tall box with black above and below. */
+    /* The cover is about to cover the square, so the card goes with it.
+     * See ui.h: albumart_show() cannot drop it itself. */
+    ui_notice_clear();
     const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                          jpg, jpg_len);
 
@@ -10122,6 +10125,7 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
          */
         if (s_art_decoded && !s_art_screen_stale) return;
         s_art_screen_stale = false;
+        ui_notice_clear();      /* see ui.h -- the cover takes the card */
         const esp_err_t aerr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
                                              s_art_img, s_art_len);
         if (aerr == ESP_OK) { s_art_decoded = true; return; }

@@ -363,6 +363,16 @@ bool ui_notice_hit(int x, int y);
  */
 void ui_notice_clear(void);
 
+/*
+ * ANYTHING THAT PAINTS THE ARTWORK SQUARE MUST DROP THE CARD.
+ *
+ * ui_clear_art() and ui_show_art_info() do it themselves. albumart_show()
+ * is not in this file and cannot, so the caller that blits a cover has
+ * to call ui_notice_clear() first -- otherwise the card is gone from
+ * the screen while ui_notice_hit() still answers for it, and every tap
+ * on the cover is swallowed by a card that is not there.
+ */
+
 /* Repaint the bar. Cheap enough to call at 20 Hz: it touches only the
  * bottom UI_BAR_H rows, never the cover art above them. */
 void ui_draw(const ui_state_t *st);

@@ -1231,6 +1231,15 @@ void ui_show_art_info(const char *const *lines, int n)
 {
     if (!s_fb || !lines || n <= 0) return;
 
+    /*
+     * This paints the whole square, so a card that was up is gone from
+     * the screen -- and if the flag stayed set, ui_notice_hit() would
+     * go on answering for a card nobody can see, and the artwork tap
+     * swallow would never lift. ui_clear_art() drops it for the same
+     * reason. ANY function that paints over this square has to.
+     */
+    s_notice_up = false;
+
     gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
 
     int total = GFX_GLYPH_H(ART_INFO_HEAD_SCALE);
