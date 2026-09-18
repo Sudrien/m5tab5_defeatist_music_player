@@ -51,6 +51,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+/* For STATION_NAME_MAX -- see the name field below. */
+#include "stationlist.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -70,7 +73,13 @@ typedef struct {
     bool     running;       /* a run is in progress right now */
     bool     have;          /* a finished result is in here    */
 
-    char     name[48];      /* the station measured */
+    /* The station measured, at exactly a station name's width.
+     * 48 was a number that looked big enough and was not: station_t
+     * carries STATION_NAME_MAX, so a station named to the limit is
+     * truncated on the way in here, and -Werror=format-truncation
+     * refuses to let it be written at all. Sized from the constant so
+     * it cannot drift from the thing it holds. */
+    char     name[STATION_NAME_MAX];
 
     /* Mean over the whole drain, and the best one-second window in it.
      * Both, because they answer different questions: the mean is what a
