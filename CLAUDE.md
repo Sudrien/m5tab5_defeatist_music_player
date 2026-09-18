@@ -9685,3 +9685,125 @@ Two things 0503 got slightly wrong, for whoever is next:
   and should not be moved: the draw path is a blit on a repaint and has
   nowhere to go, which is why the failure was useless where it was found
   originally.
+
+## The 0900 series: why lossless will not play, and four things it was not
+
+The question was why FLAC streams would not play when MP3 and AAC ones
+would. The answer turned out to be arithmetic, but it took four
+eliminations to get there and each one cost a theory.
+
+**0913-0916 built a thing to measure with, because the logs could not
+settle it.** Three candidates -- the network, the transport in this
+player, the decode loop -- and no way to tell them apart. A phone
+speedtest said 20.32 Mbps down, which ruled out the WAN and said
+nothing about the rest: the C6 is 2.4 GHz only and a phone lands on 5
+GHz, so that number was measured on a different radio.
+
+A bulk file download would have been the same mistake in a subtler
+form. Bulk transfer runs flat out with large reads and nothing
+consuming; streaming here is 2048-byte reads through TLS, an ICY demux,
+a 256 KB ring with backpressure, and a decode loop competing for the
+same CPU and SDIO link. A healthy bulk number would have been a green
+light that meant nothing.
+
+So `bench.c`: connect a real station through `netstream` exactly as
+playback would, and read the bytes without decoding them. One variable
+removed, everything else identical. **It is a ceiling, not a speed** --
+a server that paces itself cannot be made faster by not decoding it, so
+SomaFM at 128 reads 128 and that is the server's answer. Only stations
+that send as fast as they are taken mean anything; the lossless ones
+do, and WNZK has previously outrun the ring.
+
+### What it eliminated
+
+**Not the decode loop.** Drain mean 457-543 kbit/s across runs;
+playback on the same station in the same sessions 400-553. Draining
+without a decoder is not faster than playing with one. An earlier
+543-against-440 comparison looked like a 20% decoder tax and was two
+samples of a noisy link.
+
+**Not WPA3 (0921).** `WIFI_FORCE_WPA2` clears `pmf_cfg.capable`, which
+is the knob -- WPA3 requires protected management frames, so a station
+that does not advertise the capability cannot be given SAE and a
+transition-mode AP falls back to WPA2-PSK. `threshold.authmode` is a
+FLOOR and does nothing to stop WPA3 being chosen, which is worth
+knowing because it reads exactly like the switch somebody would reach
+for. Result: 457 mean / 580 peak with it on against 475 / 712 with it
+off. No better, at -34 dBm, the best signal of the night.
+
+**Not the RSSI or the channel choice.** The slow network reads -34 to
+-41 dBm; the fast one read -53. Both on channel 3.
+
+**Not the read size, PROBABLY, and this one is genuinely unresolved.**
+0919 alternates 8192- and 2048-byte reads every second within one
+connection, because this network delivered 314 and 543 kbit/s for the
+same station minutes apart and a two-press A/B measures the weather.
+Two runs disagree: 478 against 485 (a wash) and then 522 against 455 (a
+15% gap favouring the large read). **Do not record this as settled.**
+If it matters it matters because the co-processor is in compatible
+streaming mode with no SDIO SW_AGGR -- one packet per transaction -- so
+per-read overhead is paid more often than it should be.
+
+### What it actually is
+
+The link delivers roughly 410-553 kbit/s and WNZK needs 512. The
+deficit is about 8%, and the buffer shows it plainly: 14.4s down to
+5.9s over ninety seconds while sounding perfectly fine. Nothing is
+broken. A station needs marginally more than the link provides.
+
+FLAC is out by a factor of three: 24-bit Ogg FLAC at 48 kHz stereo
+wants 1500-1650 kbit/s against a peak that has never exceeded 712. No
+amount of code closes that.
+
+**Two-to-one run-to-run variance is the headline finding.** 314 and 543
+for the same station, same AP, same signal. Any single measurement on
+this network is unreliable, including every one taken before the
+benchmark existed -- the "~450 ceiling across four unrelated servers"
+that shaped most of an evening was four samples of a moving target.
+Measurements that have to be compared belong inside one run.
+
+### What is left, all outside the firmware
+
+- `mempool OOM start (TX)` and `(RX)` have both appeared. That is
+  esp-hosted out of transport buffers mid-stream, and the buffer counts
+  under `Component config -> ESP-Hosted config` are configurable. There
+  is 32 MB of PSRAM to spend.
+- SDIO runs at 40000 kHz and the setup docs cap SDIO at 50 MHz.
+- `coprocessor=0.0.0` with a major version mismatch, hence compatible
+  streaming mode. OTA from the host would end that. Note it cannot be
+  the whole story: the 1283 kbit/s peak on the other AP was measured
+  with the same mismatch.
+- Channel 3 is the worst place to sit on 2.4 GHz here, with four strong
+  neighbours on 1 and about twenty on 6. Partial overlap cannot be
+  deferred to, only suffered.
+- `eh_raw_tp: raw TP inactive` -- it is compiled in and switched off. It
+  bypasses the protocol stack and would give a host-to-C6 number with
+  no TCP, no TLS and no station pacing, which would say whether any of
+  the above can help at all.
+
+### Two unrelated things this turned up
+
+**24-bit streams were refused, not folded (0911).** `netdec` rejected
+anything that was not 16-bit on the reasoning that no broadcast AAC or
+Opus is anything else. Ogg FLAC is routinely 24-bit, the container
+carries it fine, and the fold had existed in `decoder.c` since 0803 --
+forty lines away behind a `static`. Moving it to `pcmfold.h` made it
+testable, and UBSan found undefined behaviour in it within five
+minutes: `(int32_t)(int8_t)src[2] << 16` left-shifts a negative value
+on every negative sample, which is to say about half of all audio. It
+shipped that way for two years because the file it lived in does not
+build on a host.
+
+**A 30-second silence cutoff kills streams that are working.** Both
+FLAC attempts ended at `30037` and `30098 ms silent` having decoded
+frames and filled the ring the whole time -- they were prerolling
+successfully, just slowly, and were cut off for it. WNZK made it twice
+at `21362` and `23883 ms` and failed once at 30s, on the same build
+minutes apart. At ~500 available against 512 needed, whether there is
+audio is a coin flip on network weather.
+
+Also intermittent and unexplained: `first audio bytes look like unknown
+(content-type audio/aac)` where the same station sniffs correctly
+moments later. It happens during ordinary playback, not just during a
+drain -- 0916's commit message blames the benchmark for it and is
+wrong.

@@ -265,10 +265,23 @@ esp_err_t wifi_scan_log(void);
  * security: the fast network was WPA/WPA2 and the slow one is
  * WPA2/WPA3. This switch tests the second.
  *
- * THERE IS NO EVIDENCE YET THAT WPA3 COSTS THROUGHPUT HERE. It is the
- * second of two differences, not a diagnosis, and the RF explanation is
- * at least as plausible. If flipping this changes nothing, that is a
- * result worth having and the switch should come out.
+ * IT WAS RUN, IN 0921, AND IT CHANGED NOTHING. Drain on WNZK: 457
+ * kbit/s mean and 580 peak with the switch on, against 475 and 712 with
+ * it off -- no better, marginally worse, and inside this network's
+ * noise. The switch was definitely live: the join logged "(PMF not
+ * offered)" and succeeded anyway, which means the AP accepted a
+ * non-PMF association, which WPA3 does not permit. Signal was -34 dBm,
+ * the best of the night, and the buffer still drained 14.0s to 2.3s
+ * over ninety seconds.
+ *
+ * So WPA3 was not costing this player anything, and the switch is back
+ * at 0. It is kept rather than deleted so the next person does not
+ * spend an evening re-running it; see the 0900 series notes in
+ * CLAUDE.md for the rest.
+ *
+ * One side finding worth keeping: `reason 2 (auth expired), trying once
+ * more` still happens under plain WPA2, so that retry is not a WPA3 or
+ * SAE artifact. It is something else about this AP.
  *
  * Not a setting, on purpose. PMF is what protects management frames
  * from forged deauths -- the class of frame portal.c spends its life
@@ -280,7 +293,7 @@ esp_err_t wifi_scan_log(void);
  * The join logs the security the AP actually chose, so an A/B does not
  * depend on believing this comment.
  */
-#define WIFI_FORCE_WPA2  (1)
+#define WIFI_FORCE_WPA2  (0)
 
 esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms);
 
