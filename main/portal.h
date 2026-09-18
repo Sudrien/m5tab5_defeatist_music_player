@@ -233,6 +233,41 @@ typedef enum {
 } portal_status_t;
 
 /*
+ * WHICH JOB THE PORTAL IS DOING.
+ *
+ * SETUP is the original and everything above describes it: no network
+ * yet, so the player raises an open AP, hijacks DNS, and a phone that
+ * joins gets the form. It pauses playback, because a phone joining the
+ * player's AP has left the network the music was arriving over anyway.
+ *
+ * STATION serves the same page over the network the player is ALREADY
+ * on. Nothing else about it is the same, and the differences are all
+ * consequences of that one fact:
+ *
+ *   - No AP and no DHCP. There is a network; the player is on it.
+ *   - NO DNS. dnsreply.c answers every query with the player's own
+ *     address, which is correct for a captive portal on its own AP and
+ *     hostile on somebody's home network -- it would take over name
+ *     resolution for every device in range of the router. This is the
+ *     single most important difference in this file.
+ *   - No pause. The phone stays on the house network, so the stream
+ *     keeps arriving and there is no reason to stop it. Adding a
+ *     station while listening is the whole point.
+ *   - The address is the station's, from wifi_sta_ip(), and it has to
+ *     be shown on the screen: without the DNS hijack there is no
+ *     captive sheet to carry the phone to the form.
+ *
+ * The five-minute timeout is deliberately the SAME in both modes. It is
+ * the same argument either way -- an HTTP server that somebody started
+ * once and forgot is not something this player should still be running
+ * an hour later -- and a second constant would invite the two to drift.
+ */
+typedef enum {
+    PORTAL_MODE_SETUP = 0,  /* own AP, captive DNS, playback paused */
+    PORTAL_MODE_STATION,    /* on the joined network, still playing */
+} portal_mode_t;
+
+/*
  * A snapshot, filled into the caller's storage.
  *
  * Every field is a value. See the note above on why there is no pointer
@@ -262,6 +297,24 @@ typedef struct {
      * the difference between a portal that appears to have hung and one
      * that is visibly waiting. */
     uint16_t seconds_left;
+
+    /* Which job this is. See portal_mode_t: the panel draws a different
+     * instruction for each, because "join Defeatist-3E78" is wrong
+     * advice in station mode and "open http://192.168.222.23/" is wrong
+     * advice in setup mode. */
+    portal_mode_t mode;
+
+    /*
+     * Where the form is, as text -- the AP's fixed address in setup
+     * mode, the station's own in station mode. Empty until the server is
+     * up.
+     *
+     * A field rather than something the panel derives, because in
+     * station mode only the portal task knows it: it is read from
+     * wifi_sta_ip() at bring-up, and reading it again at draw time would
+     * be a second source that can disagree after a DHCP renewal.
+     */
+    char url_ip[16];
 } portal_state_t;
 
 /*
@@ -281,6 +334,20 @@ typedef struct {
  * Safe to call when already running: returns ESP_OK and changes nothing.
  */
 esp_err_t portal_start(void);
+
+/*
+ * The same, choosing the job. portal_start() is PORTAL_MODE_SETUP.
+ *
+ * PORTAL_MODE_STATION additionally requires wifi_connected() and an
+ * address -- there is no point serving a page on a network the player
+ * has not joined -- and returns ESP_ERR_INVALID_STATE without one.
+ *
+ * Safe to call when already running, and returns ESP_OK WITHOUT
+ * changing mode: switching an AP into a station server underneath a
+ * phone that is filling in a form is not a thing anybody asked for, and
+ * the caller that wants the other mode can stop this one first.
+ */
+esp_err_t portal_start_mode(portal_mode_t mode);
 
 /*
  * Called once at boot, before anything else here. `is_playing` answers

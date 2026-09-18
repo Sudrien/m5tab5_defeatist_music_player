@@ -1187,7 +1187,11 @@ browser_result_t browser_touch(bool down, int x, int y)
          * and passes the number on.
          */
         if (!radiobrowser_menu_kind(i, NULL, NULL)) {
-            res.kind = BROWSER_RELOAD_STATIONS;
+            /* Two rows are not fetches, and they are different actions.
+             * radiobrowser.h names them so this does not hard-code
+             * which number is which. */
+            res.kind = (i == RADIOBROWSER_MENU_ADD) ? BROWSER_ADD_STATION
+                                                    : BROWSER_RELOAD_STATIONS;
             return res;
         }
         res.kind = BROWSER_FETCH_STATIONS;

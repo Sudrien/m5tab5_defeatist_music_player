@@ -400,20 +400,41 @@ int main(void)
          * the rows, the player turns a row into a request -- so what is
          * checked is that the two questions agree about every row.
          */
-        CHECK(radiobrowser_menu_label(0)[0] != '\0', "row 0 has a label");
-        CHECK(!radiobrowser_menu_kind(0, NULL, NULL),
-              "row 0 is the card, not a fetch");
+        CHECK(radiobrowser_menu_label(RADIOBROWSER_MENU_CARD)[0] != '\0',
+              "the card row has a label");
+        CHECK(!radiobrowser_menu_kind(RADIOBROWSER_MENU_CARD, NULL, NULL),
+              "the card row is not a fetch");
 
+        /*
+         * THE TWO ACTION ROWS ARE BOTH NOT-FETCHES, and the caller
+         * tells them apart by number, so the numbers must differ and
+         * both must be labelled. This is the assertion that would have
+         * caught the row that was inserted without moving the charts.
+         */
+        CHECK(radiobrowser_menu_label(RADIOBROWSER_MENU_ADD)[0] != '\0',
+              "the add-a-station row has a label");
+        CHECK(!radiobrowser_menu_kind(RADIOBROWSER_MENU_ADD, NULL, NULL),
+              "the add-a-station row is not a fetch");
+        CHECK(RADIOBROWSER_MENU_CARD != RADIOBROWSER_MENU_ADD,
+              "the two action rows are the same row");
+        CHECK(strcmp(radiobrowser_menu_label(RADIOBROWSER_MENU_CARD),
+                     radiobrowser_menu_label(RADIOBROWSER_MENU_ADD)) != 0,
+              "the two action rows share a label");
+
+        /* Every row above the actions is a fetch, and no row below is.
+         * Stated as a boundary rather than as two numbers so that
+         * inserting another action row fails here loudly. */
         radiobrowser_kind_t kind;
         const char *value;
-        CHECK(radiobrowser_menu_kind(1, &kind, &value) &&
+        const int first_fetch = RADIOBROWSER_MENU_ADD + 1;
+        CHECK(radiobrowser_menu_kind(first_fetch, &kind, &value) &&
               kind == RADIOBROWSER_TOPVOTE && value == NULL,
-              "row 1 is the votes chart and takes no value");
-        CHECK(radiobrowser_menu_kind(2, &kind, &value) &&
+              "the first fetch row is the votes chart and takes no value");
+        CHECK(radiobrowser_menu_kind(first_fetch + 1, &kind, &value) &&
               kind == RADIOBROWSER_TOPCLICK && value == NULL,
-              "row 2 is the clicks chart");
+              "the second fetch row is the clicks chart");
 
-        for (int i = 3; i < RADIOBROWSER_MENU_ROWS; i++) {
+        for (int i = first_fetch + 2; i < RADIOBROWSER_MENU_ROWS; i++) {
             char url[RADIOBROWSER_URL_MAX];
             CHECK(radiobrowser_menu_kind(i, &kind, &value), "row %d fetches", i);
             CHECK(kind == RADIOBROWSER_BYTAG, "row %d is a tag", i);

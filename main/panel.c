@@ -492,6 +492,26 @@ static void setup_lines(const portal_state_t *st, bool wifi, bool running,
 {
     for (int i = 0; i < NET_SETUP_NOTE_LINES; i++) l[i][0] = '\0';
 
+    if (running && st->mode == PORTAL_MODE_STATION) {
+        /*
+         * A different instruction, because the advice for setup mode is
+         * wrong here in both halves: there is no AP to join, and
+         * without the DNS hijack no sign-in sheet appears by itself.
+         * The address has to be read off this screen and typed.
+         */
+        snprintf(l[0], 64, "On a phone, open http://%s/",
+                 st->url_ip[0] ? st->url_ip : "this player");
+        switch (st->status) {
+        case PORTAL_STARTING: snprintf(l[1], 64, "Starting..."); break;
+        case PORTAL_ERROR:    snprintf(l[1], 64, "Could not start."); break;
+        default:              snprintf(l[1], 64, "Add a radio station to the card."); break;
+        }
+        snprintf(l[2], 64, "Same Wi-Fi as the player. %u:%02u left",
+                 (unsigned)(st->seconds_left / 60),
+                 (unsigned)(st->seconds_left % 60));
+        return;
+    }
+
     if (running) {
         snprintf(l[0], 64, "Join %s on a phone.", st->ap_ssid[0] ? st->ap_ssid : "the setup network");
         switch (st->status) {

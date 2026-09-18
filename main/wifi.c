@@ -465,6 +465,26 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
 
 bool wifi_connected(void) { return s_connected; }
 
+bool wifi_sta_ip(char *out, size_t out_size)
+{
+    if (!out || !out_size) return false;
+    out[0] = '\0';
+    if (!s_sta_netif) return false;
+
+    esp_netif_ip_info_t ip = { 0 };
+    if (esp_netif_get_ip_info(s_sta_netif, &ip) != ESP_OK) return false;
+    if (ip.ip.addr == 0) return false;
+
+    /* IPSTR/IP2STR, the same pair the "address" line at the join logs
+     * with, so the portal prints exactly what the log printed. */
+    const int n = snprintf(out, out_size, IPSTR, IP2STR(&ip.ip));
+    if (n <= 0 || (size_t)n >= out_size) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
 bool wifi_sta_ssid(char *out, size_t out_size)
 {
     if (!out || !out_size) return false;

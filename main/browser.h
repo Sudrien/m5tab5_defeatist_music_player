@@ -73,6 +73,17 @@ typedef enum {
      * browser_stations_reloaded() when the player task has them.
      */
     BROWSER_FETCH_STATIONS,
+
+    /*
+     * Open the web form that adds a station to stations.m3u -- the
+     * radio menu's "Add a station by phone..." row.
+     *
+     * Requested rather than performed, like the two above: it starts an
+     * HTTP server, and starting one is the player task's business. The
+     * chooser closes, because the next thing to look at is the panel,
+     * which is where the address to type into a phone is shown.
+     */
+    BROWSER_ADD_STATION,
 } browser_result_kind_t;
 
 typedef struct {

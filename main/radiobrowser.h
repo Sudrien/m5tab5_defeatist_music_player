@@ -485,24 +485,40 @@ static inline bool radiobrowser_search_url(char *url, size_t url_size,
  * wrong.
  *
  * Row 0 is the card's own list, so the way back from the directory is
- * the first row rather than a button somebody has to find. Then the two
+ * the first row rather than a button somebody has to find. Row 1 opens
+ * the web form that adds one -- next to the card's list because that is
+ * the file it writes to, and near the top because somebody who has just
+ * found a station in the directory is about to want it. Then the two
  * charts, then the pinned tags.
+ *
+ * ROWS 0 AND 1 ARE BOTH ACTIONS, NOT FETCHES, which is why
+ * radiobrowser_menu_kind() answers false for both and the caller
+ * switches on the row instead. The alternative -- a kind meaning "not a
+ * fetch" -- would put a directory request and a web server behind the
+ * same enum.
  */
-#define RADIOBROWSER_MENU_ROWS  (RADIOBROWSER_TAG_COUNT + 3)
+#define RADIOBROWSER_MENU_ROWS  (RADIOBROWSER_TAG_COUNT + 4)
+
+/* The card's own list. */
+#define RADIOBROWSER_MENU_CARD  (0)
+/* The station form, served by portal.c in PORTAL_MODE_STATION. */
+#define RADIOBROWSER_MENU_ADD   (1)
 
 static inline const char *radiobrowser_menu_label(int row)
 {
     static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
-    if (row == 0) return "stations.m3u on the card";
-    if (row == 1) return "Most voted";
-    if (row == 2) return "Most listened";
-    if (row >= 3 && row < RADIOBROWSER_MENU_ROWS) return tags[row - 3];
+    if (row == RADIOBROWSER_MENU_CARD) return "stations.m3u on the card";
+    if (row == RADIOBROWSER_MENU_ADD)  return "Add a station by phone...";
+    if (row == 2) return "Most voted";
+    if (row == 3) return "Most listened";
+    if (row >= 4 && row < RADIOBROWSER_MENU_ROWS) return tags[row - 4];
     return "";
 }
 
 /*
- * What row `row` fetches. False for row 0, which is not a fetch at all
- * -- it is the card, and the caller reloads rather than requests.
+ * What row `row` fetches. False for rows 0 and 1, which are not fetches
+ * at all -- the card, which the caller reloads, and the station form,
+ * which the caller opens.
  *
  * `value` is left pointing at the table rather than copied, which is
  * safe because the table is static const and outlives everything; a
@@ -512,12 +528,12 @@ static inline bool radiobrowser_menu_kind(int row, radiobrowser_kind_t *kind,
                                           const char **value)
 {
     static const char *const tags[RADIOBROWSER_TAG_COUNT] = RADIOBROWSER_TAGS;
-    if (row <= 0 || row >= RADIOBROWSER_MENU_ROWS) return false;
+    if (row <= RADIOBROWSER_MENU_ADD || row >= RADIOBROWSER_MENU_ROWS) return false;
     if (value) *value = NULL;
-    if (row == 1) { if (kind) *kind = RADIOBROWSER_TOPVOTE;  return true; }
-    if (row == 2) { if (kind) *kind = RADIOBROWSER_TOPCLICK; return true; }
+    if (row == 2) { if (kind) *kind = RADIOBROWSER_TOPVOTE;  return true; }
+    if (row == 3) { if (kind) *kind = RADIOBROWSER_TOPCLICK; return true; }
     if (kind)  *kind  = RADIOBROWSER_BYTAG;
-    if (value) *value = tags[row - 3];
+    if (value) *value = tags[row - 4];
     return true;
 }
 

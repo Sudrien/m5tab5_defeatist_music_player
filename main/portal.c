@@ -38,6 +38,8 @@
 #include "dnsreply.h"
 #include "portalweb.h"
 #include "settings.h"
+#include "stationlist.h"
+#include "stations.h"
 #include "wifi.h"
 #include "wifistore.h"
 
@@ -72,6 +74,20 @@ static wifi_seen_t       s_seen[SEEN_MAX];
 static int               s_seen_n;
 static int               s_hidden_n;           /* hidden networks heard */
 static char              s_ap_ip[16] = "192.168.4.1";
+
+/*
+ * The job, and the address the form is on.
+ *
+ * Written by portal_start_mode() before the task is kicked and read by
+ * the task and the handlers after. Not volatile and not locked: the
+ * kick is the handoff, and nothing changes it while the server is up --
+ * portal_start_mode() refuses to change mode on a running portal
+ * exactly so that this stays true.
+ */
+static portal_mode_t     s_mode = PORTAL_MODE_SETUP;
+static char              s_form_ip[16] = "192.168.4.1";
+
+static bool station_mode(void) { return s_mode == PORTAL_MODE_STATION; }
 
 /* Portal task only. */
 static httpd_handle_t    s_httpd;
@@ -235,6 +251,60 @@ static esp_err_t send_head(httpd_req_t *req, const char *extra)
     return chunk(req, head);
 }
 
+/*
+ * The stations section, on the same page as the networks one.
+ *
+ * Both modes get this. The networks section is setup mode's alone --
+ * see send_form() -- but a station can be added from either, and from
+ * setup mode it is the only useful thing to do on the page once the
+ * network has been saved.
+ *
+ * The list is shown as well as the form, because the first question
+ * anybody adding a station has is whether it is already there, and the
+ * second is what the names look like so the new one matches.
+ */
+static void send_stations(httpd_req_t *req)
+{
+    chunk(req, "<h2>Radio stations</h2>");
+
+    const int have = stations_count();
+    if (have >= STATIONLIST_MAX) {
+        char full[128];
+        snprintf(full, sizeof(full),
+                 "<p class=m>The list is full at %d stations. Remove one from "
+                 "stations.m3u on the card to add another.</p>",
+                 STATIONLIST_MAX);
+        chunk(req, full);
+        return;
+    }
+
+    chunk(req, "<p>Added to <code>stations.m3u</code> on the card. The name is "
+               "optional &mdash; without one the station is listed by its "
+               "address.</p>"
+               "<form method=post action=/station>"
+               "<label>Name<input name=name maxlength=63 autocomplete=off "
+               "placeholder='optional'></label>"
+               "<label>Stream address<input name=url type=url maxlength=511 "
+               "autocomplete=off autocapitalize=none inputmode=url required "
+               "placeholder='http://&hellip;'></label>"
+               "<button>Add station</button></form>");
+
+    if (have > 0) {
+        char head[64];
+        snprintf(head, sizeof(head), "<p>Already on the card (%d):</p><ul>",
+                 have);
+        chunk(req, head);
+        for (int i = 0; i < have; i++) {
+            station_t st;
+            if (!stations_get(i, &st)) continue;
+            chunk(req, "<li>");
+            chunk_escaped(req, st.name);
+            chunk(req, "</li>");
+        }
+        chunk(req, "</ul>");
+    }
+}
+
 static esp_err_t send_form(httpd_req_t *req, const char *message)
 {
     send_head(req, NULL);
@@ -243,6 +313,32 @@ static esp_err_t send_form(httpd_req_t *req, const char *message)
         chunk(req, message);
         chunk(req, "</p>");
     }
+
+    /*
+     * NO NETWORKS SECTION IN STATION MODE, and this is a judgement
+     * rather than a limitation. The form is being served over the very
+     * network a join would replace: submitting it would drop the
+     * association, take the phone's route to this page with it, and
+     * leave the person looking at a spinner with no way to find out
+     * what happened. Setup mode has nothing to lose by joining; this
+     * mode has the connection the page arrived over.
+     *
+     * Someone who wants to change networks can use the NET tab, which
+     * raises the AP and is the mode that expects to lose the station.
+     */
+    if (station_mode()) {
+        send_stations(req);
+        char note[160];
+        snprintf(note, sizeof(note),
+                 "<p>To change Wi-Fi networks instead, use Network setup on "
+                 "the player's screen. This page closes itself after %d "
+                 "minutes.</p>", PORTAL_TIMEOUT_S / 60);
+        chunk(req, note);
+        chunk(req, PAGE_TAIL);
+        return httpd_resp_send_chunk(req, NULL, 0);
+    }
+
+    chunk(req, "<h2>Wi-Fi</h2>");
     chunk(req, "<p>Choose the network this player should use, and enter "
                "its password. It is tried before it is saved.</p>"
                "<form method=post action=/join>"
@@ -280,6 +376,7 @@ static esp_err_t send_form(httpd_req_t *req, const char *message)
                  "to be typed.</p>", s_hidden_n, s_hidden_n == 1 ? "" : "s");
         chunk(req, note);
     }
+    send_stations(req);
     chunk(req, PAGE_TAIL);
     return httpd_resp_send_chunk(req, NULL, 0);
 }
@@ -332,6 +429,86 @@ static esp_err_t h_status(httpd_req_t *req)
     }
     chunk(req, PAGE_TAIL);
     return httpd_resp_send_chunk(req, NULL, 0);
+}
+
+/*
+ * A station submitted from the form.
+ *
+ * Writes the card and reloads the list, both inside stations_append().
+ * That is a card write and a 64 KB parse on the HTTP task, which is the
+ * right task for it: stations.h forbids ui_task, and the alternative --
+ * posting the work to the player and answering the browser before it
+ * finished -- would mean reporting success before knowing whether the
+ * entry could be read back.
+ *
+ * Validation is stationlist.h's, not this file's, so the rules that
+ * decide what may go in stations.m3u live next to the parser that reads
+ * it and are host-tested. This handler only turns the verdict into a
+ * sentence.
+ */
+static esp_err_t h_station(httpd_req_t *req)
+{
+    if (req->content_len == 0 || req->content_len > BODY_MAX) {
+        return send_form(req, "That form was too large to be a name and a "
+                              "stream address.");
+    }
+    char body[BODY_MAX];
+    size_t got = 0;
+    while (got < req->content_len) {
+        const int n = httpd_req_recv(req, body + got, req->content_len - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
+        if (n <= 0) return ESP_FAIL;
+        got += (size_t)n;
+    }
+
+    /*
+     * Both buffers a little larger than the limits they are checked
+     * against, for h_join()'s reason: an over-long field has to arrive
+     * whole so that station_name_ok() refuses it by length and the
+     * person is told, rather than the decoder truncating it into
+     * something acceptable that is not what they typed.
+     */
+    char name[STATION_NAME_MAX + 16], url[STATION_URL_MAX + 16];
+    if (!portalweb_field(body, got, "name", name, sizeof(name))) name[0] = '\0';
+    const bool have_url = portalweb_field(body, got, "url", url, sizeof(url));
+    memset(body, 0, sizeof(body));
+
+    /* Ends trimmed: a pasted URL usually arrives with a space or a
+     * newline on it, and refusing that would be pedantry about the
+     * clipboard rather than about the URL. The interior is still
+     * refused -- see station_url_writable(). */
+    station_trim(name);
+    if (have_url) station_trim(url);
+
+    if (!have_url || !url[0]) {
+        return send_form(req, "That needs a stream address.");
+    }
+    if (!station_url_writable(url)) {
+        return send_form(req, "That is not a usable stream address. It has to "
+                              "start with http:// or https:// and be one "
+                              "unbroken address.");
+    }
+    if (!station_name_ok(name)) {
+        return send_form(req, "That name cannot be used. Names are up to 63 "
+                              "characters and cannot start with a #.");
+    }
+
+    ESP_LOGI(TAG, "station submitted: %.63s <%.200s>",
+             name[0] ? name : "(unnamed)", url);
+
+    if (!stations_append(name, url)) {
+        return send_form(req, "The station could not be saved. The card may be "
+                              "full, absent, or write-protected, or the list "
+                              "may already be full.");
+    }
+
+    /*
+     * Straight back to the form rather than to /status. /status is about
+     * a join -- it polls while the radio does something slow. This is
+     * already finished by the time the response is written, and the
+     * form redrawn with the station now in its list is the confirmation.
+     */
+    return send_form(req, "Station added.");
 }
 
 static esp_err_t h_join(httpd_req_t *req)
@@ -424,7 +601,11 @@ static esp_err_t h_join(httpd_req_t *req)
 static esp_err_t h_other(httpd_req_t *req)
 {
     char loc[32];
-    snprintf(loc, sizeof(loc), "http://%s/", s_ap_ip);
+    /* The form's address, which is the AP's in setup mode and the
+     * station's in station mode. A redirect to 192.168.4.1 from a
+     * server reached over the house network would send the phone
+     * nowhere. */
+    snprintf(loc, sizeof(loc), "http://%s/", s_form_ip);
     httpd_resp_set_status(req, "302 Found");
     httpd_resp_set_hdr(req, "Location", loc);
     return httpd_resp_send(req, NULL, 0);
@@ -446,6 +627,7 @@ static bool http_start(void)
         { .uri = "/",       .method = HTTP_GET,  .handler = h_root   },
         { .uri = "/status", .method = HTTP_GET,  .handler = h_status },
         { .uri = "/join",   .method = HTTP_POST, .handler = h_join   },
+        { .uri = "/station", .method = HTTP_POST, .handler = h_station },
         { .uri = "/*",      .method = HTTP_GET,  .handler = h_other  },
     };
     for (size_t i = 0; i < sizeof(uris) / sizeof(uris[0]); i++) {
@@ -462,8 +644,13 @@ static void teardown(portal_status_t final)
         httpd_stop(s_httpd);
         s_httpd = NULL;
     }
-    dns_stop();
-    wifi_ap_end();
+    /* Both are no-ops in station mode -- neither was started -- but
+     * wifi_ap_end() switches the radio to STA, and calling it for a
+     * portal that never left STA is a mode change nobody asked for. */
+    if (!station_mode()) {
+        dns_stop();
+        wifi_ap_end();
+    }
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_st.status = final;
@@ -478,8 +665,52 @@ static void teardown(portal_status_t final)
     ESP_LOGI(TAG, "portal down (%d)", (int)final);
 }
 
+/*
+ * Station mode's bring-up: the web server, and nothing else.
+ *
+ * No scan, because the networks section is not offered here -- see
+ * h_root. No AP, no DHCP, no DNS. See portal_mode_t for why the DNS in
+ * particular must not run on somebody's home network.
+ */
+static void bring_up_station(void)
+{
+    set_status(PORTAL_STARTING, "");
+
+    s_seen_n = 0;
+    s_hidden_n = 0;
+
+    char ip[16];
+    if (!wifi_sta_ip(ip, sizeof(ip))) {
+        ESP_LOGE(TAG, "no address on the joined network; not serving");
+        teardown(PORTAL_ERROR);
+        return;
+    }
+    snprintf(s_form_ip, sizeof(s_form_ip), "%s", ip);
+
+    if (!http_start()) {
+        ESP_LOGE(TAG, "could not start HTTP");
+        teardown(PORTAL_ERROR);
+        return;
+    }
+
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    s_st.ap_ssid[0] = '\0';        /* there is no AP in this mode */
+    snprintf(s_st.url_ip, sizeof(s_st.url_ip), "%s", s_form_ip);
+    xSemaphoreGive(s_mu);
+
+    s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(PORTAL_TIMEOUT_S * 1000u);
+    set_status(PORTAL_WAITING, NULL);
+    ESP_LOGI(TAG, "station portal up: open http://%s/ (%d s)",
+             s_form_ip, PORTAL_TIMEOUT_S);
+}
+
 static void bring_up(void)
 {
+    if (station_mode()) {
+        bring_up_station();
+        return;
+    }
+
     set_status(PORTAL_STARTING, "");
 
     /* Scan first, as a plain station: the page's list, without an AP
@@ -533,6 +764,11 @@ static void bring_up(void)
         teardown(PORTAL_ERROR);
         return;
     }
+
+    snprintf(s_form_ip, sizeof(s_form_ip), "%s", s_ap_ip);
+    xSemaphoreTake(s_mu, portMAX_DELAY);
+    snprintf(s_st.url_ip, sizeof(s_st.url_ip), "%s", s_form_ip);
+    xSemaphoreGive(s_mu);
 
     s_deadline = xTaskGetTickCount() + pdMS_TO_TICKS(PORTAL_TIMEOUT_S * 1000u);
     set_status(PORTAL_WAITING, NULL);
@@ -673,13 +909,29 @@ static void portal_task(void *arg)
             continue;
         }
 
+        /*
+         * Station mode has a second way to lose its footing: the radio
+         * is still up but the association or the lease has gone, so the
+         * server is listening on an address that no longer reaches it.
+         * Setup mode cannot hit this -- its clients are on its own AP.
+         */
+        if (station_mode() && !wifi_connected()) {
+            ESP_LOGW(TAG, "left the network the form was served on; closing");
+            teardown(PORTAL_ERROR);
+            continue;
+        }
+
         const TickType_t now = xTaskGetTickCount();
         portal_status_t st;
         bool pending;
         xSemaphoreTake(s_mu, portMAX_DELAY);
         st = s_st.status;
         pending = s_pending;
-        s_st.clients = (uint8_t)wifi_ap_clients();
+        /* Associated phones, which only means anything when there is
+         * an AP for them to associate with. In station mode the phone
+         * is on the router's network and this would report 0 forever,
+         * which the panel would draw as "nobody has joined yet". */
+        s_st.clients = station_mode() ? 0 : (uint8_t)wifi_ap_clients();
         s_st.seconds_left = (now < s_deadline)
                           ? (uint16_t)((s_deadline - now) / configTICK_RATE_HZ) : 0;
         xSemaphoreGive(s_mu);
@@ -721,21 +973,49 @@ void portal_init(bool (*is_playing)(void), void (*pause)(void))
 
 esp_err_t portal_start(void)
 {
+    return portal_start_mode(PORTAL_MODE_SETUP);
+}
+
+esp_err_t portal_start_mode(portal_mode_t mode)
+{
     if (!s_mu) return ESP_ERR_INVALID_STATE;
+    /* Already up: left alone, and deliberately not switched. See
+     * portal.h. */
     if (s_running) return ESP_OK;
     if (!settings_wifi_enabled() || !wifi_up()) {
         ESP_LOGW(TAG, "not starting: the radio is off");
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_is_playing && s_is_playing() && s_pause) {
+
+    char ip[16];
+    if (mode == PORTAL_MODE_STATION &&
+        (!wifi_connected() || !wifi_sta_ip(ip, sizeof(ip)))) {
+        ESP_LOGW(TAG, "not starting: no address on a joined network");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /*
+     * The pause is setup mode's alone. A phone joining the player's own
+     * AP has left the network the audio was arriving over, so the
+     * stream was going to stop regardless and stopping it deliberately
+     * is the honest version. In station mode nothing leaves anything:
+     * the phone is on the house network, the stream keeps arriving, and
+     * pausing it to add a station would be the player interrupting the
+     * music to be told about more music.
+     */
+    if (mode == PORTAL_MODE_SETUP &&
+        s_is_playing && s_is_playing() && s_pause) {
         ESP_LOGI(TAG, "pausing playback for network setup");
         s_pause();
     }
+
+    s_mode = mode;
 
     xSemaphoreTake(s_mu, portMAX_DELAY);
     memset(&s_st, 0, sizeof(s_st));
     s_st.status = PORTAL_STARTING;
     s_st.seconds_left = PORTAL_TIMEOUT_S;
+    s_st.mode = mode;
     s_last_err = ESP_OK;
     xSemaphoreGive(s_mu);
 

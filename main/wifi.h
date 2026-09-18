@@ -259,6 +259,20 @@ bool wifi_connected(void);
 bool wifi_sta_ssid(char *out, size_t out_size);
 
 /*
+ * The station's own address, as text -- "192.168.222.23".
+ *
+ * For the portal in station mode, which unlike the AP mode has no fixed
+ * address to print: the phone is on the same network as the player and
+ * has to be told where to go, because there is no captive redirect to
+ * carry it there. Copied out, like the SSID above, for portal.h's
+ * reason.
+ *
+ * False and "" when there is no address, which is not the same as not
+ * being joined: the association can be up with DHCP still outstanding.
+ */
+bool wifi_sta_ip(char *out, size_t out_size);
+
+/*
  * The portal's access point: an open AP alongside the station, on the
  * radio that is already up. wifi_ap_begin() switches to APSTA and
  * configures the AP; wifi_ap_end() switches back to STA. Neither powers

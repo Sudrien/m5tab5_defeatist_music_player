@@ -6183,6 +6183,32 @@ static void ui_task(void *arg)
                  */
                 s_fetch_row = r.index;
                 break;
+            case BROWSER_ADD_STATION:
+                /*
+                 * The station form, on the network the player is already
+                 * on -- see portal_mode_t. Nothing is paused: the phone
+                 * stays on the house network, so the stream keeps
+                 * arriving while somebody types into it.
+                 *
+                 * Does not wait, for the same reason the NET tab does
+                 * not: portal_start_mode() hands the work to the
+                 * portal's task. A refusal -- radio off, or joined but
+                 * without an address yet -- is logged here and shows on
+                 * the panel's own lines, which is where the address to
+                 * type is shown too, and which is why the chooser
+                 * closes rather than staying open over it.
+                 */
+                {
+                    const esp_err_t perr =
+                        portal_start_mode(PORTAL_MODE_STATION);
+                    ESP_LOGI(TAG, "station form: start%s",
+                             perr == ESP_OK ? "" : " refused (no network)");
+                }
+                browser_close();
+                s_repaint_art = true;
+                touch_swallow();
+                break;
+
             case BROWSER_RELOAD_STATIONS:
                 /*
                  * Requested, not done. The chooser stays open and stays
