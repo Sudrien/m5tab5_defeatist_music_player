@@ -143,10 +143,25 @@ void bench_service(void)
      */
     int connect_ms = 0;
     bool up = false;
+    /*
+     * IDLE IS THE STARTING STATE, NOT A FAILURE, and that distinction
+     * is the whole of this loop's difficulty. netstream_play() posts a
+     * request and returns; the netstream task logs `idle -> connecting`
+     * a moment later. Treating IDLE as terminal therefore gave up on
+     * the first pass, before the connection had begun, and reported
+     * "Timed out connecting" in a few milliseconds.
+     *
+     * So IDLE only counts as an answer once the stream has been seen to
+     * leave it. After that it means stopped, which is terminal and
+     * worth reporting; before that it means not yet started.
+     */
+    bool left_idle = false;
     while (connect_ms < BENCH_CONNECT_MS) {
         const netstream_state_t s = netstream_state();
         if (s == NETSTREAM_BUFFERING || s == NETSTREAM_PLAYING) { up = true; break; }
-        if (s == NETSTREAM_FAILED || s == NETSTREAM_IDLE) break;
+        if (s != NETSTREAM_IDLE) left_idle = true;
+        if (s == NETSTREAM_FAILED) break;
+        if (s == NETSTREAM_IDLE && left_idle) break;
         vTaskDelay(pdMS_TO_TICKS(50));
         connect_ms = (int)((esp_timer_get_time() - t_start) / 1000);
     }
@@ -155,8 +170,12 @@ void bench_service(void)
     if (!up) {
         netstream_stop_wait(2000);
         free(sink);
-        set_note(netstream_state() == NETSTREAM_FAILED
-                 ? "The station did not answer."
+        /* Three outcomes and three sentences, because "timed out" was
+         * being said for all of them and sent the wrong thing to be
+         * investigated. */
+        const netstream_state_t s = netstream_state();
+        set_note(s == NETSTREAM_FAILED ? "The station did not answer."
+                 : s == NETSTREAM_IDLE ? "The stream stopped before it started."
                  : "Timed out connecting.");
         return;
     }
