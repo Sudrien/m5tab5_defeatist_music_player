@@ -9807,3 +9807,68 @@ Also intermittent and unexplained: `first audio bytes look like unknown
 moments later. It happens during ordinary playback, not just during a
 drain -- 0916's commit message blames the benchmark for it and is
 wrong.
+
+## Station favourites, blacklist, and the web UI (v0.5.0)
+
+Design settled in conversation, not built. Three states per station --
+starred, neither, blacklisted -- with the control on the main page in
+the gap between `next` and the moon.
+
+The shape, briefly, because the reasoning is worth keeping:
+
+- **A favourites list per volume, chosen from the radio menu.** It loads
+  the same way any other list loads, so `stations_index()`, `next` and
+  `prev` keep meaning what they mean today. No mode, no second position
+  space -- which was the thing that looked expensive and is not.
+- **Two M3U files, not one file with markers.** `favourites.m3u` and
+  `blacklist.m3u` beside `stations.m3u`, same SD-first precedence, so
+  `stationlist.h` and `stations_append()` are reused unchanged. Three
+  states is "in one set, the other, or neither".
+- **Unstarring is the one genuinely new write path.** Everything written
+  today appends. Removal needs the temp-file-and-rename discipline
+  settings.c uses, for the reason stations.h already gives: a list
+  truncated by a power cut is worse than no list. This is unavoidable in
+  any storage shape -- a three-state toggle where two transitions are
+  removals cannot be append-only.
+- **Blacklist filters API lists only, in `stations_set_remote()`, before
+  the `STATIONLIST_MAX` cap** so the cap counts stations that would
+  actually be seen. It must NOT filter the card's own `stations.m3u`: a
+  station typed into a file by hand is a deliberate choice, and having
+  it vanish because a chart row was blacklisted weeks earlier is a bug
+  report waiting to happen.
+- **Gold highlight needs `entry_t` to carry a `fav` bool**, resolved
+  once in `load_stations()` against the URL from the `stations_get()`
+  call already made there -- not per draw. The main-page button does not
+  replace this; it is what makes a chart row show gold for something
+  already starred.
+
+Two decisions still open: which volume's favourites the highlight
+compares against when both are mounted (SD-first precedence is
+consistent with everything else, at the cost of a star silently ceasing
+to be true on a swap), and how much URL normalisation to do (fold scheme
+and host, leave the path byte-exact, matching stationlist.h's habit of
+refusing what it cannot handle rather than repairing it).
+
+**The three-state cycle must not pass through blacklist on the way back
+to neutral.** Blacklist is the one state whose effect is invisible from
+the page it is set on -- it silently shrinks future API lists -- so a
+stray double-tap must not reach it. Either tap-toggles-star with
+long-press to blacklist, or a cycle where the blacklist step confirms.
+The second is preferable; the README already complains about invisible
+interactions elsewhere.
+
+**ui.c's row 7 comment is wrong and needs rewriting, not obeying.** It
+says "the right-hand side has no such gap: next ends at 521 and the moon
+starts at 616, so a sixth control over there would have had to move the
+transport". That gap is 95 px. A star centred at 568 with the moon's own
+half-span of 40 spans 528-608, clearing by 7 and 8 px -- no tighter than
+the gear, which sits in 116-196 against 104 and 199. The comment asserts
+no gap exists while describing one the same size as the one it just used.
+
+**THE WEB UI HAS TO MANAGE ALL OF THIS TOO.** `portalweb.c` already
+lists stations and adds them; it will need starring, unstarring and
+blacklisting, which means the removal path above is reached from two
+callers rather than one, and the portal is the side with a real keyboard
+and a real screen -- it is where someone will actually curate a
+blacklist rather than react to one station. Do not build the on-device
+toggle in a way that assumes it is the only writer.
