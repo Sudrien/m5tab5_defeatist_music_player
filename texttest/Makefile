@@ -8,7 +8,7 @@
 #   make        build and run
 #   make clean
 #
-# This does NOT replace a flash. CLAUDE.md is emphatic about that and it
+# This does NOT replace a flash. ARCHITECTURE.md is emphatic about that and it
 # has been right every time: host testing cannot see the DSI panel, PSRAM
 # timing, or the ESP-IDF build. It catches layout arithmetic, which is
 # what changed here, and nothing else.

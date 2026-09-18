@@ -11,7 +11,7 @@ of property checks. Exit status is non-zero on any failure.
 
 ## Why it compiles the real file
 
-`CLAUDE.md` on `seektest/`: *"Generated test files verify the logic
+`ARCHITECTURE.md` on `seektest/`: *"Generated test files verify the logic
 against the format as understood; they cannot verify the understanding."*
 The same trap is open here in a different shape. A reimplementation of
 `gfx_text_w()` in the harness would share the author's misunderstanding by
@@ -138,7 +138,7 @@ Any one of them can be built and run on its own, e.g.
 
 ## What it does *not* verify
 
-Everything `CLAUDE.md` says host testing cannot see, which has been right
+Everything `ARCHITECTURE.md` says host testing cannot see, which has been right
 every time: the DSI panel, PSRAM timing and bandwidth, the ESP-IDF build
 itself, and how any of this looks at 294 PPI. **This is not a substitute
 for a flash.** It catches layout arithmetic, which is what changed, and
