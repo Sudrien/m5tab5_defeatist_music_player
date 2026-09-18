@@ -89,6 +89,33 @@ typedef struct {
     int      kbps_avg;
     int      kbps_peak;
 
+    /*
+     * The same drain, split by how large a read asked for it.
+     *
+     * WHY THIS IS MEASURED INSIDE ONE RUN AND NOT ACROSS TWO PRESSES.
+     * This network has been seen to deliver 314 kbit/s and 543 kbit/s
+     * for the same station, minutes apart, with the same signal
+     * strength. Two-to-one run-to-run variance means any A/B taken as
+     * two separate measurements is measuring the weather, not the
+     * change. So both read sizes are exercised in ONE connection,
+     * alternating every window, which cancels drift and TCP warm-up
+     * because each size gets the good seconds and the bad ones alike.
+     *
+     * What it is for: with the co-processor in compatible streaming
+     * mode -- no SDIO SW_AGGR, one packet per transaction -- per-read
+     * overhead is paid more often than it should be, so read size is a
+     * plausible lever. netstream reads in NETSTREAM-sized pieces
+     * (2048); the first version of this benchmark read 8192 and
+     * measured faster. Those were two variables at once. This is the
+     * one-variable version.
+     *
+     * If they come back equal, read size is not the lever and
+     * netstream's 2048 is fine. If the large one is clearly faster,
+     * raising netstream's read is worth trying.
+     */
+    int      kbps_read_big;     /* BENCH_READ_BIG-sized reads */
+    int      kbps_read_small;   /* BENCH_READ_SMALL-sized reads */
+
     /* What the station says it needs, when it says anything -- the ICY
      * header, or the decoder's own figure from a previous play. 0 when
      * unknown, which is common and not an error. */

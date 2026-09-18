@@ -550,8 +550,19 @@ static void bench_lines(const bench_result_t *b, bool wifi,
     } else {
         snprintf(l[1], 64, "The station does not say what it needs.");
     }
-    snprintf(l[2], 64, "%u KB in %u ms, connected in %d ms",
-             (unsigned)(b->bytes / 1024), (unsigned)b->ms, b->connect_ms);
+    /*
+     * The read-size comparison replaces the byte/time line, which was
+     * only ever there to show the run had really happened -- the mean
+     * above does that. This is the number somebody pressed the row to
+     * see. 3 + 11 + 6 + 11 + 8 + NUL = 40 of 64, counted.
+     */
+    if (b->kbps_read_big > 0 && b->kbps_read_small > 0) {
+        snprintf(l[2], 64, "8K %d / 2K %d kbit/s",
+                 b->kbps_read_big, b->kbps_read_small);
+    } else {
+        snprintf(l[2], 64, "%u KB in %u ms", (unsigned)(b->bytes / 1024),
+                 (unsigned)b->ms);
+    }
 }
 
 /*

@@ -199,13 +199,26 @@ void bench_service(void)
     int64_t win_start = esp_timer_get_time();
     const int64_t t_drain = win_start;
 
+    /*
+     * Bytes and microseconds per read size, kept apart so each gets its
+     * own rate. Alternated at every window boundary rather than run as
+     * two halves: halves would give the first one TCP slow start and
+     * the second one whatever the network was doing by then, which is
+     * the confound this exists to avoid.
+     */
+    uint32_t sz_bytes[2] = { 0, 0 };
+    uint64_t sz_us[2] = { 0, 0 };
+    int which = 0;      /* 0 = big, 1 = small */
+
     while ((esp_timer_get_time() - t_drain) / 1000 < BENCH_RUN_MS) {
         const netstream_state_t s = netstream_state();
         if (s != NETSTREAM_BUFFERING && s != NETSTREAM_PLAYING) break;
 
-        const size_t got = netstream_read(sink, BENCH_READ, BENCH_READ_MS);
+        const size_t want = which ? BENCH_READ_SMALL : BENCH_READ_BIG;
+        const size_t got = netstream_read(sink, want, BENCH_READ_MS);
         total += (uint32_t)got;
         win_bytes += (uint32_t)got;
+        sz_bytes[which] += (uint32_t)got;
 
         const int64_t now = esp_timer_get_time();
         const int64_t win_us = now - win_start;
@@ -219,8 +232,10 @@ void bench_service(void)
             const int kbps = (int)((uint64_t)win_bytes * 8ull
                                    / (uint64_t)(win_us / 1000));
             if (kbps > peak) peak = kbps;
+            sz_us[which] += (uint64_t)win_us;
             win_bytes = 0;
             win_start = now;
+            which ^= 1;         /* the other size next second */
         }
     }
 
@@ -230,11 +245,22 @@ void bench_service(void)
 
     const int avg = ms ? (int)((uint64_t)total * 8ull / (uint64_t)ms) : 0;
 
+    /* Per size, over the seconds that size actually held. Zero when the
+     * drain was too short to complete a window of it, which is honest:
+     * one unfinished window is not a measurement. */
+    int by_read[2] = { 0, 0 };
+    for (int i = 0; i < 2; i++) {
+        const uint64_t sms = sz_us[i] / 1000;
+        if (sms) by_read[i] = (int)((uint64_t)sz_bytes[i] * 8ull / sms);
+    }
+
     xSemaphoreTake(s_mu, portMAX_DELAY);
     s_st.running = false;
     s_st.have = true;
     s_st.kbps_avg = avg;
     s_st.kbps_peak = peak;
+    s_st.kbps_read_big = by_read[0];
+    s_st.kbps_read_small = by_read[1];
     s_st.declared_kbps = declared;
     s_st.bytes = total;
     s_st.ms = ms;
@@ -254,4 +280,6 @@ void bench_service(void)
         ESP_LOGI(TAG, "drain: that is %d%% of what the station needs",
                  (avg * 100) / declared);
     }
+    ESP_LOGI(TAG, "drain: %d-byte reads %d kbit/s, %d-byte reads %d kbit/s",
+             BENCH_READ_BIG, by_read[0], BENCH_READ_SMALL, by_read[1]);
 }
