@@ -33,7 +33,22 @@ static const char *TAG = "tab5_bench";
  * this is a sink and never a cache, and 8 KB of internal is cheaper to
  * touch than a PSRAM round trip on every read.
  */
-#define BENCH_READ          (8192)
+/*
+ * THE TWO SIZES COMPARED, alternating window by window -- see the
+ * kbps_read_big field in bench.h for why they are measured in one run
+ * rather than two.
+ *
+ * SMALL IS NETSTREAM'S OWN 2048, deliberately, rather than something
+ * chosen for symmetry: the question is whether netstream's read size
+ * costs it anything, so the comparison has to include the size
+ * netstream actually uses.
+ *
+ * BENCH_READ stays as the sink's size and must remain the LARGER of the
+ * two, because that is the allocation every read writes into.
+ */
+#define BENCH_READ_BIG      (8192)
+#define BENCH_READ_SMALL    (2048)
+#define BENCH_READ          BENCH_READ_BIG
 
 /* One reading a second, which is what makes a peak meaningful. */
 #define BENCH_WINDOW_MS     (1000)
