@@ -70,7 +70,12 @@ Note: the goal of this project is to max out the potential of this hardware with
 
 ## v0.5.0 targets
 - Expand web ui (is there an api to mirror/ map to local functions?)
-- Audio recording, since  the hardware is  right there
+- Audio recording, since the hardware is  right there
+  - input toggle (onboard array / headset mic / UAC)
+  - mono default with stereo option
+  - omnidirectional vs. GSC-directional (screen-forward) mode for onboard array
+  - all captures encoded to FLAC as master (mp3 it yourself, bub).
+  - match uac channels if that makes any sense
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
@@ -111,7 +116,6 @@ Note: the goal of this project is to max out the potential of this hardware with
   the hardware JPEG decoder cannot allocate for: the P4's decoder has no
   scaler, so a 3000 px cover wants 17 MB of PSRAM in one block and does
   not get it.
-- MurmurHash2, for cover identity, is public domain. No obligation.
 - **Ark Pixel Font is SIL OFL-1.1, and `components/ark12` is therefore
   OFL-1.1 too, not MIT.** Converting the glyph PNGs into C arrays makes
   those files a Modified Version under OFL section 5, and section 5
