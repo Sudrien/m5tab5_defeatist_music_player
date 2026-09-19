@@ -70,6 +70,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 
 ## v0.5.0 targets
 - Expand web ui (is there an api to mirror/ map to local functions?)
+- Audio recording, since  the hardware is  right there
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
