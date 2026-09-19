@@ -69,6 +69,8 @@ Note: the goal of this project is to max out the potential of this hardware with
 
 
 ## v0.5.0 targets
+- Ethernet dongle support
+- zero storage internet radio scenario
 - Expand web ui (is there an api to mirror/ map to local functions?)
 - Audio recording, since the hardware is  right there
   - input toggle (onboard array / headset mic / UAC)
