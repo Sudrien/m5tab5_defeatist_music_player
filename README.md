@@ -74,7 +74,7 @@ Note: the goal of this project is to max out the potential of this hardware with
   - input toggle (onboard array / headset mic / UAC)
   - mono default with stereo option
   - omnidirectional vs. GSC-directional (screen-forward) mode for onboard array
-  - all captures encoded to FLAC as master (mp3 it yourself, bub).
+  - all captures encoded to FLAC as master (mp3 it yourself, bub), named aftere best guess for datetime.
   - match uac channels if that makes any sense
 
 ## What could happen
