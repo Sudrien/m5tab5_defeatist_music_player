@@ -287,6 +287,102 @@ int main(void)
     CHECK(streamplan_done(true, true), "both");
     CHECK(!streamplan_done(false, false), "neither");
 
+    /* ---------------------------------------------------------------- */
+    /* Play/pause across a close that has not finished                   */
+    /* ---------------------------------------------------------------- */
+
+    /*
+     * THE BOARD'S SEQUENCE, pass by pass. Two taps 300 ms apart, and
+     * netstream_stop() asynchronous, so the state still reads PLAYING
+     * when the second tap is decided:
+     *
+     *   122130  tap: pause   state PLAYING
+     *   122434  tap: play    state PLAYING   (the stop not yet processed)
+     *   122464               state STOPPING
+     *   122467               state IDLE
+     *
+     * The old decision disconnected twice and never reconnected, and
+     * the station ended. The resume has to survive all four passes and
+     * connect on the first one where the socket is gone -- and not one
+     * pass earlier, because STOPPING is still a session.
+     */
+    {
+        bool pending = false;
+        streamplan_action_t a;
+
+        a = streamplan_playpause_step(true, false, true, &pending);
+        CHECK(a == STREAMPLAN_DISCONNECT, "first tap did not pause: %d", (int)a);
+        CHECK(!pending, "a pause left a resume pending");
+
+        a = streamplan_playpause_step(true, true, true, &pending);
+        CHECK(a != STREAMPLAN_DISCONNECT,
+              "THE BUG: a play press during the close disconnected again");
+        CHECK(a != STREAMPLAN_CONNECT,
+              "a play press during the close opened a second session");
+        CHECK(pending, "a play press during the close was forgotten");
+
+        /* STOPPING is connected: still waiting, still one session. */
+        a = streamplan_playpause_step(false, true,
+                                      streamplan_is_connected(NETSTREAM_STOPPING),
+                                      &pending);
+        CHECK(a == STREAMPLAN_NOTHING, "connected during STOPPING: %d", (int)a);
+        CHECK(pending, "the resume was dropped while the socket closed");
+
+        /* IDLE: now, and exactly once. */
+        a = streamplan_playpause_step(false, true,
+                                      streamplan_is_connected(NETSTREAM_IDLE),
+                                      &pending);
+        CHECK(a == STREAMPLAN_CONNECT, "the resume never connected: %d", (int)a);
+        CHECK(!pending, "the resume is still pending after connecting");
+
+        a = streamplan_playpause_step(false, true, false, &pending);
+        CHECK(a == STREAMPLAN_NOTHING, "the resume connected twice: %d", (int)a);
+    }
+
+    /* Pause, play, pause, all inside one close: the listener wants it
+     * off, and the waiting resume must not fire after they said so. */
+    {
+        bool pending = false;
+        (void)streamplan_playpause_step(true, false, true, &pending);
+        (void)streamplan_playpause_step(true, true, true, &pending);
+        CHECK(pending, "setup: the resume should be waiting");
+
+        const streamplan_action_t a =
+            streamplan_playpause_step(true, false, true, &pending);
+        CHECK(!pending, "a third tap to pause left the resume pending");
+        CHECK(a != STREAMPLAN_CONNECT, "a pause reconnected");
+
+        CHECK(streamplan_playpause_step(false, false, false, &pending)
+              == STREAMPLAN_NOTHING,
+              "a cancelled resume fired once the socket closed");
+    }
+
+    /* The mirror case: a pause on a stream that is already down is a
+     * press for silence. The toggle alone would have reconnected. */
+    {
+        bool pending = false;
+        const streamplan_action_t a =
+            streamplan_playpause_step(true, false, false, &pending);
+        CHECK(a == STREAMPLAN_NOTHING,
+              "a pause on a dropped stream reconnected it: %d", (int)a);
+        CHECK(!pending, "and left a resume pending");
+    }
+
+    /* The ordinary cases still behave as they did: the fix changes
+     * only what happens when the press and the socket disagree. */
+    {
+        bool pending = false;
+        CHECK(streamplan_playpause_step(true, false, true, &pending)
+              == STREAMPLAN_DISCONNECT, "plain pause");
+        CHECK(streamplan_playpause_step(true, true, false, &pending)
+              == STREAMPLAN_CONNECT, "plain resume");
+        CHECK(!pending, "plain resume left something pending");
+        CHECK(streamplan_playpause_step(false, true, true, &pending)
+              == STREAMPLAN_NOTHING, "no press, nothing pending, nothing");
+        CHECK(streamplan_playpause_step(true, true, true, NULL)
+              == STREAMPLAN_NOTHING, "a NULL pending is refused, not read");
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

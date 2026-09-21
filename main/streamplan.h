@@ -305,6 +305,67 @@ static inline streamplan_action_t streamplan_transport(streamplan_press_t p,
 }
 
 /*
+ * One pass of play/pause, including a resume that is waiting.
+ *
+ * `pressed` is whether the listener's play/pause intent changed this
+ * pass, `want_play` is what they now want, `connected` is
+ * streamplan_is_connected() of the stream, and `*pending` is a resume
+ * that could not happen yet. Returns DISCONNECT, CONNECT or NOTHING.
+ *
+ * WHEN THE PRESS AND THE SOCKET DISAGREE, THE PRESS WINS ON DIRECTION
+ * AND THE SOCKET WINS ON TIMING.
+ *
+ * streamplan_transport() decides a press from `connected`, which is
+ * right whenever the two agree. They stop agreeing for a few hundred
+ * milliseconds after a pause: netstream_stop() posts a request and
+ * returns, and the state reads PLAYING until the netstream task gets to
+ * it. A play press in that window was decided as a SECOND DISCONNECT --
+ * the opposite of the press -- and nothing ever reconnected, because
+ * the intent and the last intent then agreed and there was no press
+ * left to handle. Two taps 300 ms apart ended the station.
+ *
+ * It cannot simply connect on the press. STOPPING counts as connected
+ * on purpose (see streamplan_is_connected()): netstream allows one
+ * session, ever, and a play during the close would race a second into
+ * existence. So a play that finds the socket still open is held in
+ * `*pending` and connects on the first pass after the socket is gone.
+ *
+ * The mirror case -- a pause that finds the stream already down -- is a
+ * press for silence, and returns NOTHING rather than the reconnect the
+ * toggle would have produced. A pause also cancels a pending resume:
+ * pause, play, pause inside one close is a listener who wants it off.
+ */
+static inline streamplan_action_t streamplan_playpause_step(bool pressed,
+                                                            bool want_play,
+                                                            bool connected,
+                                                            bool *pending)
+{
+    if (!pending) return STREAMPLAN_NOTHING;
+
+    if (pressed) {
+        const streamplan_action_t act =
+            streamplan_transport(STREAMPLAN_PRESS_PLAYPAUSE, connected, false);
+
+        if (want_play && act == STREAMPLAN_DISCONNECT) {
+            *pending = true;                /* play during a close: wait */
+            return STREAMPLAN_NOTHING;
+        }
+        if (!want_play) {
+            *pending = false;               /* any pause cancels a wait  */
+            return act == STREAMPLAN_DISCONNECT ? STREAMPLAN_DISCONNECT
+                                                : STREAMPLAN_NOTHING;
+        }
+        return act;                         /* play on a closed socket   */
+    }
+
+    if (*pending && !connected) {
+        *pending = false;
+        return STREAMPLAN_CONNECT;
+    }
+    return STREAMPLAN_NOTHING;
+}
+
+/*
  * Whether a state counts as connected for the above.
  *
  * STOPPING is connected: a socket is still open and a play press during

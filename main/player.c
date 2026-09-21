@@ -10928,6 +10928,12 @@ static track_end_t play_stream(const char *url, const char *name)
      * holding off. s_playing is the writer's gate and ui_task toggles it
      * on a press; a stream turns that into a disconnect. */
     bool was_playing = s_playing;
+    /*
+     * A play press that arrived while the pause before it was still
+     * closing its socket, waiting for the close to finish. See the
+     * press handling below for why it cannot act at once.
+     */
+    bool resume_pending = false;
 
     while (1) {
         /* Something else was chosen. Ahead of everything: a listener who
@@ -11028,38 +11034,75 @@ static track_end_t play_stream(const char *url, const char *name)
          * holding the connection open while paused fills both rings and
          * stalls the server anyway.
          */
-        if (!leaving && s_playing != was_playing) {
-            was_playing = s_playing;
-            const streamplan_action_t act = streamplan_transport(
-                STREAMPLAN_PRESS_PLAYPAUSE,
-                streamplan_is_connected(netstream_state()),
-                stations_have_other());
-            if (act == STREAMPLAN_DISCONNECT) {
-                ESP_LOGI(TAG, "stream paused: disconnecting");
-                netstream_stop();
-                /* The ring's contents are a moment of live radio that
-                 * will never be current again, so unlike a file's pause
-                 * they are not worth keeping. Dropped through the
-                 * writer's own flush path rather than reset from here,
-                 * because that path is the one that publishes. */
-                /* Why first, flag second: the writer reads the string
-                 * when it sees the flag, and the other three call sites
-                 * set them in this order for the same reason. */
-                s_flush_why = "stream paused";
-                s_pcm_flush = true;
-            } else if (act == STREAMPLAN_CONNECT) {
-                ESP_LOGI(TAG, "stream resumed: reconnecting");
-                netdec_reconnect();
-                bufplan_init(&plan, esp_timer_get_time() / 1000);
-                first_sound = false;
-                /* Same race as the first connect: the resume posts a
-                 * request and the state stays IDLE until the task picks
-                 * it up. Latching this down again is what stops the
-                 * resume ending the stream it just asked for. */
-                seen_live = false;
-                t_connect = esp_timer_get_time();
-                netstream_play(s_stream_url, s_stream_name);
+        /*
+         * READ ONCE. s_playing is written by ui_task, and the press is
+         * decided from it in two places below; reading it twice is how a
+         * press lands half in one branch and half in the other.
+         */
+        const bool want_play = s_playing;
+        const bool pressed = !leaving && want_play != was_playing;
+        if (pressed) was_playing = want_play;
+
+        /*
+         * The decision, including a resume waiting on a close, is
+         * streamplan_playpause_step() -- in the header rather than here
+         * so the host can test it against the exact sequence the board
+         * produced. See its comment for why a play press can arrive
+         * while the pause before it is still closing, and why it must
+         * wait rather than connect.
+         */
+        const bool had_pending = resume_pending;
+        const streamplan_action_t pp = leaving ? STREAMPLAN_NOTHING
+            : streamplan_playpause_step(pressed, want_play,
+                  streamplan_is_connected(netstream_state()),
+                  &resume_pending);
+
+        /* Two calls rather than one with a chosen format: ESP_LOGI
+         * pastes its format into adjacent string literals, so it has to
+         * BE a literal, and a conditional expression does not build on
+         * the board -- while compiling fine on the host, whose stand-in
+         * macro throws its arguments away. */
+        if (pressed && pp == STREAMPLAN_NOTHING) {
+            if (resume_pending) {
+                ESP_LOGI(TAG, "stream resume: waiting for the last close");
+            } else {
+                ESP_LOGI(TAG, "stream pause: already down, nothing to close");
             }
+        }
+
+        bool do_connect = false;
+        if (pp == STREAMPLAN_DISCONNECT) {
+            ESP_LOGI(TAG, "stream paused: disconnecting");
+            netstream_stop();
+            /* The ring's contents are a moment of live radio that
+             * will never be current again, so unlike a file's pause
+             * they are not worth keeping. Dropped through the
+             * writer's own flush path rather than reset from here,
+             * because that path is the one that publishes. */
+            /* Why first, flag second: the writer reads the string
+             * when it sees the flag, and the other three call sites
+             * set them in this order for the same reason. */
+            s_flush_why = "stream paused";
+            s_pcm_flush = true;
+        } else if (pp == STREAMPLAN_CONNECT) {
+            if (had_pending) {
+                ESP_LOGI(TAG, "stream resume: the close finished");
+            }
+            do_connect = true;
+        }
+
+        if (do_connect) {
+            ESP_LOGI(TAG, "stream resumed: reconnecting");
+            netdec_reconnect();
+            bufplan_init(&plan, esp_timer_get_time() / 1000);
+            first_sound = false;
+            /* Same race as the first connect: the resume posts a
+             * request and the state stays IDLE until the task picks
+             * it up. Latching this down again is what stops the
+             * resume ending the stream it just asked for. */
+            seen_live = false;
+            t_connect = esp_timer_get_time();
+            netstream_play(s_stream_url, s_stream_name);
         }
 
         /*
@@ -11122,7 +11165,15 @@ static track_end_t play_stream(const char *url, const char *name)
          * the break, and go round for ever -- the pause would have
          * become a way to make the player unresponsive.
          */
-        if (!s_playing && !leaving) {
+        /*
+         * `resume_pending` holds the plan too, and it is the other half
+         * of the fix above. A pending resume has s_playing true, so
+         * without this the plan was stepped against an empty buffer and
+         * a closing source while it waited -- which is precisely what
+         * ended the stream on the board. Waiting for a close is a pause
+         * as far as the plan is concerned.
+         */
+        if ((!want_play || resume_pending) && !leaving) {
             s_stream_hold = true;
             s_stream_status = STREAMPLAN_STATUS_NONE;
 
