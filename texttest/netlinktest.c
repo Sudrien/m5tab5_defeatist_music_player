@@ -92,17 +92,31 @@ int main(void)
     CHECK(!netlink_eth_usable(&s), "usable without link");
     CHECK(netlink_eth_step(&s, NETLINK_EV_LINK_UP), "link after address did not rise");
 
-    /* The wire has to outrank the station, or plugging in does nothing
-     * while Wi-Fi is joined. */
-    CHECK(NETLINK_ETH_ROUTE_PRIO > NETLINK_WIFI_STA_ROUTE_PRIO,
-          "cable route_prio %d does not beat the station's %d",
+    /* esp_netif must never choose the cable by itself: it re-picks at
+     * link up and at every IPv6 address, before the cable can route. */
+    CHECK(NETLINK_ETH_ROUTE_PRIO < NETLINK_WIFI_STA_ROUTE_PRIO,
+          "cable route_prio %d beats the station's %d -- esp_netif will pick it unaddressed",
           NETLINK_ETH_ROUTE_PRIO, NETLINK_WIFI_STA_ROUTE_PRIO);
 
-    /* ...but not while it waits for an address, or a replug takes the
-     * default from a working station and routes nowhere until DHCP. */
-    CHECK(NETLINK_ETH_ROUTE_PRIO_PENDING < NETLINK_WIFI_STA_ROUTE_PRIO,
-          "cable route_prio %d while pending beats the station's %d",
-          NETLINK_ETH_ROUTE_PRIO_PENDING, NETLINK_WIFI_STA_ROUTE_PRIO);
+    /* So ethernet.c picks, and pins. */
+    CHECK(netlink_pick(true, true) == NETLINK_PICK_CABLE, "usable cable not preferred");
+    CHECK(netlink_pick(true, false) == NETLINK_PICK_CABLE, "usable cable, no radio");
+    CHECK(netlink_pick(false, true) == NETLINK_PICK_STATION,
+          "cable gone and the station not pinned back");
+    CHECK(netlink_pick(false, false) == NETLINK_PICK_NONE,
+          "pinned something with no station to pin -- the radio could never be picked again");
+
+    /* The replay that 1008 lost: link up, then the IPv6 link-local a
+     * second later, then IPv4. Until the IPv4 lease the cable is not
+     * usable, so the pick stays the station through all of it. */
+    s = (netlink_eth_t){ 0 };
+    netlink_eth_step(&s, NETLINK_EV_LINK_UP);
+    CHECK(netlink_pick(netlink_eth_usable(&s), true) == NETLINK_PICK_STATION,
+          "link up alone moved the default to the cable");
+    /* (IPv6 is not an event here at all: it cannot make the cable usable.) */
+    netlink_eth_step(&s, NETLINK_EV_GOT_IP);
+    CHECK(netlink_pick(netlink_eth_usable(&s), true) == NETLINK_PICK_CABLE,
+          "the IPv4 lease did not move the default to the cable");
 
     /* Which configuration a Realtek adapter is enumerated in (ethcfg.h).
      * Configuration 2 is CDC-ECM on the RTL8152 and RTL8153. */

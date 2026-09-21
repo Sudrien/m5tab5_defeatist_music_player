@@ -119,6 +119,8 @@ bool ethernet_ip(char *out, size_t out_size)
  * handler, so this only records and logs -- the same rule wifi.c's
  * on_event() follows.
  */
+static void pick_default(void);
+
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
     (void)arg;
@@ -134,19 +136,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         if (!i) return;
         switch (id) {
-        case IOT_ETH_EVENT_CONNECTED:
-            /*
-             * Down to PENDING before esp_netif sees the link, so its
-             * link-up pick of the default keeps Wi-Fi. This handler runs
-             * first because it was registered first: IOT_ETH_EVENT
-             * handlers for ANY id run in registration order, and the
-             * netif glue's -- the one that brings the interface up and
-             * re-picks the default -- is registered at attach(), after
-             * this. on_link_up_after() puts it back. See netlink.h.
-             */
-            if (i->netif) esp_netif_set_route_prio(i->netif, NETLINK_ETH_ROUTE_PRIO_PENDING);
-            ev = NETLINK_EV_LINK_UP;
-            break;
+        case IOT_ETH_EVENT_CONNECTED:    ev = NETLINK_EV_LINK_UP;   break;
         case IOT_ETH_EVENT_DISCONNECTED: ev = NETLINK_EV_LINK_DOWN; break;
         case IOT_ETH_EVENT_STOP:         ev = NETLINK_EV_STOP;      break;
         default: return;
@@ -179,6 +169,8 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (ev == NETLINK_EV_LINK_UP)   ESP_LOGI(TAG, "%s: cable connected", i->name);
     if (ev == NETLINK_EV_LINK_DOWN) ESP_LOGI(TAG, "%s: cable disconnected", i->name);
 
+    if (rose || (was && !netlink_eth_usable(&s))) pick_default();
+
     if (rose) {
         ESP_LOGI(TAG, "%s: wired network up; it is the default route", i->name);
         streamprobe_kick();         /* once per boot; see streamprobe.h */
@@ -189,25 +181,34 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 /*
- * After the glue's link-up handling, the priority goes back up, so the
- * GOT_IP pick -- the one with an address to route from -- makes the
- * cable the default.
- *
- * "After" is got from esp_event's dispatch order rather than from
- * timing: handlers registered for one specific id run after every
- * handler registered for the whole base, whatever order they were
- * registered in. This one is for IOT_ETH_EVENT_CONNECTED alone; the
- * glue's is for all of IOT_ETH_EVENT.
+ * Pin the default route to what netlink_pick() says. Called at the three
+ * moments the answer can change; see netlink.h for why esp_netif is not
+ * left to choose. esp_netif_set_default_netif() runs on the lwIP task
+ * and waits for it, which is fine from the event task -- the glue's own
+ * actions do the same.
  */
-static void on_link_up_after(void *arg, esp_event_base_t base, int32_t id, void *data)
+static void pick_default(void)
 {
-    (void)arg; (void)base; (void)id;
-    const iot_eth_handle_t h = data ? *(const iot_eth_handle_t *)data : NULL;
-    for (int k = 0; k < IF_COUNT; k++) {
-        if (h && s_if[k].eth == h && s_if[k].netif) {
-            esp_netif_set_route_prio(s_if[k].netif, NETLINK_ETH_ROUTE_PRIO);
-        }
+    const eth_if_t *cable = usable_if();
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    switch (netlink_pick(cable != NULL, sta != NULL)) {
+    case NETLINK_PICK_CABLE:
+        esp_netif_set_default_netif(cable->netif);
+        break;
+    case NETLINK_PICK_STATION:
+        esp_netif_set_default_netif(sta);
+        break;
+    case NETLINK_PICK_NONE:
+        break;
     }
+}
+
+/* The station got an address. Pinned only if the cable is not usable --
+ * a station joining behind a working cable must not take the route. */
+static void on_sta_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)id; (void)data;
+    if (!ethernet_connected()) pick_default();
 }
 
 /*
@@ -236,9 +237,9 @@ static esp_err_t eth_class_install(void)
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IOT_ETH_EVENT, ESP_EVENT_ANY_ID,
                                                    on_event, NULL),
                         TAG, "IOT_ETH_EVENT handler");
-    ESP_RETURN_ON_ERROR(esp_event_handler_register(IOT_ETH_EVENT, IOT_ETH_EVENT_CONNECTED,
-                                                   on_link_up_after, NULL),
-                        TAG, "link-up (after) handler");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                   on_sta_got_ip, NULL),
+                        TAG, "STA_GOT_IP handler");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                    on_event, NULL),
                         TAG, "ETH_GOT_IP handler");
@@ -308,8 +309,9 @@ static esp_err_t attach(eth_if_t *i, iot_eth_driver_t *driver, const char *if_ke
     esp_netif_inherent_config_t inherent = ESP_NETIF_INHERENT_DEFAULT_ETH();
     inherent.if_key = if_key;
     inherent.if_desc = i->name;
-    /* See netlink.h: the stock 50 loses to the station's 100, and a
-     * cable nobody is using is not what plugging one in asks for. */
+    /* Under the station's, on purpose: esp_netif must never pick the
+     * cable by itself. pick_default() does, when it can route. See
+     * netlink.h. */
     inherent.route_prio = NETLINK_ETH_ROUTE_PRIO;
     const esp_netif_config_t netif_cfg = {
         .base = &inherent,

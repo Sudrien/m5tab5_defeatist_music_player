@@ -22,14 +22,32 @@
  * and until it does the address from before the unplug is not known to
  * be good -- it may be a different network on the other end.
  *
- * WIRED IS PREFERRED, AND THAT IS lwIP's DECISION, NOT THIS FILE'S
+ * WIRED IS PREFERRED, AND THE CHOICE IS MADE HERE, NOT BY esp_netif
  *
- * Both interfaces can be up at once. Which one a socket uses is the
- * default route, and esp_netif picks the default as the up interface
- * with the highest route_prio. The Wi-Fi station is 100; the stock
- * Ethernet inherent config is 50, which would leave a plugged-in cable
- * idle behind the radio. NETLINK_ETH_ROUTE_PRIO is what ethernet.c
- * sets instead.
+ * Both interfaces can be up at once, and a socket leaves by the default
+ * route. esp_netif picks the default itself, by route_prio, at every
+ * link up and every address -- IPv4 or IPv6 -- and it picks between
+ * interfaces that are UP, not interfaces that can route. That was tried
+ * twice and lost twice on the board:
+ *
+ *   1000 gave the cable 200 over the station's 100. A replug made the
+ *   cable the default the moment it linked, nine seconds before DHCP
+ *   answered: "(default now no route)", Wi-Fi joined throughout.
+ *
+ *   1008 held it at 50 through the link-up pick and raised it after.
+ *   The link-local IPv6 address arrives a second after the link, and
+ *   adding it re-picks as well -- by then at 200. A stream reconnected
+ *   in that window came up "via no route".
+ *
+ * So the cable's route_prio stays under the station's for good, and
+ * esp_netif's own picking never chooses it. netlink_pick() below
+ * decides, and ethernet.c applies the answer with
+ * esp_netif_set_default_netif() at the three moments it can change: the
+ * cable becoming usable, the cable stopping being usable, and the
+ * station getting an address. That call pins the default -- esp_netif
+ * stops re-picking until the pinned interface is destroyed -- which is
+ * exactly the point: an IPv6 address turning up is no longer a reason
+ * to route somewhere else.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -41,28 +59,32 @@
 extern "C" {
 #endif
 
-/* Above ESP_NETIF_INHERENT_DEFAULT_WIFI_STA()'s 100, so a cable wins. */
-#define NETLINK_ETH_ROUTE_PRIO      (200)
+/* Under ESP_NETIF_INHERENT_DEFAULT_WIFI_STA()'s 100, permanently: see
+ * above. esp_netif on its own never makes the cable the default. */
+#define NETLINK_ETH_ROUTE_PRIO      (50)
 #define NETLINK_WIFI_STA_ROUTE_PRIO (100)
 
+typedef enum {
+    NETLINK_PICK_NONE,      /* leave esp_netif's choice alone */
+    NETLINK_PICK_CABLE,
+    NETLINK_PICK_STATION,
+} netlink_pick_t;
+
 /*
- * AND BELOW IT WHILE THE CABLE HAS NO ADDRESS.
- *
- * esp_netif re-picks the default at two moments, link up and GOT_IP,
- * and at link up it asks only whether the interface is up -- not whether
- * it has an address. So at 200 from the start, a replug made the cable
- * the default the moment it linked and nine seconds before DHCP
- * answered, and for those nine seconds every new connection had nowhere
- * to go. The board's rate line said it plainly: "(default now no
- * route)", with Wi-Fi joined the whole time.
- *
- * So ethernet.c drops the cable to this just before esp_netif's link-up
- * pick and raises it back just after -- see on_event() and
- * on_link_up_after() for how the ordering is got -- and the pick that
- * makes the cable the default is the GOT_IP one, when there is an
- * address to route from.
+ * Which interface should be the default. A usable cable, always; else
+ * the station, if there is one to pin. NONE when there is no station
+ * netif at all (Wi-Fi switched off), because pinning a cable that has
+ * just gone would stop esp_netif choosing the station when the radio is
+ * turned back on -- the pin only lets go when its interface is
+ * destroyed, and a cable's netif never is.
  */
-#define NETLINK_ETH_ROUTE_PRIO_PENDING (50)
+static inline netlink_pick_t netlink_pick(bool cable_usable, bool station_exists)
+{
+    if (cable_usable) return NETLINK_PICK_CABLE;
+    if (station_exists) return NETLINK_PICK_STATION;
+    return NETLINK_PICK_NONE;
+}
+
 
 typedef enum {
     NETLINK_EV_LINK_UP,     /* IOT_ETH_EVENT_CONNECTED    */
