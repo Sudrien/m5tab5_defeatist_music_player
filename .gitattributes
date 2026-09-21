@@ -1,0 +1,6 @@
+# The cue sheets in test_audio_files are test data whose line ends and
+# encodings ARE the test: CRLF, a UTF-8 BOM, a Windows-1252 byte. As
+# text they would be at the mercy of core.autocrlf, and a patch carrying
+# them would lose its CRs in `git am`, which strips them by default.
+# Binary keeps every byte, in the repository and in a patch.
+test_audio_files/*.cue binary

@@ -170,4 +170,168 @@ ffmpeg -loglevel error -y -i landmark.wav -t 10 -c:a pcm_f32le \
 # It is 951 KB because tones compress, not because it is short.
 $F -c:a flac -sample_fmt s32 "$OUT/21 flac-24bit.flac"
 
+# ---------------------------------------------------------------- 1002
+# Cue sheets. The player does not read them yet; these are the files
+# the feature will be written against, so the corpus exists before the
+# code rather than being made to fit it afterwards.
+#
+# Every sheet puts its track starts somewhere the landmark makes
+# audible: on a ten-second mark the track opens with that mark's beeps,
+# and anywhere else the tick and the pitch say where it began. The
+# README has what each one should do.
+#
+# The .cue files are written byte by byte with printf, not by an
+# editor, because three of the things they test are bytes: a UTF-8 BOM,
+# CRLF line ends, and a Windows-1252 accent.
+
+# crlf FILE -- rewrite FILE with CRLF line ends, as EAC writes them.
+crlf() { sed 's/$/\r/' "$1" > "$1.tmp" && mv "$1.tmp" "$1"; }
+
+# 22 -- the ordinary case: one FLAC image of a disc, six tracks on the
+# six ten-second marks, so track N opens with N beeps. UTF-8 with a BOM
+# and CRLF, which is what EAC and foobar2000 write today, and one title
+# outside ASCII.
+$F -c:a flac "$OUT/22 cue-flac-image.flac"
+{
+    printf '\357\273\277'
+    printf 'REM GENRE "Test"\n'
+    printf 'REM DATE 2026\n'
+    printf 'REM COMMENT "defeatist test corpus"\n'
+    printf 'PERFORMER "Landmark Ensemble"\n'
+    printf 'TITLE "Six Marks"\n'
+    printf 'FILE "22 cue-flac-image.flac" WAVE\n'
+    n=1
+    for t in "One Beep" "Two Beeps" "Three Beeps" "Four Beeps" \
+             "F\303\274nf Signalt\303\266ne" "Six Beeps"; do
+        printf '  TRACK %02d AUDIO\n' $n
+        printf '    TITLE "%s"\n' "$t"
+        printf '    PERFORMER "Landmark Ensemble"\n'
+        printf '    INDEX 01 00:%02d:00\n' $(( (n - 1) * 10 ))
+        n=$((n + 1))
+    done
+} > "$OUT/22 cue-flac-image.cue"
+crlf "$OUT/22 cue-flac-image.cue"
+
+# 23 -- the index lines that are not "track starts here". Windows-1252,
+# no BOM, LF: an older EAC sheet, and the accent in the performer is a
+# byte that is not valid UTF-8.
+#
+#   track 1  INDEX 00 at 0, INDEX 01 at 3 s: a hidden track before the
+#            first one. The track starts at 3.
+#   track 2  INDEX 00 at 8, INDEX 01 at 10: a two-second pregap. The
+#            track starts at 10 and opens with two beeps; 8-10 belongs
+#            to track 1 when playing straight through.
+#   track 3  INDEX 01 at 00:25:37 -- CD frames are 1/75 s, so 25.493 s.
+#   track 4  INDEX 01 at 00:39:74, one frame before the four beeps, and
+#            an INDEX 02 at 45 that must not start a track.
+$F -c:a flac "$OUT/23 cue-pregap-htoa.flac"
+{
+    printf 'PERFORMER "Caf\351 Tones"\n'
+    printf 'TITLE "Gaps"\n'
+    printf 'FILE "23 cue-pregap-htoa.flac" WAVE\n'
+    printf '  TRACK 01 AUDIO\n'
+    printf '    TITLE "After the Hidden Track"\n'
+    printf '    INDEX 00 00:00:00\n'
+    printf '    INDEX 01 00:03:00\n'
+    printf '  TRACK 02 AUDIO\n'
+    printf '    TITLE "Two Beeps After a Pregap"\n'
+    printf '    INDEX 00 00:08:00\n'
+    printf '    INDEX 01 00:10:00\n'
+    printf '  TRACK 03 AUDIO\n'
+    printf '    TITLE "Off the Second"\n'
+    printf '    INDEX 01 00:25:37\n'
+    printf '  TRACK 04 AUDIO\n'
+    printf '    TITLE "One Frame Before Four"\n'
+    printf '    INDEX 01 00:39:74\n'
+    printf '    INDEX 02 00:45:00\n'
+} > "$OUT/23 cue-pregap-htoa.cue"
+
+# 24 -- the sheet names a file that is not there. EAC writes
+# FILE "CDImage.wav" or "Range.wav", and the image is then renamed,
+# compressed to FLAC, or both. The audio beside it with the sheet's own
+# base name is the one it means. Tracks at 0, 20 and 40: one, three and
+# five beeps.
+$F -c:a flac "$OUT/24 cue-filename-mismatch.flac"
+{
+    printf 'REM COMMENT "ExactAudioCopy v1.6"\n'
+    printf 'TITLE "Renamed"\n'
+    printf 'FILE "CDImage.wav" WAVE\n'
+    printf '  TRACK 01 AUDIO\n'
+    printf '    TITLE "One"\n'
+    printf '    INDEX 01 00:00:00\n'
+    printf '  TRACK 02 AUDIO\n'
+    printf '    TITLE "Three"\n'
+    printf '    INDEX 01 00:20:00\n'
+    printf '  TRACK 03 AUDIO\n'
+    printf '    TITLE "Five"\n'
+    printf '    INDEX 01 00:40:00\n'
+} > "$OUT/24 cue-filename-mismatch.cue"
+crlf "$OUT/24 cue-filename-mismatch.cue"
+
+# 25 -- one FILE per track: the minute cut at 20 and 40 into three
+# files. Track 3's pregap is the last two seconds of the SECOND file
+# (INDEX 00 under 25b, INDEX 01 at the top of 25c), which is EAC's
+# "gaps appended to previous tracks" layout and the reason a track's
+# start and its file cannot be assumed to be the same thing.
+# The three pieces are also ordinary files and list as such.
+ffmpeg -loglevel error -y -i landmark.wav -t 20 -c:a flac \
+    "$OUT/25a cue-multifile.flac"
+ffmpeg -loglevel error -y -ss 20 -i landmark.wav -t 20 -c:a flac \
+    "$OUT/25b cue-multifile.flac"
+ffmpeg -loglevel error -y -ss 40 -i landmark.wav -c:a flac \
+    "$OUT/25c cue-multifile.flac"
+{
+    printf 'TITLE "Three Files"\n'
+    printf 'FILE "25a cue-multifile.flac" WAVE\n'
+    printf '  TRACK 01 AUDIO\n'
+    printf '    TITLE "One"\n'
+    printf '    INDEX 01 00:00:00\n'
+    printf 'FILE "25b cue-multifile.flac" WAVE\n'
+    printf '  TRACK 02 AUDIO\n'
+    printf '    TITLE "Three"\n'
+    printf '    INDEX 01 00:00:00\n'
+    printf '  TRACK 03 AUDIO\n'
+    printf '    TITLE "Five"\n'
+    printf '    INDEX 00 00:18:00\n'
+    printf 'FILE "25c cue-multifile.flac" WAVE\n'
+    printf '    INDEX 01 00:00:00\n'
+} > "$OUT/25 cue-multifile.cue"
+crlf "$OUT/25 cue-multifile.cue"
+
+# 26 -- broken on purpose, against 22's audio so it costs no new file.
+# Of nine tracks three are playable: 01 (0-20), 04 (20-50, and a
+# 300-character title) and 09 (50-60). Each other one is wrong in its
+# own way -- no INDEX 01, frame 75, going backwards, a data track, a
+# start past the end of the audio -- plus an unclosed quote, a line
+# that means nothing, and no newline on the last line.
+{
+    printf 'REM this sheet is broken on purpose\n'
+    printf 'TITLE "Unclosed quote\n'
+    printf 'FILE "22 cue-flac-image.flac" WAVE\n'
+    printf '  TRACK 01 AUDIO\n'
+    printf '    TITLE "Fine"\n'
+    printf '    INDEX 01 00:00:00\n'
+    printf '  TRACK 02 AUDIO\n'
+    printf '    TITLE "No INDEX 01"\n'
+    printf '    INDEX 00 00:05:00\n'
+    printf '  TRACK 03 AUDIO\n'
+    printf '    TITLE "Frame 75 Is Not a Frame"\n'
+    printf '    INDEX 01 00:15:75\n'
+    printf '  TRACK 04 AUDIO\n'
+    printf '    TITLE "%s"\n' "$(printf '%0300d' 0 | tr 0 x)"
+    printf '    INDEX 01 00:20:00\n'
+    printf '  TRACK 06 AUDIO\n'
+    printf '    TITLE "Goes Backwards"\n'
+    printf '    INDEX 01 00:18:00\n'
+    printf '  TRACK 07 MODE1/2352\n'
+    printf '    INDEX 01 00:30:00\n'
+    printf 'GARBAGE LINE WITH NO MEANING\n'
+    printf '  TRACK 08 AUDIO\n'
+    printf '    TITLE "Past the End"\n'
+    printf '    INDEX 01 01:10:00\n'
+    printf '  TRACK 09 AUDIO\n'
+    printf '    TITLE "Fine Again"\n'
+    printf '    INDEX 01 00:50:00'
+} > "$OUT/26 cue-malformed.cue"
+
 echo "built into $OUT"

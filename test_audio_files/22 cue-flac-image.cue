@@ -1,0 +1,30 @@
+﻿REM GENRE "Test"
+REM DATE 2026
+REM COMMENT "defeatist test corpus"
+PERFORMER "Landmark Ensemble"
+TITLE "Six Marks"
+FILE "22 cue-flac-image.flac" WAVE
+  TRACK 01 AUDIO
+    TITLE "One Beep"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:00:00
+  TRACK 02 AUDIO
+    TITLE "Two Beeps"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:10:00
+  TRACK 03 AUDIO
+    TITLE "Three Beeps"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:20:00
+  TRACK 04 AUDIO
+    TITLE "Four Beeps"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:30:00
+  TRACK 05 AUDIO
+    TITLE "F\303\274nf Signalt\303\266ne"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:40:00
+  TRACK 06 AUDIO
+    TITLE "Six Beeps"
+    PERFORMER "Landmark Ensemble"
+    INDEX 01 00:50:00

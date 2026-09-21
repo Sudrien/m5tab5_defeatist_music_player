@@ -10,6 +10,9 @@ the cases none of them reached: a branch with no file, and three shapes
 of input that the probes are supposed to refuse and that nothing ever
 handed them.
 
+22 to 26 are not about seeking: they are cue sheets, for a feature the
+player does not have yet. See the section on them below.
+
 ## What you are listening to
 
 Both channels carry a landmark, so a seek can be judged by ear without
@@ -51,6 +54,11 @@ place; one that is wrong by more is obvious from the beep count.
 | 19 wav-pcm32 | 32-bit integer | **refuses, and says 32-bit** |
 | 20 wav-float32 | 32-bit float, indistinguishable from 19 at the decoder | **refuses, identically** |
 | 21 flac-24bit | the fold on a real decoder rather than a PCM chunk | plays, seeks |
+| 22 cue-flac-image | cue sheet, one image, six tracks on the marks; UTF-8 BOM, CRLF | six tracks; track N opens with N beeps; track 5 reads *Fünf Signaltöne* |
+| 23 cue-pregap-htoa | INDEX 00, a hidden track, starts off the second; Windows-1252 | four tracks starting 3, 10, 25.49 and 39.99 s; performer *Café Tones* |
+| 24 cue-filename-mismatch | sheet names `CDImage.wav`, which is not there | resolves to the FLAC beside it; tracks at 0, 20, 40 |
+| 25 cue-multifile (+ 25a-c) | one FILE per track, a pregap in the previous file | three tracks opening with 1, 3 and 5 beeps |
+| 26 cue-malformed | nine tracks, six of them wrong | **three tracks, no crash**: 0-20, 20-50, 50-60 |
 
 ## 08 seeks during the first play now, and 10 seeks at last
 
@@ -203,6 +211,61 @@ being 24-bit is a fact about the file. 21 arrives from the FLAC
 decoder, where it is a fact about the decoder's output, which is where
 this matters in real use -- 24-bit FLAC is most of what a bought
 download is.
+
+## Cue sheets (1002): written before the code that reads them
+
+**Nothing in the player reads a `.cue` today.** The chooser does not
+list them, and 22 to 24 play as the plain one-minute FLACs they are.
+These five sheets are here so that cue support is written against a
+corpus rather than a corpus being made to agree with it afterwards.
+Until then the Expected column is the specification, not a result.
+
+All of them are built by `build/encode.sh`, the sheets byte by byte
+with `printf`, because three of the things they test are bytes.
+
+**The landmark does the checking.** Every track start is either on a
+ten-second mark, where the track opens with that mark's beeps, or
+deliberately off one, where the tick and the pitch say where it
+landed. Skip to a track and count.
+
+- **22 is the ordinary case**, as EAC and foobar2000 write it today:
+  UTF-8 with a byte-order mark and CRLF line ends. The BOM is three
+  bytes in front of `REM`, and a parser that does not strip them has
+  a first line it does not recognise. Track 5's title is outside
+  ASCII; in the ark12 font that may be boxes, which is fine (see the
+  main README) -- a missing title or a truncated sheet is not.
+- **23 is the index lines that do not start tracks.** `INDEX 00` is a
+  pregap and `INDEX 01` is the start: track 1 begins at 3 s with a
+  hidden track before it, and track 2 at 10 s, not at its pregap at 8.
+  Track 3 is at `00:25:37`, and the last field is CD frames, 1/75 s --
+  25.493 s, not 25.37. Track 4 is one frame before the four beeps, so
+  they come 13 ms in, and its `INDEX 02` must not become a track.
+  It is Windows-1252 with no BOM: `Café` is the byte `E9`, which is
+  not valid UTF-8, so a reader that assumes UTF-8 has to cope with it
+  rather than drop the line.
+- **24 names a file that does not exist.** EAC writes
+  `FILE "CDImage.wav"` or `"Range.wav"`, and the image then gets
+  renamed or compressed, or both. This is most of the cue sheets in
+  the wild. The audio beside the sheet with the sheet's own base name
+  is the one it means.
+- **25 spreads one disc over three files**, and puts track 3's pregap
+  at the end of the *second* file (`INDEX 00` under 25b, `INDEX 01` at
+  the top of 25c). That is EAC's "gaps appended to previous tracks"
+  layout, and the reason a track and a file cannot be assumed to be
+  the same thing. 25a to 25c are also ordinary 20 s FLACs and list as
+  such.
+- **26 is broken on purpose**, against 22's audio. The three playable
+  tracks are 01 (0-20), 04 (20-50, with a 300-character title) and 09
+  (50-60). The rest each fail one way: no `INDEX 01`, frame 75, a
+  start before the previous one, a `MODE1/2352` data track, a start
+  past the end. There is also an unclosed quote, a line of garbage,
+  and no newline at the end. What matters is that nothing crashes and
+  no track has zero or negative length; which way the bad ones fail
+  is up to the parser, as long as the log names them.
+
+22, 23 and 24 are the same FLAC three times -- byte-identical to 05 --
+so that each sheet can have an audio file with its own base name. It
+costs 1.9 MB and saves every sheet from depending on another test.
 
 ## Not covered, and why
 
