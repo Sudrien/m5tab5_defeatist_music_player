@@ -14,6 +14,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cuesheet.h"
 
@@ -33,6 +34,14 @@ static int checks, failures;
 
 /* Static, as on the board: 30 KB is not a local anywhere. */
 static cue_sheet_t cs;
+
+/* The decoder's own test, near enough: an audio extension. */
+static bool playable(const char *name)
+{
+    const char *d = strrchr(name, '.');
+    return d && (strcasecmp(d, ".flac") == 0 || strcasecmp(d, ".wav") == 0 ||
+                 strcasecmp(d, ".mp3") == 0);
+}
 static char buf[16384];
 
 static size_t slurp(const char *name)
@@ -198,6 +207,47 @@ int main(void)
     /* Overlong and surrogate UTF-8 are not UTF-8. */
     CHECK(!cue_is_utf8("\xc0\xaf", 2), "overlong '/' accepted");
     CHECK(!cue_is_utf8("\xed\xa0\x80", 3), "surrogate accepted");
+
+    /* ---- virtual paths ---------------------------------------------- */
+    size_t sl = 0;
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue#03", &sl) == 3 && sl == 18,
+          "vpath: %zu", sl);
+    CHECK(cue_vpath_split("/sdcard/A/Disc.CUE#99", NULL) == 99, "upper-case .CUE");
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue#00", NULL) == 0, "track 0 accepted");
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue#100", NULL) == 0, "track 100 accepted");
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue#3x", NULL) == 0, "trailing junk accepted");
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue#", NULL) == 0, "no number accepted");
+    CHECK(cue_vpath_split("/sdcard/A/Track #3.flac", NULL) == 0,
+          "a real file with a # in its name taken for a cue track");
+    CHECK(cue_vpath_split("/sdcard/A/Disc.cue", NULL) == 0, "the sheet itself");
+    CHECK(cue_is_sheet("x.cue") && cue_is_sheet("X.CUE") && !cue_is_sheet(".cue") &&
+          !cue_is_sheet("x.cue.flac"), "cue_is_sheet");
+
+    /* ---- resolving FILE lines against a directory ------------------- */
+    static const char *const dir[] = {
+        "22 cue-flac-image.cue", "22 cue-flac-image.flac",
+        "24 cue-filename-mismatch.cue", "24 cue-filename-mismatch.flac",
+        "25 cue-multifile.cue", "25a cue-multifile.flac",
+        "25b cue-multifile.flac", "25c cue-multifile.flac",
+        "CDImage.flac", "notes.txt",
+    };
+    const int nd = (int)(sizeof dir / sizeof dir[0]);
+    CHECK(cue_resolve("22 cue-flac-image.flac", "22 cue-flac-image.cue", 1, dir, nd, playable) == 1,
+          "exact name not found");
+    CHECK(cue_resolve("22 CUE-FLAC-IMAGE.FLAC", "22 cue-flac-image.cue", 1, dir, nd, playable) == 1,
+          "case-insensitive name not found");
+    CHECK(cue_resolve("CDImage.wav", "x.cue", 3, dir, nd, playable) == 8,
+          "compressed after the sheet: CDImage.wav should find CDImage.flac");
+    CHECK(cue_resolve("Range.wav", "24 cue-filename-mismatch.cue", 1, dir, nd, playable) == 3,
+          "24: the sheet's own stem not used");
+    CHECK(cue_resolve("Range.wav", "25 cue-multifile.cue", 3, dir, nd, playable) == -1,
+          "the sheet's stem used for a multi-file sheet");
+    CHECK(cue_resolve("C:\\Rips\\25b cue-multifile.flac", "25 cue-multifile.cue", 3, dir, nd, playable) == 6,
+          "a Windows directory in FILE not stripped");
+    CHECK(cue_resolve("notes.wav", "z.cue", 1, dir, nd, playable) == -1,
+          "resolved to something that does not play");
+    CHECK(cue_resolve("nothing.flac", "22 cue-flac-image.cue", 2, dir, nd, playable) == -1,
+          "resolved a name that is not there, on a two-file sheet");
 
     printf("%s: %d checks, %d failures\n",
            failures ? "FAILURES" : "all passed", checks, failures);

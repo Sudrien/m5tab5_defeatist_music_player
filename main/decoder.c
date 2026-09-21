@@ -44,6 +44,7 @@
 #include "tsseek.h"
 #include "mp4seek.h"
 #include "duration.h"
+#include "cuedir.h"
 
 static const char *TAG = "tab5_dec";
 
@@ -61,10 +62,31 @@ static const char *TAG = "tab5_dec";
 
 typedef enum { BACKEND_MINIMP3, BACKEND_ESP_CODEC } backend_t;
 
+/*
+ * A cue track: one span of a real file, presented as if it were the
+ * whole of one. See the section "Cue tracks" below. All zero for an
+ * ordinary file, and every public function checks `on` first.
+ *
+ * Positions are in SAMPLES of the real file (frames, per channel), and
+ * the span is only turned from CD frames into samples at the first
+ * read, because that is when the rate is first known.
+ */
+typedef struct {
+    bool     on;
+    bool     armed;         /* the rate is known and lo/hi are set */
+    uint32_t start_f;       /* CD frames, from the sheet */
+    uint32_t end_f;         /* CD frames; 0 = the end of the file */
+    uint32_t pending_sec;   /* a seek asked for before the first read */
+    uint64_t lo, hi;        /* the span, in samples; hi 0 = open-ended */
+    uint64_t pos;           /* the sample the next raw read starts at */
+    uint64_t want;          /* discard everything before this */
+} cue_span_t;
+
 struct decoder {
     backend_t backend;
     FILE *f;
     decoder_info_t info;
+    cue_span_t cue;
 
     /* minimp3 */
     mp3dec_ex_t ex;
@@ -1190,7 +1212,16 @@ decoder_t *decoder_open(const char *path)
     return decoder_open_indexed(path, NULL);
 }
 
+static decoder_t *open_file(const char *path, const decoder_index_t *ix);
+static decoder_t *cue_open(const char *vpath, const decoder_index_t *ix);
+
 decoder_t *decoder_open_indexed(const char *path, const decoder_index_t *ix)
+{
+    if (cue_vpath_split(path, NULL)) return cue_open(path, ix);
+    return open_file(path, ix);
+}
+
+static decoder_t *open_file(const char *path, const decoder_index_t *ix)
 {
     const int fmt = format_index(path);
     if (fmt < 0) {
@@ -1212,18 +1243,35 @@ decoder_t *decoder_open_indexed(const char *path, const decoder_index_t *ix)
     return d;
 }
 
+static int read_raw(decoder_t *d, int16_t *out, int max_int16)
+{
+    return (d->backend == BACKEND_MINIMP3)
+         ? minimp3_read(d, out, max_int16)
+         : esp_codec_read(d, out, max_int16);
+}
+
+static int cue_read(decoder_t *d, int16_t *out, int max_int16);
+static uint32_t cue_duration_sec(decoder_t *d);
+static esp_err_t cue_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs);
+
 int decoder_read(decoder_t *d, int16_t *out, int max_int16, decoder_info_t *info)
 {
-    const int got = (d->backend == BACKEND_MINIMP3)
-                  ? minimp3_read(d, out, max_int16)
-                  : esp_codec_read(d, out, max_int16);
+    const int got = d->cue.on ? cue_read(d, out, max_int16)
+                              : read_raw(d, out, max_int16);
     if (info) *info = d->info;
     return got;
 }
 
+static uint32_t duration_raw(decoder_t *d);
+
 uint32_t decoder_duration_sec(decoder_t *d)
 {
     if (!d) return 0;
+    return d->cue.on ? cue_duration_sec(d) : duration_raw(d);
+}
+
+static uint32_t duration_raw(decoder_t *d)
+{
 
     if (d->backend == BACKEND_MINIMP3) {
         if (d->ex.samples && d->ex.info.hz && d->ex.info.channels) {
@@ -1301,9 +1349,16 @@ esp_err_t decoder_seek_sec(decoder_t *d, uint32_t sec)
     return decoder_seek_sec_at_cs(d, sec, NULL);
 }
 
+static esp_err_t seek_raw(decoder_t *d, uint32_t sec, uint32_t *landed_cs);
+
 esp_err_t decoder_seek_sec_at_cs(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
 {
     if (!d) return ESP_ERR_NOT_SUPPORTED;
+    return d->cue.on ? cue_seek(d, sec, landed_cs) : seek_raw(d, sec, landed_cs);
+}
+
+static esp_err_t seek_raw(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
+{
     if (landed_cs) *landed_cs = sec * 100;
 
     if (d->backend != BACKEND_MINIMP3) return esp_codec_seek(d, sec, landed_cs);
@@ -1472,4 +1527,156 @@ bool decoder_install_index(decoder_t *d, const decoder_index_t *ix)
 {
     if (!d) return false;
     return install_table(d, ix, "table from the walk");
+}
+
+/* ------------------------------------------------------------------ */
+/* Cue tracks                                                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * A cue track is the real file, opened as usual, with a window over it:
+ * reads discard everything before the track's start and stop at its end,
+ * the length is the span's, and a seek to t is a seek to start + t.
+ * Everything else -- the index, the table, the stream position -- is the
+ * real file's and passes straight through, so a sidecar holds the same
+ * seek table for every track of an image, which is correct: it is one
+ * file.
+ *
+ * GETTING TO THE START. The seek entry points take whole seconds, and a
+ * track starts on a CD frame, 1/75 s. So a start is reached by seeking
+ * to the second at or before it and decoding forward, discarding, to the
+ * exact sample -- using where the seek says it landed, in hundredths.
+ * That puts a start within 10 ms of the sheet on every format, and
+ * exactly on it wherever the landing is exact (minimp3; PCM WAV to the
+ * rounding of a hundredth). Unseekable files decode forward from the
+ * top, which is correct and, for a late track in a long image, slow.
+ *
+ * WHAT THIS DOES NOT DO: a straight-through play of an image closes the
+ * file at the end of each track and opens it again for the next, as it
+ * would two files. So a cue boundary is exactly as gapless as a file
+ * boundary is -- the player's own join -- plus the start's 10 ms. A join
+ * that keeps the file open across the boundary is later work.
+ */
+
+static decoder_t *cue_open(const char *vpath, const decoder_index_t *ix)
+{
+    /* Static: it is a kilobyte, and the decoder is opened by one task. */
+    static cuetrack_t ct;
+    if (!cuedir_track(vpath, STORAGE_IO_PLAYBACK, &ct)) return NULL;
+
+    decoder_t *d = open_file(ct.audio, ix);
+    if (!d) return NULL;
+    d->cue.on = true;
+    d->cue.start_f = ct.start;
+    d->cue.end_f = ct.end;
+
+    /* The listing allowed a second's slack on the length (cuedir.c);
+     * this is where a start inside that slack is caught. */
+    const uint32_t len = duration_raw(d);
+    if (len && ct.start >= len * CUE_FPS + CUE_FPS / 2) {
+        ESP_LOGW(TAG, "%s starts at %u s, past the end of %s (%u s)", vpath,
+                 (unsigned)(ct.start / CUE_FPS), ct.audio, (unsigned)len);
+        decoder_close(d);
+        return NULL;
+    }
+    ESP_LOGI(TAG, "cue track %d: %s from %u.%02u s%s", ct.number, ct.audio,
+             (unsigned)(ct.start / CUE_FPS),
+             (unsigned)(cue_frames_to_cs(ct.start) % 100),
+             ct.end ? "" : " to the end");
+    return d;
+}
+
+/* Put the real file at sample `target`, or as near before it as a seek
+ * can, and discard up to it. True if the file moved -- anything already
+ * read is then from somewhere else and must be thrown away. */
+static bool cue_goto(decoder_t *d, uint64_t target)
+{
+    const uint32_t rate = (uint32_t)d->info.sample_rate;
+    d->cue.want = target;
+    if (!rate || !decoder_can_seek(d)) return false;   /* discard forward */
+    uint32_t landed = 0;
+    if (seek_raw(d, (uint32_t)(target / rate), &landed) != ESP_OK) return false;
+    d->cue.pos = (uint64_t)landed * rate / 100;
+    /* A mechanism that lands after the ask (CBR lands on the first
+     * frame at or after) cannot be discarded back to it. */
+    if (d->cue.pos > target) d->cue.want = d->cue.pos;
+    return true;
+}
+
+static int cue_read(decoder_t *d, int16_t *out, int max_int16)
+{
+    cue_span_t *c = &d->cue;
+    if (c->armed && c->hi && c->pos >= c->hi) return 0;
+
+    for (;;) {
+        const int n = read_raw(d, out, max_int16);
+        if (n <= 0) return n;
+        const int ch = d->info.channels > 0 ? d->info.channels : 1;
+        const uint64_t frames = (uint64_t)(n / ch);
+
+        if (!c->armed) {
+            /* The first samples: now the rate is known. They came from
+             * the top of the file, so they count from 0. */
+            const uint32_t rate = (uint32_t)d->info.sample_rate;
+            if (!rate) return n;        /* cannot place it; play it whole */
+            c->armed = true;
+            c->lo = cue_frames_to_samples(c->start_f, rate);
+            c->hi = c->end_f ? cue_frames_to_samples(c->end_f, rate) : 0;
+            uint64_t target = c->lo + (uint64_t)c->pending_sec * rate;
+            if (c->hi && target >= c->hi) target = c->lo;
+            c->pos = 0;
+            c->want = target;
+            if (target > frames && cue_goto(d, target)) {
+                continue;               /* seeked: this buffer is stale */
+            }
+        }
+
+        const uint64_t a = c->pos, b = a + frames;
+        c->pos = b;
+        const uint64_t lo = a > c->want ? a : c->want;
+        const uint64_t hi = (c->hi && b > c->hi) ? c->hi : b;
+        if (hi <= lo) {
+            if (c->hi && a >= c->hi) return 0;
+            continue;                   /* all before the start: discard */
+        }
+        const size_t keep = (size_t)(hi - lo) * (size_t)ch;
+        if (lo > a) memmove(out, out + (size_t)(lo - a) * (size_t)ch,
+                            keep * sizeof(int16_t));
+        return (int)keep;
+    }
+}
+
+static uint32_t cue_duration_sec(decoder_t *d)
+{
+    const cue_span_t *c = &d->cue;
+    uint32_t end_cs;
+    if (c->end_f) {
+        end_cs = cue_frames_to_cs(c->end_f);
+    } else {
+        const uint32_t raw = duration_raw(d);
+        if (!raw) return 0;
+        end_cs = raw * 100;
+    }
+    const uint32_t start_cs = cue_frames_to_cs(c->start_f);
+    return end_cs > start_cs ? (end_cs - start_cs + 50) / 100 : 0;
+}
+
+static esp_err_t cue_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
+{
+    cue_span_t *c = &d->cue;
+    if (landed_cs) *landed_cs = sec * 100;
+    if (!c->armed) {
+        /* Before the first read the rate is not known; the first read
+         * applies it. */
+        c->pending_sec = sec;
+        return ESP_OK;
+    }
+    const uint32_t rate = (uint32_t)d->info.sample_rate;
+    uint64_t target = c->lo + (uint64_t)sec * rate;
+    if (c->hi && target >= c->hi) target = c->hi > c->lo + rate ? c->hi - rate : c->lo;
+    /* Backwards in an unseekable file cannot be discarded to. */
+    if (target < c->pos && !decoder_can_seek(d)) return ESP_ERR_NOT_SUPPORTED;
+    cue_goto(d, target);
+    if (landed_cs) *landed_cs = (uint32_t)((c->want - c->lo) * 100 / rate);
+    return ESP_OK;
 }

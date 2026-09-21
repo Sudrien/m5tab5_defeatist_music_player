@@ -64,6 +64,7 @@
 #include "bench.h"
 #include "player_diag.h"
 #include "covertag.h"
+#include "cuedir.h"
 #include "heapcheck.h"
 #include "mediacache.h"
 #include "browser.h"
@@ -3931,7 +3932,13 @@ static void load_tags(const char *path)
 {
     memset(&s_tags, 0, sizeof(s_tags));
 
-    if (mediacache_tags(path, &s_tags)) {
+    /* A cue track's text is its sheet's, never the image's own tags,
+     * which describe the whole disc. See cuedir_tags(). */
+    if (cuedir_tags(path, s_tags.title, s_tags.artist, s_tags.album,
+                    sizeof(s_tags.title))) {
+        ESP_LOGI(TAG, "tags from the cue sheet: \"%s\" / \"%s\" / \"%s\"",
+                 s_tags.title, s_tags.artist, s_tags.album);
+    } else if (mediacache_tags(path, &s_tags)) {
         ESP_LOGI(TAG, "tags from cache: \"%s\"", s_tags.title);
     } else {
         FILE *af = storage_io_open(path, "rb");
@@ -4329,6 +4336,10 @@ static void track_commit(const track_commit_t *tc)
  * it recognised by extension in the first place. */
 static void container_name(const char *path, char *out, size_t out_len)
 {
+    /* A cue track's container is its image's, not "CUE#03". media_task
+     * only, like its one caller. */
+    static char file_buf[512];
+    path = cuedir_file_of(path, file_buf, sizeof(file_buf));
     const char *dot = strrchr(path, '.');
     const char *slash = strrchr(path, '/');
     if (!dot || (slash && dot < slash) || !dot[1]) {
@@ -4460,10 +4471,15 @@ static void do_art(const char *path, uint32_t gen)
      * at all. Without the negative being cached this is a full tag scan
      * every time the track comes back, to learn the same nothing.
      */
+    /* The file to read, which for a cue track is the image behind it.
+     * `path` stays the key for everything cached: media_task only. */
+    static char file_buf[512];
+    const char *file = cuedir_file_of(path, file_buf, sizeof(file_buf));
+
     if (mediacache_no_art(path)) {
         ESP_LOGI(TAG, "no cover art (cached); showing the format");
         long known = 0;
-        FILE *sf = fopen(path, "rb");        /* size only: open, seek, close */
+        FILE *sf = fopen(file, "rb");        /* size only: open, seek, close */
         if (sf) {
             if (fseek(sf, 0, SEEK_END) == 0) known = ftell(sf);
             fclose(sf);
@@ -4472,7 +4488,7 @@ static void do_art(const char *path, uint32_t gen)
         return;
     }
 
-    FILE *af = storage_io_open(path, "rb");
+    FILE *af = storage_io_open(file, "rb");
     if (!af) return;
 
     long fsize = 0;
@@ -5308,7 +5324,17 @@ static void prefetch_next(void)
     const uint32_t gen = s_track_gen;
 
     /* ---- tags ---- */
-    if (!mediacache_tags(next, NULL)) {
+    /* The file behind the next path, for a cue track. media_task only. */
+    static char next_buf[512];
+    const char *next_file = cuedir_file_of(next, next_buf, sizeof(next_buf));
+
+    if (!mediacache_tags(next, NULL) && next_file != next) {
+        id3_tags_t t;
+        memset(&t, 0, sizeof(t));
+        if (cuedir_tags(next, t.title, t.artist, t.album, sizeof(t.title))) {
+            mediacache_put_tags(next, &t);
+        }
+    } else if (!mediacache_tags(next, NULL)) {
         FILE *f = storage_io_open(next, "rb");
         if (f) {
             id3_tags_t t;
@@ -5332,7 +5358,7 @@ static void prefetch_next(void)
             return;
         }
 
-        FILE *f = storage_io_open(next, "rb");
+        FILE *f = storage_io_open(next_file, "rb");
         if (!f) return;
 
         uint8_t *img = NULL;
@@ -5630,7 +5656,14 @@ static void media_task(void *arg)
          * After the cover, because the cover is the thing on screen and
          * this is a few KB at the front of a file.
          */
-        if (gen == s_track_gen && !mediacache_tags(path, NULL)) {
+        if (gen == s_track_gen && !mediacache_tags(path, NULL) &&
+            cue_vpath_split(path, NULL)) {
+            id3_tags_t t;
+            memset(&t, 0, sizeof(t));
+            if (cuedir_tags(path, t.title, t.artist, t.album, sizeof(t.title))) {
+                mediacache_put_tags(path, &t);
+            }
+        } else if (gen == s_track_gen && !mediacache_tags(path, NULL)) {
             FILE *tf = storage_io_open(path, "rb");
             if (tf) {
                 id3_tags_t t;
@@ -5697,7 +5730,11 @@ static void media_task(void *arg)
             media_settle(gen, MEDIA_ART_DELAY_MS, MEDIA_MIN_RING_PCT, "index")) {
             s_ixw_want = false;
 
-            FILE *wf = storage_io_open(path, "rb");
+            /* The walk is over the real file: a cue track's table is its
+             * image's, which is what the decoder passes it to. */
+            static char walk_buf[512];
+            FILE *wf = storage_io_open(cuedir_file_of(path, walk_buf,
+                                                      sizeof(walk_buf)), "rb");
             if (wf) {
                 long end = 0;
                 if (fseek(wf, 0, SEEK_END) == 0) end = ftell(wf);
@@ -8240,6 +8277,9 @@ static track_end_t play_file(const char *path)
     uint64_t file_bytes = 0;
     {
         struct stat st;
+        /* Fails for a cue track, on purpose: its path is not a file,
+         * and the image's size over one track's length is not its
+         * bitrate. 0 is "unknown" to everything below. */
         if (stat(path, &st) == 0 && st.st_size > 0) {
             file_bytes = (uint64_t)st.st_size;
         }
@@ -10214,7 +10254,8 @@ static void restore_last_track(void)
 
         /* The file may be gone, or on the other volume, or renamed.
          * Opening it is the only honest test and it is cheap. */
-        FILE *probe = fopen(last, "rb");
+        static char probe_buf[512];     /* not a local: CLAUDE.md */
+        FILE *probe = fopen(cuedir_file_of(last, probe_buf, sizeof(probe_buf)), "rb");
         if (!probe) {
             ESP_LOGI(TAG, "last track is gone: %s", last);
             return;

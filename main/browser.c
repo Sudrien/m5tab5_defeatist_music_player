@@ -14,6 +14,7 @@
 #include "esp_log.h"
 
 #include "browser.h"
+#include "cuedir.h"
 #include "favorites.h"
 #include "radiobrowser.h"
 #include "stations.h"
@@ -91,6 +92,13 @@ static const char *TAG = "tab5_browser";
 
 typedef struct {
     char *name;
+    /*
+     * What to draw instead of the name, or NULL. Set for cue tracks
+     * only, whose name is "Album.cue#03" -- the thing that is opened and
+     * compared, and nothing anyone wants to read. The prefix elision
+     * does not apply to a label; it is already the part that differs.
+     */
+    char *label;
     bool is_dir;
     /*
      * Starred, resolved when the row was built and not while drawing.
@@ -236,7 +244,11 @@ static bool scroll_geom(int *track_y, int *track_h, int *bar_h, int *max_top)
 
 static void entries_free(void)
 {
-    for (int i = 0; i < s_count; i++) free(s_entries[i].name);
+    for (int i = 0; i < s_count; i++) {
+        free(s_entries[i].name);
+        free(s_entries[i].label);
+        s_entries[i].label = NULL;
+    }
     s_count = 0;
     /* The prefix belonged to those names. A volume going away without a
      * reload -- which is what calls this -- would otherwise leave the
@@ -282,6 +294,10 @@ static void load_dir(const char *dir)
         return;
     }
 
+    /* The same cue view the playlist builds, so a row here is a track
+     * there. See cuedir.h. */
+    cuedir_t *cues = cuedir_load(dir, STORAGE_IO_BACKGROUND);
+
     struct dirent *e;
     while ((e = readdir(d)) != NULL && s_count < MAX_ENTRIES) {
         const bool is_dir = (e->d_type == DT_DIR);
@@ -291,6 +307,7 @@ static void load_dir(const char *dir)
          * untappable is a worse list. */
         if (storage_is_hidden(e->d_name)) continue;   /* . .. and dotfiles */
         if (!is_dir && !decoder_supports(e->d_name)) continue;
+        if (!is_dir && cuedir_hides(cues, e->d_name)) continue;
 
         s_entries[s_count].name = strdup(e->d_name);
         if (!s_entries[s_count].name) break;
@@ -298,6 +315,15 @@ static void load_dir(const char *dir)
         s_count++;
     }
     closedir(d);
+
+    for (int i = 0; i < cuedir_count(cues) && s_count < MAX_ENTRIES; i++) {
+        s_entries[s_count].name = strdup(cuedir_name(cues, i));
+        s_entries[s_count].label = strdup(cuedir_label(cues, i));
+        if (!s_entries[s_count].name) break;
+        s_entries[s_count].is_dir = false;
+        s_count++;
+    }
+    cuedir_free(cues);
 
     qsort(s_entries, (size_t)s_count, sizeof(entry_t), cmp_entry);
     find_common_prefix();
@@ -362,7 +388,7 @@ static void find_common_prefix(void)
     int files = 0, lcp = 0;
 
     for (int i = 0; i < s_count; i++) {
-        if (s_entries[i].is_dir) continue;
+        if (s_entries[i].is_dir || s_entries[i].label) continue;
         const char *n = s_entries[i].name;
         if (!first) { first = n; lcp = (int)strlen(n); files = 1; continue; }
         files++;
@@ -382,7 +408,7 @@ static void find_common_prefix(void)
 
     /* Every row has to be left with something worth reading. */
     for (int i = 0; i < s_count; i++) {
-        if (s_entries[i].is_dir) continue;
+        if (s_entries[i].is_dir || s_entries[i].label) continue;
         if ((int)strlen(s_entries[i].name) - lcp < MIN_REMAINDER) return;
     }
 
@@ -974,7 +1000,8 @@ void browser_draw(void)
         /* Files only. See find_common_prefix() -- the name itself is
          * untouched; this is where the elision happens and the only
          * place it happens. */
-        const char *label = s_entries[i].name
+        const char *label = s_entries[i].label ? s_entries[i].label
+                          : s_entries[i].name
                           + (s_entries[i].is_dir ? 0 : s_prefix_len);
 
         /*

@@ -471,6 +471,121 @@ static inline uint32_t cue_frames_to_cs(uint32_t frames)
     return (uint32_t)(((uint64_t)frames * 100 + CUE_FPS / 2) / CUE_FPS);
 }
 
+/* ---- the path a track is known by --------------------------------- */
+
+/*
+ * A cue track is named "<sheet>.cue#NN" everywhere a path goes: the
+ * playlist, the chooser, history, favourites, the sidecar key. NN is the
+ * track's 1-based position among the sheet's KEPT tracks, two digits so
+ * a sort by path is a sort by track.
+ *
+ * Position rather than the sheet's own TRACK number, because numbers in
+ * a hand-edited sheet can repeat or skip (26 skips 05) and a name must
+ * pick out exactly one track. Kept rather than written, because the
+ * name has to find the same track the chooser showed, and the chooser
+ * only shows kept ones.
+ */
+#define CUE_VPATH_SEP   '#'
+
+/*
+ * If path is a cue track, return its position (1..CUE_MAX_TRACKS) and
+ * the length of the sheet's path in *sheet_len; otherwise 0. Case-
+ * insensitive on ".cue", as FAT is.
+ */
+static inline int cue_vpath_split(const char *path, size_t *sheet_len)
+{
+    if (!path) return 0;
+    const char *h = strrchr(path, CUE_VPATH_SEP);
+    if (!h || h - path < 4) return 0;
+    const char *x = h - 4;
+    if (x[0] != '.' || (x[1] | 0x20) != 'c' || (x[2] | 0x20) != 'u' ||
+        (x[3] | 0x20) != 'e') return 0;
+    const char *d = h + 1;
+    int v = 0, nd = 0;
+    while (*d >= '0' && *d <= '9') {
+        v = v * 10 + (*d++ - '0');
+        if (++nd > 3) return 0;
+    }
+    if (*d || nd == 0 || v < 1 || v > CUE_MAX_TRACKS) return 0;
+    if (sheet_len) *sheet_len = (size_t)(h - path);
+    return v;
+}
+
+static inline bool cue_is_sheet(const char *name)
+{
+    const size_t n = name ? strlen(name) : 0;
+    if (n < 5) return false;
+    const char *x = name + n - 4;
+    return x[0] == '.' && (x[1] | 0x20) == 'c' && (x[2] | 0x20) == 'u' &&
+           (x[3] | 0x20) == 'e';
+}
+
+static inline int cue_casecmp_n(const char *a, const char *b, size_t n)
+{
+    for (size_t i = 0; i < n; i++) {
+        int x = (unsigned char)a[i], y = (unsigned char)b[i];
+        if (x >= 'A' && x <= 'Z') x += 32;
+        if (y >= 'A' && y <= 'Z') y += 32;
+        if (x != y || !x) return x - y;
+    }
+    return 0;
+}
+
+/* Length of name without its extension. */
+static inline size_t cue_stem_len(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    return dot && dot != name ? (size_t)(dot - name) : strlen(name);
+}
+
+/*
+ * Which of the directory's names a FILE line means, or -1.
+ *
+ *   1. the name itself, case-insensitively, as FAT would find it;
+ *   2. the same stem with another extension `playable` accepts -- the
+ *      image was compressed after the sheet was written, CDImage.wav
+ *      now CDImage.flac;
+ *   3. only for a sheet with ONE file: the sheet's own stem with any
+ *      playable extension. 24's case, and most sheets in the wild: EAC
+ *      wrote "CDImage.wav" and the pair was renamed together.
+ *
+ * Rule 3 is refused for multi-file sheets because it would point every
+ * FILE at the same audio and play one file N times.
+ *
+ * `want` is only a name: a sheet's FILE line with a directory in it
+ * ("..\\audio\\x.flac", written on another machine) is matched on the
+ * part after the last slash of either kind.
+ */
+static inline int cue_resolve(const char *want, const char *sheet_name,
+                              int sheet_files, const char *const *names,
+                              int n, bool (*playable)(const char *))
+{
+    if (!want || !names) return -1;
+    const char *b = want;
+    for (const char *p = want; *p; p++) if (*p == '/' || *p == '\\') b = p + 1;
+    const size_t bl = strlen(b), bs = cue_stem_len(b);
+
+    for (int i = 0; i < n; i++) {
+        if (strlen(names[i]) == bl && cue_casecmp_n(names[i], b, bl) == 0)
+            return i;
+    }
+    for (int i = 0; i < n; i++) {
+        if (cue_stem_len(names[i]) == bs && cue_casecmp_n(names[i], b, bs) == 0 &&
+            (!playable || playable(names[i])))
+            return i;
+    }
+    if (sheet_files == 1 && sheet_name) {
+        const size_t ss = cue_stem_len(sheet_name);
+        for (int i = 0; i < n; i++) {
+            if (cue_stem_len(names[i]) == ss &&
+                cue_casecmp_n(names[i], sheet_name, ss) == 0 &&
+                !cue_is_sheet(names[i]) && (!playable || playable(names[i])))
+                return i;
+        }
+    }
+    return -1;
+}
+
 #ifdef __cplusplus
 }
 #endif

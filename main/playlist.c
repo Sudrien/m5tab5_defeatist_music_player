@@ -14,6 +14,7 @@
 #include "esp_log.h"
 #include "esp_random.h"
 
+#include "cuedir.h"
 #include "decoder.h"
 #include "playlist.h"
 #include "storage.h"
@@ -63,6 +64,11 @@ esp_err_t playlist_load_dir(const char *dir)
         return ESP_ERR_NOT_FOUND;
     }
 
+    /* Cue sheets: their tracks join the list as "X.cue#NN", and the
+     * audio they cover leaves it -- see cuedir.h. NULL, the usual case,
+     * changes nothing below. */
+    cuedir_t *cues = cuedir_load(dir, STORAGE_IO_BACKGROUND);
+
     struct dirent *e;
     bool truncated = false;
     while ((e = readdir(d)) != NULL) {
@@ -75,6 +81,7 @@ esp_err_t playlist_load_dir(const char *dir)
          * decoded to nothing. */
         if (storage_is_hidden(e->d_name)) continue;
         if (!decoder_supports(e->d_name)) continue;
+        if (cuedir_hides(cues, e->d_name)) continue;
         if (s_count >= PLAYLIST_MAX) { truncated = true; break; }
 
         char full[512];
@@ -87,6 +94,16 @@ esp_err_t playlist_load_dir(const char *dir)
         s_count++;
     }
     closedir(d);
+
+    for (int i = 0; i < cuedir_count(cues); i++) {
+        if (s_count >= PLAYLIST_MAX) { truncated = true; break; }
+        char full[512];
+        if (!storage_join_path(full, sizeof(full), dir, cuedir_name(cues, i))) continue;
+        s_paths[s_count] = strdup(full);
+        if (!s_paths[s_count]) break;
+        s_count++;
+    }
+    cuedir_free(cues);
 
     if (truncated) {
         ESP_LOGW(TAG, "%s has more than %d tracks; the rest are ignored",

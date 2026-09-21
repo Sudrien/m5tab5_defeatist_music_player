@@ -10,8 +10,8 @@ the cases none of them reached: a branch with no file, and three shapes
 of input that the probes are supposed to refuse and that nothing ever
 handed them.
 
-22 to 26 are not about seeking: they are cue sheets, for a feature the
-player does not have yet. See the section on them below.
+22 to 26 are not about seeking: they are cue sheets. See the section on
+them below.
 
 ## What you are listening to
 
@@ -214,11 +214,17 @@ download is.
 
 ## Cue sheets (1002): written before the code that reads them
 
-**Nothing in the player reads a `.cue` today.** The chooser does not
-list them, and 22 to 24 play as the plain one-minute FLACs they are.
-These five sheets are here so that cue support is written against a
-corpus rather than a corpus being made to agree with it afterwards.
-Until then the Expected column is the specification, not a result.
+**Written before the player read them, and read since 1005.** These
+five sheets are here so that cue support was written against a corpus
+rather than a corpus being made to agree with it afterwards. The
+Expected column was the specification; `texttest/cuesheettest` now
+checks the parser against it on every build, and the rest is checked
+on the board.
+
+In the chooser a sheet's tracks are rows of their own, labelled with
+the sheet's track number and title, and the audio a sheet covers is
+not listed -- a disc image beside its own tracks is the same music
+twice. So 22 to 25's FLACs do not appear; their tracks do.
 
 All of them are built by `build/encode.sh`, the sheets byte by byte
 with `printf`, because three of the things they test are bytes.
@@ -252,8 +258,8 @@ landed. Skip to a track and count.
   at the end of the *second* file (`INDEX 00` under 25b, `INDEX 01` at
   the top of 25c). That is EAC's "gaps appended to previous tracks"
   layout, and the reason a track and a file cannot be assumed to be
-  the same thing. 25a to 25c are also ordinary 20 s FLACs and list as
-  such.
+  the same thing. 25a to 25c are hidden behind the sheet like any
+  covered file; delete the sheet and they list as three 20 s FLACs.
 - **26 is broken on purpose**, against 22's audio. The three playable
   tracks are 01 (0-20), 04 (20-50, with a 300-character title) and 09
   (50-60). The rest each fail one way: no `INDEX 01`, frame 75, a
