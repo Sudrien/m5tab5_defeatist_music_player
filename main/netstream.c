@@ -763,8 +763,14 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
              * which is the whole thing 0414 could not do. And WNZK's
              * 512 is not a number anyone here chose: play_stream()'s
              * header recorded 512 kbit/s AAC from a probe run long
-             * before any of this, by a different method, on a station
-             * that declares nothing at all.
+             * before any of this, by a different method.
+             *
+             * 0930: that sentence used to end "on a station that
+             * declares nothing at all", and WNZK now sends
+             * `icy-br: 320`. It costs 512. So the station does declare
+             * something, and what it declares is wrong by sixty per
+             * cent -- which is a better argument for this denominator
+             * than a silent station ever was.
              *
              * THE GUARD IS WHAT MAKES THE FLAG MEAN SOMETHING. SomaFM
              * prints 95%, 96% and 97% while perfectly healthy -- a full
@@ -1248,6 +1254,7 @@ bool netstream_logo(char *out, size_t out_size)
     return out[0] != '\0';
 }
 void netstream_set_actual_kbps(int kbps) { if (kbps > 0) s_actual_br = kbps; }
+int  netstream_actual_kbps(void)         { return s_actual_br; }
 
 /* How much decoded audio the player has in hand, in hundredths of a
  * second. Pushed in every pass of the stream loop; see s_audio_cs. */

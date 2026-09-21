@@ -238,6 +238,24 @@ bool netstream_has_title(void);
 void netstream_set_actual_kbps(int kbps);
 
 /*
+ * What the audio ACTUALLY costs, in kbit/s, or 0 before a frame has
+ * been decoded.
+ *
+ * The figure netdec measures on a decoded-audio clock -- compressed
+ * bytes in per second of audio out -- and the denominator of the
+ * "of N needed" line. It is not the decoder's own per-frame report,
+ * which latches whatever the last frame happened to say, and it is not
+ * icy-br, which is whatever the station chose to write down.
+ *
+ * Exported because the panel needs the same number this file has been
+ * using since 0415, and had no way to ask for it: there was a setter
+ * and no getter, so the card fell back to the declared rate and the two
+ * halves of the screen could disagree. WNZK declares 320 and costs 512,
+ * which is what made that visible.
+ */
+int netstream_actual_kbps(void);
+
+/*
  * The station's artwork URL from its icy-logo header, if it sent one.
  *
  * Copied into `out`; false and an empty string when there is none,

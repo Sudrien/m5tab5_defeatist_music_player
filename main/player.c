@@ -10261,19 +10261,19 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
                  chans == 1 ? "mono" : chans == 2 ? "stereo" : "multichannel");
     }
     /*
-     * The decoder's bitrate if it has one, else the station's own claim.
+     * `kbps` is already resolved by the caller -- measured, then
+     * declared, then the decoder's own report. See the block above the
+     * call for why that order, and why WNZK forced it.
      *
-     * minimp3 reads a rate out of every frame; the AAC decoder reports
-     * nothing, which is why WNZK logged `0 kbit/s` and why this line was
-     * simply absent for it. icy-br is what the server says it sends --
-     * a declaration rather than a measurement, nominal on a
-     * variable-rate mount, and absent entirely on some servers -- so it
-     * is the fallback and never the preference.
+     * The fallback stays for a caller that passes 0, and it is the
+     * declared rate because a station's claim is better than no line at
+     * all. It is not reachable from the one call site today: when the
+     * measured rate is 0 the declared one has already been tried.
      *
-     * Not distinguished on screen. "128 kbps" from a frame header and
-     * "128 kbps" from icy-br mean the same thing to someone looking at
-     * an artwork square, and a card that hedged about its provenance
-     * would be worse than one that is occasionally a station's rounding.
+     * Not distinguished on screen. "128 kbps" measured and "128 kbps"
+     * declared mean the same thing to someone looking at an artwork
+     * square, and a card that hedged about its provenance would be
+     * worse than one that is occasionally a station's rounding.
      */
     const int shown_br = kbps > 0 ? kbps : netstream_declared_kbps();
     if (shown_br > 0) {
@@ -11339,7 +11339,12 @@ static track_end_t play_stream(const char *url, const char *name)
              * This branch now only does what its name says -- notices
              * that sound has started -- and nothing here blocks. */
 
-            const int decl = netstream_declared_kbps();
+            /* Measured first, for the reason the card block below
+             * gives: a station that misdeclares makes this line
+             * disagree with netstream's own. */
+            const int decl = netstream_actual_kbps() > 0
+                           ? netstream_actual_kbps()
+                           : netstream_declared_kbps();
             /*
              * 64, and the arithmetic is the proof rather than a
              * comfortable-looking number. The fixed text is 29 bytes
@@ -11549,32 +11554,42 @@ static track_end_t play_stream(const char *url, const char *name)
          */
         const stream_codec_t codec_now = netdec_codec();
         /*
-         * THE CARD SHOWS WHAT THE STATION ADVERTISES, and falls back to
-         * the decoder only when the station said nothing.
+         * THE CARD SHOWS WHAT THE AUDIO COSTS, then what the station
+         * advertises, then the decoder's own report.
          *
-         * This was the other way round, and a board log caught the
-         * difference: `icy-br: 320`, a first frame decoding as
-         * `320 kbit/s, 960 bytes`, and the card saying 256, because
-         * last_kbps latches the last non-zero bitrate ANY frame
-         * reported and one of them had reported 256. A number that
-         * moves with whichever frame the decoder happened to finish on
-         * is not a fact about the station.
+         * IT SHOWED THE ADVERTISED RATE FIRST AND A BOARD LOG KILLED
+         * THAT. WNZK sends `icy-br: 320` and its frames are 1365 bytes
+         * per 1024 samples at 48 kHz, which is 512 kbit/s -- the
+         * station is wrong about itself by sixty per cent. The card
+         * said 320 while netstream's line beside it said
+         * "of 512 needed (81%) SHORT" against a delivery of 400, so the
+         * screen claimed the player could not keep up with 320 while
+         * receiving 400.
          *
-         * Advertised is also the right KIND of fact for this square. It
-         * is what the listener is being offered -- the thing to compare
-         * against the delivery figure in netstream's line, which is the
-         * comparison that says whether a station is going to work here.
-         * The decoded frame's bitrate answers a different question,
-         * which nothing on this screen is asking.
+         * That comparison was the whole argument for showing the
+         * advertised rate: it was "the thing to compare against the
+         * delivery figure in netstream's line". A station that
+         * misdeclares turns it into a contradiction, and the two halves
+         * of one screen disagreeing is worse than either number alone.
          *
-         * And it is the only bitrate there will be on the AAC path,
-         * where the simple decoder reports none at all: before this,
-         * that path took the declared value and the MP3 path did not,
-         * so two stations differed on screen for a reason that was
-         * about this player rather than about them.
+         * THIS IS NOT A RETURN TO last_kbps, which was rejected for a
+         * good reason and still is: it latches the last non-zero rate
+         * ANY frame reported, so it moved with whichever frame the
+         * decoder finished on. netstream_actual_kbps() is neither that
+         * nor icy-br -- it is bytes in per second of audio out, on a
+         * decoded-audio clock, which is the stable per-station fact the
+         * old comment wanted and could not reach. netstream has used it
+         * as its denominator since 0415; it simply had no getter.
+         *
+         * It is also present on the AAC path, where the decoder reports
+         * no bitrate at all, so the case that forced the fallback is
+         * the case this fixes.
          */
+        const int measured = netstream_actual_kbps();
         const int declared = netstream_declared_kbps();
-        const int br_now = declared > 0 ? declared : last_kbps;
+        const int br_now = measured > 0 ? measured
+                         : declared > 0 ? declared
+                                        : last_kbps;
         const bool facts_moved = codec_now != shown_codec ||
                                  out_rate   != shown_rate  ||
                                  last_chans != shown_chans ||

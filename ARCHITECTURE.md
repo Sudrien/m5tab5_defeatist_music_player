@@ -9815,3 +9815,62 @@ callers rather than one, and the portal is the side with a real keyboard
 and a real screen -- it is where someone will actually curate a
 blacklist rather than react to one station. Do not build the on-device
 toggle in a way that assumes it is the only writer.
+
+## WNZK declares 320 and costs 512 (measured, 0930)
+
+**The station that sent no `icy-br` now sends one, and it is wrong by
+sixty per cent.** From a board log:
+
+    icy-name: WNZK-AM
+    icy-br: 320
+    first frame: AAC (ADTS), 48000 Hz, 2 ch, 16-bit, 1365 bytes -> 1024 samples
+
+1365 bytes per 1024 samples at 48 kHz is 46.875 frames a second and
+63984 bytes a second, which is **511.9 kbit/s**. That is where
+netstream's `of 512 needed` comes from, and it agrees to the digit with
+the 512 the 0200 probe measured by a different method months earlier.
+
+### Three earlier entries are now wrong, and none of them should be edited
+
+- **0328 said "WNZK sends no `icy-br` either -- not to the PC, and not
+  to the device".** True when it was written. The station changed.
+- **0328 also said the 512 figure "is 0200's, not the station's", with
+  no independent confirmation.** There is one now, from the frame
+  arithmetic above, and it is not the station's `icy-br`.
+- **netstream.c's 0415 comment ended "on a station that declares
+  nothing at all".** Corrected in place in the code, because a comment
+  describing the mechanism it sits beside has to be true; the entries
+  here are dated records and stay as they were written.
+
+### What it cost on screen
+
+The card preferred `icy-br` over everything, deliberately -- 0404 chose
+it so the square showed "the thing to compare against the delivery
+figure in netstream's line". With a station that misdeclares, that
+comparison inverts: **the card read 320 kbps while the line beside it
+read `of 512 needed (81%) SHORT` against a delivery of about 400.** One
+screen saying the player cannot keep up with 320 while receiving 400.
+
+The fix is not a return to the decoder's per-frame report, which 0404
+rejected correctly -- `last_kbps` latches whatever the last frame said
+and moves with the decoder. It is `netstream_actual_kbps()`: bytes in
+per second of audio out, on a decoded-audio clock, which netstream has
+used as its denominator since 0415 and which nothing outside that file
+could read, because there was a setter and no getter.
+
+**A declared bitrate is a claim, and this is the station that proves it
+has to be treated as one.** Prefer the measurement everywhere; keep the
+declaration as the fallback, because a claim beats a blank line.
+
+### What this does not explain
+
+The reserve still sawtooths and the link still under-delivers: 380-459
+kbit/s against 512 needed, reserve peaking at 13.5 s and falling to
+1.8 s, `SHORT` on most lines. That is unchanged and is the 0900 series'
+problem. Nothing here made the stream work better; it made the screen
+stop contradicting itself.
+
+One number worth keeping from the same log: **first sound at 24727 ms**,
+against a 30000 ms preroll cutoff. The stream was six seconds from being
+killed for being slow while it was in fact working, which is the case
+0930's "Stream too slow here" card was written for.
