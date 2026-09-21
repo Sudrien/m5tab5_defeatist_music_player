@@ -164,6 +164,13 @@ CONFIG_FATFS_VOLUME_COUNT=2
 CONFIG_USB_HOST_HUBS_SUPPORTED=y
 CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
 
+# Lets usbhost.c pick configuration 2 -- CDC-ECM -- on a Realtek
+# RTL8152/8153 adapter, whose configuration 1 is a vendor protocol
+# nothing here speaks. Without it the adapter enumerates and is ignored.
+# See main/ethcfg.h. Like every line in this file it reaches an existing
+# sdkconfig only after `rm sdkconfig`.
+CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK=y
+
 # esp_log_level_set() is a no-op without this on IDF v6.
 CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
 

@@ -93,6 +93,12 @@ dependencies:
     git: https://github.com/Sudrien/esp_usbh_asix.git
     version: "977af24f70e530bbc3c7e6eb5990d4d06a4bd61f"
 
+  # And CDC-ECM, for Realtek RTL8152/8153 adapters, which offer it as
+  # their second configuration (see ethcfg.h), and for any other adapter
+  # that speaks ECM out of the box. Espressif's, in the registry; it
+  # brings iot_usbh_cdc, and the same iot_eth the ASIX driver uses.
+  espressif/iot_usbh_ecm: "*"
+
   espressif/esp_lcd_touch_st7123: "*"
   espressif/esp_lcd_touch_gt911: "*"
 

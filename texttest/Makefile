@@ -166,7 +166,8 @@ RADIOBROWSER_BIN := radiobrowsertest
 LEVELHIST_BIN := levelhisttest
 
 # When the USB Ethernet cable counts as a network. Header-only, like
-# favmatchtest, so this compiles netlink.h itself.
+# favmatchtest, so this compiles netlink.h itself -- and ethcfg.h, the
+# Realtek configuration choice.
 NETLINK_BIN := netlinktest
 
 all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink
@@ -234,7 +235,7 @@ $(FAVMATCH_BIN): favmatchtest.c ../main/favmatch.h
 run-favmatch: $(FAVMATCH_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FAVMATCH_BIN)
 
-$(NETLINK_BIN): netlinktest.c ../main/netlink.h
+$(NETLINK_BIN): netlinktest.c ../main/netlink.h ../main/ethcfg.h
 	$(CC) $(WARNCFLAGS) -c netlinktest.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ netlinktest.c $(LDFLAGS)
 

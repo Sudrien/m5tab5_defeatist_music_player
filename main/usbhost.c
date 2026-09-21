@@ -13,6 +13,7 @@
 
 #include "usb/usb_host.h"
 
+#include "ethcfg.h"
 #include "usbhost.h"
 
 static const char *TAG = "tab5_usbhost";
@@ -142,6 +143,25 @@ static void usb_lib_task(void *arg)
     }
 }
 
+#ifdef CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+/*
+ * Runs for every device, before its configuration is set. Returning
+ * false would refuse the device, so this always returns true and only
+ * ever changes which configuration is asked for -- see ethcfg.h.
+ */
+static bool enum_filter(const usb_device_desc_t *dev, uint8_t *config)
+{
+    const uint8_t want = ethcfg_select(dev->idVendor, dev->idProduct,
+                                       dev->bNumConfigurations);
+    if (want) {
+        ESP_LOGI(TAG, "%04x:%04x: asking for configuration %u (CDC-ECM)",
+                 dev->idVendor, dev->idProduct, want);
+        *config = want;
+    }
+    return true;
+}
+#endif
+
 /* Host stack, class drivers, then bus power -- in that order, so a
  * device already in the port is enumerated by a stack that exists rather
  * than dropped on the floor. */
@@ -150,6 +170,9 @@ static esp_err_t bring_up(void)
     const usb_host_config_t host_cfg = {
         .skip_phy_setup = false,
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
+#ifdef CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK
+        .enum_filter_cb = enum_filter,
+#endif
     };
     ESP_RETURN_ON_ERROR(usb_host_install(&host_cfg), TAG, "usb_host_install");
 

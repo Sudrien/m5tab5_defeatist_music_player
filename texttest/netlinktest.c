@@ -11,10 +11,15 @@
  * the address alone reads "online" for those two minutes. The replays
  * below are in the order the board delivers them.
  *
+ * The Realtek configuration choice in main/ethcfg.h is checked at the
+ * end, for the same reason: it is the rule, and usbhost.c's filter is
+ * one call to it.
+ *
  * SPDX-License-Identifier: MIT
  */
 #include <stdio.h>
 
+#include "ethcfg.h"
 #include "netlink.h"
 
 static int checks, failures;
@@ -92,6 +97,25 @@ int main(void)
     CHECK(NETLINK_ETH_ROUTE_PRIO > NETLINK_WIFI_STA_ROUTE_PRIO,
           "cable route_prio %d does not beat the station's %d",
           NETLINK_ETH_ROUTE_PRIO, NETLINK_WIFI_STA_ROUTE_PRIO);
+
+    /* Which configuration a Realtek adapter is enumerated in (ethcfg.h).
+     * Configuration 2 is CDC-ECM on the RTL8152 and RTL8153. */
+    CHECK(ethcfg_select(0x0bda, 0x8153, 2) == 2, "RTL8153 not moved to ECM");
+    CHECK(ethcfg_select(0x0bda, 0x8152, 2) == 2, "RTL8152 not moved to ECM");
+    CHECK(ethcfg_select(0x0bda, 0x8153, 3) == 2, "three configs, ECM not chosen");
+
+    /* A configuration the device does not have fails enumeration, which
+     * is worse than leaving it alone. */
+    CHECK(ethcfg_select(0x0bda, 0x8153, 1) == 0, "asked a one-config device for 2");
+    CHECK(ethcfg_select(0x0bda, 0x8153, 0) == 0, "asked a zero-config device for 2");
+
+    /* Everyone else keeps the stack's choice: the ASIX adapter, the
+     * Realtek card readers and audio parts under the same vendor ID,
+     * and anything that is not Realtek at all. */
+    CHECK(ethcfg_select(0x0b95, 0x772b, 2) == 0, "ASIX touched");
+    CHECK(ethcfg_select(0x0bda, 0x0129, 2) == 0, "Realtek card reader touched");
+    CHECK(ethcfg_select(0x0bda, 0x4014, 2) == 0, "Realtek audio touched");
+    CHECK(ethcfg_select(0x0781, 0x8153, 2) == 0, "matched a PID under another vendor");
 
     printf("%s: %d checks, %d failures\n",
            failures ? "FAILURES" : "all passed", checks, failures);
