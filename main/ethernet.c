@@ -120,6 +120,8 @@ bool ethernet_ip(char *out, size_t out_size)
  * on_event() follows.
  */
 static void pick_default(void);
+static esp_netif_dns_info_t s_dns_sta[2], s_dns_cable[2];
+static void dns_save(esp_netif_t *nif, esp_netif_dns_info_t out[2]);
 
 static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
@@ -149,6 +151,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         if (!i) return;
         ESP_LOGI(TAG, "%s: address " IPSTR ", gateway " IPSTR, i->name,
                  IP2STR(&e->ip_info.ip), IP2STR(&e->ip_info.gw));
+        dns_save(e->esp_netif, s_dns_cable);    /* see pick_default() */
         ev = NETLINK_EV_GOT_IP;
     } else if (base == IP_EVENT && id == IP_EVENT_ETH_LOST_IP) {
         const ip_event_got_ip_t *e = data;
@@ -181,11 +184,50 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 /*
- * Pin the default route to what netlink_pick() says. Called at the three
- * moments the answer can change; see netlink.h for why esp_netif is not
- * left to choose. esp_netif_set_default_netif() runs on the lwIP task
- * and waits for it, which is fine from the event task -- the glue's own
- * actions do the same.
+ * THE DNS SERVERS ARE ONE GLOBAL LIST, AND THE CABLE WIPED IT.
+ *
+ * lwIP keeps one set of DNS servers for the whole device, and esp_netif
+ * writes into it from every interface: each DHCP lease sets it, and --
+ * this is the one that bit -- every DHCP client START clears it
+ * (esp_netif_dhcpc_start_api -> dns_clear_servers). A cable linking
+ * starts DHCP on the cable. So plugging a cable in erased the servers
+ * Wi-Fi was using, and if the cable then got no lease, nothing put them
+ * back: the board's log is a stream that paused and resumed over a
+ * perfectly good Wi-Fi link, and failed in 2 ms, five times, with
+ * "getaddrinfo() returns 202". The earlier second-unplug failure was the
+ * same list the other way round: the cable's servers left behind,
+ * reached for over Wi-Fi.
+ *
+ * ESP-IDF has CONFIG_ESP_NETIF_SET_DNS_PER_DEFAULT_NETIF for this, but a
+ * Kconfig line only reaches a build after `rm sdkconfig`, and a stale
+ * one would bring the failure straight back with nothing in the log to
+ * say why. So it is done here instead, where the route is already being
+ * chosen: each interface's servers are saved when its lease arrives, and
+ * the chosen interface's are put back every time the default is pinned.
+ */
+static void dns_save(esp_netif_t *nif, esp_netif_dns_info_t out[2])
+{
+    if (!nif) return;
+    esp_netif_get_dns_info(nif, ESP_NETIF_DNS_MAIN, &out[0]);
+    esp_netif_get_dns_info(nif, ESP_NETIF_DNS_BACKUP, &out[1]);
+}
+
+static void dns_apply(esp_netif_t *nif, esp_netif_dns_info_t in[2])
+{
+    if (!nif) return;
+    /* A zero address is "never saved", not "no server": leave the list
+     * alone rather than clear it twice. */
+    if (in[0].ip.u_addr.ip4.addr) esp_netif_set_dns_info(nif, ESP_NETIF_DNS_MAIN, &in[0]);
+    if (in[1].ip.u_addr.ip4.addr) esp_netif_set_dns_info(nif, ESP_NETIF_DNS_BACKUP, &in[1]);
+}
+
+/*
+ * Pin the default route to what netlink_pick() says, and put that
+ * interface's DNS servers back. Called at every moment the answer, or
+ * the global DNS list, can change; see netlink.h for why esp_netif is
+ * not left to choose. Both calls run on the lwIP task and wait for it,
+ * which is fine from the event task -- the glue's own actions do the
+ * same.
  */
 static void pick_default(void)
 {
@@ -194,21 +236,45 @@ static void pick_default(void)
     switch (netlink_pick(cable != NULL, sta != NULL)) {
     case NETLINK_PICK_CABLE:
         esp_netif_set_default_netif(cable->netif);
+        dns_apply(cable->netif, s_dns_cable);
         break;
     case NETLINK_PICK_STATION:
         esp_netif_set_default_netif(sta);
+        dns_apply(sta, s_dns_sta);
         break;
     case NETLINK_PICK_NONE:
         break;
     }
 }
 
-/* The station got an address. Pinned only if the cable is not usable --
- * a station joining behind a working cable must not take the route. */
+/*
+ * The station got an address. Its lease has just written ITS servers
+ * over the list -- so they are saved, and the pick is made again even
+ * when the cable is the answer, to put the cable's back.
+ */
 static void on_sta_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 {
+    (void)arg; (void)base; (void)id;
+    const ip_event_got_ip_t *e = data;
+    if (e) dns_save(e->esp_netif, s_dns_sta);
+    pick_default();
+}
+
+/*
+ * After the glue has handled a cable linking -- which starts DHCP on
+ * the cable and so clears the DNS list, see above -- the pick is made
+ * again, and while the cable has no lease that puts the station's
+ * servers back.
+ *
+ * "After" comes from esp_event's dispatch order, not timing: handlers
+ * registered for one specific id run after every handler registered
+ * for the whole base, and the glue's is registered for the whole of
+ * IOT_ETH_EVENT. This one is for IOT_ETH_EVENT_CONNECTED alone.
+ */
+static void on_link_up_after(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
     (void)arg; (void)base; (void)id; (void)data;
-    if (!ethernet_connected()) pick_default();
+    pick_default();
 }
 
 /*
@@ -240,6 +306,9 @@ static esp_err_t eth_class_install(void)
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                                    on_sta_got_ip, NULL),
                         TAG, "STA_GOT_IP handler");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IOT_ETH_EVENT, IOT_ETH_EVENT_CONNECTED,
+                                                   on_link_up_after, NULL),
+                        TAG, "link-up (after) handler");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                    on_event, NULL),
                         TAG, "ETH_GOT_IP handler");
