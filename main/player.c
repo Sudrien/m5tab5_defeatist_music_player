@@ -6148,6 +6148,184 @@ static bool notice_battery_low(void)
     return low;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* The SDIO clock A/B -- AN EXPERIMENT, MEANT TO BE FLIPPED BY HAND,   */
+/* exactly like WIFI_FORCE_WPA2 in wifi.h                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * WHAT THIS ANSWERS. The SDIO clock went from 40000 to 50000 kHz in
+ * 0922 and every run since has come in under the one number recorded
+ * before it -- roughly 401, 392, 346, 397 and 342 kbit/s against
+ * 0328's 466. That is the wrong direction, it is inside this network's
+ * noise, and it is therefore evidence of nothing. It gets measured or
+ * it gets reverted on a guess.
+ *
+ * WHY IT CANNOT BE A BEFORE-AND-AFTER. This network delivers 314 and
+ * 543 kbit/s for the same station minutes apart. Two builds compared
+ * across two evenings measure the weather; ARCHITECTURE.md says so in
+ * three separate entries and was right every time. bench.h makes the
+ * same argument for the read-size A/B and answers it by alternating
+ * INSIDE one run.
+ *
+ * The clock cannot alternate inside one connection -- it is read at
+ * transport init -- so this alternates inside one SESSION instead: a
+ * round each, six rounds, about four minutes. Each clock gets the same
+ * share of the good minutes and the bad ones, which is the only
+ * property that matters.
+ *
+ * WHY THE BENCH ITSELF IS UNTOUCHED. This drives bench_request() and
+ * bench_service() through their public API and changes nothing inside
+ * either, so every number it prints is comparable with every bench
+ * number already recorded. A benchmark modified to run an experiment
+ * is a different benchmark and settles nothing.
+ *
+ * TO USE IT: set CLOCK_AB to 1, build, boot, leave the board alone for
+ * four minutes, read the table at the end of the log, set it back to
+ * 0. A card says what it is doing; nothing will play until it is done.
+ */
+#define CLOCK_AB            (0)
+
+#define CLOCK_AB_ROUNDS     (6)         /* even: three rounds each     */
+#define CLOCK_AB_KHZ_A      (50000)     /* what the board runs now     */
+#define CLOCK_AB_KHZ_B      (40000)     /* what it ran before 0922     */
+#define CLOCK_AB_JOIN_MS    (45000)     /* a join has taken 14 s here  */
+
+/*
+ * WHICH STATION, AND IT MATTERS MORE THAN ANYTHING ELSE HERE.
+ *
+ * bench.h: "A server that paces itself cannot be made to go faster by
+ * not decoding it." A 64 kbit/s station reads 64 whatever the clock is
+ * doing, and the A/B comes back a dead heat with both clocks looking
+ * perfect. The station MUST outrun the link, so that what is measured
+ * is the link's ceiling and not the server's pacing.
+ *
+ * 1 is WNZK on the list this was written against: 512 kbit/s against a
+ * link that has never delivered 470, so it saturates every window, and
+ * it is the station every figure in the 0900 series is about. CHECK IT
+ * AGAINST YOUR OWN stations.m3u -- an index is not a station, and the
+ * list is whatever is on the card.
+ */
+#define CLOCK_AB_STATION    (1)
+
+#if CLOCK_AB
+static bool s_clock_ab_done;
+
+/* One round: bring the radio up on `khz`, wait for an address, drain.
+ * Returns the mean in kbit/s, or 0 with the reason logged. */
+static int clock_ab_round(uint32_t khz)
+{
+    wifi_stop();
+    wifi_set_sdio_khz(khz);
+
+    const esp_err_t err = wifi_start();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "clock A/B: radio would not start at %u kHz (%s)",
+                 (unsigned)khz, esp_err_to_name(err));
+        return 0;
+    }
+
+    /* The worker scans and joins by itself; this waits only for the
+     * address, which is when a stream can be opened. */
+    int waited = 0;
+    while (!wifi_connected() && waited < CLOCK_AB_JOIN_MS) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        waited += 250;
+    }
+    if (!wifi_connected()) {
+        ESP_LOGW(TAG, "clock A/B: no address after %d ms at %u kHz",
+                 waited, (unsigned)khz);
+        return 0;
+    }
+
+    stations_set_index(CLOCK_AB_STATION);
+    if (!bench_request()) {
+        ESP_LOGW(TAG, "clock A/B: the bench refused a run");
+        return 0;
+    }
+    bench_service();        /* synchronous: this IS the player task */
+
+    bench_result_t r;
+    bench_state(&r);
+    if (r.note[0]) {
+        ESP_LOGW(TAG, "clock A/B: %s", r.note);
+        return 0;
+    }
+
+    ESP_LOGW(TAG, "clock A/B: %u kHz -> %d kbit/s mean, %d peak, "
+                  "join %d ms, connect %d ms",
+             (unsigned)khz, r.kbps_avg, r.kbps_peak, waited, r.connect_ms);
+    return r.kbps_avg;
+}
+
+static void service_clock_ab(void)
+{
+    if (s_clock_ab_done || !wifi_up()) return;
+    s_clock_ab_done = true;
+
+    notice_post("Measuring the SDIO clock", "about four minutes");
+
+    int sum[2] = { 0, 0 }, n[2] = { 0, 0 };
+    int seen[CLOCK_AB_ROUNDS];
+
+    for (int i = 0; i < CLOCK_AB_ROUNDS; i++) {
+        /* Alternating, not two halves. Halves give one clock the first
+         * two minutes of the evening and the other the next two, which
+         * is the confound this exists to avoid. */
+        const int which = i & 1;
+        const uint32_t khz = which ? CLOCK_AB_KHZ_B : CLOCK_AB_KHZ_A;
+
+        ESP_LOGW(TAG, "clock A/B: round %d of %d, %u kHz",
+                 i + 1, CLOCK_AB_ROUNDS, (unsigned)khz);
+
+        const int kbps = clock_ab_round(khz);
+        seen[i] = kbps;
+        if (kbps > 0) { sum[which] += kbps; n[which]++; }
+    }
+
+    /* Back to the build's own clock and a radio that works, whatever
+     * happened above. */
+    wifi_stop();
+    wifi_set_sdio_khz(CLOCK_AB_KHZ_A);
+    wifi_start();
+
+    ESP_LOGW(TAG, "---- SDIO clock A/B ----");
+    for (int i = 0; i < CLOCK_AB_ROUNDS; i++) {
+        ESP_LOGW(TAG, "  round %d  %5u kHz  %4d kbit/s%s",
+                 i + 1, (unsigned)((i & 1) ? CLOCK_AB_KHZ_B : CLOCK_AB_KHZ_A),
+                 seen[i], seen[i] > 0 ? "" : "  (no reading)");
+    }
+    const int a = n[0] ? sum[0] / n[0] : 0;
+    const int b = n[1] ? sum[1] / n[1] : 0;
+    ESP_LOGW(TAG, "  %u kHz mean %d over %d round%s, "
+                  "%u kHz mean %d over %d round%s",
+             (unsigned)CLOCK_AB_KHZ_A, a, n[0], n[0] == 1 ? "" : "s",
+             (unsigned)CLOCK_AB_KHZ_B, b, n[1], n[1] == 1 ? "" : "s");
+
+    /*
+     * The reading, printed rather than left to be eyeballed at one in
+     * the morning: this network's own noise is the yardstick, and a gap
+     * smaller than it is not a result. 314 against 543 is 1.7x, so
+     * anything under about 15% between two three-round means is well
+     * inside it and the honest answer is "no difference measured".
+     */
+    if (a > 0 && b > 0) {
+        const int diff = ((a - b) * 100) / b;
+        ESP_LOGW(TAG, "  %u kHz is %+d%% against %u kHz -- under 15%% "
+                      "either way is inside this network's noise",
+                 (unsigned)CLOCK_AB_KHZ_A, diff, (unsigned)CLOCK_AB_KHZ_B);
+    } else {
+        ESP_LOGW(TAG, "  not enough readings to compare");
+    }
+    ESP_LOGW(TAG, "------------------------");
+
+    notice_post("SDIO clock A/B done", "the table is in the log");
+}
+#else
+static void service_clock_ab(void) { }
+#endif
+
 static void service_notices(void)
 {
     portal_state_t ps;
@@ -11990,6 +12168,7 @@ static void player_loop(void)
              * loop can afford and no other can.
              */
             bench_service();
+            service_clock_ab();
 
             const uint32_t sgen = storage_generation();
             if (sgen != stations_gen) {

@@ -115,6 +115,15 @@ static const char *TAG = "tab5_wifi";
 #define SDIO_CLOCK_KHZ          (50000)
 
 /*
+ * What the next start will use. Initialised to the constant above, so a
+ * build nobody has experimented on behaves exactly as it did.
+ */
+static uint32_t s_sdio_khz = SDIO_CLOCK_KHZ;
+
+void wifi_set_sdio_khz(uint32_t khz) { if (khz) s_sdio_khz = khz; }
+uint32_t wifi_sdio_khz(void)         { return s_sdio_khz; }
+
+/*
  * How many APs a scan keeps. 32 was plenty while hidden networks were
  * dropped; once 0018 kept them, both scans on the seventh flash came back
  * "scan: 32 networks, 16 hidden" and "32 networks, 17 hidden" -- full,
@@ -987,7 +996,7 @@ esp_err_t wifi_start(void)
     sdio.pin_d2.pin    = SDIO_PIN_D2;
     sdio.pin_d3.pin    = SDIO_PIN_D3;
     sdio.pin_reset.pin = SDIO_PIN_RESET;
-    sdio.clock_freq_khz = SDIO_CLOCK_KHZ;
+    sdio.clock_freq_khz = s_sdio_khz;
 
     esp_err_t err = esp_hosted_sdio_set_config(&sdio);
     if (err != ESP_OK) {

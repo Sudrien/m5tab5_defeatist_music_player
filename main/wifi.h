@@ -133,6 +133,23 @@ void wifi_init(i2c_master_dev_handle_t exp2);
  * value read rather than a call into the driver, so it is safe anywhere.
  */
 esp_err_t wifi_start(void);
+
+/*
+ * The SDIO clock the NEXT wifi_start() will configure, in kHz.
+ *
+ * A VARIABLE ONLY SO THE A/B IN player.c CAN MOVE IT. Nothing else
+ * should call this: the clock is a property of the board's wiring and
+ * a setting nobody can evaluate from a menu. It takes effect at
+ * transport init, so it needs a wifi_stop() and a wifi_start() around
+ * it -- setting it while the radio is up does nothing at all, which is
+ * the mistake it would be easy to make.
+ *
+ * wifi_sdio_khz() reports what the last start actually used, which is
+ * also what the "SDIO in use" line prints, so a reader has one number
+ * to believe rather than two.
+ */
+void     wifi_set_sdio_khz(uint32_t khz);
+uint32_t wifi_sdio_khz(void);
 esp_err_t wifi_stop(void);
 bool wifi_up(void);
 
