@@ -91,7 +91,7 @@ dependencies:
   # espressif/iot_eth. See ethernet.h.
   esp_usbh_asix:
     git: https://github.com/Sudrien/esp_usbh_asix.git
-    version: "977af24f70e530bbc3c7e6eb5990d4d06a4bd61f"
+    version: "b81adc58d3d0b115d3d7d3941af0826b07af6e3c"
 
   # And CDC-ECM, for Realtek RTL8152/8153 adapters, which offer it as
   # their second configuration (see ethcfg.h), and for any other adapter
