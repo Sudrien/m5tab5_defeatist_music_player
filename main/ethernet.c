@@ -134,7 +134,19 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
         }
         if (!i) return;
         switch (id) {
-        case IOT_ETH_EVENT_CONNECTED:    ev = NETLINK_EV_LINK_UP;   break;
+        case IOT_ETH_EVENT_CONNECTED:
+            /*
+             * Down to PENDING before esp_netif sees the link, so its
+             * link-up pick of the default keeps Wi-Fi. This handler runs
+             * first because it was registered first: IOT_ETH_EVENT
+             * handlers for ANY id run in registration order, and the
+             * netif glue's -- the one that brings the interface up and
+             * re-picks the default -- is registered at attach(), after
+             * this. on_link_up_after() puts it back. See netlink.h.
+             */
+            if (i->netif) esp_netif_set_route_prio(i->netif, NETLINK_ETH_ROUTE_PRIO_PENDING);
+            ev = NETLINK_EV_LINK_UP;
+            break;
         case IOT_ETH_EVENT_DISCONNECTED: ev = NETLINK_EV_LINK_DOWN; break;
         case IOT_ETH_EVENT_STOP:         ev = NETLINK_EV_STOP;      break;
         default: return;
@@ -177,6 +189,28 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
 }
 
 /*
+ * After the glue's link-up handling, the priority goes back up, so the
+ * GOT_IP pick -- the one with an address to route from -- makes the
+ * cable the default.
+ *
+ * "After" is got from esp_event's dispatch order rather than from
+ * timing: handlers registered for one specific id run after every
+ * handler registered for the whole base, whatever order they were
+ * registered in. This one is for IOT_ETH_EVENT_CONNECTED alone; the
+ * glue's is for all of IOT_ETH_EVENT.
+ */
+static void on_link_up_after(void *arg, esp_event_base_t base, int32_t id, void *data)
+{
+    (void)arg; (void)base; (void)id;
+    const iot_eth_handle_t h = data ? *(const iot_eth_handle_t *)data : NULL;
+    for (int k = 0; k < IF_COUNT; k++) {
+        if (h && s_if[k].eth == h && s_if[k].netif) {
+            esp_netif_set_route_prio(s_if[k].netif, NETLINK_ETH_ROUTE_PRIO);
+        }
+    }
+}
+
+/*
  * The class install, on the usbhost bus task, after usb_host_install()
  * and before VBUS -- which is what lets an adapter already in the port
  * enumerate against a client that exists.
@@ -202,6 +236,9 @@ static esp_err_t eth_class_install(void)
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IOT_ETH_EVENT, ESP_EVENT_ANY_ID,
                                                    on_event, NULL),
                         TAG, "IOT_ETH_EVENT handler");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IOT_ETH_EVENT, IOT_ETH_EVENT_CONNECTED,
+                                                   on_link_up_after, NULL),
+                        TAG, "link-up (after) handler");
     ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_ETH_GOT_IP,
                                                    on_event, NULL),
                         TAG, "ETH_GOT_IP handler");

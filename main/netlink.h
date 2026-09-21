@@ -45,6 +45,25 @@ extern "C" {
 #define NETLINK_ETH_ROUTE_PRIO      (200)
 #define NETLINK_WIFI_STA_ROUTE_PRIO (100)
 
+/*
+ * AND BELOW IT WHILE THE CABLE HAS NO ADDRESS.
+ *
+ * esp_netif re-picks the default at two moments, link up and GOT_IP,
+ * and at link up it asks only whether the interface is up -- not whether
+ * it has an address. So at 200 from the start, a replug made the cable
+ * the default the moment it linked and nine seconds before DHCP
+ * answered, and for those nine seconds every new connection had nowhere
+ * to go. The board's rate line said it plainly: "(default now no
+ * route)", with Wi-Fi joined the whole time.
+ *
+ * So ethernet.c drops the cable to this just before esp_netif's link-up
+ * pick and raises it back just after -- see on_event() and
+ * on_link_up_after() for how the ordering is got -- and the pick that
+ * makes the cable the default is the GOT_IP one, when there is an
+ * address to route from.
+ */
+#define NETLINK_ETH_ROUTE_PRIO_PENDING (50)
+
 typedef enum {
     NETLINK_EV_LINK_UP,     /* IOT_ETH_EVENT_CONNECTED    */
     NETLINK_EV_LINK_DOWN,   /* IOT_ETH_EVENT_DISCONNECTED */

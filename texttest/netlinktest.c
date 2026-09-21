@@ -98,6 +98,12 @@ int main(void)
           "cable route_prio %d does not beat the station's %d",
           NETLINK_ETH_ROUTE_PRIO, NETLINK_WIFI_STA_ROUTE_PRIO);
 
+    /* ...but not while it waits for an address, or a replug takes the
+     * default from a working station and routes nowhere until DHCP. */
+    CHECK(NETLINK_ETH_ROUTE_PRIO_PENDING < NETLINK_WIFI_STA_ROUTE_PRIO,
+          "cable route_prio %d while pending beats the station's %d",
+          NETLINK_ETH_ROUTE_PRIO_PENDING, NETLINK_WIFI_STA_ROUTE_PRIO);
+
     /* Which configuration a Realtek adapter is enumerated in (ethcfg.h).
      * Configuration 2 is CDC-ECM on the RTL8152 and RTL8153. */
     CHECK(ethcfg_select(0x0bda, 0x8153, 2) == 2, "RTL8153 not moved to ECM");
