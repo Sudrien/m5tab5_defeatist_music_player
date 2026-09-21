@@ -165,7 +165,11 @@ RADIOBROWSER_BIN := radiobrowsertest
 # reserve-to-columns conversion the drawing will use.
 LEVELHIST_BIN := levelhisttest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch
+# When the USB Ethernet cable counts as a network. Header-only, like
+# favmatchtest, so this compiles netlink.h itself.
+NETLINK_BIN := netlinktest
+
+all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -230,6 +234,13 @@ $(FAVMATCH_BIN): favmatchtest.c ../main/favmatch.h
 run-favmatch: $(FAVMATCH_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FAVMATCH_BIN)
 
+$(NETLINK_BIN): netlinktest.c ../main/netlink.h
+	$(CC) $(WARNCFLAGS) -c netlinktest.c -o /dev/null
+	$(CC) $(CFLAGS) -o $@ netlinktest.c $(LDFLAGS)
+
+run-netlink: $(NETLINK_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(NETLINK_BIN)
+
 $(TAIL_BIN): tailplantest.c ../main/tailplan.h
 	$(CC) $(WARNCFLAGS) -c tailplantest.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ tailplantest.c $(LDFLAGS)
@@ -262,7 +273,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -377,4 +388,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink clean

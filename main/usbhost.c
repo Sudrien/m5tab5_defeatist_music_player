@@ -49,8 +49,8 @@ static const char *TAG = "tab5_usbhost";
  * starts driving bus resets at whatever is plugged in. */
 #define USB_VBUS_SETTLE_MS      (100)
 
-/* Mass storage and audio. A third would be a HID remote and there is no
- * fourth in sight; this is a bound, not a budget. */
+/* Mass storage, audio, the HID remote and USB Ethernet: all four are
+ * spoken for. This is a bound, not a budget. */
 #define MAX_CLASSES             (4)
 
 static i2c_master_dev_handle_t s_exp2;

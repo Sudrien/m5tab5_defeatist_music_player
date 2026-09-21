@@ -84,6 +84,15 @@ dependencies:
   espressif/esp_wifi_remote: "*"
   espressif/esp_hosted: ">=3.0.2"
 
+  # USB Ethernet, for ASIX AX88772/A/B adapters in the USB-A port. Not
+  # in the registry, so it comes from git, PINNED TO A COMMIT: the driver
+  # says of itself that it has not yet run on hardware, and a moving
+  # branch would change it underneath a build that worked. It pulls in
+  # espressif/iot_eth. See ethernet.h.
+  esp_usbh_asix:
+    git: https://github.com/Sudrien/esp_usbh_asix.git
+    version: "977af24f70e530bbc3c7e6eb5990d4d06a4bd61f"
+
   espressif/esp_lcd_touch_st7123: "*"
   espressif/esp_lcd_touch_gt911: "*"
 

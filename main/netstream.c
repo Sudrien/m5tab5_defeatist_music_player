@@ -23,6 +23,7 @@
 
 #include "icydemux.h"
 #include "streamsniff.h"
+#include "ethernet.h"
 #include "wifi.h"
 
 static const char *TAG = "tab5_netstream";
@@ -899,17 +900,17 @@ static void netstream_task(void *arg)
              * which puts the real error in the log rather than leaving
              * the screen on "Connecting" for ever.
              */
-            if (!wifi_connected()) {
+            if (!net_online()) {
                 ESP_LOGI(TAG, "no network yet; waiting before the first "
                               "lookup");
                 int waited = 0;
-                while (!wifi_connected() && waited < NET_WAIT_MAX_MS &&
+                while (!net_online() && waited < NET_WAIT_MAX_MS &&
                        !superseded(gen)) {
                     vTaskDelay(pdMS_TO_TICKS(NET_WAIT_SLICE_MS));
                     waited += NET_WAIT_SLICE_MS;
                 }
                 if (superseded(gen)) break;
-                if (wifi_connected()) {
+                if (net_online()) {
                     ESP_LOGI(TAG, "network up after %d ms; connecting",
                              waited);
                 } else {

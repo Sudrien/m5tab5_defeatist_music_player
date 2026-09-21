@@ -74,6 +74,7 @@
 #include "loudness.h"
 #include "tailplan.h"
 #include "replaygain.h"
+#include "ethernet.h"
 #include "hid.h"
 #include "panel.h"
 #include "playlist.h"
@@ -6006,7 +6007,7 @@ static void service_station_fetch(void)
 
     const char *label = radiobrowser_menu_label(row);
 
-    if (!wifi_connected()) {
+    if (!net_online()) {
         /*
          * Said plainly and early, because the alternative is twelve
          * seconds of nothing followed by a failure that looks like the
@@ -12717,6 +12718,12 @@ void app_main(void)
      * on-screen controls doing everything they already did. */
     if (hid_init(hid_button) != ESP_OK) {
         ESP_LOGW(TAG, "no USB remote support this boot");
+    }
+
+    /* A USB Ethernet adapter, the fourth class on the port. Not fatal
+     * either: Wi-Fi is the route every build already had. */
+    if (ethernet_init() != ESP_OK) {
+        ESP_LOGW(TAG, "no USB Ethernet support this boot");
     }
 
     /*
