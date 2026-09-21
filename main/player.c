@@ -6069,14 +6069,29 @@ static void service_station_fetch(void)
     }
 }
 
+/*
+ * The station list and the stars, which are ONE READ AND NOT TWO.
+ *
+ * favorites.m3u sits beside stations.m3u on the same volume and is
+ * chosen by the same SD-first rule, so a pass that reads one and not
+ * the other leaves the stars describing a card that may not be in the
+ * slot any more. Both callers go through here so that the next one
+ * cannot read half of it -- which is exactly what happened: the reload
+ * button loaded both and the generation poll below loaded only the
+ * stations, so on a fresh boot nothing was ever starred until somebody
+ * pressed RLOD.
+ */
+static void load_station_files(void)
+{
+    stations_load();
+    favorites_load();
+}
+
 static void service_station_reload(void)
 {
     if (!s_reload_stations) return;
     s_reload_stations = false;
-    stations_load();
-    /* The stars belong to the volume the list came from, so they are
-     * re-read with it. A card swapped for another swaps both. */
-    favorites_load();
+    load_station_files();
     s_stations_epoch++;
 }
 
@@ -11951,7 +11966,7 @@ static void player_loop(void)
                 stations_gen = sgen;
                 if (storage_present(STORAGE_SD) ||
                     storage_present(STORAGE_USB)) {
-                    stations_load();
+                    load_station_files();
                 }
             }
 
