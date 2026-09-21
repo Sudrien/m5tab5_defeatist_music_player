@@ -226,6 +226,41 @@ static inline bool netplan_made_progress(uint64_t audio_bytes)
     return audio_bytes >= NETPLAN_PROGRESS_BYTES;
 }
 
+/*
+ * Whether a connection should be dropped on purpose to move it onto the
+ * cable.
+ *
+ * A connection keeps the interface it was opened on. When the cable
+ * comes back after an unplug, the stream stays on Wi-Fi until something
+ * reconnects it -- and on the Tab5 that can be for good, because Wi-Fi
+ * is where WNZK ran at 69-83% of what it needs while a working cable sat
+ * idle beside it, the reserve draining from 4.3 s to 1.5 s. (Board log,
+ * 1012.)
+ *
+ * So: move when the connection is not on the cable, the cable can
+ * route, and there is enough decoded audio to play through the
+ * reconnect. A reconnect over the cable measured 2.5-3.5 s from request
+ * to first bytes (two hops of TLS); NETPLAN_MOVE_MIN_AUDIO_CS is that
+ * plus half a second, because a move that runs the reserve dry trades a
+ * slow stream for a silent one.
+ *
+ * NOT MORE THAN THAT. The first draft had 6 s, and in the very run it
+ * was written from the reserve was 4.28 s when the cable got its
+ * address and never climbed back above it on Wi-Fi -- the rule would
+ * never have fired, and the stream would have starved until it failed.
+ * A stream on a link that cannot carry it only ever loses reserve, so
+ * the threshold has to be the least that survives the reconnect, not a
+ * comfortable amount. Below it the stream stays and is asked again
+ * next window.
+ */
+#define NETPLAN_MOVE_MIN_AUDIO_CS   (400)
+
+static inline bool netplan_should_move(bool on_cable, bool cable_usable,
+                                       int audio_cs)
+{
+    return !on_cable && cable_usable && audio_cs >= NETPLAN_MOVE_MIN_AUDIO_CS;
+}
+
 #ifdef __cplusplus
 }
 #endif

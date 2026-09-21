@@ -30,6 +30,11 @@
  * last hop. Module scope: read by the rate line on the same task. */
 static char s_route[48] = "no route";
 
+/* Set when pump() ends a healthy connection on purpose to move it onto
+ * the cable (netplan_should_move()), so the reconnect goes at once and
+ * says why instead of reporting a drop. Same task only. */
+static bool s_moving;
+
 static const char *TAG = "tab5_netstream";
 
 /* netstream.h publishes NETSTREAM_TITLE_MAX so callers need not include
@@ -816,6 +821,18 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
                      (unsigned)uxTaskGetStackHighWaterMark(NULL));
             window_bytes = 0;
             last_window = now;
+
+            /* Once per window, after the line that shows why. */
+            if (netplan_should_move(strncmp(s_route, "cable", 5) == 0,
+                                    ethernet_connected(), acs)) {
+                char to[48];
+                net_route_describe(to, sizeof(to));
+                ESP_LOGI(TAG, "the cable is up and this connection is on %s; "
+                              "moving it to %s with %d.%02ds in hand",
+                         s_route, to, acs / 100, acs % 100);
+                s_moving = true;
+                break;
+            }
         }
     }
     return produced;
@@ -1036,7 +1053,10 @@ static void netstream_task(void *arg)
             esp_http_client_cleanup(c);
 
         backoff:
-            if (give_up || superseded(gen)) break;
+            if (give_up || superseded(gen)) {
+                s_moving = false;   /* the next station is not moving */
+                break;
+            }
 
             const int attempt_ms =
                 (int)((esp_timer_get_time() - attempt_start) / 1000);
@@ -1051,7 +1071,12 @@ static void netstream_task(void *arg)
              * is now its own branch and says what happened.
              */
             int wait;
-            if (s_failures == 0) {
+            if (s_moving) {
+                /* Not a drop and not a failure: nothing to back off from. */
+                s_moving = false;
+                wait = 0;
+                set_state(NETSTREAM_RETRYING);
+            } else if (s_failures == 0) {
                 wait = netplan_backoff_ms(0);
                 set_state(NETSTREAM_RETRYING);
                 ESP_LOGW(TAG, "dropped after playing; reconnecting in %d ms",

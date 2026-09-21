@@ -204,6 +204,23 @@ int main(void)
               "an unknown state did not fall back to \"?\"");
     }
 
+    /* Moving a Wi-Fi connection onto the cable. */
+    CHECK(netplan_should_move(false, true, 1400), "on Wi-Fi, cable up, 14 s in hand: stayed");
+    CHECK(!netplan_should_move(true, true, 1400), "already on the cable: moved again");
+    CHECK(!netplan_should_move(false, false, 1400), "moved to a cable that cannot route");
+    CHECK(!netplan_should_move(false, true, 150),
+          "moved with 1.5 s in hand -- the reconnect alone is 2.5-3.5 s");
+    CHECK(netplan_should_move(false, true, NETPLAN_MOVE_MIN_AUDIO_CS),
+          "not moved at exactly the threshold");
+    CHECK(!netplan_should_move(false, true, NETPLAN_MOVE_MIN_AUDIO_CS - 1),
+          "moved one hundredth under the threshold");
+    CHECK(NETPLAN_MOVE_MIN_AUDIO_CS >= 350 + 50,
+          "the threshold leaves no room over the measured reconnect");
+    /* And low enough to fire in the run it was written from: the cable
+     * got its address with 4.28 s in hand, and Wi-Fi never gave more. */
+    CHECK(netplan_should_move(false, true, 428),
+          "would not have moved in the board run that asked for this");
+
     printf("%d checks, %d failures\n", checks, failures);
     printf(failures ? "FAILURES\n" : "all passed\n");
     return failures ? 1 : 0;
