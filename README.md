@@ -64,7 +64,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 - captive portal wifi config (multiple routers)
 - wifi network portal manual Internet Radio station entry 
 - Starred Favorites
-- Ethernet to usb dongles ( CDC-ECM and experimental [asix[(https://github.com/Sudrien/esp_usbh_asix) port )
+- Ethernet to usb dongles ( CDC-ECM and experimental [asix](https://github.com/Sudrien/esp_usbh_asix) port )
 
 ## v0.5.0 targets
 - zero storage internet radio scenario
