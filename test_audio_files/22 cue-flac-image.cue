@@ -21,7 +21,7 @@ FILE "22 cue-flac-image.flac" WAVE
     PERFORMER "Landmark Ensemble"
     INDEX 01 00:30:00
   TRACK 05 AUDIO
-    TITLE "F\303\274nf Signalt\303\266ne"
+    TITLE "Fünf Signaltöne"
     PERFORMER "Landmark Ensemble"
     INDEX 01 00:40:00
   TRACK 06 AUDIO

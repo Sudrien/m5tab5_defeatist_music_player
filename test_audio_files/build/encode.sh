@@ -204,7 +204,9 @@ $F -c:a flac "$OUT/22 cue-flac-image.flac"
     for t in "One Beep" "Two Beeps" "Three Beeps" "Four Beeps" \
              "F\303\274nf Signalt\303\266ne" "Six Beeps"; do
         printf '  TRACK %02d AUDIO\n' $n
-        printf '    TITLE "%s"\n' "$t"
+        # %b, not %s: the fifth title's accents are octal escapes, and
+        # %s writes them out as backslashes. 1003.
+        printf '    TITLE "%b"\n' "$t"
         printf '    PERFORMER "Landmark Ensemble"\n'
         printf '    INDEX 01 00:%02d:00\n' $(( (n - 1) * 10 ))
         n=$((n + 1))
