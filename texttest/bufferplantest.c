@@ -414,6 +414,57 @@ int main(void)
               bufplan_phase_name(b.phase));
     }
 
+    /*
+     * GROWING, ABOVE THE FLOOR, AND STILL SHORT OF TARGET AT THE
+     * DEADLINE. This is the case that killed both FLAC attempts in the
+     * 0900 series -- 30037 and 30098 ms silent, with frames decoded
+     * and the ring filling the whole way -- and nothing here covered
+     * it: the two tests above both sit BELOW the floor, which is the
+     * case that should still end.
+     *
+     * Climbs 400 ms of audio a second against a 20.4 s ring, so it is
+     * never stalled (well over BUFPLAN_START_GROWTH_MS a window) and
+     * never reaches 75% of capacity inside thirty seconds.
+     */
+    {
+        set_capacity(20400);
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        int buffered = 0;
+        for (int64_t t = 1000; t < BUFPLAN_PREROLL_GIVEUP_MS; t += 1000) {
+            buffered += 400;
+            step(t, buffered, false, false);
+        }
+        CHECK(b.phase == BUFPLAN_PREROLL, "left preroll early: %s",
+              bufplan_phase_name(b.phase));
+        CHECK(buffered >= bufplan_start_floor_ms(20400),
+              "the fixture never cleared the floor: %d", buffered);
+        CHECK(buffered < bufplan_start_target_ms(20400),
+              "the fixture reached target, so it tests nothing: %d", buffered);
+
+        buffered += 400;
+        step(BUFPLAN_PREROLL_GIVEUP_MS, buffered, false, false);
+        CHECK(b.phase == BUFPLAN_PLAYING,
+              "a growing stream above the floor was ended at the deadline: %s",
+              bufplan_phase_name(b.phase));
+    }
+
+    /* And the same deadline, below the floor, still ends. The two
+     * cases differ only in how much audio there is, which is the whole
+     * of the rule. */
+    {
+        set_capacity(20400);
+        bufplan_init(&b, 0);
+        step(0, 0, false, false);
+        for (int64_t t = 1000; t < BUFPLAN_PREROLL_GIVEUP_MS; t += 1000) {
+            step(t, 100 + (int)(t / 1000) * 10, false, false);
+        }
+        step(BUFPLAN_PREROLL_GIVEUP_MS, 400, false, false);
+        CHECK(b.phase == BUFPLAN_ENDED,
+              "below the floor at the deadline did not end: %s",
+              bufplan_phase_name(b.phase));
+    }
+
     /* A ring smaller than the floor. Neither number may name a level
      * that cannot exist: the failure this guards is the ring
      * saturating, the decode loop parking in the send, and the station

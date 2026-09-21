@@ -315,7 +315,33 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
             bufplan_enter(b, buffered > 0 ? BUFPLAN_DRAINING : BUFPLAN_ENDED,
                           in->now_ms);
         } else if (in->now_ms - b->phase_since_ms >= BUFPLAN_PREROLL_GIVEUP_MS) {
-            bufplan_enter(b, BUFPLAN_ENDED, in->now_ms);
+            /*
+             * THE DEADLINE, AND IT PLAYS WHAT IT HAS RATHER THAN
+             * THROWING IT AWAY.
+             *
+             * Reaching here with `floor` in hand means the buffer was
+             * still GROWING: a stalled buffer above the floor has
+             * already started, two branches up. So this is a stream
+             * that works and is merely slower than the watermark --
+             * and ending it was killing exactly that. Both FLAC
+             * attempts in the 0900 series died at 30037 and 30098 ms
+             * having decoded frames and filled the ring the whole time,
+             * and the log read as the station dropping out when what
+             * dropped it was this line.
+             *
+             * Below the floor it still ends, which is what the two
+             * tests for this branch have always asserted: four seconds
+             * is the level under which there is nothing worth starting.
+             *
+             * The deadline is NOT deferred while growing, which was the
+             * other candidate. A stream may grow at BUFPLAN_START_GROWTH_MS
+             * per window for ever -- ten per cent of real time -- and
+             * deferring on that is an unbounded silence with a progress
+             * bar. Thirty seconds, then play whatever there is.
+             */
+            bufplan_enter(b, buffered >= floor ? BUFPLAN_PLAYING
+                                               : BUFPLAN_ENDED,
+                          in->now_ms);
         }
         break;
     }
