@@ -6,7 +6,14 @@ dependencies:
   # ESPRESSIF MIT licence -- free, but licensed for use on Espressif
   # silicon only, which is the same caveat the exFAT note carries. P4 has
   # been supported since v2.0.0.
-  espressif/esp_audio_codec: "^2.3.0"
+  #
+  # AND BELOW 2.6, WHICH REQUIRES ESP32-P4 SILICON REVISION 3.0 -- the
+  # precompiled archives stop supporting the earlier die, and the build
+  # says so and stops. The Tab5s this has run on are revision v1.3
+  # ("chip revision: v1.3" at boot). "^2.3.0" allowed 2.6 the first time
+  # dependencies.lock was regenerated; 2.5.0 is what the lock held and
+  # what every board run so far has used.
+  espressif/esp_audio_codec: ">=2.3.0,<2.6.0"
 
   # TJpgDec, as the software JPEG fallback for covers the hardware
   # decoder cannot allocate for. The P4's decoder has no scaler --
