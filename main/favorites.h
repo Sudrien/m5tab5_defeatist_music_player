@@ -124,15 +124,25 @@ bool favorites_add(const char *name, const char *url);
  * entry in it.
  *
  *   1. write .favorites.tmp in full, flush, close
- *   2. rename favorites.m3u -> .favorites.tmp's neighbour? no: see below
+ *   2. remove favorites.m3u
+ *   3. rename .favorites.tmp -> favorites.m3u
+ *
+ * STEP 2 IS NOT OPTIONAL AND IS NOT TIDINESS. FATFS refuses a rename
+ * whose destination exists -- it is not POSIX, where rename() replaces
+ * atomically -- so renaming over the top fails with EEXIST every time.
+ * It did, on the board, on every unstar, and the star never went out.
+ *
+ * That leaves a window between 2 and 3 with no list on the card and a
+ * complete one in the temp file, so favorites_load() adopts an orphaned
+ * temp before reading. The rename it uses is its own test: it can only
+ * succeed when favorites.m3u is absent, which is exactly the
+ * interrupted case, so a temp left by a write that died EARLIER -- with
+ * favorites.m3u still in place -- can never be adopted.
  *
  * There is no .bak here, deliberately. settings.c keeps one because its
  * file is the only record of a hundred settings; this file is a list of
- * stations that also exist in stations.m3u or in the directory, and a
- * second copy of it on the card buys less than the confusion of a
- * favorites.m3u.bak somebody finds and edits. The sequence is write
- * temp, rename over: power lost before the rename leaves the original
- * list intact and costs a temp file, which the next removal overwrites.
+ * stations that also exist in stations.m3u or in the directory, and the
+ * temp file already covers the only window that can lose it.
  *
  * True when the URL is gone from the file, INCLUDING when it was never
  * there -- the postcondition is "not starred", and a caller toggling a

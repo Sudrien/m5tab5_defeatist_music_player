@@ -102,10 +102,46 @@ static storage_id_t write_volume(void)
 /* Loading                                                             */
 /* ------------------------------------------------------------------ */
 
+/*
+ * Put back a list that a removal was interrupted in the middle of.
+ *
+ * favorites_remove() writes the whole new list to the temp file,
+ * removes the old one and renames the temp into place. Power lost
+ * between the remove and the rename leaves no favorites.m3u and a
+ * complete .favorites.tmp, and without this that is a lost list.
+ *
+ * THE RENAME IS THE TEST. It succeeds only when favorites.m3u is
+ * absent, which is the only state worth recovering from: a temp left
+ * by a write that died BEFORE the remove sits beside a favorites.m3u
+ * that still exists, the rename fails with EEXIST, and the real list
+ * wins. So a half-written temp can never be adopted, and no flag or
+ * marker is needed to tell the two apart.
+ */
+static void adopt_interrupted_removal(storage_id_t id)
+{
+    char path[128], tmp[128];
+    if (!path_for(id, path, sizeof(path), FAVORITES_FILENAME) ||
+        !path_for(id, tmp, sizeof(tmp), FAVORITES_TEMPNAME)) {
+        return;
+    }
+
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    const int moved = rename(tmp, path);
+    storage_io_release();
+
+    if (moved == 0) {
+        ESP_LOGW(TAG, "recovered %s from an interrupted removal", path);
+    }
+}
+
 static size_t read_file(storage_id_t id, char *buf, size_t buf_size)
 {
     char path[128];
     if (!path_for(id, path, sizeof(path), FAVORITES_FILENAME)) return 0;
+
+    /* Before the open, because the file it puts back is the one to
+     * read. Cheap: a rename that fails costs one directory lookup. */
+    adopt_interrupted_removal(id);
 
     FILE *f = storage_io_open(path, "r");
     if (!f) return 0;
@@ -359,20 +395,42 @@ bool favorites_remove(const char *url)
     }
 
     /*
-     * One rename over the original. No .bak: see favorites.h. Power
-     * lost before this leaves the original list whole and costs a temp
-     * file the next removal overwrites.
+     * REMOVE, THEN RENAME. NOT A RENAME OVER THE TOP, WHICH THIS USED
+     * TO DO AND WHICH CANNOT WORK ON THIS FILESYSTEM.
      *
-     * The lease is taken around the rename alone, so a playback read
-     * can get in front of it.
+     * POSIX rename() replaces the destination atomically. FATFS does
+     * not: f_rename() refuses a destination that exists, so the board
+     * logged
+     *
+     *     could not install /sd/favorites.m3u (File exists)
+     *
+     * on every unstar, and the star never went out. settings.c has
+     * always been right about this and the reason was invisible --
+     * compact_file() renames .dat to .bak BEFORE renaming .tmp to
+     * .dat, so it only ever renames onto a name that is free. The
+     * shape was copied here and the constraint that produced it was
+     * not.
+     *
+     * A lease per operation, like compact_file(), so a playback read
+     * can get between them.
      */
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    remove(path);
+    storage_io_release();
+
     storage_io_acquire(STORAGE_IO_BACKGROUND);
     const int installed = rename(tmp, path);
     storage_io_release();
 
     if (installed != 0) {
-        ESP_LOGW(TAG, "could not install %s (%s)", path, strerror(errno));
-        remove(tmp);
+        /*
+         * The list is now gone and the temp file holds it. Say so --
+         * this is the one path here that can lose data -- and leave the
+         * temp where it is: favorites_load() adopts it, which is the
+         * whole reason that branch exists.
+         */
+        ESP_LOGE(TAG, "could not install %s (%s); %s holds the list",
+                 path, strerror(errno), FAVORITES_TEMPNAME);
         return false;
     }
 

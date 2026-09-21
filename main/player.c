@@ -6305,8 +6305,23 @@ static void service_favorite_toggle(void)
         s_stations_epoch++;
         return;
     }
+    /*
+     * Before and after, because "what it is now" cannot tell a working
+     * unstar from a refused one. The board logged `starred: WNZK`
+     * immediately under `could not install /sd/favorites.m3u
+     * (File exists)` -- true about the state and a lie about what just
+     * happened, and the only sign on the panel was a star that did not
+     * change.
+     */
+    const bool was = favorites_contains(st.url);
     const bool now = favorites_toggle(st.name, st.url);
-    ESP_LOGI(TAG, "%s: %s", now ? "starred" : "unstarred", st.name);
+
+    if (now == was) {
+        ESP_LOGW(TAG, "the star did not change: %s", st.name);
+        notice_post("Could not save", "the card would not take the write");
+    } else {
+        ESP_LOGI(TAG, "%s: %s", now ? "starred" : "unstarred", st.name);
+    }
     s_stations_epoch++;
 }
 
