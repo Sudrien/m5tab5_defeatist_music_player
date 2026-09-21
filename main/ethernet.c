@@ -75,6 +75,26 @@ bool net_online(void)
     return wifi_connected() || ethernet_connected();
 }
 
+void net_route_describe(char *out, size_t out_size)
+{
+    if (!out || !out_size) return;
+    esp_netif_t *nif = esp_netif_get_default_netif();
+    esp_netif_ip_info_t ip = { 0 };
+    if (!nif || esp_netif_get_ip_info(nif, &ip) != ESP_OK || ip.ip.addr == 0) {
+        snprintf(out, out_size, "no route");
+        return;
+    }
+    const char *what = "Wi-Fi";
+    for (int k = 0; k < IF_COUNT; k++) {
+        if (nif == s_if[k].netif) what = s_if[k].name;
+    }
+    if (what[0] == 'W') {
+        snprintf(out, out_size, "Wi-Fi " IPSTR, IP2STR(&ip.ip));
+    } else {
+        snprintf(out, out_size, "cable (%s) " IPSTR, what, IP2STR(&ip.ip));
+    }
+}
+
 bool ethernet_ip(char *out, size_t out_size)
 {
     if (!out || !out_size) return false;

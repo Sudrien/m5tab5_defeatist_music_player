@@ -26,6 +26,10 @@
 #include "ethernet.h"
 #include "wifi.h"
 
+/* The route the open connection took, from net_route_describe() at its
+ * last hop. Module scope: read by the rate line on the same task. */
+static char s_route[48] = "no route";
+
 static const char *TAG = "tab5_netstream";
 
 /* netstream.h publishes NETSTREAM_TITLE_MAX so callers need not include
@@ -449,9 +453,13 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         s_last_status = status;
 
         act = netplan_action(status);
-        ESP_LOGI(TAG, "hop %d: HTTP %d -> %s, connect+TLS %lld ms, metaint %d",
+        /* The route this connection took, taken now and kept: an unplug
+         * moves the default, not a socket that is already open, and the
+         * rate line below reports the two separately. */
+        net_route_describe(s_route, sizeof(s_route));
+        ESP_LOGI(TAG, "hop %d: HTTP %d -> %s, connect+TLS %lld ms, metaint %d, via %s",
                  hop + 1, status, netplan_action_name(act),
-                 (long long)((t1 - t0) / 1000), s_hdr_metaint);
+                 (long long)((t1 - t0) / 1000), s_hdr_metaint, s_route);
 
         if (act != NETPLAN_REDIRECT) return act;
 
@@ -787,11 +795,20 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
                          needed, (s_kbps * 100) / needed,
                          (s_kbps < needed && s_audio_cs < 400) ? " SHORT" : "");
             }
-            ESP_LOGI(TAG, "%d kbit/s%s, peak %d, bytes %u%% (%u), "
+            /* Where the bytes come from, and -- only when it differs --
+             * where a new connection would go instead. The difference is
+             * the window between an unplug and the reconnect. */
+            char now_route[48], route_note[64] = "";
+            net_route_describe(now_route, sizeof(now_route));
+            if (strcmp(now_route, s_route) != 0) {
+                snprintf(route_note, sizeof(route_note), " (default now %s)",
+                         now_route);
+            }
+            ESP_LOGI(TAG, "%d kbit/s%s via %s%s, peak %d, bytes %u%% (%u), "
                           "audio %d.%02ds, "
                           "stalled %d ms, internal free %u, "
                           "stack low water %u",
-                     s_kbps, rate_note, s_kbps_peak,
+                     s_kbps, rate_note, s_route, route_note, s_kbps_peak,
                      netstream_ring_pct(), (unsigned)s_buffered,
                      acs / 100, acs % 100,
                      stalled_ms,

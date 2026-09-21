@@ -50,6 +50,16 @@ bool ethernet_ip(char *out, size_t out_size);
 /* Either route. What netstream and the directory wait on. */
 bool net_online(void);
 
+/*
+ * Which interface a connection opened now would leave by, as text:
+ * "cable (asix) 192.168.1.124", "Wi-Fi 192.168.5.62", or "no route".
+ * That is lwIP's default netif, which is how every socket here picks its
+ * source: esp_http_client has no way to ask a socket where it went, but
+ * a socket opened with no bind takes the default's address, so the
+ * default at connect time IS the connection's route. At least 48 bytes.
+ */
+void net_route_describe(char *out, size_t out_size);
+
 #ifdef __cplusplus
 }
 #endif
