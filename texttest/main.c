@@ -29,6 +29,7 @@
  *
  * SPDX-License-Identifier: MIT
  */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -376,6 +377,136 @@ static void test_degenerate(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Shapes                                                              */
+/* ------------------------------------------------------------------ */
+
+/*
+ * How many arms the thing at (cx, cy) has, counted rather than assumed.
+ *
+ * Walks a ring at 78% of the outer radius -- outside the inner vertices
+ * at 38.2% and inside the points -- and counts runs of ink. A
+ * five-pointed star gives 5. Two overlapping triangles, which is what
+ * this used to draw while calling itself five-pointed, give 6.
+ */
+static int arms_at(int cx, int cy, int r)
+{
+    /* Spelled out rather than M_PI: this file builds at -std=c11 with
+     * no _GNU_SOURCE, where M_PI is not declared. */
+    const double pi = 3.14159265358979323846;
+    const double rad = r * 0.78;
+    const int N = 2000;
+    int runs = 0;
+    bool prev = false, first = false;
+
+    for (int i = 0; i < N; i++) {
+        const double a = (2.0 * pi * i) / N;
+        const int x = cx + (int)lround(rad * cos(a));
+        const int y = cy + (int)lround(rad * sin(a));
+        const bool ink = (x >= 0 && x < W && y >= 0 && y < H &&
+                          fb[y * W + x] != BLANK);
+        if (i == 0) first = ink;
+        if (ink && !prev) runs++;
+        prev = ink;
+    }
+    /* A run straddling the seam was counted at both ends. */
+    if (first && prev && runs > 0) runs--;
+    return runs;
+}
+
+static void test_star_has_five_points(void)
+{
+    const int cx = 200, cy = 200, r = 80;
+
+    clear();
+    gfx_fill_star(cx, cy, r, INK);
+
+    /* THE CHECK THIS FILE EXISTS FOR. It was six. */
+    CHECK(arms_at(cx, cy, r) == 5, "star has %d points, not 5",
+          arms_at(cx, cy, r));
+
+    /* Point up: ink just inside the top point, none at the bottom
+     * centre, where a point-up star has the notch between its two lower
+     * arms. This is what tells a star from a star rotated 36 degrees,
+     * which also has five points. */
+    CHECK(fb[(cy - r + 2) * W + cx] != BLANK, "no ink at the top point");
+    CHECK(fb[(cy + (r * 78) / 100) * W + cx] == BLANK,
+          "ink at the bottom centre: the star is upside down");
+
+    /* Solid in the middle. A star drawn as an outline by accident would
+     * pass the arm count and fail here. */
+    CHECK(fb[cy * W + cx] != BLANK, "the centre is not filled");
+
+    /* The bbox is the star's own size, give or take rounding: the
+     * points reach r in every direction. */
+    int x0, y0, x1, y1;
+    CHECK(ink_bbox(&x0, &y0, &x1, &y1), "nothing drawn");
+    CHECK(y0 >= cy - r - 1 && y0 <= cy - r + 1, "top at %d, wanted %d",
+          y0, cy - r);
+    CHECK(x0 >= cx - r - 1 && x1 <= cx + r + 1, "wider than r: %d..%d",
+          x0, x1);
+
+    /* The ring the unfilled star is drawn with: the same star again,
+     * smaller, in the background. Still five arms, hollow centre. */
+    clear();
+    gfx_fill_star(cx, cy, r, INK);
+    gfx_fill_star(cx, cy, (r * 58) / 100, BLANK);
+    CHECK(arms_at(cx, cy, r) == 5, "the ring has %d points, not 5",
+          arms_at(cx, cy, r));
+    CHECK(fb[cy * W + cx] == BLANK, "the unfilled star has a filled centre");
+}
+
+static void test_poly_basics(void)
+{
+    /* A triangle, because gfx_fill_poly() replaced a triangle
+     * primitive and has to be able to do its job. */
+    clear();
+    {
+        const int tri[6] = { 100, 100,  180, 100,  140, 180 };
+        gfx_fill_poly(tri, 3, INK);
+        CHECK(fb[105 * W + 140] != BLANK, "triangle: no ink inside");
+        CHECK(fb[175 * W + 105] == BLANK, "triangle: ink outside the slope");
+        int x0, y0, x1, y1;
+        CHECK(ink_bbox(&x0, &y0, &x1, &y1), "triangle drew nothing");
+        CHECK(y0 == 100 && y1 <= 180, "triangle bbox y %d..%d", y0, y1);
+    }
+
+    /* A rectangle as a polygon, against the rect primitive: same
+     * pixels, or the crossing rule is off by one somewhere. */
+    clear();
+    {
+        const int box[8] = { 50, 50,  90, 50,  90, 90,  50, 90 };
+        gfx_fill_poly(box, 4, INK);
+        int x0, y0, x1, y1;
+        CHECK(ink_bbox(&x0, &y0, &x1, &y1), "box drew nothing");
+        CHECK(x0 == 50 && y0 == 50 && x1 == 90 && y1 == 89,
+              "box bbox %d,%d..%d,%d", x0, y0, x1, y1);
+    }
+
+    /* Degenerate input draws nothing and does not read off the end.
+     * ASan is the real check here. */
+    clear();
+    {
+        const int two[4] = { 10, 10, 20, 20 };
+        gfx_fill_poly(two, 2, INK);
+        gfx_fill_poly(two, 0, INK);
+        gfx_fill_poly(NULL, 3, INK);
+        gfx_fill_poly(two, GFX_POLY_MAX_PTS + 1, INK);
+        int x0, y0, x1, y1;
+        CHECK(!ink_bbox(&x0, &y0, &x1, &y1), "degenerate polygon drew ink");
+    }
+
+    /* A flat polygon: every point on one row. No crossings, no ink, no
+     * division by a zero height. */
+    clear();
+    {
+        const int flat[6] = { 10, 40,  60, 40,  35, 40 };
+        gfx_fill_poly(flat, 3, INK);
+        int x0, y0, x1, y1;
+        CHECK(!ink_bbox(&x0, &y0, &x1, &y1), "a flat polygon drew ink");
+    }
+}
+
 int main(void)
 {
     if (gfx_init(NULL, W, H) != ESP_OK) {
@@ -404,6 +535,8 @@ int main(void)
     test_tail_keeps_tail();
     test_tail_longer_than_ring();
     test_degenerate();
+    test_poly_basics();
+    test_star_has_five_points();
 
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

@@ -110,11 +110,18 @@ bool gfx_flipped(void);
 void gfx_px(int x, int y, uint16_t c);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t c);
 void gfx_fill_circle(int cx, int cy, int r, uint16_t c);
-/* Three points, filled. A degenerate triangle draws nothing. See gfx.c:
- * this exists for the star, which is the one glyph here that a circle
- * and a rectangle cannot make between them. */
-void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
-                       uint16_t c);
+/* The most points gfx_fill_poly() will take. A star is ten; the bound
+ * exists because the crossing list is a stack array. */
+#define GFX_POLY_MAX_PTS    (16)
+
+/* A filled polygon, even-odd, `n` POINTS as x0,y0,x1,y1,... Closes from
+ * the last point to the first. See gfx.c: this replaced a triangle
+ * primitive that could not draw the one shape it was added for. */
+void gfx_fill_poly(const int *xy, int n, uint16_t c);
+
+/* A five-pointed star, point up, points at radius r. The shape a
+ * favourite is marked with, and the reason gfx_fill_poly() exists. */
+void gfx_fill_star(int cx, int cy, int r, uint16_t c);
 
 /* Seven-segment metrics, exported because callers lay out around them. */
 #define GFX_DIG_W       (20)

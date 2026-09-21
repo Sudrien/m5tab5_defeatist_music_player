@@ -332,56 +332,99 @@ void gfx_fill_circle(int cx, int cy, int r, uint16_t c)
 }
 
 /*
- * A filled triangle, by scanlines.
+ * A filled convex-or-concave polygon, by scanlines, even-odd rule.
  *
- * Added for the star in the chooser and the panel, which is two
- * overlapping triangles -- the one shape in this program that a circle
- * and a rectangle cannot make between them.
+ * REPLACES gfx_fill_triangle(), WHICH EXISTED ONLY TO DRAW A STAR AND
+ * COULD NOT. Two overlapping triangles make a HEXAGRAM -- six points,
+ * the Star of David -- and no arrangement of two triangles makes the
+ * five-pointed star a favourite is marked with. The primitive was
+ * chosen for the shape before the shape was worked out, and the comment
+ * on it said "five-pointed" for a fortnight.
  *
- * Flat-sided rather than anti-aliased, like everything else here: the
- * panel is 294 PPI and a one-pixel stair on a 36 px glyph is under a
- * tenth of a millimetre. The edges are walked with integer cross
- * products rather than slopes so that a degenerate triangle -- two
- * vertices equal, which a star at r=1 produces -- fills nothing instead
- * of dividing by zero.
+ * A star is a ten-vertex polygon, so this takes a polygon. It also
+ * subsumes the triangle: three points work, and nothing else in the
+ * program wanted one.
+ *
+ * `xy` is x0,y0,x1,y1,... with `n` POINTS, not values. Edges close from
+ * the last point back to the first.
+ *
+ * Scanlines rather than per-pixel inside tests: the old triangle walked
+ * the whole bounding box asking three cross products per pixel, which
+ * for ten triangles of a fanned star would have been about thirteen
+ * thousand tests per glyph. This is one crossing list per row.
+ *
+ * The edge test is HALF-OPEN in y -- `y >= lo && y < hi` -- which is
+ * what stops a vertex being counted by both of its edges and leaving a
+ * one-pixel hole or a run to the edge of the screen. Horizontal edges
+ * are skipped for the same reason.
  */
-void gfx_fill_triangle(int x0, int y0, int x1, int y1, int x2, int y2,
-                       uint16_t c)
+void gfx_fill_poly(const int *xy, int n, uint16_t c)
 {
-    int min_y = y0 < y1 ? (y0 < y2 ? y0 : y2) : (y1 < y2 ? y1 : y2);
-    int max_y = y0 > y1 ? (y0 > y2 ? y0 : y2) : (y1 > y2 ? y1 : y2);
-    int min_x = x0 < x1 ? (x0 < x2 ? x0 : x2) : (x1 < x2 ? x1 : x2);
-    int max_x = x0 > x1 ? (x0 > x2 ? x0 : x2) : (x1 > x2 ? x1 : x2);
+    if (!xy || n < 3 || n > GFX_POLY_MAX_PTS) return;
 
-    /* Signed area. Zero is a line or a point: nothing to fill, and the
-     * inside test below would be a comparison against no interior. */
-    const int area = (x1 - x0) * (y2 - y0) - (x2 - x0) * (y1 - y0);
-    if (area == 0) return;
+    int min_y = xy[1], max_y = xy[1];
+    for (int i = 1; i < n; i++) {
+        const int y = xy[2 * i + 1];
+        if (y < min_y) min_y = y;
+        if (y > max_y) max_y = y;
+    }
 
     for (int y = min_y; y <= max_y; y++) {
-        /*
-         * The row's span, found by walking x rather than solving for
-         * the edges: the spans are at most a glyph wide, and the
-         * alternative is three slope cases and their degeneracies. The
-         * first and last inside pixel bound one fill_rect, so the write
-         * is still one span per row.
-         */
-        int lo = max_x + 1, hi = min_x - 1;
-        for (int x = min_x; x <= max_x; x++) {
-            const int w0 = (x1 - x0) * (y - y0) - (y1 - y0) * (x - x0);
-            const int w1 = (x2 - x1) * (y - y1) - (y2 - y1) * (x - x1);
-            const int w2 = (x0 - x2) * (y - y2) - (y0 - y2) * (x - x2);
-            /* All three the same sign as the area means inside, with
-             * zero counting as on the edge and therefore in. */
-            const bool inside = area > 0 ? (w0 >= 0 && w1 >= 0 && w2 >= 0)
-                                         : (w0 <= 0 && w1 <= 0 && w2 <= 0);
-            if (inside) {
-                if (x < lo) lo = x;
-                if (x > hi) hi = x;
-            }
+        int xs[GFX_POLY_MAX_PTS];
+        int cnt = 0;
+
+        for (int i = 0; i < n; i++) {
+            const int j = (i + 1) % n;
+            const int y0 = xy[2 * i + 1], y1 = xy[2 * j + 1];
+            if (y0 == y1) continue;                 /* horizontal: skip */
+
+            const int lo = y0 < y1 ? y0 : y1;
+            const int hi = y0 < y1 ? y1 : y0;
+            if (y < lo || y >= hi) continue;        /* half-open */
+
+            const int x0 = xy[2 * i], x1 = xy[2 * j];
+            xs[cnt++] = x0 + (int)(((int64_t)(y - y0) * (x1 - x0)) / (y1 - y0));
         }
-        if (hi >= lo) gfx_fill_rect(lo, y, hi - lo + 1, 1, c);
+
+        /* Insertion sort: cnt is at most a handful and never more than
+         * the vertex count, so anything cleverer costs more than it
+         * saves. */
+        for (int a = 1; a < cnt; a++) {
+            const int v = xs[a];
+            int b = a - 1;
+            while (b >= 0 && xs[b] > v) { xs[b + 1] = xs[b]; b--; }
+            xs[b + 1] = v;
+        }
+
+        for (int a = 0; a + 1 < cnt; a += 2) {
+            gfx_fill_rect(xs[a], y, xs[a + 1] - xs[a] + 1, 1, c);
+        }
     }
+}
+
+/*
+ * A five-pointed star, filled, centred on (cx, cy) with its points at
+ * radius r. Point up.
+ *
+ * The ten vertices are a table in permille of r rather than five sines
+ * worked out at each call: they are the same ten numbers every time,
+ * the inner radius is (3-sqrt5)/2 = 0.382 of the outer, which is what
+ * makes the arms meet at the angle a star is expected to have, and an
+ * integer table cannot drift the way a repeated float expression can.
+ */
+void gfx_fill_star(int cx, int cy, int r, uint16_t c)
+{
+    static const int k[20] = {
+           0, -1000,   225,  -309,   951,  -309,   363,   118,
+         588,   809,     0,   382,  -588,   809,  -363,   118,
+        -951,  -309,  -225,  -309,
+    };
+    int xy[20];
+    for (int i = 0; i < 10; i++) {
+        xy[2 * i]     = cx + (k[2 * i]     * r) / 1000;
+        xy[2 * i + 1] = cy + (k[2 * i + 1] * r) / 1000;
+    }
+    gfx_fill_poly(xy, 10, c);
 }
 
 /* ------------------------------------------------------------------ */

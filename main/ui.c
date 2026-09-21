@@ -518,15 +518,18 @@ static void draw_gear(void)
 }
 
 /*
- * The star, filled when this station is starred and an outline when it
- * is not. Nothing at all when there is no station -- see ui_state_t's
+ * The star, filled when this station is starred and a ring when it is
+ * not. Nothing at all when there is no station -- see ui_state_t's
  * `fav`.
  *
- * The same two-triangle construction the chooser's rows use, at the
- * icon size the rest of row 7 is drawn at, so the two stars are
- * recognisably the same mark. They are not shared code: browser.c fills
- * its hole with C_ROW and this one with C_BG, and a shared helper would
- * have to be told the background, which is the only thing that differs.
+ * The same shape the chooser's rows use, at row 7's icon size, so the
+ * two stars are recognisably one mark. Both were two overlapping
+ * triangles until 0932, which is a hexagram and not a star.
+ *
+ * Not shared code with browser.c's: that one punches its ring in the
+ * row colour and this one in the panel background, which is the only
+ * thing that differs, and a helper taking a background is longer than
+ * the two lines it would save.
  */
 static void draw_star_btn(int state)
 {
@@ -534,20 +537,10 @@ static void draw_star_btn(int state)
 
     int cx, cy;
     star_centre(&cx, &cy);
-    const int r = ICON_HALF;
-    const uint16_t c = (state == UI_FAV_ON) ? C_STAR : C_ICON;
-
-    gfx_fill_triangle(cx, cy - r, cx - (r * 87) / 100, cy + (r * 50) / 100,
-                      cx + (r * 87) / 100, cy + (r * 50) / 100, c);
-    gfx_fill_triangle(cx, cy + r, cx - (r * 87) / 100, cy - (r * 50) / 100,
-                      cx + (r * 87) / 100, cy - (r * 50) / 100, c);
-
+    gfx_fill_star(cx, cy, ICON_HALF,
+                  state == UI_FAV_ON ? C_STAR : C_ICON);
     if (state == UI_FAV_OFF) {
-        const int in = (r * 60) / 100;
-        gfx_fill_triangle(cx, cy - in, cx - (in * 87) / 100, cy + (in * 50) / 100,
-                          cx + (in * 87) / 100, cy + (in * 50) / 100, C_BG);
-        gfx_fill_triangle(cx, cy + in, cx - (in * 87) / 100, cy - (in * 50) / 100,
-                          cx + (in * 87) / 100, cy - (in * 50) / 100, C_BG);
+        gfx_fill_star(cx, cy, (ICON_HALF * 58) / 100, C_BG);
     }
 }
 

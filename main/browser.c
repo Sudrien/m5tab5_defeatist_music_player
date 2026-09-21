@@ -702,37 +702,27 @@ static void draw_folder_icon(int cx, int cy, uint16_t c)
 }
 
 /*
- * A five-pointed star, filled when starred and an outline when not.
+ * The star: filled when starred, a ring when not.
  *
- * Drawn from two overlapping triangles rather than a polygon fill,
- * because gfx has no polygon fill and a star is exactly the shape that
- * decomposes into two. The outline case draws the same two triangles in
- * the row colour inside a slightly larger pair, which is a stroke
- * without a stroke primitive.
+ * IT USED TO BE TWO OVERLAPPING TRIANGLES, which is a hexagram -- six
+ * points -- while the comment above it said "five-pointed". No pair of
+ * triangles makes a five-pointed star; it is a ten-vertex polygon, and
+ * gfx_fill_star() draws one.
+ *
+ * The unfilled case is the same star again at 58% in the row's own
+ * colour, which leaves a rim. `bg` and not C_ROW: the rows alternate
+ * C_ROW and C_ROW_ALT, and a hole punched in the wrong one is a star
+ * with a shadow on every second line.
+ *
+ * 58% rather than the 60% the triangles used because a star's arms are
+ * thinner than a triangle's edge at the same fraction, and at r=18 the
+ * rim wants the two or three pixels this leaves it.
  */
 static void draw_star(int cx, int cy, int r, bool filled, uint16_t c,
                       uint16_t bg)
 {
-    /* Upright triangle, then the inverted one, which together read as a
-     * star at any size a finger can aim at.
-     *
-     * `bg` and not C_ROW: the rows alternate C_ROW and C_ROW_ALT, and a
-     * hole punched in the wrong one of those is a star with a shadow on
-     * every second line. */
-    gfx_fill_triangle(cx, cy - r, cx - (r * 87) / 100, cy + (r * 50) / 100,
-                      cx + (r * 87) / 100, cy + (r * 50) / 100, c);
-    gfx_fill_triangle(cx, cy + r, cx - (r * 87) / 100, cy - (r * 50) / 100,
-                      cx + (r * 87) / 100, cy - (r * 50) / 100, c);
-    if (!filled) {
-        /* The same shape, smaller, in the row's colour: what is left is
-         * a ring. The inner star is 60% because anything thinner than
-         * about 3 px of rim disappears at this pitch. */
-        const int in = (r * 60) / 100;
-        gfx_fill_triangle(cx, cy - in, cx - (in * 87) / 100, cy + (in * 50) / 100,
-                          cx + (in * 87) / 100, cy + (in * 50) / 100, bg);
-        gfx_fill_triangle(cx, cy + in, cx - (in * 87) / 100, cy - (in * 50) / 100,
-                          cx + (in * 87) / 100, cy - (in * 50) / 100, bg);
-    }
+    gfx_fill_star(cx, cy, r, c);
+    if (!filled) gfx_fill_star(cx, cy, (r * 58) / 100, bg);
 }
 
 /* A note: stem and head. Two rectangles and a circle is enough to read as
