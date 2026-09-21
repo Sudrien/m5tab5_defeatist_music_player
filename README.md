@@ -63,10 +63,8 @@ Note: the goal of this project is to max out the potential of this hardware with
 - Network Time Protocol (if wifi has been setup)
 - captive portal wifi config (multiple routers)
 - wifi network portal manual Internet Radio station entry 
-
-## v0.4.0 targets
-- Internet radio favorites
-
+- Starred Favorites
+- Ethernet to usb dongles ( CDC-ECM and experimental [asix[(https://github.com/Sudrien/esp_usbh_asix) port )
 
 ## v0.5.0 targets
 - Ethernet dongle support
