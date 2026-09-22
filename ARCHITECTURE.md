@@ -9874,3 +9874,95 @@ One number worth keeping from the same log: **first sound at 24727 ms**,
 against a 30000 ms preroll cutoff. The stream was six seconds from being
 killed for being slow while it was in fact working, which is the case
 0930's "Stream too slow here" card was written for.
+
+## The 1200 series: cue sheets, USB Ethernet, and the third ring's order
+
+### Two series called 1000 (read this before searching for a number)
+
+**1000–1012 were used twice.** The v0.3.0 work above is the 1000 series
+up to 1116. The session that added USB Ethernet and cue sheets numbered
+its patches from 1000 again without looking, so there are two of each
+of 1000–1012 in the history. The second set, in order:
+
+| # | What |
+| --- | --- |
+| 1000 | USB Ethernet: `ethernet.c`, `netlink.h`, ASIX + CDC-ECM (RTL8152/8153) |
+| 1001 | Ethernet with Espressif's `iot_usbh_ecm` for the Realtek dongles |
+| 1002 | Cue-sheet test corpus, 22–26, and `.gitattributes` for the `.cue` bytes |
+| 1003 | `encode.sh` writes 22's accented title with `%b` |
+| 1004 | `cuesheet.h`, the parser, and `texttest/cuesheettest.c` |
+| 1005 | `cuedir.c` and cue playback: "Album.cue#03", spans in `decoder.c` |
+| 1006 | `net_route_describe()`: netstream says which interface it went out of |
+| 1007 | `esp_usbh_asix` pinned |
+| 1008 | route-priority juggling -- superseded by 1009 |
+| 1009 | `netlink_pick()`: the default route pinned, not left to esp_netif |
+| 1010 | DNS saved and restored around the cable's DHCP |
+| 1011 | `esp_audio_codec` held below 2.6, which needs chip revision v3 |
+| 1012 | `netplan_should_move`: a stream moves to the cable when it comes up |
+
+Everything after starts at 1200, which was checked free. When a log or
+a comment says "1005", it is the cue patch if it mentions cues and the
+v0.3.0 one otherwise.
+
+### What the 1200s fixed
+
+- **1200** cue tracks get sidecars (replaygain.c stat()ed the virtual
+  path) and neighbours on one sheet never crossfade -- they are one
+  recording cut at INDEX 01.
+- **1201** the crossfade mixed `s_ring[fill]` as the incoming side. With
+  three rings and short tracks the decode can be two tracks ahead, so
+  it mixed the wrong track, or -- once fill wrapped to play -- nothing,
+  and the rest of the outgoing ring played at a frozen ramp gain. The
+  incoming side is `(play + 1) % PCM_RINGS`, and an overlap only starts
+  when fill is that ring, because `s_xfade_armed` describes the
+  boundary into fill.
+- **1202** diagnostics: every writer ring change, and the ring levels
+  when the decode starts waiting for one.
+- **1203** test file 27, whose tracks draw 3, 2 and 1 bumps -- the
+  landmark barely moves in loudness, so 22's tracks all draw the same
+  line and cannot show whose envelope a bar is.
+- **1204/1205** a track decoded before it is heard kept losing its
+  screen commit, because the commit lived in `play_file()` and that
+  returns when the DECODE ends. It is saved per ring (`s_late`) and
+  applied when the writer arrives. The gate also commits on the writer
+  reaching the track's ring, not on a release raised by an earlier
+  boundary.
+- **1206** the chooser went black after boot: `browser_open()` from the
+  decode task raced ui_task's draw, and with every cue sheet parsed the
+  load was long enough to lose. `load_dir()` dirties the screen again at
+  the end.
+- **1207–1209** stars on local files and folders (`starred.c`,
+  `starred.m3u` per volume, relative paths, folders end in `/`), the
+  panel's star for files (solid / thick gold ring for a starred folder /
+  thin white ring), and star requests served from the sliced send loop,
+  which is the only loop running while paused. A mark only: nothing
+  plays the list yet.
+- **1210** the one 1202 found. The decode set `s_ring_fill` to the next
+  ring and THEN waited for it. The writer only leaves a ring that is not
+  the fill ring, so a ring it was draining became one it could not
+  leave: it emptied it, stayed, and played the next track out of it
+  ahead of the two already queued. Tracks came out of order and, later,
+  the 30 s timeout reset 1.4 MB of a passed-over track. The next ring is
+  now chosen, waited for until it is empty AND the writer is off it, and
+  only then taken.
+
+**The lesson 1115 already had, again.** Three rings broke two
+assumptions that two rings could not: that fill is play + 1, and that a
+chosen ring is a free one. Anything that names a ring by `s_ring_fill`
+when it means "the next one to be heard" is suspect.
+
+### Still open
+
+- **A cue track starting mid-file costs ~500 ms** before its first
+  sample: a block decoded at the top of the file to learn the rate, a
+  FLAC seek, a decoder reopen, and decoding forward. 1211 logs the parts
+  (`cue: start reached in …`, and `find`/`reopen` on the seek line).
+  The likely fix is to take the rate from STREAMINFO at open and seek
+  before the first decode. Not audible while a previous track is
+  playing, which is every case in the logs so far.
+- **Cue sheets are re-parsed on every listing and every play**, all of
+  them, which is the repeated `tab5_cue` bursts in every log. A per-
+  folder cache would end that and shorten the race 1206 closed.
+- **The chooser's rows are filled on one task and drawn on another** at
+  boot. 1206 made the result right; the two still touch the array at
+  once.

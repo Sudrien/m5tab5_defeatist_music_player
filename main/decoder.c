@@ -1058,6 +1058,7 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
     uint8_t preamble[FLAC_PREAMBLE_BYTES];
     size_t plen = 0;
     uint32_t at_cs = sec * 100;
+    const int64_t t0 = esp_timer_get_time();
 
     if (d->cbr_ok) {
         off = cbr_offset_for_sec(d->f, &d->cbr, sec);
@@ -1113,6 +1114,7 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
         return ESP_ERR_NOT_SUPPORTED;
     }
     if (off < 0) return ESP_FAIL;
+    const int64_t t_found = esp_timer_get_time();
 
     if (!d->mp4.ok && fseek(d->f, off, SEEK_SET) != 0) {
         ESP_LOGW(TAG, "%s: fseek to %ld failed", d->info.codec, off);
@@ -1192,14 +1194,17 @@ static esp_err_t esp_codec_seek(decoder_t *d, uint32_t sec, uint32_t *landed_cs)
     }
 
     if (landed_cs) *landed_cs = at_cs;
+    const int64_t t_done = esp_timer_get_time();
     ESP_LOGI(TAG, "%s: seek to %" PRIu32 "s -> offset %ld, landed %" PRIu32
-                  ".%02" PRIu32 "s (+%u B header)",
+                  ".%02" PRIu32 "s (+%u B header; find %u ms, reopen %u ms)",
              d->cbr_ok ? d->cbr.what
                        : d->flac.ok ? "flac"
                        : d->ogg.ok  ? "ogg"
                        : d->ts.ok   ? "ts" : "adts table",
              sec, off, at_cs / 100, at_cs % 100,
-             (unsigned)plen);
+             (unsigned)plen,
+             (unsigned)((t_found - t0) / 1000),
+             (unsigned)((t_done - t_found) / 1000));
     return ESP_OK;
 }
 
@@ -1608,8 +1613,18 @@ static int cue_read(decoder_t *d, int16_t *out, int max_int16)
     cue_span_t *c = &d->cue;
     if (c->armed && c->hi && c->pos >= c->hi) return 0;
 
+    /* The cost of reaching a span's start, in its three parts: the
+     * block decoded at the top of the file to learn the rate, the seek
+     * (find + decoder reopen, split in esp_codec_seek()'s line), and
+     * decoding forward to the first kept sample. Only on the call that
+     * arms the span. */
+    const bool timing = !c->armed;
+    const int64_t t_in = timing ? esp_timer_get_time() : 0;
+    int64_t t_first = 0, t_seek = 0;
+
     for (;;) {
         const int n = read_raw(d, out, max_int16);
+        if (timing && !t_first) t_first = esp_timer_get_time();
         if (n <= 0) return n;
         const int ch = d->info.channels > 0 ? d->info.channels : 1;
         const uint64_t frames = (uint64_t)(n / ch);
@@ -1627,6 +1642,7 @@ static int cue_read(decoder_t *d, int16_t *out, int max_int16)
             c->pos = 0;
             c->want = target;
             if (target > frames && cue_goto(d, target)) {
+                t_seek = esp_timer_get_time();
                 continue;               /* seeked: this buffer is stale */
             }
         }
@@ -1642,6 +1658,15 @@ static int cue_read(decoder_t *d, int16_t *out, int max_int16)
         const size_t keep = (size_t)(hi - lo) * (size_t)ch;
         if (lo > a) memmove(out, out + (size_t)(lo - a) * (size_t)ch,
                             keep * sizeof(int16_t));
+        if (timing && t_seek) {
+            const int64_t t_out = esp_timer_get_time();
+            ESP_LOGI(TAG, "cue: start reached in %u ms: first block %u, "
+                          "seek %u, decode to the start %u",
+                     (unsigned)((t_out - t_in) / 1000),
+                     (unsigned)((t_first - t_in) / 1000),
+                     (unsigned)((t_seek - t_first) / 1000),
+                     (unsigned)((t_out - t_seek) / 1000));
+        }
         return (int)keep;
     }
 }
