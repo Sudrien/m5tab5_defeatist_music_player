@@ -32,6 +32,7 @@ static const char *TAG = "tab5_ui";
  * colour, two screens. Not C_FILL, which means "played" on the seek bar
  * eight pixels away. */
 #define C_STAR      RGB(0xE8, 0xB3, 0x2C)
+#define C_STAR_OFF  RGB(0xFF, 0xFF, 0xFF)   /* the thin ring: nothing starred */
 /* Album row. Dimmer than artist, but its own value rather than reusing
  * C_TRACK -- that is 0x3A, chosen to be a slider groove that does not
  * compete with the fill, and it is too dark to read as text. */
@@ -535,12 +536,26 @@ static void draw_star_btn(int state)
 {
     if (state == UI_FAV_HIDDEN) return;
 
+    /*
+     * Three looks, told apart at arm's length: solid gold for starred,
+     * a thick gold ring for a file whose folder is starred, a thin
+     * white ring for neither. The rings are the same star with a
+     * smaller or larger one punched out of it in the background.
+     */
     int cx, cy;
     star_centre(&cx, &cy);
-    gfx_fill_star(cx, cy, ICON_HALF,
-                  state == UI_FAV_ON ? C_STAR : C_ICON);
-    if (state == UI_FAV_OFF) {
-        gfx_fill_star(cx, cy, (ICON_HALF * 58) / 100, C_BG);
+    switch (state) {
+    case UI_FAV_ON:
+        gfx_fill_star(cx, cy, ICON_HALF, C_STAR);
+        break;
+    case UI_FAV_FOLDER:
+        gfx_fill_star(cx, cy, ICON_HALF, C_STAR);
+        gfx_fill_star(cx, cy, (ICON_HALF * 50) / 100, C_BG);
+        break;
+    default:
+        gfx_fill_star(cx, cy, ICON_HALF, C_STAR_OFF);
+        gfx_fill_star(cx, cy, (ICON_HALF * 82) / 100, C_BG);
+        break;
     }
 }
 

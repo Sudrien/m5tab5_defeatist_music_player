@@ -3240,6 +3240,11 @@ static bool              s_star_dir;
 static volatile bool     s_star_pending;
 static volatile uint32_t s_stars_epoch;
 
+/* The file the screen is showing -- set where the screen commits to a
+ * track, which is not s_path during a decode-ahead. For the panel's
+ * star. */
+static char              s_shown_path[512];
+
 /*
  * The station's artwork URL, resolved once at first sound, or empty.
  *
@@ -4331,6 +4336,7 @@ static void track_commit(const track_commit_t *tc)
 
     settings_set_track(tc->path);
     browser_set_playing(tc->path);
+    snprintf(s_shown_path, sizeof(s_shown_path), "%s", tc->path);
 
     track_change_show();
     load_track_visuals(tc->path);
@@ -4412,6 +4418,7 @@ static void late_commit_poll(void)
     s_rg_gain_db   = l->tc.rg_gain_db;
     settings_set_track(l->path);
     browser_set_playing(l->path);
+    snprintf(s_shown_path, sizeof(s_shown_path), "%s", l->path);
     if (l->env == ENV_PENDING_SET)        wave_show(&l->walk, l->path);
     else if (l->env == ENV_PENDING_CLEAR) wave_clear();
     load_track_visuals(l->path);
@@ -6669,6 +6676,39 @@ static void service_favorite_toggle(void)
     s_stations_epoch++;
 }
 
+/*
+ * The panel's star for a file: its own star, else a star on its folder
+ * or any folder above it, else none. Resolved when the track or the
+ * stars change, not every frame -- starred_contains() can read the
+ * volume's list the first time it is asked.
+ */
+static int file_star_state(void)
+{
+    static char     path[512];
+    static uint32_t epoch = UINT32_MAX;
+    static int      state = UI_FAV_HIDDEN;
+
+    if (!s_shown_path[0]) return UI_FAV_HIDDEN;
+    if (epoch == s_stars_epoch && strcmp(path, s_shown_path) == 0) return state;
+
+    snprintf(path, sizeof(path), "%s", s_shown_path);
+    epoch = s_stars_epoch;
+
+    if (starred_contains(path, false)) {
+        state = UI_FAV_ON;
+        return state;
+    }
+    static char dir[512];
+    snprintf(dir, sizeof(dir), "%s", path);
+    state = UI_FAV_OFF;
+    for (char *slash = strrchr(dir, '/'); slash && slash != dir;
+         slash = strrchr(dir, '/')) {
+        *slash = '\0';
+        if (starred_contains(dir, true)) { state = UI_FAV_FOLDER; break; }
+    }
+    return state;
+}
+
 static void ui_task(void *arg)
 {
     ui_state_t st;
@@ -7078,7 +7118,7 @@ static void ui_task(void *arg)
                    : favorites_contains(fst.url) ? UI_FAV_ON
                                                  : UI_FAV_OFF;
         } else {
-            st.fav = UI_FAV_HIDDEN;
+            st.fav = file_star_state();
         }
 
         /*
@@ -7490,7 +7530,15 @@ static void ui_task(void *arg)
              * outstanding, and if they race the later press wins, which
              * is the one the finger meant.
              */
-            s_fav_row = stations_index();
+            if (s_streaming) {
+                s_fav_row = stations_index();
+            } else if (!s_star_pending && s_shown_path[0]) {
+                /* A file: star the track itself. A folder is starred
+                 * from the chooser. */
+                snprintf(s_star_path, sizeof(s_star_path), "%s", s_shown_path);
+                s_star_dir = false;
+                s_star_pending = true;
+            }
             break;
 
         case UI_ACTION_SCREEN_OFF:

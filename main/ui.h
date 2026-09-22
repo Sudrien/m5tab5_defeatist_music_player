@@ -197,10 +197,11 @@ typedef struct {
     /*
      * The star, on the transport row between `next` and the moon.
      *
-     * Three-valued because "not shown" is not the same as "not
-     * starred": the button is absent for a FILE, which has nothing to
-     * star, and an empty outline there would be a control that does
-     * nothing. UI_FAV_HIDDEN draws no glyph and ui_touch() does not
+     * "Not shown" is not the same as "not starred": the button is
+     * absent when there is nothing playing to star, and an empty
+     * outline there would be a control that does nothing. Since 1208 a
+     * local file has a star too (starred.h), and FOLDER is the fourth
+     * state. UI_FAV_HIDDEN draws no glyph and ui_touch() does not
      * test the box, so the space belongs to nobody rather than to a
      * dead button.
      *
@@ -212,7 +213,14 @@ typedef struct {
     enum {
         UI_FAV_HIDDEN = 0,  /* not a stream: no button */
         UI_FAV_OFF,         /* a stream, not starred */
-        UI_FAV_ON,          /* a stream, starred */
+        UI_FAV_ON,          /* starred: a stream, or this file */
+        /*
+         * A file that is not starred but whose folder -- or a folder
+         * above it -- is. A thick gold ring: the star is not this
+         * track's, but it is not nothing either. Files only; a station
+         * has no folder.
+         */
+        UI_FAV_FOLDER,
     } fav;
 } ui_state_t;
 
