@@ -4096,6 +4096,7 @@ static void track_change_begin(const char *path)
      * survive into this one.
      */
     s_visuals_released = !tail_playing();
+    if (!tail_playing()) late_commit_drop();
 
     /*
      * Re-pin around the change. The track leaving the screen is the one
@@ -4321,6 +4322,91 @@ static void track_commit(const track_commit_t *tc)
 
     track_change_show();
     load_track_visuals(tc->path);
+}
+
+/*
+ * A commit that outlived its decode.
+ *
+ * The gate above lives in play_file(), and play_file() returns when the
+ * track's DECODE ends. With three rings and tracks shorter than one, a
+ * track can be decoded start to finish while two others are still
+ * queued ahead of it -- 27's 20 s and 10 s tracks, all three decoded in
+ * 22 s -- and its commit was simply lost: the bar sat grey through
+ * track 2, and track 3 played under track 1's bumps and length.
+ *
+ * So an uncommitted track leaves its commit here, keyed by the ring it
+ * filled, and it is applied when the writer arrives on that ring. The
+ * envelope goes with it, because s_walk_pending is the next track's by
+ * then. Static, not stack: a framewalk_t is most of a kilobyte, times
+ * three.
+ */
+typedef struct {
+    bool           set;
+    uint32_t       seq;
+    int            ring;
+    track_commit_t tc;
+    char           path[512];
+    int            env;
+    framewalk_t    walk;
+} late_commit_t;
+
+static late_commit_t s_late[PCM_RINGS];
+static uint32_t      s_late_seq;
+
+static void late_commit_drop(void)
+{
+    for (int i = 0; i < PCM_RINGS; i++) s_late[i].set = false;
+}
+
+static void late_commit_save(int ring, const track_commit_t *tc)
+{
+    if (ring < 0 || ring >= PCM_RINGS) return;
+    late_commit_t *l = &s_late[ring];
+    l->set  = true;
+    l->seq  = ++s_late_seq;
+    l->ring = ring;
+    l->tc   = *tc;
+    snprintf(l->path, sizeof(l->path), "%s", tc->path);
+    l->tc.path = l->path;
+    l->env = ENV_PENDING_NONE;
+    if (s_env_pending != ENV_PENDING_NONE &&
+        (s_env_pending == ENV_PENDING_CLEAR || strcmp(s_env_path, tc->path) == 0)) {
+        l->env = s_env_pending;
+        if (l->env == ENV_PENDING_SET) memcpy(&l->walk, &s_walk_pending, sizeof(l->walk));
+    }
+    s_env_pending = ENV_PENDING_NONE;
+}
+
+/* Apply the newest saved commit whose ring the writer is now on, and
+ * forget it and everything older. Decode task only, like the gate. */
+static void late_commit_poll(void)
+{
+    int best = -1;
+    for (int i = 0; i < PCM_RINGS; i++) {
+        if (s_late[i].set && s_late[i].ring == s_ring_play &&
+            (best < 0 || s_late[i].seq > s_late[best].seq)) best = i;
+    }
+    if (best < 0) return;
+
+    late_commit_t *l = &s_late[best];
+    const uint32_t seq = l->seq;
+    ESP_LOGI(TAG, "screen caught up on ring %d: %s", l->ring, l->path);
+
+    s_len_sec      = l->tc.len_sec;
+    s_can_seek     = l->tc.can_seek;
+    s_stats_valid  = true;
+    s_rg_active    = l->tc.rg_active;
+    s_rg_measuring = l->tc.rg_measuring;
+    s_rg_gain_db   = l->tc.rg_gain_db;
+    settings_set_track(l->path);
+    browser_set_playing(l->path);
+    if (l->env == ENV_PENDING_SET)        wave_show(&l->walk, l->path);
+    else if (l->env == ENV_PENDING_CLEAR) wave_clear();
+    load_track_visuals(l->path);
+
+    for (int i = 0; i < PCM_RINGS; i++) {
+        if (s_late[i].set && s_late[i].seq <= seq) s_late[i].set = false;
+    }
 }
 
 
@@ -5172,8 +5258,10 @@ static void ring_publish(void)
      * false and the ring chosen is the one that was always chosen.
      */
     int pos_ring = s_ring_play;
-    if (s_visuals_released && s_ring_play != s_ring_fill) {
-        pos_ring = s_ring_fill;
+    if (s_visuals_released && s_xfade_active) {
+        /* The incoming ring, not the fill ring: with a deep queue the
+         * fill ring is a track nobody is hearing yet. */
+        pos_ring = (s_ring_play + 1) % PCM_RINGS;
     }
     pos_publish(pos_ring, xStreamBufferBytesAvailable(s_ring[pos_ring]));
 
@@ -8204,6 +8292,7 @@ static track_end_t play_file(const char *path)
      * below passes on its first look.
      */
     bool visuals_pending = true;
+    int  my_ring = -1;          /* the ring this track fills; see s_late */
 
     /*
      * The handoff, from this side. s_ring_play catches up when the
@@ -8227,8 +8316,14 @@ static track_end_t play_file(const char *path)
      */
 #define VISUALS_GATE()                                                  \
     do {                                                                \
-        if (visuals_pending && cur_rate != 0 && track_commit_due()) {    \
+        late_commit_poll();                                              \
+        if (visuals_pending && cur_rate != 0 &&                          \
+            ((my_ring >= 0 && s_ring_play == my_ring) ||                  \
+             (track_commit_due() &&                                      \
+              (my_ring < 0 || s_xfade_active ||                          \
+               xStreamBufferIsEmpty(s_ring[s_ring_play]))))) {            \
             visuals_pending = false;                                     \
+            late_commit_drop();                                          \
             const track_commit_t _tc = {                                 \
                 .path           = path,                                  \
                 .len_sec        = len_sec,                               \
@@ -9090,6 +9185,7 @@ static track_end_t play_file(const char *path)
                  */
                 s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
                 s_pcm = s_ring[s_ring_fill];
+                my_ring = s_ring_fill;
 
                 /*
                  * WAIT FOR IT, RATHER THAN RESET OVER IT.
@@ -10214,6 +10310,20 @@ static track_end_t play_file(const char *path)
      * has got to. Zeroing here dropped the bar to the start for the last
      * twenty seconds of every song. */
     if (!tail_playing()) s_pos_sec = 0;
+
+    /* Decoded but not yet heard: leave the commit for the writer's
+     * arrival on this ring. See s_late. */
+    if (visuals_pending && why == TRACK_ENDED && tail_playing() && my_ring >= 0) {
+        const track_commit_t tc = {
+            .path         = path,
+            .len_sec      = len_sec,
+            .can_seek     = can_seek,
+            .rg_active    = rg_pending_active,
+            .rg_measuring = rg_pending_measuring,
+            .rg_gain_db   = rg_pending_db,
+        };
+        late_commit_save(my_ring, &tc);
+    }
     return why;
 }
 #undef VISUALS_GATE
@@ -12553,8 +12663,10 @@ static void player_loop(void)
          * where that belongs.
          */
         while (s_tail_pending && !s_pending_ready) {
+            late_commit_poll();
             vTaskDelay(pdMS_TO_TICKS(50));
         }
+        late_commit_poll();
         if (s_pending_ready) continue;
 
         /*
