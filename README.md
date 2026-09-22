@@ -64,7 +64,8 @@ Note: the goal of this project is to max out the potential of this hardware with
 - captive portal wifi config (multiple routers)
 - wifi network portal manual Internet Radio station entry 
 - Starred Favorites
-- Ethernet to usb dongles ( CDC-ECM and experimental [asix](https://github.com/Sudrien/esp_usbh_asix) port )
+- Ethernet to usb dongles ( experimental CDC-ECM and [asix](https://github.com/Sudrien/esp_usbh_asix) port )
+- Cue sheets
 
 ## v0.5.0 targets
 - zero storage internet radio scenario
@@ -81,8 +82,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 - build file lists faster
 - more crash and burn handling, hey, you can always hook it up to `idf.py monitor` and see what you get.
 - Podcast over wifi downloader? Conceivable. Would want chapter support
-  - there's so much. So so much. 
-- Cue sheets - do people actually rip full albums? I just have seen tracks
+  - there's so much. So so much.
 - m3u/m3u8 - playlists are significant potential UI
 
 ## What could not happen with current published code
