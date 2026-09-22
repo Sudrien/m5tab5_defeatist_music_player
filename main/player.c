@@ -4071,6 +4071,9 @@ static bool track_commit_due(void)
     return s_visuals_released;
 }
 
+/* Defined with s_late below; this function is its one early caller. */
+static void late_commit_drop(void);
+
 static void track_change_begin(const char *path)
 {
     s_track_gen++;
