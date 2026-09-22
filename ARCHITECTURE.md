@@ -9966,3 +9966,36 @@ when it means "the next one to be heard" is suspect.
 - **The chooser's rows are filled on one task and drawn on another** at
   boot. 1206 made the result right; the two still touch the array at
   once.
+
+## Where v0.4.0 got to, and the 5000 series
+
+**v0.4.0 is tagged** at the end of the 1200 series above (1211). What it
+added over v0.3.0, in the order it will matter to someone picking it up:
+
+- **USB Ethernet** (the second 1000, 1001, 1006-1012): ASIX AX88772 and
+  CDC-ECM, so the Realtek RTL8152/8153 dongles through Espressif's
+  driver. The cable wins the default route whenever it is usable
+  (`netlink_pick()`), the station stays as the fallback, and DNS is
+  saved and restored across the cable's DHCP. Confirmed on the board
+  with the ASIX; **the Realtek path has not been on hardware yet.**
+- **Cue sheets** (1002-1005, 1200, 1203, 1211): a sheet's tracks list
+  and play as "Album.cue#03", with sidecars, gapless between
+  neighbours, and the image hidden behind its sheet. Test files 22-27.
+- **Local stars** (1207-1209): files and folders, per volume, in
+  `starred.m3u`. A mark, not yet a playlist.
+- **Three rings, properly** (1201, 1204, 1210): the crossfade, the
+  screen commit and the ring handoff each assumed the decode was one
+  track ahead. Short tracks -- cue tracks, interludes -- made it two.
+
+**Known open at the tag**, carried from the list above: the ~500 ms
+before a mid-file cue track's first sample (timed by 1211, not yet
+fixed), cue sheets re-parsed on every listing, and the chooser filled
+and drawn on two tasks at boot.
+
+### The 5000 series
+
+Patches after v0.4.0 are numbered from 5000; 5000 itself is the
+CLAUDE.md change that says so. The jump is deliberate and leaves 1212-
+4999 unused, so that a number says which release it came after: 0xxx
+and the first 1000-1116 are v0.3.0 and before, the second 1000-1012
+and 1200-1211 are v0.4.0, 5000 on is after it.
