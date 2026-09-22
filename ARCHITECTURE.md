@@ -10064,3 +10064,27 @@ sideband, matching the file envelope, which had been drawn from the
 baseline all along; and `settings` carries `screen_rotation` alongside
 the old `screen_flipped`, so a rollback lands upright or over rather
 than on its side.
+
+### 5002 -- the call site the host suite could not see
+
+5001 renamed `screen_apply_flip()` to `screen_apply_rotation()` and
+missed one of its two call sites, so the ESP-IDF build failed on an
+implicit declaration in `ui_task`. The host suite passed the whole time
+and always would have: **`player.c` does not build on a host**, and
+neither do `touch.c`, `settings.c` or `albumart.c`. `texttest` builds
+`gfx.c` and compiles `sleeppage.c` for warnings; everything else in a
+patch that touches the screen is checked by reading it.
+
+So the rule this cost: **after renaming anything in a file the host
+suite cannot build, grep the tree for the old name and count the hits
+against the number of edits made.** One edit and two hits is the whole
+failure. It is cheap and it is the only check available.
+
+Also here, found while auditing for the same class of mistake: the
+play/pause hit box was still `BTN_R`, the radius of the disc the toggle
+replaced. The pill is 168x92 and a 92 px box inside it left the 38 px at
+each end looking pressable and not being -- exactly the complaint the
+old row-7 comment makes about controls whose boxes disagree with their
+ink. The box is the pill's now, written out because `in_box()` takes one
+half-extent and every other control on the row is square. `BTN_R` is
+gone with its last user.

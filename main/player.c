@@ -6874,18 +6874,22 @@ static void ui_task(void *arg)
             } else if (r == SLEEPPAGE_FLIP) {
                 /*
                  * The page stays open and redraws itself, which is the
-                 * confirmation: the row that was tapped comes back at
-                 * the other end of the screen. sleeppage_draw() blits
-                 * the whole screen, so there is nothing left over from
-                 * the old orientation to clear.
+                 * confirmation: the row that was tapped comes back the
+                 * new way round. sleeppage_draw() blits the whole
+                 * screen, so there is nothing left over from the old
+                 * orientation to clear.
                  *
                  * The press is swallowed because the finger is still on
                  * the glass and the coordinates under it have just
                  * changed meaning -- the same trap touch_swallow()
                  * exists for on every other screen transition, arrived
                  * at without changing screens.
+                 *
+                 * A quarter turn also changes gfx_w()/gfx_h(), so
+                 * screen_apply_rotation() relays the square out before
+                 * anything draws against the new extent.
                  */
-                screen_apply_flip();
+                screen_apply_rotation();
                 sleeppage_draw();
                 touch_swallow();
                 s_repaint_art = true;

@@ -196,8 +196,9 @@ static const char *TAG = "tab5_ui";
 #define PILL_W      (168)
 #define PILL_H      (92)
 #define KNOB_R      (45)
+/* BTN_R, the disc's radius, is gone with the disc. Its last user was the
+ * hit test, which is the pill's own box now -- see ui_touch(). */
 
-#define BTN_R       (46)    /* the old disc's radius; still the hit size */
 #define ICON_HALF   (26)
 #define SKIP_HALF   (35)    /* prev/next: 26 px triangle plus a 7 px bar */
 /*
@@ -2093,8 +2094,18 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
 
     int cx, cy;
 
+    /*
+     * The toggle's box is the PILL, not the disc it replaced.
+     *
+     * in_box() takes one half-extent because every other control on
+     * this row is square; the pill is 168x92 and a BTN_R box would be a
+     * 92 px target inside a 168 px control -- the 38 px either end that
+     * look pressable would not be. Written out rather than adding a
+     * rectangular in_box() for one caller.
+     */
     play_centre(&cx, &cy);
-    if (in_box(x, y, cx, cy, BTN_R)) {
+    if (x >= cx - PILL_W / 2 - HIT_PAD_X && x <= cx + PILL_W / 2 + HIT_PAD_X &&
+        y >= cy - PILL_H / 2 - HIT_PAD_Y && y <= cy + PILL_H / 2 + HIT_PAD_Y) {
         act.kind = UI_ACTION_PLAY_PAUSE;
         return act;
     }
