@@ -76,6 +76,7 @@ Note: the goal of this project is to max out the potential of this hardware with
   - omnidirectional vs. GSC-directional (screen-forward) mode for onboard array
   - all captures encoded to FLAC as master (mp3 it yourself, bub), named aftere best guess for datetime.
   - match uac channels if that makes any sense
+- clean up layout, landscape layout 
 
 ## What could happen
 - I think there is nothing in dependencies stopping from using esp-idf 6.1
