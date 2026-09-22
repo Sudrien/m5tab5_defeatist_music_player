@@ -16,6 +16,7 @@
 #include "browser.h"
 #include "cuedir.h"
 #include "favorites.h"
+#include "starred.h"
 #include "radiobrowser.h"
 #include "stations.h"
 #include "decoder.h"
@@ -272,6 +273,22 @@ static int cmp_entry(const void *a, const void *b)
  * and sorted. */
 static void find_common_prefix(void);
 
+/*
+ * Local stars, resolved per row when the list is built -- the reason
+ * entry_t.fav exists, and the same once-per-load rule the radio rows
+ * follow. The first call for a volume reads its starred.m3u, which is
+ * I/O on the task that is already reading the directory.
+ */
+static void stars_resolve(void)
+{
+    static char full[512];                  /* not the stack */
+    for (int i = 0; i < s_count; i++) {
+        s_entries[i].fav =
+            storage_join_path(full, sizeof(full), s_dir, s_entries[i].name) &&
+            starred_contains(full, s_entries[i].is_dir);
+    }
+}
+
 static void load_dir(const char *dir)
 {
     if (!s_entries) {
@@ -327,6 +344,7 @@ static void load_dir(const char *dir)
 
     qsort(s_entries, (size_t)s_count, sizeof(entry_t), cmp_entry);
     find_common_prefix();
+    stars_resolve();
 
     /*
      * Dirty again now the rows exist. The flag set at the top is for
@@ -568,6 +586,13 @@ void browser_stations_reloaded(void)
     s_radio_menu = false;
     s_radio_status[0] = '\0';
     load_stations();
+}
+
+void browser_stars_changed(void)
+{
+    if (!s_open || s_radio) return;
+    stars_resolve();
+    s_dirty = true;
 }
 
 static void select_tab(browser_tab_t id)
@@ -1026,7 +1051,7 @@ void browser_draw(void)
          * one nobody finds. It is drawn dim so that a list with none
          * starred does not read as a column of decorations.
          */
-        const bool starrable = s_radio && !s_radio_menu;
+        const bool starrable = s_radio ? !s_radio_menu : true;
         const int  name_w = w - 112 - SCROLL_W - (starrable ? STAR_W : 0);
         gfx_draw_text(96, y + (ROW_H - GFX_GLYPH_H(NAME_SCALE)) / 2, label,
                       NAME_SCALE, name_w, playing ? C_ACCENT : C_TEXT);
@@ -1336,6 +1361,18 @@ browser_result_t browser_touch(bool down, int x, int y)
          * knows what station i is. */
         res.kind = BROWSER_PLAY_STREAM;
         res.index = i;
+        return res;
+    }
+
+    /* The star's strip on a file or folder row, same place and same
+     * precedence as the station rows'. */
+    if (x >= gfx_w() - SCROLL_W - STAR_W && x < gfx_w() - SCROLL_W) {
+        if (!storage_join_path(s_result, sizeof(s_result), s_dir, s_entries[i].name)) {
+            return res;
+        }
+        res.kind = BROWSER_TOGGLE_STAR;
+        res.path = s_result;
+        res.index = s_entries[i].is_dir ? 1 : 0;
         return res;
     }
 

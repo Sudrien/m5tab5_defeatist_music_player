@@ -98,6 +98,7 @@
 #include "netdec.h"
 #include "netstream.h"
 #include "favorites.h"
+#include "starred.h"
 #include "stations.h"
 #include "radiobrowser.h"
 #include "streamgain.h"
@@ -3230,6 +3231,14 @@ static volatile int      s_fetch_row = -1;
  */
 static volatile bool     s_load_favorites;
 static volatile int      s_fav_row = -1;
+
+/* The local star the chooser asked for, same one-outstanding rule. The
+ * path is copied before the flag is raised, and the flag is what the
+ * player task reads first. s_stars_epoch tells ui_task it landed. */
+static char              s_star_path[512];
+static bool              s_star_dir;
+static volatile bool     s_star_pending;
+static volatile uint32_t s_stars_epoch;
 
 /*
  * The station's artwork URL, resolved once at first sound, or empty.
@@ -6603,6 +6612,22 @@ static void service_favorites_load(void)
  * to redraw either way, and after a failure the row must go back to
  * showing what is actually on the card rather than what was asked for.
  */
+static void service_star_toggle(void)
+{
+    if (!s_star_pending) return;
+    static char path[512];
+    snprintf(path, sizeof(path), "%s", s_star_path);
+    const bool dir = s_star_dir;
+    s_star_pending = false;
+
+    const bool was = starred_contains(path, dir);
+    const bool now = starred_toggle(path, dir);
+    if (now == was) {
+        notice_post("Could not save", "the card would not take the write");
+    }
+    s_stars_epoch++;
+}
+
 static void service_favorite_toggle(void)
 {
     const int index = s_fav_row;
@@ -6952,6 +6977,15 @@ static void ui_task(void *arg)
                 s_fav_row = r.index;
                 break;
 
+            case BROWSER_TOGGLE_STAR:
+                /* Requested, like the station star: it writes. */
+                if (!s_star_pending && r.path) {
+                    snprintf(s_star_path, sizeof(s_star_path), "%s", r.path);
+                    s_star_dir = (r.index == 1);
+                    s_star_pending = true;
+                }
+                break;
+
             case BROWSER_RELOAD_STATIONS:
                 /*
                  * Requested, not done. The chooser stays open and stays
@@ -6985,6 +7019,12 @@ static void ui_task(void *arg)
                 if (now_epoch != drawn_epoch) {
                     drawn_epoch = now_epoch;
                     browser_stations_reloaded();
+                }
+                static uint32_t drawn_stars;
+                const uint32_t now_stars = s_stars_epoch;
+                if (now_stars != drawn_stars) {
+                    drawn_stars = now_stars;
+                    browser_stars_changed();
                 }
             }
 
@@ -8454,6 +8494,7 @@ static track_end_t play_file(const char *path)
         service_station_fetch();
         service_favorites_load();
         service_favorite_toggle();
+        service_star_toggle();
         service_notices();
 
         /* The envelope landed. Drawn here rather than on the loading
@@ -11316,6 +11357,7 @@ static track_end_t play_stream(const char *url, const char *name)
             service_station_fetch();
             service_favorites_load();
             service_favorite_toggle();
+            service_star_toggle();
             service_notices();
         }
 
@@ -12400,6 +12442,7 @@ static void player_loop(void)
             service_station_fetch();
             service_favorites_load();
             service_favorite_toggle();
+            service_star_toggle();
             service_notices();
 
             /*

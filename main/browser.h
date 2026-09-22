@@ -109,6 +109,16 @@ typedef enum {
      * has done it and called browser_stations_reloaded().
      */
     BROWSER_TOGGLE_FAVORITE,
+
+    /*
+     * Star or unstar a file or folder on a volume tab. `path` is the
+     * row's full path and `index` is 1 for a folder, 0 for a file.
+     *
+     * Requested, like the station star: it writes starred.m3u, so the
+     * player does it and then calls browser_stars_changed(). A mark
+     * only, for now -- see starred.h.
+     */
+    BROWSER_TOGGLE_STAR,
 } browser_result_kind_t;
 
 typedef struct {
@@ -128,6 +138,10 @@ typedef struct {
  * listing would replace the listing with stations.
  */
 void browser_stations_reloaded(void);
+
+/* Local stars changed; re-resolve the rows' marks. Same task and same
+ * rule as browser_stations_reloaded(), for the volume tabs. */
+void browser_stars_changed(void);
 
 /*
  * A line for the radio tab's status row, replacing the usual one until
