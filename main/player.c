@@ -2251,6 +2251,8 @@ static void ring_advance_play(void)
         s_ring_play = s_ring_fill;
         return;
     }
+    ESP_LOGI(TAG, "writer: ring %d -> %d (fill %d)", s_ring_play, next,
+             s_ring_fill);
     s_ring_play = next;
 }
 
@@ -9139,12 +9141,24 @@ static track_end_t play_file(const char *path)
                  * the ring is being abandoned deliberately.
                  */
                 uint32_t ring_wait_ms = 0;
+                /* Which ring the writer is on, and what each holds, at
+                 * the start of a wait. A ring should drain in under its
+                 * own twenty seconds; the cue run waited 26 s and 30 s
+                 * on 20 s tracks, so the queue order is in question. */
+                if (!xStreamBufferIsEmpty(s_pcm)) {
+                    ESP_LOGI(TAG, "ring %d busy: play %d; rings %u/%u/%u KB",
+                             s_ring_fill, s_ring_play,
+                             (unsigned)(xStreamBufferBytesAvailable(s_ring[0]) / 1024),
+                             (unsigned)(xStreamBufferBytesAvailable(s_ring[1]) / 1024),
+                             (unsigned)(xStreamBufferBytesAvailable(s_ring[2]) / 1024));
+                }
                 while (!xStreamBufferIsEmpty(s_pcm)) {
                     if (!s_playing || s_pending_ready || s_seek_pct >= 0) break;
                     if (ring_wait_ms >= RING_WAIT_MAX_MS) {
                         ESP_LOGW(TAG, "ring %d still busy after %" PRIu32
                                       " ms; taking it anyway",
                                  s_ring_fill, ring_wait_ms);
+                        writer_state_dump();
                         break;
                     }
                     vTaskDelay(pdMS_TO_TICKS(RING_WAIT_STEP_MS));
