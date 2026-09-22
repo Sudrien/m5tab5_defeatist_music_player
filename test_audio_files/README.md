@@ -59,6 +59,7 @@ place; one that is wrong by more is obvious from the beep count.
 | 24 cue-filename-mismatch | sheet names `CDImage.wav`, which is not there | resolves to the FLAC beside it; tracks at 0, 20, 40 |
 | 25 cue-multifile (+ 25a-c) | one FILE per track, a pregap in the previous file | three tracks opening with 1, 3 and 5 beeps |
 | 26 cue-malformed | nine tracks, six of them wrong | **three tracks, no crash**: 0-20, 20-50, 50-60 |
+| 27 cue-bumps | a cue track's seek-bar waveform is its own span, not the image's | three tracks whose bars draw **3, 2 and 1** rising bumps; six on any one bar is wrong |
 
 ## 08 seeks during the first play now, and 10 seeks at last
 
@@ -268,6 +269,16 @@ landed. Skip to a track and count.
   and no newline at the end. What matters is that nothing crashes and
   no track has zero or negative length; which way the bad ones fail
   is up to the parser, as long as the log names them.
+
+- **27 is for the eyes.** The landmark barely moves in loudness, and
+  the waveform is peak loudness, so every track of 22 draws the same
+  beep-then-flat line and cannot show whether a bar is its track's or
+  the whole image's. 27's audio (`build/bumps.py`) is a 440 Hz tone
+  that swells six times, ten seconds each, each swell louder than the
+  last. The sheet cuts it at 0, 30 and 50 s, so the three bars draw
+  three bumps, two and one, rising left to right. A bar with six bumps
+  was measured over the whole file; a bar with the right count but
+  the wrong heights was measured over the wrong part of it.
 
 22, 23 and 24 are the same FLAC three times -- byte-identical to 05 --
 so that each sheet can have an audio file with its own base name. It

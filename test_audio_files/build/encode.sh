@@ -336,4 +336,25 @@ crlf "$OUT/25 cue-multifile.cue"
     printf '    INDEX 01 00:50:00'
 } > "$OUT/26 cue-malformed.cue"
 
+# 27 -- made to be looked at, not listened to. bumps.py's six rising
+# swells, cut 3/2/1: tracks at 0, 30 and 50 s, so each track's seek bar
+# draws three bumps, then two, then one, each set rising. A track that
+# draws all six is being measured over the whole image.
+[ -f bumps.wav ] || python3 bumps.py
+ffmpeg -loglevel error -y -i bumps.wav -c:a flac "$OUT/27 cue-bumps.flac"
+{
+    printf 'PERFORMER "Bump Ensemble"\n'
+    printf 'TITLE "Three Two One"\n'
+    printf 'FILE "27 cue-bumps.flac" WAVE\n'
+    printf '  TRACK 01 AUDIO\n'
+    printf '    TITLE "Three Bumps"\n'
+    printf '    INDEX 01 00:00:00\n'
+    printf '  TRACK 02 AUDIO\n'
+    printf '    TITLE "Two Bumps"\n'
+    printf '    INDEX 01 00:30:00\n'
+    printf '  TRACK 03 AUDIO\n'
+    printf '    TITLE "One Bump"\n'
+    printf '    INDEX 01 00:50:00\n'
+} > "$OUT/27 cue-bumps.cue"
+
 echo "built into $OUT"
