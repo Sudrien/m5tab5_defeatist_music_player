@@ -2040,6 +2040,10 @@ static bool xfade_can_start(int play, int fill, size_t avail_a, size_t avail_b,
 {
     if (!s_xfade_armed || s_xfade_active || s_fade_out) return false;
     if (play == fill) return false;                 /* no second track yet */
+    /* The arm belongs to the boundary into the fill ring. With three
+     * rings and short tracks the decode can be two tracks ahead, and
+     * then this boundary is not the one that was armed. */
+    if (fill != (play + 1) % PCM_RINGS) return false;
 
     const uint32_t rate = s_frames_rate[play];
     /*
@@ -2583,10 +2587,16 @@ static void i2s_writer_task(void *arg)
          * taken is a byte that gets mixed.
          */
         const int fill = s_ring_fill;
+        /* The incoming side is the ring after this one, not the fill
+         * ring: the decode may move on to a third track mid-overlap, and
+         * mixing whatever it is filling then is mixing the wrong audio
+         * -- or, once fill wraps round to play, nothing, and the rest of
+         * the outgoing ring goes out at a frozen ramp gain. */
+        const int in = (play + 1) % PCM_RINGS;
         if (mixbuf && (s_xfade_armed || s_xfade_active)) {
             const size_t avail_a = xStreamBufferBytesAvailable(s_ring[play]);
-            const size_t avail_b = (fill != play)
-                                 ? xStreamBufferBytesAvailable(s_ring[fill]) : 0;
+            const size_t avail_b = (fill != play || s_xfade_active)
+                                 ? xStreamBufferBytesAvailable(s_ring[in]) : 0;
 
             if (!s_xfade_active) {
                 const uint32_t rate = s_frames_rate[play];
@@ -2598,7 +2608,7 @@ static void i2s_writer_task(void *arg)
                 const tail_xfade_t plan = tail_xfade(
                     (tail_kind_t)s_ring_tail[play], s_ring_fade_ms[play],
                     s_ring_after_ms[play], s_xfade_ms);
-                if (fill != play && !plan.allow) {
+                if (fill == in && !plan.allow) {
                     s_xfade_armed = false;
                     if (s_ring_tail[play] == TAIL_SILENCE) {
                         ESP_LOGI(TAG, "no crossfade: the outgoing track ends "
@@ -2660,7 +2670,7 @@ static void i2s_writer_task(void *arg)
 
                 if (n) {
                     xStreamBufferReceive(s_ring[play], buf, n, 0);
-                    xStreamBufferReceive(s_ring[fill], mixbuf, n, 0);
+                    xStreamBufferReceive(s_ring[in], mixbuf, n, 0);
                     xfade_mix((int16_t *)buf, (const int16_t *)mixbuf,
                               n / PCM_BYTES_PER_FRAME);
                     audio_out_write(buf, n);
