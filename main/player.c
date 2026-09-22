@@ -9471,6 +9471,12 @@ static track_end_t play_file(const char *path)
                 s_repaint_art = false;
                 load_track_visuals(path);
             }
+            /* And the stars, for the same reason: paused, this is the
+             * only loop running, and a star pressed on the panel or in
+             * the chooser waited for play to resume. Both return at
+             * once when nothing is asked. */
+            service_favorite_toggle();
+            service_star_toggle();
             const size_t sent = xStreamBufferSend(s_pcm, src, remain,
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             src += sent;
