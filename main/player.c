@@ -7752,6 +7752,20 @@ static track_end_t play_file(const char *path)
             ESP_LOGI(TAG, "no crossfade: same file");
         }
 
+        /*
+         * Never between neighbours on one cue sheet, whatever
+         * crossfade_album says: they are one recording cut at INDEX 01,
+         * so the next track already begins where this one stops.
+         */
+        size_t cl = 0, pl = 0;
+        const int cn = cue_vpath_split(path, &cl);
+        const int pn = cue_vpath_split(s_prev_path, &pl);
+        if (ok && cn && pn == cn - 1 && cl == pl &&
+            strncmp(path, s_prev_path, cl) == 0) {
+            ok = false;
+            ESP_LOGI(TAG, "no crossfade: consecutive tracks of one cue sheet");
+        }
+
         if (ok && !settings_crossfade_album() && same_album(path, s_prev_dir)) {
             ok = false;
             ESP_LOGI(TAG, "no crossfade: same album");

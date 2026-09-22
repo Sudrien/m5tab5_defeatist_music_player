@@ -12,10 +12,28 @@
 #include <sys/stat.h>
 
 #include "cJSON.h"
+#include "cuedir.h"
+#include "cuesheet.h"
 #include "esp_log.h"
 
 #include "storage.h"
 #include "storage_io.h"
+
+/*
+ * stat() for a track path. A cue track ("X.cue#03") is not a file, so
+ * the size and date that key the sidecar are the audio file's behind
+ * it. The buffer is heap, not stack: these run on whatever task asked.
+ */
+static int rg_stat(const char *path, struct stat *st)
+{
+    if (!cue_vpath_split(path, NULL)) return stat(path, st);
+    char *buf = malloc(600);
+    if (!buf) return -1;
+    const char *real = cuedir_file_of(path, buf, 600);
+    const int r = real ? stat(real, st) : -1;
+    free(buf);
+    return r;
+}
 
 static const char *TAG = "tab5_rg";
 
@@ -368,7 +386,7 @@ bool replaygain_load(const char *path, replaygain_t *out)
     memset(out, 0, sizeof(*out));
 
     struct stat st;
-    if (stat(path, &st) != 0) return false;
+    if (rg_stat(path, &st) != 0) return false;
 
     char cache_path[600];
     if (!sidecar_path(path, cache_path, sizeof(cache_path))) {
@@ -682,7 +700,7 @@ esp_err_t replaygain_save_waveform(const char *path, const uint8_t *level,
     if (!path || !level || columns <= 0) return ESP_ERR_INVALID_ARG;
 
     struct stat st;
-    if (stat(path, &st) != 0) {
+    if (rg_stat(path, &st) != 0) {
         ESP_LOGW(TAG, "stat failed for %s; not caching", path);
         return ESP_FAIL;
     }
@@ -716,7 +734,7 @@ esp_err_t replaygain_save_loudness(const char *path, float integrated_lufs,
     if (!path) return ESP_ERR_INVALID_ARG;
 
     struct stat st;
-    if (stat(path, &st) != 0) {
+    if (rg_stat(path, &st) != 0) {
         ESP_LOGW(TAG, "stat failed for %s; not caching loudness", path);
         return ESP_FAIL;
     }
@@ -767,7 +785,7 @@ float replaygain_gain_db(const replaygain_loudness_t *l)
  * would hide exactly the field assignments worth reading. */
 #define RG_SAVE_PROLOGUE(fail)                                            \
     struct stat st;                                                       \
-    if (stat(path, &st) != 0) {                                           \
+    if (rg_stat(path, &st) != 0) {                                           \
         ESP_LOGW(TAG, "stat failed for %s; " fail, path);                 \
         return ESP_FAIL;                                                  \
     }                                                                     \
@@ -853,7 +871,7 @@ esp_err_t replaygain_write(const char *path, const replaygain_t *rg)
     if (!path || !rg) return ESP_ERR_INVALID_ARG;
 
     struct stat st;
-    if (stat(path, &st) != 0) {
+    if (rg_stat(path, &st) != 0) {
         ESP_LOGW(TAG, "stat failed for %s; not writing", path);
         return ESP_FAIL;
     }
