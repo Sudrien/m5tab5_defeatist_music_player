@@ -9275,9 +9275,25 @@ static track_end_t play_file(const char *path)
                  * establishing rather than asserting, and that is the
                  * bug.
                  */
-                s_ring_fill = (s_ring_fill + 1) % PCM_RINGS;
-                s_pcm = s_ring[s_ring_fill];
-                my_ring = s_ring_fill;
+                /*
+                 * Chosen, but not taken until it is free -- 1210.
+                 *
+                 * This used to move s_ring_fill first and wait after,
+                 * and the writer only leaves a ring when it is not the
+                 * fill ring. So a ring the writer was on became
+                 * unleavable the moment it was chosen: the writer
+                 * drained it, stayed, and played the next track out of
+                 * it ahead of the two already queued. The cue run
+                 * showed it exactly -- "ring 2 busy: play 2", then no
+                 * "writer: ring 2 -> 0" for twenty seconds, then the
+                 * 30 s timeout resetting 1.4 MB of the track that had
+                 * been skipped.
+                 *
+                 * Free means empty AND not the writer's. The second
+                 * half clears by itself: a writer on an empty ring that
+                 * is not the fill ring moves on at its next pass.
+                 */
+                const int next_ring = (s_ring_fill + 1) % PCM_RINGS;
 
                 /*
                  * WAIT FOR IT, RATHER THAN RESET OVER IT.
@@ -9333,19 +9349,20 @@ static track_end_t play_file(const char *path)
                  * the start of a wait. A ring should drain in under its
                  * own twenty seconds; the cue run waited 26 s and 30 s
                  * on 20 s tracks, so the queue order is in question. */
-                if (!xStreamBufferIsEmpty(s_pcm)) {
+                if (!xStreamBufferIsEmpty(s_ring[next_ring])) {
                     ESP_LOGI(TAG, "ring %d busy: play %d; rings %u/%u/%u KB",
-                             s_ring_fill, s_ring_play,
+                             next_ring, s_ring_play,
                              (unsigned)(xStreamBufferBytesAvailable(s_ring[0]) / 1024),
                              (unsigned)(xStreamBufferBytesAvailable(s_ring[1]) / 1024),
                              (unsigned)(xStreamBufferBytesAvailable(s_ring[2]) / 1024));
                 }
-                while (!xStreamBufferIsEmpty(s_pcm)) {
+                while (!xStreamBufferIsEmpty(s_ring[next_ring]) ||
+                       s_ring_play == next_ring) {
                     if (!s_playing || s_pending_ready || s_seek_pct >= 0) break;
                     if (ring_wait_ms >= RING_WAIT_MAX_MS) {
                         ESP_LOGW(TAG, "ring %d still busy after %" PRIu32
                                       " ms; taking it anyway",
-                                 s_ring_fill, ring_wait_ms);
+                                 next_ring, ring_wait_ms);
                         writer_state_dump();
                         break;
                     }
@@ -9354,8 +9371,11 @@ static track_end_t play_file(const char *path)
                 }
                 if (ring_wait_ms) {
                     ESP_LOGI(TAG, "waited %" PRIu32 " ms for ring %d "
-                                  "to play out", ring_wait_ms, s_ring_fill);
+                                  "to play out", ring_wait_ms, next_ring);
                 }
+                s_ring_fill = next_ring;
+                s_pcm = s_ring[s_ring_fill];
+                my_ring = s_ring_fill;
 
                 /*
                  * Only reachable now by the exits above -- a pause, a
