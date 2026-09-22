@@ -19,6 +19,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -82,30 +83,50 @@ int gfx_filter(void);
 esp_err_t gfx_blit_err(int y0, int y1);
 
 /*
- * Turn the picture 180 degrees on its way to the glass.
+ * Turn the picture on its way to the glass. 0..3 quarter turns clockwise.
  *
- * Nothing that draws knows about this, which is the point. The shadow
- * buffer is always the right way up -- every offset in ui.c, panel.c,
- * browser.c and sleeppage.c keeps meaning what it meant -- and the flip
- * happens in the blit, where a band of rows [y0, y1) goes out to rows
- * [h - y1, h - y0) with each row reversed.
+ * NOTHING THAT DRAWS KNOWS ABOUT THIS, which is the point and the whole
+ * reason the rotation lives here. The shadow buffer is always the right
+ * way up IN THE ORIENTATION THE UI THINKS IT IS IN: gfx_w() and gfx_h()
+ * report the logical extent, they swap at 90 and 270, and every offset
+ * in ui.c, panel.c, browser.c, sleeppage.c and albumart.c keeps meaning
+ * what it meant. albumart.c in particular writes straight into gfx_fb()
+ * with a gfx_w() stride, and that stays correct at every angle.
  *
- * That mapping is why this is cheap and why it is 180 degrees only: a
- * flipped full-width band is still a full-width band, so it is still
- * one contiguous transfer of the same size, which is the shape the DPI
- * driver wants and the shape BLIT_BAND_ROWS was tuned for. A quarter
- * turn would transpose the buffer and make every transfer a column.
+ * The buffer does not change size, only shape: 720x1280 and 1280x720 are
+ * the same allocation, so an angle change is a restride and a repaint,
+ * not a realloc.
  *
- * Costs a pass through the scratch while it is on -- the same scratch
- * the filter uses, and the same pass when both are on -- and nothing
- * while it is off.
+ * What it costs, by angle:
  *
- * Takes effect at the next blit of each band, so a caller that turns it
- * over blits the whole screen. Touch is not this file's business; see
- * touch_set_flipped().
+ *   0    nothing. Rows go out as they are, contiguous.
+ *   180  one pass through the scratch, reversed in both axes. The band
+ *        stays full-width and contiguous -- see the note below.
+ *   90   a transpose. A logical band of rows [y0, y1) is a COLUMN of the
+ *   270  panel, so the transfer is (y1-y0) wide and full height, and the
+ *        source for one output row is a logical column -- a stride of
+ *        2*gfx_w() bytes per pixel read. Gathered in 16x16 tiles to keep
+ *        that from being a cache miss per pixel, but it is still the
+ *        expensive angle, and rotated bands are split smaller
+ *        (BLIT_BAND_ROT) so the gather fits the scratch the filter and
+ *        the 180 flip already share.
+ *
+ * Takes effect at the next blit of each band, so a caller that turns the
+ * screen blits all of it. Touch is not this file's business; see
+ * touch_set_rotation().
  */
-void gfx_set_flipped(bool flipped);
-bool gfx_flipped(void);
+#define GFX_ROT_0       (0)
+#define GFX_ROT_90      (1)
+#define GFX_ROT_180     (2)
+#define GFX_ROT_270     (3)
+
+void gfx_set_rotation(int quarter_turns);
+int  gfx_rotation(void);
+
+/* True when the current angle swaps the axes -- 90 or 270. Callers that
+ * lay out per orientation ask this rather than testing the angle, so a
+ * later 16-angle fever dream has one place to break. */
+bool gfx_landscape(void);
 
 void gfx_px(int x, int y, uint16_t c);
 void gfx_fill_rect(int x, int y, int w, int h, uint16_t c);
@@ -136,6 +157,34 @@ void gfx_fill_star(int cx, int cy, int r, uint16_t c);
 #define GFX_SDIG_GAP    (4)
 
 void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c);
+
+/*
+ * The same clocks in ark12 rather than seven segments.
+ *
+ * ark12's halfwidth cell is monospaced, so MM:SS is fixed width without
+ * anything here arranging it: every digit advances GFX_GLYPH_W(scale)
+ * and the run does not twitch as the seconds roll over. That is the one
+ * property the seven-segment digits were carrying, and it comes free.
+ *
+ * What is NOT free is the width, because these do not zero-pad: "2:41"
+ * is four cells and "101:23" is six, so a caller right-justifying the
+ * remaining time must MEASURE it with gfx_time_text_w() rather than
+ * subtract a constant. GFX_TIME_W and GFX_TIME_NEG_W do not apply.
+ *
+ * And because the width is not fixed, the minutes are not clamped:
+ * gfx_draw_time() caps at 99 because it draws exactly two minute
+ * digits, and a 101-minute track reads 99:23 there. Here it reads
+ * 101:23. Hours are deliberately not a format -- a 101-minute track is
+ * 101 minutes, not 1:41:23.
+ *
+ * Writes into `out` (at least GFX_TIME_TEXT_MAX) and returns it, so a
+ * caller can measure and draw the same string rather than formatting
+ * twice and hoping the two agree.
+ */
+#define GFX_TIME_TEXT_MAX   (16)
+const char *gfx_time_text(char *out, size_t out_len, uint32_t sec, bool neg);
+int gfx_time_text_w(const char *s, int scale);
+void gfx_draw_time_text(int x, int y, const char *s, int scale, uint16_t c);
 
 /* Remaining time, with a leading minus. Its own function rather than a
  * flag on gfx_draw_time() because the minus changes the width, and the

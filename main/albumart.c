@@ -27,6 +27,8 @@
 #include "albumart.h"
 #include "storage_io.h"
 #include "gfx.h"
+#include "ui.h"      /* ui_blit_art(): the artwork is a band in portrait
+                     * and a column in landscape, and only ui.c knows */
 
 static const char *TAG = "tab5_art";
 
@@ -827,8 +829,19 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
      * caller passes the space above the transport bar. Clearing the full
      * panel height here would blank the bar in the shadow and blit that
      * over it, so the bar vanished on every track change until the next
-     * ui_draw() put it back. */
-    memset(fb, 0, (size_t)screen_w * screen_h * 2);
+     * ui_draw() put it back.
+     *
+     * AND screen_w is not the framebuffer's stride any more. In portrait
+     * the artwork band is the full width and the two are equal; in
+     * landscape the band is 560 wide inside a 1280-wide buffer, so a
+     * memset of screen_w*screen_h would run diagonally across the
+     * picture and every row write would land further left than the last.
+     * fbw is the stride, screen_w is the region -- they are different
+     * numbers and every write below uses the right one. */
+    const int fbw = gfx_w();
+    for (int y = 0; y < screen_h; y++) {
+        memset(&fb[(size_t)y * fbw], 0, (size_t)screen_w * 2);
+    }
     const uint16_t *src = (const uint16_t *)rgb;
     for (int y = 0; y < ch; y++) {
         uint32_t syf = (uint32_t)y * ystep;
@@ -836,7 +849,7 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
         if (srow >= ih) srow = ih - 1;
 
         const uint16_t *row = &src[(size_t)srow * stride];
-        uint16_t *dst = &fb[(dy + y) * screen_w + dx];
+        uint16_t *dst = &fb[(size_t)(dy + y) * fbw + dx];
 
         if (xstep == (1u << 16)) {
             memcpy(dst, row, (size_t)cw * 2);
@@ -849,7 +862,11 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
             }
         }
     }
-    return gfx_blit_err(0, screen_h);
+    /* ui_blit_art_err() knows whether the artwork is a band or a column;
+     * this does not, and the difference is the whole screen. The _err
+     * form because a cover that did not reach the glass must not be
+     * reported as shown. */
+    return ui_blit_art_err();
 }
 
 esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h,
@@ -1210,6 +1227,7 @@ typedef struct {
     bool too_big;           /* dimensions would overflow the 32-bit edge map */
     uint16_t *fb;
     int screen_w, screen_h;
+    int fbw;                /* framebuffer stride; see blit_cover() */
     int dx, dy;             /* top-left of the scaled image in screen space */
     int iw, ih;             /* source size */
     int cw, ch;             /* size on screen after fitting */
@@ -1299,7 +1317,7 @@ static void png_on_draw(pngle_t *pngle, uint32_t x, uint32_t y,
 
     for (int sy = py0; sy < py1; sy++) {
         if (sy < 0 || sy >= c->screen_h) continue;
-        uint16_t *row = &c->fb[(size_t)sy * c->screen_w];
+        uint16_t *row = &c->fb[(size_t)sy * c->fbw];
         for (int sx = px0; sx < px1; sx++) {
             if (sx < 0 || sx >= c->screen_w) continue;
             row[sx] = px;
@@ -1313,12 +1331,16 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
 {
     uint16_t *fb = gfx_fb();
     ESP_RETURN_ON_FALSE(fb, ESP_ERR_INVALID_STATE, TAG, "no shadow buffer");
-    memset(fb, 0, (size_t)screen_w * screen_h * 2);
+    const int fbw = gfx_w();
+    for (int y = 0; y < screen_h; y++) {
+        memset(&fb[(size_t)y * fbw], 0, (size_t)screen_w * 2);
+    }
 
     pngle_t *p = pngle_new();
     ESP_RETURN_ON_FALSE(p, ESP_ERR_NO_MEM, TAG, "pngle_new");
 
-    png_ctx_t ctx = { .fb = fb, .screen_w = screen_w, .screen_h = screen_h };
+    png_ctx_t ctx = { .fb = fb, .screen_w = screen_w, .screen_h = screen_h,
+                      .fbw = fbw };
     pngle_set_user_data(p, &ctx);
     pngle_set_init_callback(p, png_on_init);
     pngle_set_draw_callback(p, png_on_draw);
@@ -1350,7 +1372,7 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
     if (ret == ESP_OK) {
         /* One copy, once, when the whole image is decoded -- rather than
          * the panel showing the picture arrive scanline by scanline. */
-        ret = gfx_blit_err(0, screen_h);
+        ret = ui_blit_art_err();
     }
     return ret;
 }

@@ -75,11 +75,19 @@ static esp_lcd_touch_handle_t s_touch;
 static bool s_swallow;
 static TickType_t s_swallow_until;
 
-/* The panel's extent, kept for touch_set_flipped()'s arithmetic. */
+/* The panel's extent, kept for touch_set_rotation()'s arithmetic. It is
+ * the GLASS, always portrait, and does not swap with the angle -- the
+ * controller reports in this space whatever the picture is doing. */
 static int s_w, s_h;
-static bool s_flipped;
+static int s_rot;
 
-void touch_set_flipped(bool flipped) { s_flipped = flipped; }
+/* The inverse of gfx.c's forward map. Both are duplicated in
+ * texttest/rotatetest.c, which checks they round-trip at every angle;
+ * change one, change all three. */
+void touch_set_rotation(int quarter_turns)
+{
+    s_rot = ((quarter_turns % 4) + 4) % 4;
+}
 
 esp_err_t touch_init(i2c_master_bus_handle_t bus, int panel_w, int panel_h)
 {
@@ -258,14 +266,17 @@ bool touch_get(int *x, int *y)
 
     if (swallow_active(true)) return false;
 
-    /* The flip last, so the trace above logs what the glass reported
-     * and this returns what the screens expect. */
-    if (s_flipped) {
-        *x = s_w - 1 - (int)pt[0].x;
-        *y = s_h - 1 - (int)pt[0].y;
-    } else {
-        *x = pt[0].x;
-        *y = pt[0].y;
+    /* The turn last, so the trace above logs what the glass reported
+     * and this returns what the screens expect. Inverse of the forward
+     * mapping in gfx.c -- see touch_set_rotation(). */
+    {
+        const int px = (int)pt[0].x, py = (int)pt[0].y;
+        switch (s_rot) {
+        case 1:  *x = py;             *y = s_w - 1 - px; break;
+        case 2:  *x = s_w - 1 - px;   *y = s_h - 1 - py; break;
+        case 3:  *x = s_h - 1 - py;   *y = px;           break;
+        default: *x = px;             *y = py;           break;
+        }
     }
     return true;
 }

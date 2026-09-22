@@ -43,13 +43,16 @@ typedef enum {
                                backlight, so the switch is seen to move,
                                then closes the page */
     SLEEPPAGE_FLIP,         /* the Rotation switch was tapped;
-                               settings_screen_flipped() is already the
-                               new value. The caller turns the picture
-                               and the touch coordinates over and
-                               repaints the screen, and the page stays
-                               open -- so the row that did it comes back
-                               the other way up, which is the only
-                               confirmation this setting can give */
+                               settings_screen_rotation() is already the
+                               new value, one quarter turn on from the
+                               last. The caller turns the picture and the
+                               touch coordinates and repaints the screen,
+                               and the page stays open -- so the row that
+                               did it comes back the new way round, which
+                               is the only confirmation this setting can
+                               give. A turn between portrait and landscape
+                               also changes gfx_w()/gfx_h(), so the caller
+                               relays out rather than only repainting */
 } sleeppage_result_t;
 
 void sleeppage_open(void);

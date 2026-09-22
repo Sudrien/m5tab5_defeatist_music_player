@@ -85,7 +85,10 @@ static const char *TAG = "tab5_settings";
 /* Raised again, from 448, when the screen flip arrived: "screen_flipped"
  * plus its value is 24 more bytes of keys, and the path is what pays
  * otherwise. */
-#define SETTINGS_MAX_LINE       (480)
+/* And again, from 480, when the flip became four angles: the record
+ * carries "screen_rotation":N as well as the old boolean, which is 21
+ * more bytes. Both are written on purpose -- see the comment by fl. */
+#define SETTINGS_MAX_LINE       (504)
 
 /*
  * The file is append-only, and this is where it stops growing.
@@ -125,7 +128,13 @@ static bool       s_crossfade_album;
 static uint8_t    s_brightness = SETTINGS_BRIGHTNESS_DEFAULT;
 /* Right way up. A player that has never been told otherwise is the one
  * on the desk in front of whoever flashed it. */
-static bool       s_screen_flipped;
+/*
+ * Screen rotation, 0..3 quarter turns clockwise. Was a bool named
+ * screen_flipped, which could say upright or upside down and nothing
+ * else; the record still carries that key for machines that roll back,
+ * and reading one sets 0 or 2 -- see the load path.
+ */
+static uint8_t    s_screen_rot;
 
 /* Off. The radio does not come up because a firmware update happened.
  * See settings_wifi_enabled(). */
@@ -226,12 +235,13 @@ void settings_set_brightness(uint8_t pct)
     s_dirty_since = xTaskGetTickCount();
 }
 
-bool settings_screen_flipped(void) { return s_screen_flipped; }
+int settings_screen_rotation(void) { return s_screen_rot; }
 
-void settings_set_screen_flipped(bool flipped)
+void settings_set_screen_rotation(int quarter_turns)
 {
-    if (flipped == s_screen_flipped) return;
-    s_screen_flipped = flipped;
+    const uint8_t r = (uint8_t)(((quarter_turns % 4) + 4) % 4);
+    if (r == s_screen_rot) return;
+    s_screen_rot = r;
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -470,9 +480,26 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        /*
+         * Rotation, and the old boolean behind it.
+         *
+         * screen_rotation wins when present. A record written before
+         * four angles existed has only screen_flipped, and that maps
+         * onto two of them: false is upright, true is 180. Reading the
+         * bool second would undo a rotation set by a newer record, so
+         * it is read FIRST and the number overwrites it.
+         */
         const cJSON *fl = cJSON_GetObjectItemCaseSensitive(root, "screen_flipped");
         if (take_settings && cJSON_IsBool(fl)) {
-            s_screen_flipped = cJSON_IsTrue(fl);
+            s_screen_rot = cJSON_IsTrue(fl) ? 2 : 0;
+            any = true;
+        }
+
+        const cJSON *sr = cJSON_GetObjectItemCaseSensitive(root, "screen_rotation");
+        if (take_settings && cJSON_IsNumber(sr)) {
+            int v = (int)sr->valuedouble;
+            if (v < 0 || v > 3) v = 0;
+            s_screen_rot = (uint8_t)v;
             any = true;
         }
 
@@ -573,7 +600,13 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
         return true;
     }
     if (strcmp(key, "screen_flipped") == 0) {
-        s_screen_flipped = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
+        s_screen_rot = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0) ? 2 : 0;
+        return true;
+    }
+    if (strcmp(key, "screen_rotation") == 0) {
+        int v = atoi(val);
+        if (v < 0 || v > 3) v = 0;
+        s_screen_rot = (uint8_t)v;
         return true;
     }
     if (strcmp(key, "crossfade_album") == 0) {
@@ -696,7 +729,11 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
     const char *const rg = s_rg_enabled ? "true" : "false";
     const char *const xa = s_crossfade_album ? "true" : "false";
-    const char *const fl = s_screen_flipped ? "true" : "false";
+    /* Both keys. screen_flipped is what an older build reads, and it
+     * can only say upright or over -- a quarter turn is written as
+     * upright there, because landing on its side is worse than landing
+     * the way it shipped. */
+    const char *const fl = (s_screen_rot == 2) ? "true" : "false";
     const char *const wf = s_wifi_enabled ? "true" : "false";
     /* The stored preference, not the effective one. Writing the gated
      * value would mean turning the radio off and on again silently
@@ -727,10 +764,12 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
 #define SETTINGS_FIELDS_FMT "\"volume\":%u,\"replaygain\":%s," \
                             "\"crossfade\":%u,\"crossfade_album\":%s," \
                             "\"brightness\":%u,\"screen_flipped\":%s," \
+                            "\"screen_rotation\":%u," \
                             "\"wifi\":%s,\"ntp\":%s," \
                             "\"ntp_epoch\":%s,\"ntp_boot_us\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
                              (unsigned)s_brightness, fl, \
+                             (unsigned)s_screen_rot, \
                              wf, np, nte, ntb
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {

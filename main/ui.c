@@ -44,6 +44,10 @@ static const char *TAG = "tab5_ui";
  * what "de-emphasised" means rather than two. */
 #define C_ICON_OFF  RGB(0x55, 0x55, 0x55)
 
+/* The play toggle's lit trough. The same green as a charging battery --
+ * see draw_play_pause() for why that is a reuse and not a collision. */
+#define C_PLAY_ON   RGB(0x4C, 0xC0, 0x5E)
+
 /*
  * ReplayGain. Yellow because nothing else on the bar is: C_FILL owns
  * "the level you set" and C_ICON owns "a control", so a gain that is
@@ -128,20 +132,103 @@ static const char *TAG = "tab5_ui";
  * title at roughly 2.8 mm, about a phone's body text, and fits 19
  * characters across the panel -- which is why the title bounces.
  */
+/*
+ * Every offset here is from the SQUARE's top-left corner, not the
+ * panel's. That is what lets portrait and landscape share the table:
+ * the square is 720x720 at both angles, so a row at y=392 is 392 px
+ * down the square wherever the square happens to be.
+ *
+ * Nine rows now, not eight -- row 7 split in two when the square grew
+ * from 560 to 720. Seven controls on one line was what 560 px forced,
+ * and it put the file chooser and the sleep page in the same sweep as
+ * the transport. Two lines puts the transport alone on its own row,
+ * which is the row every finger goes to.
+ *
+ *   1  the cover, beside or above the square entirely
+ *   2  the envelope, full square width
+ *   3  elapsed left, remaining right
+ *   4  title
+ *   5  album
+ *   6  artist
+ *   7  prev, play/pause, next
+ *   8  folder, gear, star, sleep -- four on one pitch
+ *   9  output icon, volume, battery
+ */
+#define BAR_PAD     (24)    /* square edge to content, both sides */
 #define SEEK_Y      (96)    /* row 2: the envelope's baseline */
-#define SEEK_X0     (0)     /* full width, edge to edge */
-#define TIME_Y      (112)   /* row 3 */
-#define TIME_PAD    (16)    /* clocks in from each edge */
+#define TIME_Y      (112)   /* row 3: TOP of the cell, not a baseline */
 #define TITLE_Y     (186)   /* row 4 */
 #define ALBUM_Y     (238)   /* row 5 */
 #define ARTIST_Y    (278)   /* row 6 */
-#define ROW_Y       (380)   /* row 7, centres */
-#define VOL_Y       (490)   /* row 8 */
-#define TEXT_X      (16)
+#define ROW_Y       (392)   /* row 7, transport centres */
+#define AUX_Y       (500)   /* row 8, the four icons' centres */
+#define VOL_Y       (623)   /* row 9 */
+/*
+ * The art overlay's inset. NOT the bar's -- the bar's text starts at
+ * bar_x0(), which is the square's content edge and is 560+24 in
+ * landscape. This one is for the notice card and the no-artwork lines,
+ * which live in the artwork band and so are still measured from the
+ * panel's own left edge.
+ */
+#define TEXT_X      (24)
 
-#define BTN_R       (46)    /* play/pause circle */
+/*
+ * Play/pause is a toggle, not a disc.
+ *
+ * A disc with a triangle in it says what tapping does; this says what
+ * the player IS doing, which is the thing a glance across the room
+ * actually wants. The knob's position carries it -- right for playing,
+ * left for paused -- and the trough's colour says the same thing again
+ * so it survives being seen out of the corner of an eye: green for
+ * running, C_FILL for stopped.
+ *
+ * The green is C_BATT_CHG, already in the palette for "power is coming
+ * in", which is near enough to "this is going" to not be a fifth idea.
+ * The red is C_FILL, which already means played on the envelope and set
+ * on the volume track; a filled pill is not confusable with either, and
+ * the alternative was a fourth red.
+ *
+ * 168x92 with a 45 px knob: the proportion from the mockup, with the
+ * knob nearly the trough's full height so the trough reads as a track
+ * rather than a border. Wider than the 92 px disc it replaces, which is
+ * what moved prev and next out to +/-132.
+ */
+#define PILL_W      (168)
+#define PILL_H      (92)
+#define KNOB_R      (45)
+
+#define BTN_R       (46)    /* the old disc's radius; still the hit size */
 #define ICON_HALF   (26)
 #define SKIP_HALF   (35)    /* prev/next: 26 px triangle plus a 7 px bar */
+/*
+ * Prev and next, either side of the pill.
+ *
+ * 150 and not 132, and the difference is a bug the layout test caught.
+ * The pill's padded box reaches PILL_W/2 + HIT_PAD_X = 98 from the
+ * centre and a skip glyph's reaches SKIP_HALF + HIT_PAD_X = 49 back
+ * towards it, so the centres must be at least 147 apart. At 132 they
+ * overlapped by 15 px and the ordering in ui_touch() was the only thing
+ * deciding which control a press near the pill's edge hit -- which is
+ * exactly the failure mode row 7's own comment warns about, reintroduced
+ * by making the button wider without redoing its arithmetic.
+ *
+ * 150 leaves 3 px. The glyph's outer edge is then 185 from the centre,
+ * well inside the content box's 336.
+ */
+#define SKIP_DX     (150)
+
+/*
+ * The two blocks that flank the volume groove, declared up here because
+ * vol_bounds() derives the gutters from them and it is above the icons
+ * themselves. SPK_HALF's own argument -- a 52 px target for an icon
+ * alone in a margin -- is with draw_speaker().
+ *
+ * BATT_BLOCK is the battery's drawn width INCLUDING the nub: the
+ * outline is BATT_W and the nub hangs off its right edge, and a groove
+ * that stopped at the outline would run under the nub.
+ */
+#define SPK_HALF    (26)
+#define BATT_BLOCK  (46 + 5)        /* BATT_W + BATT_NUB_W, both below */
 
 /* Hit targets are padded well beyond the drawn shapes. A 22 px slider on
  * a 5" panel is a small thing to hit with a thumb, and there is nothing
@@ -189,7 +276,16 @@ static const char *TAG = "tab5_ui";
  */
 static uint16_t *s_fb;
 static int s_w, s_h;
+
+/*
+ * The control square's origin. s_bar_top is the portrait name and kept
+ * because every row offset below is written against it; s_bar_x is the
+ * other axis, 0 in portrait and 560 in landscape. Both are set by
+ * ui_relayout() and by nothing else.
+ */
 static int s_bar_top;
+static int s_bar_x;
+static bool s_landscape;
 
 /* Live drag state. -1 = nothing being dragged. */
 /*
@@ -308,105 +404,158 @@ bool ui_animating(void)
 
 /* Seek runs nearly the full width; volume sits between the folder icon
  * and the play button. Returned in absolute screen coordinates. */
-/* Row 2: the envelope, edge to edge. Nothing shares the row now, which
- * is what the clocks moving to row 3 bought. */
+/*
+ * The square's content box. Everything below is laid out inside it, and
+ * it is the only place s_bar_x and s_bar_top appear together.
+ */
+static inline int bar_x0(void) { return s_bar_x + BAR_PAD; }
+static inline int bar_x1(void) { return s_bar_x + UI_SQUARE - BAR_PAD; }
+static inline int bar_cx(void) { return s_bar_x + UI_SQUARE / 2; }
+
+/* Row 2: the envelope, content edge to content edge. Nothing shares the
+ * row. It used to run the full panel width; inside the square it stops
+ * at the padding, so it lines up with the title below it rather than
+ * bleeding past it. */
 static void seek_bounds(int *x0, int *x1, int *y)
 {
-    *x0 = SEEK_X0;
-    *x1 = s_w - SEEK_X0;
+    *x0 = bar_x0();
+    *x1 = bar_x1();
     *y  = s_bar_top + SEEK_Y;
 }
 
-/* Row 8. The speaker sits in the left margin, so the groove starts clear
- * of it and stops the same distance from the right edge -- an asymmetric
- * slider reads as a mistake even when the icon explains it. */
+/*
+ * Row 9. Three blocks and two gutters, the gutters equal and the outer
+ * blocks flush to the content box.
+ *
+ * The margins used to be a flat 96 px either side, which was sized when
+ * the bar was the full 720-wide panel. Inside a padded square that left
+ * dead air at the output icon's end and crowded the battery at the
+ * other, so the groove is now derived: content width less the two
+ * icons, the rest split evenly.
+ */
+#define VOL_BLOCKS  (2 * SPK_HALF + BATT_BLOCK)
+
 static void vol_bounds(int *x0, int *x1, int *y)
 {
-    *x0 = 96;
-    *x1 = s_w - 96;
+    const int gut = ((bar_x1() - bar_x0()) - VOL_BLOCKS) / 8;
+    *x0 = bar_x0() + 2 * SPK_HALF + gut;
+    *x1 = bar_x1() - BATT_BLOCK - gut;
     *y  = s_bar_top + VOL_Y;
 }
 
 /*
- * Row 7, five controls in three groups: the file chooser at the left
- * edge, transport in the middle, sleep at the right.
+ * Row 7: the transport, alone.
  *
- * The centres are spaced so the padded hit boxes do not touch. Play is
- * BTN_R + HIT_PAD_X = 60 either side; prev and next are 38. At 248, 360
- * and 472 the gaps are 300-288 and 420-434, which is the margin the
- * ordering in ui_touch() no longer has to provide. Boxes that overlap and
- * are disambiguated by test order work until the order changes.
+ * The pill is 168 wide against the disc's 92, so prev and next moved out
+ * from +/-112 to +/-150 -- see SKIP_DX, where the arithmetic is, and
+ * where a first attempt at +/-132 is recorded because it overlapped and
+ * the layout test is what said so. Tighter than it was, and the reason
+ * row 7 now has nothing else on it.
  */
 static void play_centre(int *cx, int *cy)
 {
-    *cx = s_w / 2;
+    *cx = bar_cx();
     *cy = s_bar_top + ROW_Y;
 }
 
 static void prev_centre(int *cx, int *cy)
 {
-    *cx = s_w / 2 - 112;
+    *cx = bar_cx() - SKIP_DX;
     *cy = s_bar_top + ROW_Y;
 }
 
 static void next_centre(int *cx, int *cy)
 {
-    *cx = s_w / 2 + 112;
-    *cy = s_bar_top + ROW_Y;
-}
-
-static void folder_centre(int *cx, int *cy)
-{
-    *cx = 64;
+    *cx = bar_cx() + SKIP_DX;
     *cy = s_bar_top + ROW_Y;
 }
 
 /*
- * The gear, in the gap between the folder and prev.
+ * Row 8: folder, gear, star, sleep, on ONE pitch.
  *
- * 156 rather than anywhere else because row 7's boxes must not touch and
- * this is the only slack left in it. The folder's padded box ends at
- * 64 + ICON_HALF + HIT_PAD_X = 104; prev's starts at 360 - 112 - SKIP_HALF
- * - HIT_PAD_X = 199. A gear at 156 spans 116..196, which clears both.
+ * The old row put these in the gaps left over by the transport, at 64,
+ * 156, 568 and s_w-64 -- four positions chosen one at a time so their
+ * padded boxes cleared whatever was beside them, and a comment arguing
+ * the row was full. With the transport on its own row there is nothing
+ * to clear and nothing to argue: four centres, evenly spaced across the
+ * content box, inset by the icon's half-width so no glyph overhangs.
  *
- * The right-hand side has one too, and this comment used to deny it.
- * Next ends at 521 and the moon starts at 616, which is 95 px -- as
- * much slack as the gear's gap and more than the 80 px the gear's box
- * occupies. What was true is that there was no gap LEFT once the moon
- * sat at s_w - 64; what was written was that the side had none. The
- * star at 568 spans 528..608 and clears both by 7 and 8 px, which is
- * the same order of clearance the gear has at 12 and 3.
- *
- * So: row 7 is seven controls in four groups, and it is full. An eighth
- * would have to move the transport, and the transport is where every
- * finger already goes.
+ * Pitch works out at (672 - 52) / 3 = 206 px, and every box is the same
+ * distance from its neighbours, which is the thing the eye actually
+ * checks.
  */
-static void gear_centre(int *cx, int *cy)
+static void aux_centre(int idx, int *cx, int *cy)
 {
-    *cx = 156;
-    *cy = s_bar_top + ROW_Y;
+    const int x0 = bar_x0() + ICON_HALF;
+    const int span = (bar_x1() - ICON_HALF) - x0;
+
+    /*
+     * The pitch is computed once and multiplied, rather than
+     * interpolating each centre across the span.
+     *
+     * Interpolating -- x0 + span*idx/3 -- truncates differently at each
+     * index: a 620 px span gives gaps of 206, 207, 207, so the row is
+     * a pixel out of true in two places. Nobody sees one pixel, but the
+     * whole point of this row is that the spacing is equal, and a
+     * comment claiming equal spacing over code that computes unequal
+     * spacing is the kind of thing that stays wrong for years.
+     *
+     * So: an exact pitch, and the remainder spent on the leading margin
+     * so the group stays centred in the box.
+     */
+    const int pitch = span / 3;
+    const int lead = (span - pitch * 3) / 2;
+
+    *cx = x0 + lead + pitch * idx;
+    *cy = s_bar_top + AUX_Y;
 }
+
+static void folder_centre(int *cx, int *cy) { aux_centre(0, cx, cy); }
+static void gear_centre(int *cx, int *cy)   { aux_centre(1, cx, cy); }
+static void star_centre(int *cx, int *cy)   { aux_centre(2, cx, cy); }
+static void moon_centre(int *cx, int *cy)   { aux_centre(3, cx, cy); }
 
 /*
- * The star, between next and the moon. See the note above row 7 for the
- * arithmetic; 568 is the midpoint of 521 and 616 rounded to the pixel
- * that leaves the clearance even.
+ * Row 3, both clocks, in one place because they are laid out against
+ * each other.
+ *
+ * ark12 rather than seven segments -- see gfx_time_text(). The left one
+ * sits at the content edge and the right one is MEASURED and
+ * right-justified, because these do not zero-pad and so have no fixed
+ * width: "2:41" is 84 px at scale 3 and "101:23" is 126.
+ *
+ * NULL for either draws dashes in its place. The dashes are wider than
+ * a short time and narrower than a long one, so the right-hand run
+ * shifts when a duration resolves. That is accepted: the alternative is
+ * padding every clock to the widest form it could take, which puts a
+ * leading zero on every track under ten minutes to keep a placeholder
+ * still.
  */
-static void star_centre(int *cx, int *cy)
-{
-    *cx = 568;
-    *cy = s_bar_top + ROW_Y;
-}
+#define CLOCK_SCALE (3)
+#define CLOCK_DASH  "--:--"
 
-static void moon_centre(int *cx, int *cy)
+static void draw_clocks(const char *elapsed, const char *remaining, uint16_t c)
 {
-    *cx = s_w - 64;
-    *cy = s_bar_top + ROW_Y;
+    const int ty = s_bar_top + TIME_Y;
+    const char *l = elapsed   ? elapsed   : CLOCK_DASH;
+    const char *r = remaining ? remaining : CLOCK_DASH;
+
+    gfx_draw_time_text(bar_x0(), ty, l, CLOCK_SCALE, c);
+    gfx_draw_time_text(bar_x1() - gfx_time_text_w(r, CLOCK_SCALE), ty,
+                       r, CLOCK_SCALE, c);
 }
 
 /* ------------------------------------------------------------------ */
 /* Widgets                                                             */
 /* ------------------------------------------------------------------ */
+
+/* Defined with the battery's icons further down, because that is where
+ * most of its users are; declared HERE, at the top of the widgets,
+ * because C compiles top to bottom and this file has shipped a build
+ * failure for exactly this before. The play toggle's trough is now the
+ * first user and it is above all of them, which is why the declaration
+ * moved up rather than staying beside the output icons. */
+static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c);
 
 static void draw_slider_c(int x0, int x1, int y, int pct, uint16_t fill)
 {
@@ -426,19 +575,26 @@ static void draw_play_pause(bool playing)
 {
     int cx, cy;
     play_centre(&cx, &cy);
-    gfx_fill_circle(cx, cy, BTN_R, C_THUMB);
+
+    /* Trough, then knob, then the glyph in it -- see PILL_W's note for
+     * why this is a switch and not a button. */
+    fill_rrect(cx - PILL_W / 2, cy - PILL_H / 2, PILL_W, PILL_H, PILL_H / 2,
+               playing ? C_PLAY_ON : C_FILL);
+
+    const int kx = cx + (playing ? 1 : -1) * (PILL_W / 2 - KNOB_R - 1);
+    gfx_fill_circle(kx, cy, KNOB_R, C_THUMB);
 
     if (playing) {
-        /* Pause: two bars. */
-        gfx_fill_rect(cx - 15, cy - 20, 10, 40, C_BG);
-        gfx_fill_rect(cx + 5, cy - 20, 10, 40, C_BG);
-    } else {
         /* Play: a triangle, nudged right so it looks centred rather than
          * measuring centred. */
         for (int dy = -20; dy <= 20; dy++) {
             const int a = dy < 0 ? -dy : dy;
-            gfx_fill_rect(cx - 11, cy + dy, 34 - (a * 34) / 20, 1, C_BG);
+            gfx_fill_rect(kx - 11, cy + dy, 34 - (a * 34) / 20, 1, C_BG);
         }
+    } else {
+        /* Pause: two bars. */
+        gfx_fill_rect(kx - 15, cy - 20, 10, 40, C_BG);
+        gfx_fill_rect(kx + 5, cy - 20, 10, 40, C_BG);
     }
 }
 
@@ -456,20 +612,31 @@ static void draw_skip(int cx, int cy, bool forward, bool enabled)
     const int w = 26;               /* base to apex */
     const uint16_t c = enabled ? C_ICON : C_ICON_OFF;
 
+    /*
+     * The ink spans -w..+2+bar on the forward glyph and the mirror of
+     * that on the back one, so a triangle drawn with its apex ON cx
+     * sits visibly left of centre in its slot. Shifting by half the
+     * difference centres what the eye sees rather than what the
+     * arithmetic measures -- the same correction the play triangle
+     * makes for the same reason.
+     */
+    const int off = (w - (7 + 2)) / 2;
+    const int ax = forward ? cx + off : cx - off;
+
     for (int dy = -h; dy <= h; dy++) {
         const int a = dy < 0 ? -dy : dy;
         const int run = w - (a * w) / h;
         if (run <= 0) continue;
-        if (forward) gfx_fill_rect(cx - w, cy + dy, run, 1, c);
-        else         gfx_fill_rect(cx + w - run, cy + dy, run, 1, c);
+        if (forward) gfx_fill_rect(ax - w, cy + dy, run, 1, c);
+        else         gfx_fill_rect(ax + w - run, cy + dy, run, 1, c);
     }
 
     /* The bar goes just past the apex -- the wall the tape stops against,
      * which is the convention every transport since a cassette deck has
      * used. Past the apex and not behind the base: behind the base it
      * reads as an underline on an arrow. */
-    if (forward) gfx_fill_rect(cx + 2, cy - h, 7, 2 * h + 1, c);
-    else         gfx_fill_rect(cx - 9, cy - h, 7, 2 * h + 1, c);
+    if (forward) gfx_fill_rect(ax + 2, cy - h, 7, 2 * h + 1, c);
+    else         gfx_fill_rect(ax - 9, cy - h, 7, 2 * h + 1, c);
 }
 
 static void draw_folder(void)
@@ -591,7 +758,6 @@ static void draw_moon(void)
  * the settings panel's AUDIO tab, next to a note about the cases where
  * the override cannot be honoured.
  */
-#define SPK_HALF    (26)
 
 static void spk_centre(int *cx, int *cy)
 {
@@ -620,11 +786,6 @@ static void spk_centre(int *cx, int *cy)
  * underneath without knowing which shape it is under.
  */
 
-/* Defined with the battery's icons further down, because that is where
- * the other user of it is; declared here because C compiles top to
- * bottom and this file has shipped a build failure for exactly this
- * before. */
-static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c);
 
 /* Headphones: a band and two cups. The cups hang below the band's ends
  * and are deeper than the band is thick, which is what stops the
@@ -934,11 +1095,25 @@ static void fill_rrect(int x, int y, int w, int h, int r, uint16_t c)
  * and consistency with the envelope is worth more than avoiding a
  * colour.
  *
- * The level is drawn centred on the band's midline, symmetric, because
- * that is what a waveform looks like and a bottom-anchored bar chart
- * would read as a graph of something else. The reserve is a flat block
- * at a third of the height -- deliberately NOT waveform-shaped, because
- * nothing is known about what it sounds like, only that it exists.
+ * SINGLE SIDEBAND, up from the baseline, and this used to be centred
+ * and symmetric.
+ *
+ * The argument for symmetry was that it is what a waveform looks like
+ * and that a bottom-anchored strip would read as a graph of something
+ * else. The second half of that is true of a strip drawn on its own and
+ * false of this one: the file envelope one row up in the same place is
+ * drawn from the baseline by waveform_draw_bar(), and has been all
+ * along. So the two displays of the same idea disagreed about which way
+ * a level grows, and the stream was the odd one -- the mirrored half
+ * was not carrying information either, only doubling what the top half
+ * already said at the cost of halving its resolution.
+ *
+ * Drawn from the baseline the full height is available for the value
+ * instead of half of it, which is worth more than the symmetry was. The
+ * reserve keeps its flat-block fallback -- deliberately NOT
+ * waveform-shaped, because nothing is known about what it sounds like,
+ * only that it exists -- at a third of the height, which is the same
+ * fraction of the strip it was before.
  */
 static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
 {
@@ -946,8 +1121,7 @@ static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
     if (w < LEVELHIST_COLUMNS / 4) return;   /* no room to say anything */
 
     const int top = y - UI_WAVE_H;
-    const int mid = y - UI_WAVE_H / 2;
-    const int half = UI_WAVE_H / 2;
+    const int full = UI_WAVE_H;
 
     for (int i = 0; i < LEVELHIST_COLUMNS; i++) {
         /* Both edges from the same expression, so columns tile exactly
@@ -966,9 +1140,9 @@ static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
             /* At least one pixel for anything non-zero: the difference
              * between quiet and silent is the difference between playing
              * and not, and it must not round away. */
-            int h = v * half / 255;
+            int h = v * full / 255;
             if (h < 1) h = 1;
-            gfx_fill_rect(cx0, mid - h, cw, h * 2, C_WAVE_PAST);
+            gfx_fill_rect(cx0, y - h, cw, h, C_WAVE_PAST);
             continue;
         }
 
@@ -995,9 +1169,9 @@ static void draw_level_strip(const ui_state_t *st, int sx, int x1, int y)
              * degrades to its old self instead of to an empty one.
              */
             const int v = st->strip_ahead[i - LEVELHIST_NOW_COLUMN - 1];
-            int h = v ? (v * half / 255) : (UI_WAVE_H / 6);
+            int h = v ? (v * full / 255) : (UI_WAVE_H / 3);
             if (h < 1) h = 1;
-            gfx_fill_rect(cx0, mid - h, cw, h * 2, C_WAVE_FUTURE);
+            gfx_fill_rect(cx0, y - h, cw, h, C_WAVE_FUTURE);
         }
     }
 
@@ -1024,8 +1198,8 @@ static void draw_live(const ui_state_t *st)
      * there is no waveform to share a floor with. */
     const int py = y - UI_WAVE_H / 2 - ph / 2;
 
-    fill_rrect(TEXT_X, py, pw, ph, ph / 2, C_LIVE);
-    gfx_draw_text(TEXT_X + LIVE_PAD_X, py + LIVE_PAD_Y, "LIVE", 3, pw, C_BG);
+    fill_rrect(bar_x0(), py, pw, ph, ph / 2, C_LIVE);
+    gfx_draw_text(bar_x0() + LIVE_PAD_X, py + LIVE_PAD_Y, "LIVE", 3, pw, C_BG);
 
     /*
      * THE MINUTE, in what is left of the band.
@@ -1041,7 +1215,7 @@ static void draw_live(const ui_state_t *st)
      * there is no sound, that outranks a minute of how loud it used to
      * be -- which at that moment is a minute of silence anyway.
      */
-    const int sx0 = TEXT_X + pw + LIVE_GAP;
+    const int sx0 = bar_x0() + pw + LIVE_GAP;
     if ((!st->stream_status || !*st->stream_status) && st->strip_valid) {
         draw_level_strip(st, sx0, x1, y);
         return;
@@ -1061,9 +1235,9 @@ static void draw_live(const ui_state_t *st)
      * distinction would have to arrive as its own flag rather than be
      * recovered by comparing prose in a draw call.
      */
-    const int sx = TEXT_X + pw + LIVE_GAP;
+    const int sx = bar_x0() + pw + LIVE_GAP;
     gfx_draw_text(sx, py + LIVE_PAD_Y, st->stream_status, 3,
-                  x1 - sx - TEXT_X, C_THUMB);
+                  x1 - sx, C_THUMB);
 }
 
 /*
@@ -1218,8 +1392,10 @@ void ui_clear_art(void)
     s_notice_up = false;
 
     if (!s_fb) return;
-    gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
-    gfx_blit(0, s_bar_top);
+    int aw, ah;
+    ui_art_band(NULL, NULL, &aw, &ah);
+    gfx_fill_rect(0, 0, aw, ah, C_BG);
+    ui_blit_art();
 }
 
 /*
@@ -1248,28 +1424,33 @@ void ui_show_art_info(const char *const *lines, int n)
      */
     s_notice_up = false;
 
-    gfx_fill_rect(0, 0, s_w, s_bar_top, C_BG);
+    /* The artwork BAND, which is the full width and 560 tall in
+     * portrait and 560 wide and full height in landscape. Centring on
+     * the panel instead would put these lines under the controls. */
+    int aw, ah;
+    ui_art_band(NULL, NULL, &aw, &ah);
+    gfx_fill_rect(0, 0, aw, ah, C_BG);
 
     int total = GFX_GLYPH_H(ART_INFO_HEAD_SCALE);
     for (int i = 1; i < n; i++) {
         total += ART_INFO_GAP + GFX_GLYPH_H(ART_INFO_BODY_SCALE);
     }
 
-    int y = (s_bar_top - total) / 2;
+    int y = (ah - total) / 2;
     if (y < 0) y = 0;
 
     for (int i = 0; i < n; i++) {
         const char *t = lines[i] ? lines[i] : "";
         const int scale = i ? ART_INFO_BODY_SCALE : ART_INFO_HEAD_SCALE;
         const int w = gfx_text_w(t, scale);
-        int x = (s_w - w) / 2;
+        int x = (aw - w) / 2;
         if (x < TEXT_X) x = TEXT_X;
-        gfx_draw_text(x, y, t, scale, s_w - 2 * TEXT_X,
+        gfx_draw_text(x, y, t, scale, aw - 2 * TEXT_X,
                       i ? C_ICON : C_THUMB);
         y += GFX_GLYPH_H(scale) + ART_INFO_GAP;
     }
 
-    gfx_blit(0, s_bar_top);
+    ui_blit_art();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1338,15 +1519,18 @@ void ui_show_notice(const char *head, const char *const *body, int n,
         text_h += NOTICE_GAP + GFX_GLYPH_H(NOTICE_BODY_SC);
     }
 
-    s_notice_w = s_w - 2 * NOTICE_INSET;
+    int aw, ah;
+    ui_art_band(NULL, NULL, &aw, &ah);
+
+    s_notice_w = aw - 2 * NOTICE_INSET;
     s_notice_h = text_h + 2 * NOTICE_PAD;
     s_notice_x = NOTICE_INSET;
-    s_notice_y = (s_bar_top - s_notice_h) / 2;
+    s_notice_y = (ah - s_notice_h) / 2;
     if (s_notice_y < NOTICE_INSET) s_notice_y = NOTICE_INSET;
     /* A card taller than the square is clamped rather than allowed to
      * run under the transport bar, which it would otherwise cover. */
-    if (s_notice_h > s_bar_top - 2 * NOTICE_INSET) {
-        s_notice_h = s_bar_top - 2 * NOTICE_INSET;
+    if (s_notice_h > ah - 2 * NOTICE_INSET) {
+        s_notice_h = ah - 2 * NOTICE_INSET;
     }
 
     gfx_fill_rect(s_notice_x, s_notice_y, s_notice_w, s_notice_h, C_NOTICE_EDGE);
@@ -1383,7 +1567,7 @@ void ui_show_notice(const char *head, const char *const *body, int n,
     /* The whole square, for ui_show_art_info()'s reason: this blits
      * itself rather than waiting for ui_draw(), which never comes up
      * this far. */
-    gfx_blit(0, s_bar_top);
+    ui_blit_art();
 }
 
 esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h)
@@ -1391,11 +1575,93 @@ esp_err_t ui_init(esp_lcd_panel_handle_t panel, int w, int h)
     /* gfx owns the framebuffer lookup now; this file keeps its own copies
      * of the geometry because every layout function reads them. */
     ESP_RETURN_ON_ERROR(gfx_init(panel, w, h), TAG, "gfx");
-    s_w = w;
-    s_h = h;
-    s_bar_top = h - UI_BAR_H;
     s_fb = gfx_fb();
+    ui_relayout();
     return ESP_OK;
+}
+
+/*
+ * The square's origin, and everything derived from it.
+ *
+ * One function, called at init and after every rotation change, so there
+ * is exactly one place that knows where the square is. Every bound in
+ * this file is s_bar_x/s_bar_top plus a constant from the row table --
+ * which is why the rows did not have to be written twice.
+ */
+void ui_relayout(void)
+{
+    s_w = gfx_w();
+    s_h = gfx_h();
+    s_landscape = (s_w > s_h);
+
+    if (s_landscape) {
+        /* Square on the right, artwork in the 560-wide column left of
+         * it. s_bar_top is 0: the square is the full height. */
+        s_bar_x = s_w - UI_SQUARE;
+        s_bar_top = 0;
+    } else {
+        /* Square at the bottom, artwork in the 560-tall band above. */
+        s_bar_x = 0;
+        s_bar_top = s_h - UI_SQUARE;
+    }
+}
+
+bool ui_landscape(void) { return s_landscape; }
+
+void ui_art_band(int *x, int *y, int *w, int *h)
+{
+    if (x) *x = 0;
+    if (y) *y = 0;
+    if (w) *w = s_landscape ? (s_w - UI_SQUARE) : s_w;
+    if (h) *h = s_landscape ? s_h : (s_h - UI_SQUARE);
+}
+
+/*
+ * Blit the artwork region.
+ *
+ * In portrait this is rows 0..UI_ART_H-1 and nothing else moves. In
+ * landscape the artwork is a COLUMN, and gfx_blit() takes rows -- so the
+ * whole screen goes, because there is no way to send part of a row. That
+ * is the honest cost of the square: a cover change in landscape repaints
+ * the controls too. It happens once per track, and gfx splits it into
+ * bands on the way out.
+ */
+esp_err_t ui_blit_art_err(void)
+{
+    int ay, ah;
+    ui_art_band(NULL, &ay, NULL, &ah);
+    /* Landscape sends every row: the artwork is a column, and there is
+     * no way to send part of a row. The controls ride along. */
+    if (s_landscape) return gfx_blit_err(0, s_h);
+    return gfx_blit_err(ay, ay + ah);
+}
+
+void ui_blit_art(void)
+{
+    (void)ui_blit_art_err();
+}
+
+/*
+ * And the control square, for the same reason in the other direction.
+ *
+ * Portrait: rows s_bar_top..s_h, which is the bar and nothing else.
+ * Landscape: the square is a column, so every row goes -- the artwork
+ * rides along. That is the cost named in ui_blit_art(), paid at 25 Hz
+ * here rather than once a track, and it is why landscape is the angle
+ * to measure if the panel ever underruns.
+ */
+void ui_blit_bar(void)
+{
+    if (s_landscape) gfx_blit(0, s_h);
+    else             gfx_blit(s_bar_top, s_h);
+}
+
+/* Whether a logical point is over the artwork rather than the square. */
+bool ui_in_art(int x, int y)
+{
+    int aw, ah;
+    ui_art_band(NULL, NULL, &aw, &ah);
+    return x < aw && y < ah;
 }
 
 void ui_draw(const ui_state_t *st)
@@ -1408,7 +1674,7 @@ void ui_draw(const ui_state_t *st)
         return;
     }
 
-    gfx_fill_rect(0, s_bar_top, s_w, UI_BAR_H, C_BG);
+    gfx_fill_rect(s_bar_x, s_bar_top, UI_SQUARE, UI_SQUARE, C_BG);
 
     int x0, x1, y;
     seek_bounds(&x0, &x1, &y);
@@ -1541,9 +1807,10 @@ void ui_draw(const ui_state_t *st)
      * sentence, and there is no total to finish it with; dashes on both
      * match the bare groove above, which is also refusing to claim a
      * position it does not have.
+     *
+     * Both are drawn by draw_clocks(), which owns the row's layout --
+     * the right-hand one is measured, not offset from a constant.
      */
-    const int ty = s_bar_top + TIME_Y;
-
     if (st->live) {
         /*
          * Nothing, and blank rather than dashed.
@@ -1566,8 +1833,7 @@ void ui_draw(const ui_state_t *st)
          * the number that was counting a moment ago, and leaving it at
          * the old track's value for the length of an open is the single
          * most convincing way to look like the press did nothing. */
-        gfx_draw_time_dashes(TIME_PAD, ty, C_TRACK);
-        gfx_draw_time_dashes(s_w - GFX_TIME_W - TIME_PAD, ty, C_TRACK);
+        draw_clocks(NULL, NULL, C_TRACK);
     } else {
         /*
          * While a seek drag is in progress these two show where the
@@ -1599,18 +1865,18 @@ void ui_draw(const ui_state_t *st)
         const uint16_t clock_c = seeking ? C_FILL : C_ICON;
 
         if (st->len_sec > 0) {
-            gfx_draw_time(TIME_PAD, ty, shown_sec, clock_c);
             const uint32_t left = (st->len_sec > shown_sec)
                                 ? st->len_sec - shown_sec : 0;
-            gfx_draw_time_neg(s_w - GFX_TIME_NEG_W - TIME_PAD, ty, left,
-                              clock_c);
+            char el[GFX_TIME_TEXT_MAX], rem[GFX_TIME_TEXT_MAX];
+            gfx_time_text(el, sizeof(el), shown_sec, false);
+            gfx_time_text(rem, sizeof(rem), left, true);
+            draw_clocks(el, rem, clock_c);
         } else {
             /* No duration: dashes on both, matching the bare groove.
              * The elapsed number is real and is still withheld, because
              * on its own beside a blank it is an invitation to work out
              * what is left, which is the one thing not known. */
-            gfx_draw_time_dashes(TIME_PAD, ty, C_TRACK);
-            gfx_draw_time_dashes(s_w - GFX_TIME_W - TIME_PAD, ty, C_TRACK);
+            draw_clocks(NULL, NULL, C_TRACK);
         }
     }
 
@@ -1640,7 +1906,11 @@ void ui_draw(const ui_state_t *st)
      */
     const char *title = st->title ? st->title : "";
     const int title_w = gfx_text_w(title, 3);
-    const int win_w = s_w - 2 * TEXT_X;
+    /* The square's content box, not the panel. In landscape the panel
+     * is 1280 wide and the text is 672 -- measuring against the panel
+     * would stop the marquee ever running and let long titles run out
+     * over the artwork. */
+    const int win_w = bar_x1() - bar_x0();
     const int over = title_w - win_w;
     const int len = (int)strlen(title);
 
@@ -1656,14 +1926,14 @@ void ui_draw(const ui_state_t *st)
     }
     marquee_step(title, over);
 
-    gfx_draw_text_clipped(TEXT_X - s_marq_off, s_bar_top + TITLE_Y,
-                          TEXT_X, win_w, title, 3, C_THUMB);
+    gfx_draw_text_clipped(bar_x0() - s_marq_off, s_bar_top + TITLE_Y,
+                          bar_x0(), win_w, title, 3, C_THUMB);
 
     if (st->album && *st->album) {
-        gfx_draw_text(TEXT_X, s_bar_top + ALBUM_Y, st->album, 3, win_w, C_ALBUM);
+        gfx_draw_text(bar_x0(), s_bar_top + ALBUM_Y, st->album, 3, win_w, C_ALBUM);
     }
     if (st->artist && *st->artist) {
-        gfx_draw_text(TEXT_X, s_bar_top + ARTIST_Y, st->artist, 3, win_w, C_ICON);
+        gfx_draw_text(bar_x0(), s_bar_top + ARTIST_Y, st->artist, 3, win_w, C_ICON);
     }
 
     /*
@@ -1695,7 +1965,7 @@ void ui_draw(const ui_state_t *st)
      * draws this line.
      */
     if (st->live && st->stream_title && *st->stream_title) {
-        gfx_draw_text(TEXT_X, s_bar_top + ALBUM_Y, st->stream_title, 3,
+        gfx_draw_text(bar_x0(), s_bar_top + ALBUM_Y, st->stream_title, 3,
                       win_w, C_ICON);
     }
 
@@ -1732,7 +2002,7 @@ void ui_draw(const ui_state_t *st)
     draw_skip(cx, cy, true, st->has_next);
     draw_play_pause(st->playing);
 
-    gfx_blit(s_bar_top, s_h);
+    ui_blit_bar();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1788,7 +2058,7 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
      * control -- and swallowing it means a person jabbing at a card
      * that cannot be dismissed does not also do something else.
      */
-    if (s_notice_up && y < s_bar_top) return act;
+    if (s_notice_up && ui_in_art(x, y)) return act;
 
     if (s_drag >= 0) {
         int x0, x1, sy;

@@ -201,8 +201,17 @@ void settings_set_brightness(uint8_t pct);
  * touch.c, which are the two places the framebuffer meets the world.
  * Nothing that draws knows about it.
  */
-bool settings_screen_flipped(void);
-void settings_set_screen_flipped(bool flipped);
+/*
+ * Screen rotation, 0..3 quarter turns clockwise, persisted.
+ *
+ * Replaces the screen_flipped boolean, which said upright or upside
+ * down and could not say landscape. A settings record written by an
+ * older build carries only the boolean and loads as 0 or 2; a record
+ * written by this one carries both, so a rollback lands upright or
+ * over rather than on its side.
+ */
+int  settings_screen_rotation(void);
+void settings_set_screen_rotation(int quarter_turns);
 
 /*
  * Whether to crossfade between two tracks from the same album.

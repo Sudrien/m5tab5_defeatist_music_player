@@ -209,7 +209,7 @@ void sleeppage_draw(void)
     /* --- Rotation --------------------------------------------------- */
     rotation_box(&x, &y, &bw, &bh);
     {
-        const bool flipped = settings_screen_flipped();
+        const int rot = settings_screen_rotation();
         gfx_fill_rect(x, y, bw, bh, C_ROW);
         gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Rotation",
                       NAME_SCALE, 400, C_TEXT);
@@ -219,15 +219,19 @@ void sleeppage_draw(void)
          * a box that does not line up with the one above. */
         const int pw = 132, ph = 56;
         const int px = w - 24 - pw, py = y + (bh - ph) / 2;
-        const char *text = flipped ? "180" : "0";
-        gfx_fill_rect(px, py, pw, ph, flipped ? C_ON : C_BTN);
+        /* Lit for any turn, not just 180: the pill says "not as it
+         * shipped", and the number beside it says which turn. */
+        static const char *const names[4] = { "0", "90", "180", "270" };
+        const char *text = names[rot & 3];
+        gfx_fill_rect(px, py, pw, ph, rot ? C_ON : C_BTN);
         const int tw = gfx_text_w(text, NAME_SCALE);
         gfx_draw_text(px + (pw - tw) / 2, py + (ph - GFX_GLYPH_H(NAME_SCALE)) / 2,
-                      text, NAME_SCALE, pw - 8, flipped ? C_BG : C_DIM);
+                      text, NAME_SCALE, pw - 8, rot ? C_BG : C_DIM);
     }
     {
         static const char *const note[] = {
-            "Upside down, for when the cable is at the wrong end.",
+            "Quarter turns. 90 and 270 are landscape; 180 is for when "
+            "the cable is at the wrong end.",
         };
         gfx_draw_text(24, y + bh + NOTE_GAP, note[0], LABEL_SCALE, w - 48, C_DIM);
     }
@@ -379,9 +383,12 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
      */
     rotation_box(&bx, &by, &bw, &bh);
     if (y >= by && y < by + bh) {
-        const bool want = !settings_screen_flipped();
-        settings_set_screen_flipped(want);
-        ESP_LOGI(TAG, "rotation: %s", want ? "180" : "0");
+        /* Four angles now, so the tap cycles rather than toggles:
+         * 0, 90, 180, 270 and round. A switch with four positions is
+         * still a switch -- the pill shows which one it is on. */
+        const int want = (settings_screen_rotation() + 1) & 3;
+        settings_set_screen_rotation(want);
+        ESP_LOGI(TAG, "rotation: %d", want * 90);
         s_dirty = true;
         return SLEEPPAGE_FLIP;
     }

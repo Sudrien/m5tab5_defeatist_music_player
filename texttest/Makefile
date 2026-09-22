@@ -50,6 +50,15 @@ WIFI_BIN := wifistoretest
 # The clock floor. Its own binary for the same reason the others are.
 CLOCK_BIN := clocktest
 
+# The four screen angles, and the control square that rides on them.
+# gfx.c's logical->panel map and touch.c's inverse have to agree exactly
+# or every control is at its own mirror image, which on the board looks
+# like a miscalibrated digitiser rather than like arithmetic. Neither
+# file builds on a host -- one needs the DPI driver, the other
+# esp_lcd_touch -- so both maps are transcribed there, and the layout
+# arithmetic they feed is checked with them.
+ROTATE_BIN := rotatetest
+
 # Fade and end-of-audio detection. Links the real loudness.c, and builds
 # it once more at -O2 -Werror as an object -- not -fsyntax-only, which
 # stops before the optimiser that the -O2-only warnings come out of.
@@ -174,7 +183,7 @@ NETLINK_BIN := netlinktest
 # ../test_audio_files so the bytes under test are the bytes on the card.
 CUE_BIN := cuesheettest
 
-all: run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
+all: run run-ctrl run-wifi run-clock run-rotate run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -200,6 +209,13 @@ $(CLOCK_BIN): clocktest.c
 
 run-clock: $(CLOCK_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CLOCK_BIN)
+
+$(ROTATE_BIN): rotatetest.c
+	$(CC) $(WARNCFLAGS) -c rotatetest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ rotatetest.c $(LDFLAGS)
+
+run-rotate: $(ROTATE_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(ROTATE_BIN)
 
 $(FADE_BIN): fadetest.c ../main/loudness.c ../main/loudness.h
 	$(CC) $(WARNCFLAGS) -D_GNU_SOURCE -I../main -c ../main/loudness.c -o /dev/null
@@ -285,7 +301,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -400,4 +416,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean

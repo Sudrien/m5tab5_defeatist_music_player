@@ -850,11 +850,17 @@ static void screen_apply_filter(void)
  * depends on which screen is up -- the Sleep page redraws itself, and
  * the transport bar needs the artwork behind it back.
  */
-static void screen_apply_flip(void)
+static void screen_apply_rotation(void)
 {
-    const bool f = settings_screen_flipped();
-    gfx_set_flipped(f);
-    touch_set_flipped(f);
+    const int r = settings_screen_rotation();
+    gfx_set_rotation(r);
+    touch_set_rotation(r);
+    /* gfx swapped its logical extent if the angle crossed between
+     * portrait and landscape, so every screen's layout is stale. They
+     * re-read gfx_w()/gfx_h() when they next lay out; ui_relayout()
+     * is what tells the transport bar to do it now rather than at the
+     * next track change. */
+    ui_relayout();
 }
 
 static void log_brightness(void)
@@ -3413,7 +3419,7 @@ static volatile bool     s_open_sleep;   /* the moon: see sleeppage.h */
 static volatile bool     s_brightness_pending;
 
 /*
- * The same, for the screen flip -- see settings_screen_flipped().
+ * The same, for the screen rotation -- see settings_screen_rotation().
  *
  * Raised at the same two load sites and consumed in the same place, for
  * the same reason: the setting arrives with the file, and turning the
@@ -4694,7 +4700,12 @@ static void do_art(const char *path, uint32_t gen)
     /* The cover is about to cover the square, so the card goes with it.
      * See ui.h: albumart_show() cannot drop it itself. */
     ui_notice_clear();
-    const esp_err_t serr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
+    /* The artwork region at the current angle: the full width and 560
+     * tall in portrait, 560 wide and full height in landscape. Was
+     * LCD_H_RES x UI_ART_H, which is only the portrait one. */
+    int art_w, art_h;
+    ui_art_band(NULL, NULL, &art_w, &art_h);
+    const esp_err_t serr = albumart_show(s_panel, art_w, art_h,
                                          jpg, jpg_len);
 
     /* Kept, not freed, when we own it: this is the playing track, so it
@@ -6746,12 +6757,12 @@ static void ui_task(void *arg)
          */
         if (s_flip_pending) {
             s_flip_pending = false;
-            static bool applied;                  /* upright, as gfx starts */
-            const bool want = settings_screen_flipped();
+            static int applied;                   /* upright, as gfx starts */
+            const int want = settings_screen_rotation();
             if (want != applied) {
-                screen_apply_flip();
+                screen_apply_rotation();
                 applied = want;
-                ESP_LOGI(TAG, "rotation %s from settings", want ? "180" : "0");
+                ESP_LOGI(TAG, "rotation %d from settings", want * 90);
                 /* Everything on the glass is now at the wrong end, so
                  * this is the one place a whole-screen reblit is the
                  * cheap option rather than the expensive one. */
@@ -10719,7 +10730,12 @@ static void show_stream_card(stream_codec_t codec, uint32_t rate,
         if (s_art_decoded && !s_art_screen_stale) return;
         s_art_screen_stale = false;
         ui_notice_clear();      /* see ui.h -- the cover takes the card */
-        const esp_err_t aerr = albumart_show(s_panel, LCD_H_RES, UI_ART_H,
+        /* The artwork region at the current angle: the full width and 560
+         * tall in portrait, 560 wide and full height in landscape. Was
+         * LCD_H_RES x UI_ART_H, which is only the portrait one. */
+        int art_w, art_h;
+        ui_art_band(NULL, NULL, &art_w, &art_h);
+        const esp_err_t aerr = albumart_show(s_panel, art_w, art_h,
                                              s_art_img, s_art_len);
         if (aerr == ESP_OK) { s_art_decoded = true; return; }
         /*

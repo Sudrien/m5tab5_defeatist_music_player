@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <stdio.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -25,6 +26,18 @@ static const char *TAG = "tab5_gfx";
 
 static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_fb;
+
+/*
+ * Two extents, and keeping them apart is what makes rotation invisible
+ * to everything that draws.
+ *
+ * s_pw/s_ph are the glass: fixed at gfx_init(), never swapped, and used
+ * only when talking to the panel. s_w/s_h are what the UI works in, and
+ * they swap at 90 and 270. The allocation is s_pw*s_ph either way --
+ * 720x1280 and 1280x720 are the same number of pixels -- so an angle
+ * change restrides the buffer rather than reallocating it.
+ */
+static int s_pw, s_ph;
 static int s_w, s_h;
 
 /*
@@ -33,14 +46,22 @@ static int s_w, s_h;
  * allocated the first time the filter is on, sized for the largest band a
  * blit sends, and only touched under s_blit_lock.
  *
- * s_flipped shares the scratch, because it needs the same thing for the
+ * s_rot shares the scratch, because it needs the same thing for the
  * same reason: a band that is not going out of the shadow buffer
  * verbatim has to be built somewhere first. When both are on, one pass
  * does both -- see gfx_blit_err().
  */
 static volatile int s_filter = BRIGHTNESS_FILTER_FULL;
-static volatile bool s_flipped;
+static volatile int s_rot;              /* 0..3 quarter turns clockwise */
 static uint16_t *s_dim;
+
+/* Whether an angle swaps the axes. Used before s_rot is readable in a
+ * few places, so it takes the angle rather than reading the static.
+ *
+ * The forward map below (and touch.c's inverse) is duplicated in
+ * texttest/rotatetest.c, which checks it is a bijection onto the glass
+ * and that touch undoes it exactly. Change one, change all three. */
+static inline bool rot_swaps(int r) { return (r & 1) != 0; }
 
 /*
  * One blit at a time.
@@ -108,7 +129,9 @@ static SemaphoreHandle_t s_blit_lock;
 esp_err_t gfx_init(esp_lcd_panel_handle_t panel, int w, int h)
 {
     s_panel = panel;
-    s_w = w;
+    s_pw = w;
+    s_ph = h;
+    s_w = w;            /* upright until gfx_set_rotation() says otherwise */
     s_h = h;
 
     s_blit_lock = xSemaphoreCreateMutex();
@@ -148,8 +171,30 @@ void gfx_set_filter(int filter)
 
 int gfx_filter(void) { return s_filter; }
 
-void gfx_set_flipped(bool flipped) { s_flipped = flipped; }
-bool gfx_flipped(void) { return s_flipped; }
+/*
+ * The logical extent swaps here and nowhere else.
+ *
+ * Taken under the blit lock because a blit in flight is reading s_w to
+ * stride the shadow buffer, and a restride underneath it would send one
+ * band of garbage. The caller repaints everything afterwards anyway --
+ * the buffer's CONTENTS are still laid out for the old shape, and this
+ * function deliberately does not try to re-flow them. Turning the screen
+ * is a repaint, not a transform of what was there.
+ */
+void gfx_set_rotation(int quarter_turns)
+{
+    const int r = ((quarter_turns % 4) + 4) % 4;
+    if (r == s_rot) return;
+
+    if (s_blit_lock) xSemaphoreTake(s_blit_lock, portMAX_DELAY);
+    s_rot = r;
+    s_w = rot_swaps(r) ? s_ph : s_pw;
+    s_h = rot_swaps(r) ? s_pw : s_ph;
+    if (s_blit_lock) xSemaphoreGive(s_blit_lock);
+}
+
+int  gfx_rotation(void) { return s_rot; }
+bool gfx_landscape(void) { return rot_swaps(s_rot); }
 int gfx_w(void) { return s_w; }
 int gfx_h(void) { return s_h; }
 
@@ -181,6 +226,84 @@ int gfx_h(void) { return s_h; }
 #define BLIT_BAND_ROWS          (240)
 #define BLIT_BAND_ABOVE         (600)
 
+/*
+ * The same idea for a rotated blit, and the number is smaller because
+ * the constraint is different.
+ *
+ * At 90 and 270 a logical band of N rows goes out as a panel region N
+ * WIDE and s_h_phys tall, gathered into the scratch first. The scratch
+ * is sized for the upright worst case -- s_pw * BLIT_BAND_ABOVE, 432000
+ * pixels on this panel -- so a rotated band may be at most that many
+ * pixels too: 432000 / 1280 = 337. 240 keeps it inside that with room
+ * to spare and matches BLIT_BAND_ROWS, so the split arithmetic below
+ * has one shape rather than two.
+ *
+ * Every rotated blit is split, not just big ones: an unsplit one would
+ * have to be bounded anyway and there is no contiguous fast path at
+ * these angles to preserve.
+ */
+#define BLIT_BAND_ROT           (240)
+
+/* How the scratch is sized. Both angles have to fit in one allocation. */
+#define BLIT_SCRATCH_PX(pw, ph) ((size_t)(pw) * BLIT_BAND_ABOVE)
+
+/*
+ * Gather a logical band into the scratch, transposed for a quarter turn.
+ *
+ * Logical (x, y) lands on the panel at:
+ *   90   px = s_pw-1 - y,  py = x
+ *   270  px = y,           py = s_ph-1 - x
+ *
+ * so the band [y0, y1) occupies panel columns [s_pw-y1, s_pw-y0) at 90
+ * and [y0, y1) at 270, full height either way, and the destination is
+ * (y1-y0) pixels wide.
+ *
+ * The source for one destination ROW is a logical COLUMN -- a read every
+ * 2*s_w bytes. Done a pixel at a time in scan order that is a cache miss
+ * per pixel on PSRAM, so it goes in tiles: a TILE x TILE square is small
+ * enough that its source rows stay resident while it is transposed.
+ */
+#define BLIT_TILE               (16)
+
+static void gather_rotated(uint16_t *dst, int y0, int y1, int rot, int filter)
+{
+    const int bw = y1 - y0;     /* destination width: one column per logical row */
+    const int dh = s_w;         /* destination height: the logical x axis, which
+                                 * at these angles is the panel's y axis */
+
+    for (int ty = 0; ty < dh; ty += BLIT_TILE) {
+        const int ty_end = (ty + BLIT_TILE < dh) ? ty + BLIT_TILE : dh;
+        for (int tx = 0; tx < bw; tx += BLIT_TILE) {
+            const int tx_end = (tx + BLIT_TILE < bw) ? tx + BLIT_TILE : bw;
+            for (int py = ty; py < ty_end; py++) {
+                uint16_t *out = &dst[(size_t)py * bw];
+                for (int px = tx; px < tx_end; px++) {
+                    /*
+                     * Invert the mapping above. At 90 the destination
+                     * column px counts up from panel column s_pw-y1, so
+                     * the logical row is y1-1-px; the logical column is
+                     * the destination row. At 270 both run the other
+                     * way.
+                     */
+                    int lx, ly;
+                    if (rot == GFX_ROT_90) {
+                        ly = y1 - 1 - px;
+                        lx = py;
+                    } else {
+                        ly = y0 + px;
+                        lx = s_w - 1 - py;
+                    }
+                    uint16_t v = s_fb[(size_t)ly * s_w + lx];
+                    if (filter < BRIGHTNESS_FILTER_FULL) {
+                        v = brightness_dim565(v, filter);
+                    }
+                    out[px] = v;
+                }
+            }
+        }
+    }
+}
+
 esp_err_t gfx_blit_err(int y0, int y1)
 {
     if (!s_fb) return ESP_ERR_INVALID_STATE;
@@ -188,17 +311,27 @@ esp_err_t gfx_blit_err(int y0, int y1)
     if (y1 > s_h) y1 = s_h;
     if (y1 <= y0) return ESP_OK;
 
-    /* Big region: hand it over in pieces, with the bus free between
+    /*
+     * Big region: hand it over in pieces, with the bus free between
      * them. Recursion depth is one -- the pieces are BLIT_BAND_ROWS
-     * tall and the test is for more than BLIT_BAND_ABOVE. */
-    if (y1 - y0 > BLIT_BAND_ABOVE) {
-        for (int y = y0; y < y1; y += BLIT_BAND_ROWS) {
-            const int end = (y + BLIT_BAND_ROWS < y1) ? y + BLIT_BAND_ROWS : y1;
-            const esp_err_t berr = gfx_blit_err(y, end);
-            if (berr != ESP_OK) return berr;
-            if (end < y1) vTaskDelay(1);
+     * tall and the test is for more than BLIT_BAND_ABOVE.
+     *
+     * A rotated band is split at BLIT_BAND_ROT and always, because at
+     * those angles the band has to fit the gather scratch whatever its
+     * size and there is no contiguous whole-band path to protect.
+     */
+    {
+        const bool rotated = rot_swaps(s_rot);
+        const int step = rotated ? BLIT_BAND_ROT : BLIT_BAND_ROWS;
+        if (y1 - y0 > (rotated ? BLIT_BAND_ROT : BLIT_BAND_ABOVE)) {
+            for (int y = y0; y < y1; y += step) {
+                const int end = (y + step < y1) ? y + step : y1;
+                const esp_err_t berr = gfx_blit_err(y, end);
+                if (berr != ESP_OK) return berr;
+                if (end < y1) vTaskDelay(1);
+            }
+            return ESP_OK;
         }
-        return ESP_OK;
     }
 
     /* Full-width band, so the source rows are contiguous and the driver
@@ -210,28 +343,43 @@ esp_err_t gfx_blit_err(int y0, int y1)
      * scaled into the scratch and that is what goes out. A band is never
      * taller than BLIT_BAND_ABOVE here -- the split above sees to it. */
     const int filter = s_filter;
-    const bool flipped = s_flipped;
+    const int rot = s_rot;
+    const bool flipped = (rot == GFX_ROT_180);
+    const bool rotated = rot_swaps(rot);
     const uint16_t *src = &s_fb[(size_t)y0 * s_w];
 
     /*
-     * Where this band lands. Upright it is where it was drawn; flipped
-     * it is the same distance from the other end, which keeps it
-     * full-width and contiguous -- see gfx_set_flipped().
+     * Where this band lands ON THE PANEL, in panel coordinates.
+     *
+     * Upright it is where it was drawn. At 180 it is the same distance
+     * from the other end, which keeps it full-width and contiguous. At
+     * 90 and 270 the band is a COLUMN: x spans the band and y spans the
+     * whole panel, so all four edges are named rather than just two.
      */
+    int dx0 = 0,  dx1 = s_pw;
     int dy0 = y0, dy1 = y1;
     if (flipped) {
         dy0 = s_h - y1;
         dy1 = s_h - y0;
+    } else if (rotated) {
+        dy0 = 0;
+        dy1 = s_ph;
+        dx0 = (rot == GFX_ROT_90) ? s_pw - y1 : y0;
+        dx1 = (rot == GFX_ROT_90) ? s_pw - y0 : y1;
     }
 
-    if (filter < BRIGHTNESS_FILTER_FULL || flipped) {
+    if (filter < BRIGHTNESS_FILTER_FULL || flipped || rotated) {
         if (!s_dim) {
-            s_dim = heap_caps_malloc((size_t)s_w * BLIT_BAND_ABOVE * sizeof(uint16_t),
+            s_dim = heap_caps_malloc(BLIT_SCRATCH_PX(s_pw, s_ph) * sizeof(uint16_t),
                                      MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         }
         if (s_dim) {
             const int rows = y1 - y0;
-            if (flipped) {
+            if (rotated) {
+                /* Transposed into the scratch, dimmed on the way past
+                 * if the filter is on. See gather_rotated(). */
+                gather_rotated(s_dim, y0, y1, rot, filter);
+            } else if (flipped) {
                 /*
                  * Reversed in both axes at once: source row r becomes
                  * destination row rows-1-r, read backwards. One pass,
@@ -254,24 +402,24 @@ esp_err_t gfx_blit_err(int y0, int y1)
                 for (size_t i = 0; i < n; i++) s_dim[i] = brightness_dim565(src[i], filter);
             }
             src = s_dim;
-        } else if (flipped) {
+        } else if (flipped || rotated) {
             /*
-             * No scratch and a flip asked for. Unlike the dim, this one
-             * cannot degrade gracefully -- sending the band unflipped
-             * would put it at the wrong end of the screen, upright, in
-             * the middle of a flipped picture. Better to drop the band
-             * and leave what was there.
+             * No scratch and a turn asked for. Unlike the dim, this one
+             * cannot degrade gracefully -- sending the band untransformed
+             * would put it at the wrong place on the screen, the wrong
+             * way up, in the middle of a turned picture. Better to drop
+             * the band and leave what was there.
              */
             xSemaphoreGive(s_blit_lock);
-            ESP_LOGW(TAG, "no scratch for a flipped blit %d..%d", y0, y1);
+            ESP_LOGW(TAG, "no scratch for a rot%d blit %d..%d", rot * 90, y0, y1);
             return ESP_ERR_NO_MEM;
         }
-        /* No scratch, no flip: sent undimmed rather than not at all. */
+        /* No scratch, no turn: sent undimmed rather than not at all. */
     }
 
     esp_err_t err = ESP_OK;
     for (int i = 0; i < BLIT_RETRIES; i++) {
-        err = esp_lcd_panel_draw_bitmap(s_panel, 0, dy0, s_w, dy1, src);
+        err = esp_lcd_panel_draw_bitmap(s_panel, dx0, dy0, dx1, dy1, src);
         if (err != ESP_ERR_INVALID_STATE) break;
         /* One tick, which is longer than a band transfer takes. Sleeping
          * rather than spinning: the task that owns the previous transfer
@@ -470,6 +618,30 @@ void gfx_draw_time(int x, int y, uint32_t sec, uint16_t c)
     seg_digit(x, y, (int)(s2 / 10), GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
     x += GFX_DIG_W + GFX_DIG_GAP;
     seg_digit(x, y, (int)(s2 % 10), GFX_DIG_W, GFX_DIG_H, GFX_DIG_T, c);
+}
+
+/*
+ * MM:SS as text, unpadded minutes, two-digit seconds. See gfx.h for why
+ * the minutes are not clamped and why hours are not a format.
+ */
+const char *gfx_time_text(char *out, size_t out_len, uint32_t sec, bool neg)
+{
+    const unsigned m = (unsigned)(sec / 60);
+    const unsigned s2 = (unsigned)(sec % 60);
+    snprintf(out, out_len, "%s%u:%02u", neg ? "-" : "", m, s2);
+    return out;
+}
+
+int gfx_time_text_w(const char *s, int scale)
+{
+    return gfx_text_w(s, scale);
+}
+
+void gfx_draw_time_text(int x, int y, const char *s, int scale, uint16_t c)
+{
+    /* max_w is the string's own width: these are laid out by measurement
+     * and must never be the thing that ellipsises. */
+    gfx_draw_text(x, y, s, scale, gfx_text_w(s, scale), c);
 }
 
 static void seg_dash(int x, int y, int w, int h, int t, uint16_t c)

@@ -9999,3 +9999,68 @@ CLAUDE.md change that says so. The jump is deliberate and leaves 1212-
 4999 unused, so that a number says which release it came after: 0xxx
 and the first 1000-1116 are v0.3.0 and before, the second 1000-1012
 and 1200-1211 are v0.4.0, 5000 on is after it.
+
+### 5001 -- four angles, and the square that makes them possible
+
+**The screen turns to all four quarters now, and landscape is the
+reason.** The flip was a boolean because 180 is the only angle a
+full-width band survives: `gfx_blit()` sends rows, a flipped row is
+still a row, and the transfer stays one contiguous copy. A quarter turn
+is not -- a logical band of rows is a COLUMN of the glass -- so it was
+ruled out, correctly, for as long as nobody wanted landscape.
+
+What changed is where the turn happens. `gfx.c` keeps two extents: the
+glass (`s_pw`/`s_ph`, fixed) and the logical one (`s_w`/`s_h`, swapped at
+90 and 270). The shadow buffer does not change size, only shape --
+720x1280 and 1280x720 are the same allocation -- so an angle change is a
+restride and a repaint, not a realloc. Everything that draws keeps
+meaning what it meant, including `albumart.c`'s direct writes into
+`gfx_fb()`, which is the property that made this affordable.
+
+At 90 and 270 the band is gathered into the scratch the filter and the
+180 flip already share, transposed in 16x16 tiles because the source for
+one output row is a logical column and a pixel-at-a-time scan of that is
+a cache miss per pixel on PSRAM. Rotated bands are split at 240 rows so
+the gather fits that scratch. **Landscape is the expensive angle and the
+one to measure if the panel ever underruns.**
+
+**The control block is a 720x720 square at every angle**, and that is
+forced rather than chosen: the panel is 720 on its short edge, so a
+block that is to be the same block in both orientations can be at most
+720 square, and if it is to be that in landscape too it must be exactly
+720. The artwork gets `1280 - 720 = 560` -- a 720x560 band in portrait
+and a 560x720 column in landscape, the same rectangle turned. The rows
+inside the square do NOT turn: reading order is top to bottom at every
+angle, and the envelope and volume slider are horizontal controls at
+every angle. What is shared is the square's extent, the row offsets and
+the hit grid.
+
+The square grew from 560 to 720, which bought row 7 a second line. Seven
+controls on one row was what 560 px forced, and it put the file chooser
+and the sleep page in the same sweep as the transport; the transport is
+alone on its row now and the other four sit on one pitch.
+
+**What the layout test caught, that review did not:** prev and next were
+moved from +/-112 to +/-132 to clear the new toggle, and +/-132 overlaps
+it -- the pill's padded box reaches 98 from the centre and a skip glyph's
+reaches 49 back, so the centres must be 147 apart. They are 150 now. The
+four aux icons were interpolated across their span, which truncates to
+gaps of 206, 207, 207; the pitch is computed once and multiplied now.
+Both were written with comments claiming clearances that the arithmetic
+did not produce.
+
+**The clocks are ark12 rather than seven segments.** The monospaced
+halfwidth cell makes MM:SS fixed width for free, which is the one
+property the segments were carrying. What is not free is the width:
+these do not zero-pad, so the remaining time is measured and
+right-justified rather than offset from `GFX_TIME_W`, and the minutes
+are no longer clamped -- `gfx_draw_time()` caps at 99 because it draws
+exactly two minute digits, so **a 101-minute track read 99:23**. Hours
+are deliberately not a format.
+
+Also: the play/pause disc became a toggle, reporting what the player is
+doing rather than what a tap would do; the stream level strip is single
+sideband, matching the file envelope, which had been drawn from the
+baseline all along; and `settings` carries `screen_rotation` alongside
+the old `screen_flipped`, so a rollback lands upright or over rather
+than on its side.

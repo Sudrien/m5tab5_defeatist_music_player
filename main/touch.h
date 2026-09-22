@@ -65,20 +65,29 @@ bool touch_get(int *x, int *y);
 void touch_swallow(void);
 
 /*
- * Turn the coordinates over with the screen.
+ * Turn the coordinates with the screen. 0..3 quarter turns clockwise,
+ * the same numbers gfx_set_rotation() takes and necessarily the same
+ * value, or every control is somewhere other than where it was drawn.
  *
  * The controller reports in panel-native portrait space whatever the
- * picture is doing, so when gfx is flipping the picture 180 degrees this
- * has to flip the point to match, or every control is where its mirror
- * image used to be. x becomes (w-1-x) and y becomes (h-1-y), using the
- * dimensions touch_init() was given.
+ * picture is doing, so this undoes what gfx did. Given a panel point
+ * (px, py) and the panel extent touch_init() was handed:
+ *
+ *   0    (px, py)
+ *   90   (py, w-1-px)          -- logical x runs down the glass
+ *   180  (w-1-px, h-1-py)
+ *   270  (h-1-py, px)
+ *
+ * which is the inverse of the forward mapping in gfx.c's comment. At 90
+ * and 270 the returned point is in the LANDSCAPE space the screens drew
+ * in, so its x may be up to h-1 and its y up to w-1.
  *
  * Kept here rather than in the caller because the caller is four
  * screens' worth of hit tests -- ui.c, browser.c, panel.c, sleeppage.c
- * -- and they all want the point in the space they drew in. One flip at
+ * -- and they all want the point in the space they drew in. One turn at
  * the source is one place to be wrong.
  */
-void touch_set_flipped(bool flipped);
+void touch_set_rotation(int quarter_turns);
 
 bool touch_present(void);
 

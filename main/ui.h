@@ -425,19 +425,77 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y);
  * rows top and bottom.
  */
 /*
- * The artwork is a square now -- 720x720, the full width of the panel --
- * and the bar is what is left: 1280 - 720.
+ * THE CONTROL BLOCK IS A 720x720 SQUARE, and the artwork gets what is
+ * left of the long edge: 1280 - 720 = 560.
  *
- * Derived rather than chosen, which is the reverse of every version
- * before this one. The bar used to be sized to its contents and the
- * artwork got the remainder, so the cover was 964 rows in a 720 px column
- * and albumart.c letterboxed it into the middle with 122 rows of black
- * above and below. Those rows were doing nothing. Making the cover square
- * hands them to the controls, which had eight rows to fit into 356 px and
- * now have 560.
+ * Derived rather than chosen, and derived twice. The bar used to be
+ * sized to its contents and the artwork got the remainder, so the cover
+ * was 964 rows in a 720 px column and albumart.c letterboxed it with 122
+ * rows of black above and below. Making the cover square handed those
+ * rows to the controls: 720 art, 560 bar.
+ *
+ * This is the reverse of that, for landscape. The panel is 720 on its
+ * short edge, so a control block that is to be the same block at every
+ * angle can be at most 720x720 -- and if it is to be that at 90 and 270
+ * as well, it must be exactly 720x720, because 720 is the whole short
+ * edge. That fixes the artwork at 1280-720 = 560. There is no freedom in
+ * the split; naming UI_SQUARE first and subtracting is what says so.
+ *
+ * So the artwork band is 560x720 in landscape and 720x560 in portrait --
+ * the same rectangle turned -- and the controls are one square laid out
+ * from its own origin, which is at x=560 in landscape and y=560 in
+ * portrait. The ROWS do not turn: reading order is top to bottom at
+ * every angle, and the envelope and the volume slider are horizontal
+ * controls at every angle. What is shared is the square's extent, the
+ * row offsets inside it and the hit grid -- not a rotated bitmap.
+ *
+ * UI_ART_H is the portrait name and stays, because media_task's band
+ * ownership is written in terms of it: it owns rows 0..UI_ART_H-1. In
+ * landscape the art is not a band of rows at all, and ui_art_band()
+ * is what callers ask instead.
  */
-#define UI_ART_H    (720)
-#define UI_BAR_H    (1280 - UI_ART_H)
+#define UI_SQUARE   (720)
+#define UI_ART_H    (1280 - UI_SQUARE)
+#define UI_BAR_H    (UI_SQUARE)
+
+/*
+ * Where the artwork lives at the current angle, in logical coordinates.
+ *
+ * Portrait: x=0, w=720, y=0, h=560 -- rows 0..559, still a band, and
+ * still the band media_task owns.
+ * Landscape: x=0, w=560, y=0, h=720 -- a column. A caller blitting it
+ * must blit rows 0..719, which is every row, because a column is not a
+ * band. ui_blit_art() does that so no caller has to know.
+ */
+void ui_art_band(int *x, int *y, int *w, int *h);
+void ui_blit_art(void);
+
+/* Same, returning the panel's error. albumart.c wants it: a cover that
+ * failed to reach the glass must not be reported as shown, which is the
+ * same reason gfx_blit_err() exists. */
+esp_err_t ui_blit_art_err(void);
+
+/* The control square's own blit. In landscape it sends every row,
+ * because the square is a column -- see ui.c. */
+void ui_blit_bar(void);
+
+/* True when a logical point is over the artwork rather than the square.
+ * Replaces the `y < s_bar_top` test, which is only the artwork in
+ * portrait. */
+bool ui_in_art(int x, int y);
+
+/*
+ * Re-read gfx_w()/gfx_h() and lay the square out again.
+ *
+ * Called after gfx_set_rotation(), because a turn between portrait and
+ * landscape swaps the logical extent and every bound in this file is
+ * derived from it. Does not draw; the caller repaints.
+ */
+void ui_relayout(void);
+
+/* True when the square is to the right of the artwork rather than below
+ * it. A few callers lay out per orientation; they ask this. */
+bool ui_landscape(void);
 
 #ifdef __cplusplus
 }
