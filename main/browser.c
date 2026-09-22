@@ -327,6 +327,18 @@ static void load_dir(const char *dir)
 
     qsort(s_entries, (size_t)s_count, sizeof(entry_t), cmp_entry);
     find_common_prefix();
+
+    /*
+     * Dirty again now the rows exist. The flag set at the top is for
+     * the path and the tabs; a draw that runs while this is still
+     * reading -- browser_open() from the decode task at boot, beside
+     * ui_task's draw -- takes it with s_count at 0, paints an empty
+     * list, and clears it. That was cheap to lose when a listing was a
+     * readdir. With cue sheets it is every sheet in the folder parsed,
+     * 100 ms and more, and the list stayed black until a tab change
+     * loaded it again.
+     */
+    s_dirty = true;
 }
 
 /*
