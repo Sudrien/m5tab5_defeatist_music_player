@@ -229,7 +229,21 @@ static const char *TAG = "tab5_ui";
  * that stopped at the outline would run under the nub.
  */
 #define SPK_HALF    (26)
-#define BATT_BLOCK  (46 + 5)        /* BATT_W + BATT_NUB_W, both below */
+
+/*
+ * The battery's own dimensions, up here rather than beside draw_battery()
+ * because batt_cx() needs them and C compiles top to bottom -- the same
+ * trap fill_rrect() fell into in 5001. BATT_BLOCK is what the row's
+ * arithmetic spends on it: the outline plus the nub hanging off its
+ * right edge, because a groove that stopped at the outline would run
+ * under the nub.
+ */
+#define BATT_W      (46)
+#define BATT_H      (24)
+#define BATT_NUB_W  (5)
+#define BATT_NUB_H  (10)
+#define BATT_WALL   (3)
+#define BATT_BLOCK  (BATT_W + BATT_NUB_W)
 
 /* Hit targets are padded well beyond the drawn shapes. A 22 px slider on
  * a 5" panel is a small thing to hit with a thumb, and there is nothing
@@ -436,11 +450,49 @@ static void seek_bounds(int *x0, int *x1, int *y)
  */
 #define VOL_BLOCKS  (2 * SPK_HALF + BATT_BLOCK)
 
+/*
+ * The two icons anchor to the CONTENT BOX, and the groove is derived
+ * from them -- which is the opposite of how this worked and is the whole
+ * of this patch.
+ *
+ * spk_centre() and draw_battery() used to hang off vol_bounds() by a
+ * fixed 42 px each, from when the groove's margins were a flat 96 and
+ * the icons sat inside them. 5001 rebalanced the groove and the icons
+ * came along for the ride: the output icon landed at 105 rather than
+ * flush at 50, leaving 55 px of dead air at the left end -- the very
+ * thing the rebalance was supposed to remove -- while the comment
+ * claiming the outer blocks were flush was simply false.
+ *
+ * A BOOT LOG IS WHAT CAUGHT IT. A mute press logged at x=83, which is
+ * inside 79..131 and nowhere near the 24..76 a flush icon occupies. The
+ * arithmetic had been checked against itself and agreed with itself;
+ * only the device knew where the icon actually was.
+ *
+ * So the dependency runs one way now. These two are the anchors, both
+ * expressed against bar_x0()/bar_x1() and neither against the groove,
+ * and vol_bounds() starts from where they end.
+ */
+static int spk_cx(void)
+{
+    return bar_x0() + SPK_HALF;
+}
+
+static int batt_cx(void)
+{
+    /* Drawn from cx - BATT_W/2 and extending BATT_NUB_W past
+     * cx + BATT_W/2, so flush right means the NUB touches the content
+     * edge, not the outline. */
+    return bar_x1() - BATT_NUB_W - BATT_W / 2;
+}
+
 static void vol_bounds(int *x0, int *x1, int *y)
 {
+    /* Two gutters out of what the blocks leave. The /8 is not a typo
+     * for /2: an eighth each side separates the blocks from the groove
+     * without letting the gutters dominate the row. */
     const int gut = ((bar_x1() - bar_x0()) - VOL_BLOCKS) / 8;
-    *x0 = bar_x0() + 2 * SPK_HALF + gut;
-    *x1 = bar_x1() - BATT_BLOCK - gut;
+    *x0 = spk_cx() + SPK_HALF + gut;
+    *x1 = batt_cx() - BATT_W / 2 - gut;
     *y  = s_bar_top + VOL_Y;
 }
 
@@ -764,7 +816,8 @@ static void spk_centre(int *cx, int *cy)
 {
     int x0, x1, y;
     vol_bounds(&x0, &x1, &y);
-    *cx = x0 - 42;
+    (void)x0; (void)x1;             /* the row's y, not its groove */
+    *cx = spk_cx();
     *cy = y;
 }
 
@@ -967,11 +1020,6 @@ static void draw_rg(const ui_state_t *st)
  * The fill is proportional and the outline is not: an outline that
  * shrinks reads as a smaller battery rather than as a flatter one.
  */
-#define BATT_W      (46)
-#define BATT_H      (24)
-#define BATT_NUB_W  (5)
-#define BATT_NUB_H  (10)
-#define BATT_WALL   (3)
 
 /* Below 20% the fill turns red -- the same red as the seek bar's played
  * portion, because it is the same statement: this much is spent. */
@@ -1329,7 +1377,8 @@ static void draw_battery(int pct, bool charging, bool ext)
 {
     int x0, x1, y;
     vol_bounds(&x0, &x1, &y);
-    const int cx = x1 + 42, cy = y;
+    (void)x0; (void)x1;             /* the row's y, not its groove */
+    const int cx = batt_cx(), cy = y;
 
     /*
      * Nothing of the battery is drawn when there is no battery. Not an

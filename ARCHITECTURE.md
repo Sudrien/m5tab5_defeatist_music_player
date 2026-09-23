@@ -10150,3 +10150,44 @@ a `FILINFO` with size and date already in it. Anything that later walks
 the card for a catalog should go under the VFS for that reason; at a
 volume root, bounded by `CARDTIME_SCAN_MAX`, it is not worth the
 layering.
+
+### 5004 -- the volume row's icons were never flush
+
+5001 rebalanced the volume groove into three blocks and two equal
+gutters, and said in a comment that the outer blocks were flush to the
+content box. They were not, and the arithmetic could not have told
+anyone: `spk_centre()` and `draw_battery()` derived their centres from
+`vol_bounds()` by a fixed 42 px each, a leftover from when the groove's
+margins were a flat 96 and the icons sat inside them. Rebalancing the
+groove moved the icons with it.
+
+In portrait the output icon landed at 105 with its box at 79..131,
+leaving **55 px of dead air** between the content edge and the icon --
+precisely the thing the rebalance existed to remove. The battery
+floated 47 px off the other end.
+
+**A boot log caught it.** A mute press logged at `x=83`, which is inside
+79..131 and nowhere near the 24..76 a flush icon would occupy. Every
+piece of arithmetic involved had been checked against itself and agreed
+with itself; only the device knew where the icon actually was. `5001`
+had added a layout test and that test did not look at this row, so it
+passed throughout.
+
+The dependency runs one way now: `spk_cx()` and `batt_cx()` are
+expressed against `bar_x0()`/`bar_x1()` and nothing else, and
+`vol_bounds()` starts from where they end. The groove itself does not
+move -- it was already 147..574 in portrait and still is. Only the
+icons do, the output icon left by 55 px and the battery right by 52.
+
+**The mute target moves with it**, from 79..131 to 24..76, and that test
+takes no `HIT_PAD_X` by design. A thumb trained on the previous build
+will miss low for a while.
+
+`rotatetest` grew the row: no dead air at either end, gutters equal, and
+blocks plus gutters covering the content box exactly. The log's own
+number is deliberately not asserted -- `x=83` is evidence of the bug,
+not of the fix, and pinning it would preserve what it exposed.
+
+`BATT_W` and friends moved up beside `SPK_HALF` because `batt_cx()`
+needs them and C compiles top to bottom. That is the second time in four
+patches this file has hit that; the first was `fill_rrect()` in 5001.

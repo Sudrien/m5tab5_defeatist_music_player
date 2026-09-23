@@ -233,6 +233,61 @@ int main(void)
         }
 
         /*
+         * The volume row: the two icons anchor to the content box and
+         * the groove is derived from them.
+         *
+         * 5001 had it the other way round -- the icons hung off the
+         * groove by a fixed 42 px -- so rebalancing the groove floated
+         * the output icon 55 px off the left edge while the comment
+         * claimed it was flush. A boot log caught that, not this test,
+         * because this test did not look at the row at all. It does now.
+         */
+        {
+            const int spk_half = 26, batt_w = 46, batt_nub = 5;
+            const int blocks = 2 * spk_half + (batt_w + batt_nub);
+            const int gut = ((x1 - x0) - blocks) / 8;
+
+            const int spk = x0 + spk_half;
+            const int batt = x1 - batt_nub - batt_w / 2;
+            const int vx0 = spk + spk_half + gut;
+            const int vx1 = batt - batt_w / 2 - gut;
+
+            /*
+             * No dead air. This is the property that broke, and the one
+             * the log exposed: every pixel of the content box is either
+             * a block or one of the two gutters, so nothing can float.
+             *
+             * The log's own number is deliberately NOT asserted. A mute
+             * press landed at x=83, which proves the icon was at 105 on
+             * that build -- but 83 is outside the flush box this now
+             * produces, so asserting it would pin the bug in place.
+             * What the log proved is the gap; the gap is what is
+             * checked.
+             */
+            CHECK((spk - spk_half) - x0 == 0,
+                  "rot%d: %d px of dead air before the output icon",
+                  rot * 90, (spk - spk_half) - x0);
+            CHECK(x1 - (batt + batt_w / 2 + batt_nub) == 0,
+                  "rot%d: %d px of dead air after the battery",
+                  rot * 90, x1 - (batt + batt_w / 2 + batt_nub));
+
+            /* The groove clears both blocks, and by the same margin. */
+            CHECK(vx0 > spk + spk_half,
+                  "rot%d: groove starts inside the output icon", rot * 90);
+            CHECK(vx1 < batt - batt_w / 2,
+                  "rot%d: groove ends inside the battery", rot * 90);
+            CHECK((vx0 - (spk + spk_half)) == ((batt - batt_w / 2) - vx1),
+                  "rot%d: gutters differ, %d vs %d", rot * 90,
+                  vx0 - (spk + spk_half), (batt - batt_w / 2) - vx1);
+
+            const int covered = (2 * spk_half) + (vx1 - vx0) +
+                                (batt_w + batt_nub) + 2 * gut;
+            CHECK(covered == x1 - x0,
+                  "rot%d: blocks and gutters cover %d of %d",
+                  rot * 90, covered, x1 - x0);
+        }
+
+        /*
          * The transport: the pill and the skip glyphs must not touch,
          * including their padded hit boxes. This is the clearance that
          * moving from a 92 px disc to a 168 px pill ate into.
