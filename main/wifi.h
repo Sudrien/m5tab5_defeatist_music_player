@@ -317,6 +317,15 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms);
 /* Whether the station has an address. A value, safe anywhere. */
 bool wifi_connected(void);
 
+/*
+ * Whether an NTP reply has been accepted since boot -- that is, whether
+ * settings_now() is a synced time or only the floor. The media catalog
+ * records which with every time it writes, because a floor time can be
+ * months early and the two must never be compared. Latches true; a
+ * value, safe anywhere.
+ */
+bool wifi_ntp_synced(void);
+
 /* The joined network's SSID, copied out. False and "" when not joined. */
 bool wifi_sta_ssid(char *out, size_t out_size);
 

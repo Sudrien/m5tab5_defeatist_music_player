@@ -137,6 +137,8 @@ uint32_t wifi_sdio_khz(void)         { return s_sdio_khz; }
 static bool s_powered;
 static bool s_up;
 static bool s_sntp_started;
+/* An NTP reply has been accepted this boot. See wifi_ntp_synced(). */
+static volatile bool s_ntp_synced;
 static esp_netif_t *s_sta_netif;
 
 /*
@@ -307,6 +309,7 @@ static void on_sntp_sync(struct timeval *tv)
     if (!tv) return;
     const bool ok = settings_note_ntp_time((int64_t)tv->tv_sec,
                                            esp_timer_get_time());
+    if (ok) s_ntp_synced = true;
     ESP_LOGI(TAG, "NTP sync: %lld%s", (long long)(int64_t)tv->tv_sec,
              ok ? "" : " (implausible vs. last known time; system clock "
                        "moved anyway, stored baseline did not)");
@@ -575,6 +578,8 @@ esp_err_t wifi_join(const char *ssid, const char *secret, uint32_t timeout_ms)
 }
 
 bool wifi_connected(void) { return s_connected; }
+
+bool wifi_ntp_synced(void) { return s_ntp_synced; }
 
 bool wifi_sta_ip(char *out, size_t out_size)
 {

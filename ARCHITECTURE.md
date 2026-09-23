@@ -10633,3 +10633,87 @@ image would be indexed as a track. And `cuedir_load()` returns NULL on
 no memory as well as on "no sheets". A walk that hits that shows the
 images instead of the tracks, and the next walk flips back. Both belong
 to `cuedir` and the chooser shares them; not changed here.
+
+### 5014 -- the reconcile
+
+The pieces from 5010-5013, joined. `main/mediasync.{h,c}` is the engine
+and `main/medialib.{h,c}` binds it to the card. **Built into the
+firmware, called by nothing yet. The engine is tested on the host
+(`texttest/mediasynctest.c`); the binding is not.**
+
+**The new index is written as the merge goes.** The merge visits paths
+in index order, and each step yields that path's new record: a KEEP
+copies the old one, and anything else points at the catalog line it
+just appended. So the new index streams to `.defeatist.ixn` with no sort
+and no table in memory. When the merge completes, the old index is
+removed and the new one renamed over it.
+
+**Anything short of completion changes no index.** A stop, a failed
+walk, disorder on either side, or a catalog that refuses a line: the
+temporary file is removed and the old index stands, byte for byte.
+Catalog lines already appended are then orphans, pointed at by
+nothing. And an incomplete walk buries **nothing**, not even as orphan
+lines: it hasn't looked at what it didn't reach. The first version of
+the host test missed that, and a mutation proved it (below).
+
+**A damaged old index** -- a record `midx_rec_unpack()` refuses, a size
+that isn't whole records, disorder, or a long path the catalog doesn't
+confirm -- fails the run and removes the index, so the next run
+rebuilds from nothing. That is the one answer to an index that can't be
+believed. The window between removing the old index and renaming the
+new one leads to the same rebuild.
+
+**Fallbacks for a missing catalog line.** REVIVE carries over the
+tombstone's tags; if that line is gone, the file is read as new. BURY
+copies the live line; if that is gone, the tombstone is written from
+the index's own path and stamp, which is all a tombstone needs.
+
+**The version is in the file name,** `.defeatist.ix1`. A format change
+renames the file instead of migrating it, which is the rebuild
+`MEDIA-INDEX.md` settled on, and the build that bumps the name removes
+the old file.
+
+**The binding.** Catalog appends through `mediacat_append()`. Catalog
+reads open the file per read, because they are the minority (long
+paths, revives, buries), and a handle held open across the run would be
+a second view of a file being appended to, with its own cached size and
+sector. Tags are read the way the screen gets them: a cue track's from
+its sheet with `cuedir_tags()`, anything else's with
+`covertag_read_tags()`. Times come from `settings_now()`, marked
+synced or floor by a new `wifi_ntp_synced()`, which latches true when
+`on_sntp_sync()` accepts a reply.
+
+**`MAX_OPEN_FILES` 5 to 8, per volume.** Playback holds up to three
+files (decoder, art reader, chooser folder). A reconcile holds the old
+and new index for its whole run, plus briefly a folder, sheet, tag or
+catalog file -- six, and seven when those overlap. The sum is written
+next to the number in `storage.c`.
+
+**Host test.** `mediasynctest` runs the real `mediasync.c` on real index
+files in `/tmp`, with an in-memory catalog, tag reader and walk: 600
+tracks including long paths and the `a/` versus `a b/` trap. It covers
+a first run that adds everything; an unchanged run that writes no line,
+reads no tag, reads the catalog only for the long paths, and leaves the
+index byte-identical; removals, changes and additions counted exactly,
+with tombstones flagged and carrying the run's time; a rerun that
+buries nothing again; the original card back with revives that keep
+their tags and read none; a failed walk, a stop, disorder and a refused
+append each leaving the old index byte-identical, no temporary file and
+no tombstone; a tombstone whose live line is gone; and three kinds of
+damage each removing the index and rebuilding.
+
+**Mutation-checked**, eleven bugs, all caught -- two of them only
+after the test was fixed. "Bury after an incomplete walk" survived at
+first because nothing gets installed on failure. The test now also
+requires no tombstones from a failed or stopped run. "Long path
+unconfirmed" survived because the corruption I planted also broke the
+order, so the order check caught it first. The test now plants one
+that still sorts in place. Two more crashed the test instead of failing
+it, because the test read back an index without checking it was there.
+Fixed.
+
+**Not yet known, and worth measuring when something calls this:** how
+long a first run takes on a real card. A cue track's tags come from
+`cuedir_tags()`, which parses its sheet and probes its audio's length
+for every track. An image of twenty tracks is twenty parses, which is
+fine for FLAC and could be slow for an MP3 without a Xing header.

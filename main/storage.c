@@ -81,10 +81,15 @@ static const char *TAG = "tab5_storage";
 
 /* Files a volume must hold open at once. The decoder holds one, the
  * album-art reader briefly holds a second, and the chooser's scan holds a
- * DIR. Five is the IDF default and is enough; it is stated rather than
- * inherited so a later playlist prefetch does not quietly hit the
- * "no free file descriptors" wall. */
-#define MAX_OPEN_FILES          (5)
+ * DIR. Five was the IDF default and was enough until the media index:
+ * a reconcile holds the old index and the new one for its whole run,
+ * and briefly a third -- a folder, a sheet, a track's tags, a catalog
+ * line -- so with playback's three that is six, and seven at the
+ * moment a catalog read and a tag read overlap a cue sheet's probe.
+ * Eight, stated rather than inherited, so the next reader to add a
+ * file finds the sum written down instead of the "no free file
+ * descriptors" wall. */
+#define MAX_OPEN_FILES          (8)
 
 /* ------------------------------------------------------------------ */
 
