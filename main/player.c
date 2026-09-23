@@ -8544,9 +8544,35 @@ static track_end_t play_file(const char *path)
          *
          * The cancel case still repaints: nothing is pending there, which
          * is exactly what distinguishes it. */
-        if (s_repaint_art && !s_pending_ready && !visuals_pending) {
+        /*
+         * visuals_pending no longer BLOCKS the repaint; it chooses what
+         * gets repainted.
+         *
+         * The old test refused to repaint at all while this track's
+         * visuals were uncommitted, on the sound reasoning that its
+         * cover must not go up before its audio is heard. But
+         * visuals_pending is true for as long as the decode runs ahead
+         * of the writer, which with three rings and a short track is
+         * tens of seconds -- a board log measured 19 -- and for that
+         * whole window nothing could repaint the artwork at all.
+         *
+         * Close the sleep page inside it and the art square kept the
+         * sleep page on it until the next track change. That was
+         * reported from a board and is what this fixes: the log shows
+         * `button: close` with not one drawing line after it, while the
+         * same press on a committed track redraws in 18 ms.
+         *
+         * What the screen was showing is s_shown_path -- the COMMITTED
+         * track, which is what track_commit() last put up -- so that is
+         * what a repaint restores. `path` is this decode's track and
+         * still must not be drawn early; the gate's original job is
+         * intact, it just no longer takes the repaint down with it.
+         */
+        if (s_repaint_art && !s_pending_ready) {
             s_repaint_art = false;
-            load_track_visuals(path);
+            const char *const repaint = visuals_pending ? s_shown_path : path;
+            if (repaint[0]) load_track_visuals(repaint);
+            else            ui_clear_art();
         }
 
         /* The chooser's reload, which can be asked for over live audio
@@ -9503,9 +9529,16 @@ static track_end_t play_file(const char *path)
              * out, because this block is half sent and breaking would
              * drop the rest of it.
              */
-            if (s_repaint_art && !visuals_pending) {
+            if (s_repaint_art) {
+                /* The committed track while this one is still pending --
+                 * see the longer note on the same test in the main
+                 * loop. Paused, this is the only loop running, so a
+                 * screen closed here has no other chance to repaint. */
                 s_repaint_art = false;
-                load_track_visuals(path);
+                const char *const repaint = visuals_pending ? s_shown_path
+                                                            : path;
+                if (repaint[0]) load_track_visuals(repaint);
+                else            ui_clear_art();
             }
             /* And the stars, for the same reason: paused, this is the
              * only loop running, and a star pressed on the panel or in

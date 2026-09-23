@@ -10191,3 +10191,43 @@ not of the fix, and pinning it would preserve what it exposed.
 `BATT_W` and friends moved up beside `SPK_HALF` because `batt_cx()`
 needs them and C compiles top to bottom. That is the second time in four
 patches this file has hit that; the first was `fill_rrect()` in 5001.
+
+### 5005 -- closing the sleep page left it on the artwork
+
+Reported from a board, with the log to prove it: `button: close` with
+not a single drawing line after it, and the sleep page still occupying
+the art square until the next track change nineteen seconds later. The
+same press on a different track redrew in 18 ms.
+
+The difference was `visuals_pending`. `play_file()` refused to act on
+`s_repaint_art` while this track's visuals were uncommitted --
+
+    if (s_repaint_art && !s_pending_ready && !visuals_pending)
+
+-- on the sound reasoning that a track's cover must not go up before its
+audio is heard. `VISUALS_GATE()` exists precisely to stop that, and its
+own comment records the eighteen seconds of a previous track's title
+that made it necessary.
+
+But that window is not short. With three rings and a track shorter than
+one ring's worth of audio, a decode runs tens of seconds ahead of the
+writer; the log measured **nineteen seconds** between `playing ... 02 A
+Proper Story` and its commit. For that whole window **nothing could
+repaint the artwork at all**, so any screen that covered it stayed.
+
+The fix is that `visuals_pending` no longer decides WHETHER to repaint,
+only WHAT to repaint. What the screen was showing is `s_shown_path`, the
+track `track_commit()` last put up, so that is what a repaint restores.
+`path` -- this decode's track -- is still withheld until its commit. The
+gate's original job is untouched; it simply no longer takes the repaint
+down with it.
+
+Both consumers get it: the main send loop and the paused-send loop,
+which is the only loop running while paused and so the only chance a
+screen closed there ever gets.
+
+**Not host-testable and not tested.** `player.c` does not build on a
+host, this is control flow rather than arithmetic, and the failure needs
+a decode running well ahead of playback to reproduce. The reasoning is
+above and the board log is the evidence; the confirmation is opening the
+sleep page early in a short track and closing it.
