@@ -186,10 +186,10 @@ tree and some by asking. `main/mediaindex.h` (5010) is the first code.
    Matching is byte-exact, so `ABBA/` and `Abba/` are two folders.
 4. **Record size: a path prefix, not a hash.** The merged listing needs
    both indexes in path order, which a hash key cannot give. The key is
-   the first ~120 bytes of the path, with the catalog offset, 128 bytes
-   a record; a prefix tie is settled by reading the full path out of
-   the catalog. Paths stay good to the 512 bytes the rest of the player
-   allows.
+   the first 104 bytes of the path, with the catalog offset and the
+   stamp, 128 bytes a record (5011 has the layout); a prefix tie is
+   settled by reading the full path out of the catalog. Paths stay good
+   to the 512 bytes the rest of the player allows.
 5. **A version bump rebuilds the index.** The index and search file are
    derived, and the sidecar (`replaygain.h`) already showed derived data
    needs no migration path. The catalog follows `settings.h`: a key a

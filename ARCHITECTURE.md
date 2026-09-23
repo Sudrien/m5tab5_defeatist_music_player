@@ -10428,3 +10428,68 @@ fetch. The replacement is due when radio-browser needs a second field
 or a nested one. That is when to route cJSON to PSRAM through the
 hooks, a global change that also moves settings and the sidecar, so it
 should be made on purpose.
+
+### 5011 -- the index record, and finding things in it
+
+The fixed-width file `MEDIA-INDEX.md` asks for, added to
+`mediaindex.h`, still with no I/O. Records come in through a `read`
+callback and long paths through a `fullpath` callback, so the host test
+runs them on an array and the device will run them on fseek and fread.
+**Host-tested, not built, not flashed.**
+
+**128 bytes, little-endian, packed byte by byte:** a 104-byte path
+prefix, the path's length, a dead flag, a reserved zero byte, the
+catalog offset, then mtime and size. The key is 104 bytes rather than
+the 120 that was discussed, because the stamp is in the record too. With
+the stamp in the index, reconcile merges two files it reads in order,
+the walk and the index, and touches the catalog only to append. 20 000
+tracks is 2.5 MB.
+
+**A path longer than the key is still found exactly.** When a query and
+a record agree on all 104 bytes, the record's full path is read from
+the catalog and compared. The host test found one case where that read
+isn't needed: a query exactly 104 bytes long is a proper prefix of the
+longer record, so it sorts first. It is now decided without the read, so
+no path of 104 bytes or fewer ever touches the catalog during a search.
+
+**A folder listing costs one search per child.** Everything under
+`a/b/` is one contiguous run in path order, so `MIDX_PAST_PREFIX` jumps
+over a listed subfolder in log2(n) reads. The test's box-set folder
+(three discs, 600 tracks) lists in fewer reads than reading through it.
+A root with hundreds of small folders does not gain from the skip, and
+the test does not claim it does.
+
+**What a bad catalog can and cannot do.** The full path that comes back
+is checked against the record's length and key, and a mismatch sets
+`err`: the caller should stop trusting the index and rebuild it. A line
+that matches both and differs after byte 104 -- a sibling with the same
+long prefix and the same length -- can't be caught this way. The rule
+that prevents it comes before any search: a catalog offset is only
+valid for the catalog the index was built against, so whatever compacts
+the catalog rebuilds the index in the same step.
+
+`midx_rec_unpack()` refuses anything the packer could not have written
+-- a reserved byte, an unknown flag, a NUL inside the key, a byte in
+the padding, a zero or oversized length, a leading slash -- because
+that is what a torn write or someone else's file looks like, and the
+answer to all of them is the same: rebuild.
+
+The path limit is 506 bytes: the player's 512-byte buffers, less the
+NUL, less `/usb/`.
+
+**Mutation-checked**, nine bugs, all caught: the 104-byte shortcut
+removed; the catalog's key not checked; PAST_PREFIX behaving as AT;
+AT off by one; padding not checked; the length stored in one byte; a
+long prefix matched on the key alone; mtime stored in 32 bits; a path of
+exactly 104 bytes treated as a long one. Two of those originally made
+the listing loop in the test spin for ever rather than fail; it is
+bounded now, so a broken skip fails CI instead of hanging it.
+
+**Next.** Reconcile can write the new index as it goes. The merge
+produces the index's records in index order -- a KEEP copies the old
+record, anything else writes a new one pointing at the line it just
+appended -- so the new index is streamed to a temporary file and
+renamed over the old one at the end, with no sort anywhere. A reconcile
+that stops partway throws the temporary file away. The lines it has
+already appended are then orphans: harmless, and dropped by the next
+compaction.
