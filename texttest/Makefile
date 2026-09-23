@@ -66,6 +66,13 @@ ROTATE_BIN := rotatetest
 # itself and there is nothing to drift from.
 CARDTIME_BIN := cardtimetest
 
+# The settings pages' one scrollbar. The only way to reach the sleep
+# timer in landscape, where 860 px of page sit in a 504 px viewport, so
+# an off-by-one at either end of its travel reads as a control that
+# cannot be set rather than as a scrollbar that is wrong. Header-only,
+# like cardtimetest.
+MENUSCROLL_BIN := menuscrolltest
+
 # Fade and end-of-audio detection. Links the real loudness.c, and builds
 # it once more at -O2 -Werror as an object -- not -fsyntax-only, which
 # stops before the optimiser that the -O2-only warnings come out of.
@@ -190,7 +197,7 @@ NETLINK_BIN := netlinktest
 # ../test_audio_files so the bytes under test are the bytes on the card.
 CUE_BIN := cuesheettest
 
-all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
+all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -229,6 +236,13 @@ $(CARDTIME_BIN): cardtimetest.c ../main/cardtime.h
 
 run-cardtime: $(CARDTIME_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(CARDTIME_BIN)
+
+$(MENUSCROLL_BIN): menuscrolltest.c ../main/menuscroll.h
+	$(CC) $(WARNCFLAGS) -c menuscrolltest.c -o /dev/null
+	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ menuscrolltest.c $(LDFLAGS)
+
+run-menuscroll: $(MENUSCROLL_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(MENUSCROLL_BIN)
 
 $(FADE_BIN): fadetest.c ../main/loudness.c ../main/loudness.h
 	$(CC) $(WARNCFLAGS) -D_GNU_SOURCE -I../main -c ../main/loudness.c -o /dev/null
@@ -314,7 +328,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN) $(MENUSCROLL_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -429,4 +443,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean

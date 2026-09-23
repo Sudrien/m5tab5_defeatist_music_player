@@ -7,6 +7,7 @@
 
 #include "esp_log.h"
 #include "gfx.h"
+#include "menuscroll.h"
 #include "settings.h"
 #include "sleeptimer.h"
 
@@ -74,6 +75,14 @@ static bool s_was_down;
  * touch on a dark screen, which ui.c owns.
  */
 static bool s_screen_on = true;
+/*
+ * The scroll. In portrait the page fits with room to spare and this
+ * stays at zero and draws nothing; rotated, the same content is 860 px
+ * tall in a 504 px viewport and the timer row is simply unreachable
+ * without it.
+ */
+static menuscroll_t s_scroll;
+static int s_content_h;     /* set by the draw, read by the touch */
 /* A drag on the brightness slider, held across polls -- panel.c's
  * crossfade slider, for panel.c's reason. */
 static bool s_drag;
@@ -94,6 +103,8 @@ void sleeppage_open(void)
     s_screen_on = true;
     s_drag = false;
     s_timer_drag = false;
+    s_scroll.off = 0;
+    s_scroll.drag = false;
 }
 
 void sleeppage_close(void)
@@ -106,15 +117,30 @@ void sleeppage_close(void)
  * it, which is why this is a list of boxes counted from LIST_TOP and not
  * one box.
  */
+/*
+ * The band between the header and the footer. Everything below is laid
+ * out from list_top() and so moves as one when the scroll changes --
+ * the boxes chain off each other precisely so there is one place to
+ * subtract it.
+ */
+static int view_y(void)  { return LIST_TOP; }
+static int view_h(void)  { return gfx_h() - FOOT_H - LIST_TOP; }
+static int list_top(void)
+{
+    return view_y() - menuscroll_clamp(s_scroll.off, s_content_h, view_h());
+}
+
 static void screen_box(int *x, int *y, int *w, int *h)
 {
-    *x = 0; *y = LIST_TOP; *w = gfx_w(); *h = OPTION_H;
+    *x = 0; *y = list_top(); *w = gfx_w(); *h = OPTION_H;
 }
 
 static void brightness_box(int *x, int *y, int *w, int *h)
 {
+    int sx, sy, sw, sh;
+    screen_box(&sx, &sy, &sw, &sh);
     *x = 0;
-    *y = LIST_TOP + OPTION_H + NOTE_GAP + NOTE_LINES * NOTE_STEP + GAP;
+    *y = sy + sh + NOTE_GAP + NOTE_LINES * NOTE_STEP + GAP;
     *w = gfx_w();
     *h = SLIDER_H;
 }
@@ -153,6 +179,22 @@ static void timer_box(int *x, int *y, int *w, int *h)
     *h = SLIDER_H;
 }
 
+/* A little air under the last note, so the end of the content does not
+ * sit flush against the footer. */
+#define BOT_PAD (24)
+
+/*
+ * How tall the content is, measured from list_top(). The scroll cancels
+ * -- every box chains off list_top() and this subtracts it again -- so
+ * this may be called before s_content_h is right and still be right.
+ */
+static void layout(void)
+{
+    int x, y, w, h;
+    timer_box(&x, &y, &w, &h);
+    s_content_h = (y + h + NOTE_GAP + NOTE_STEP + BOT_PAD) - list_top();
+}
+
 void sleeppage_set_timer(int step, int64_t seconds_left)
 {
     if (step != s_timer_step || seconds_left != s_timer_left) {
@@ -169,12 +211,11 @@ void sleeppage_draw(void)
     if (!s_open || !s_dirty) return;
     s_dirty = false;
 
+    layout();
+    s_scroll.off = menuscroll_clamp(s_scroll.off, s_content_h, view_h());
+
     const int w = gfx_w(), h = gfx_h();
     gfx_fill_rect(0, 0, w, h, C_BG);
-
-    gfx_draw_text(24, (HEAD_H - GFX_GLYPH_H(NAME_SCALE)) / 2, "Sleep",
-                  NAME_SCALE, w - 48, C_TEXT);
-    gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
 
     int x, y, bw, bh;
     screen_box(&x, &y, &bw, &bh);
@@ -301,6 +342,28 @@ void sleeppage_draw(void)
     }
 
     /*
+     * Header, AFTER the rows. There is no clip in gfx, so this is the
+     * clip: the content is drawn as though the page were unbounded and
+     * the opaque header covers whatever ran off the top of the
+     * viewport. The footer does the same at the other end.
+     */
+    gfx_fill_rect(0, 0, w, LIST_TOP, C_BG);
+    gfx_draw_text(24, (HEAD_H - GFX_GLYPH_H(NAME_SCALE)) / 2, "Sleep",
+                  NAME_SCALE, w - 48, C_TEXT);
+    gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
+
+    {
+        int bar_y, bar_h;
+        if (menuscroll_geom(&s_scroll, s_content_h, view_y(), view_h(),
+                            &bar_y, &bar_h)) {
+            gfx_fill_rect(w - MENUSCROLL_W, view_y(), MENUSCROLL_W, view_h(),
+                          C_ROW);
+            gfx_fill_rect(w - MENUSCROLL_W, bar_y, MENUSCROLL_W, bar_h,
+                          s_scroll.drag ? C_TEXT : C_DIM);
+        }
+    }
+
+    /*
      * Footer: panel.c's, one button, the way out.
      *
      * FILLED, not just ruled. This used to draw a 2 px rule and the
@@ -331,6 +394,32 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
 
     if (!s_open) return SLEEPPAGE_NONE;
 
+    layout();
+
+    /*
+     * The scrollbar, before the sliders and outside the tapped test: a
+     * drag is a run of downs with one edge at the front. It wins over
+     * the rows it overlaps -- that is what the strip is for -- and a
+     * press in it never reaches them.
+     */
+    {
+        if (menuscroll_touch(&s_scroll, down, tapped, x, y, gfx_w(),
+                             s_content_h, view_y(), view_h())) {
+            s_dirty = true;
+            return SLEEPPAGE_NONE;
+        }
+    }
+
+    /*
+     * Rows begin at a press inside the viewport and nowhere else. A
+     * drag already under way carries on wherever the finger goes --
+     * that is what the s_drag / s_timer_drag halves of these tests are
+     * -- but a row scrolled under the header or the footer is not a
+     * target, and without this a press on the bar would start the
+     * slider hidden behind it.
+     */
+    const bool in_view = (y >= view_y() && y < view_y() + view_h());
+
     /*
      * The slider first, before the tapped test: a drag is a run of downs
      * with one edge at the front, and applied on every move so the
@@ -340,7 +429,7 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
     {
         int sx, sy, sw, sh;
         brightness_box(&sx, &sy, &sw, &sh);
-        if (s_drag || (tapped && y >= sy && y < sy + sh)) {
+        if (s_drag || (tapped && in_view && y >= sy && y < sy + sh)) {
             if (down) {
                 int tx0, tx1;
                 slider_track(&tx0, &tx1);
@@ -373,7 +462,7 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
     {
         int sx, sy, sw, sh;
         timer_box(&sx, &sy, &sw, &sh);
-        if (s_timer_drag || (tapped && y >= sy && y < sy + sh)) {
+        if (s_timer_drag || (tapped && in_view && y >= sy && y < sy + sh)) {
             if (down) {
                 int tx0, tx1;
                 slider_track(&tx0, &tx1);
@@ -422,6 +511,8 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
     }
 
     int bx, by, bw, bh;
+
+    if (!in_view) return SLEEPPAGE_NONE;
 
     /*
      * Rotation, before the Screen row, because both are whole-row

@@ -10271,3 +10271,57 @@ included, because neither `panel.c` nor `sleeppage.c` builds on a host.
 
 The overflow that put the note under the bar is still there -- both
 files warn about it, and the scroller that fixes it is not this patch.
+
+### 5007 -- a scrollbar for the two settings pages
+
+5006 left the cause of its own bug in place: the sleep page is 860 px of
+content and landscape gives it a 504 px viewport, so the sleep timer --
+the last control on it -- could not be reached at all. The panel's row
+tabs are 888 px at twelve rows and had the same problem. Both files
+warned about the overflow in the log and neither could do anything about
+it.
+
+**Why a bar at the edge and not a drag on the content.** Both pages are
+mostly horizontal sliders whose drag begins anywhere in the row. A
+content drag has to decide, within the first few pixels of a gesture,
+whether a finger moving down and left means "scroll" or "dimmer", and it
+would be wrong often enough to be noticed. browser.c reached this
+conclusion already and this is its idiom, in pixels rather than rows
+because these pages have controls of five different heights.
+
+`menuscroll.h` is the whole mechanism: header-only and arithmetic-only,
+like `cardtime.h`, so `menuscrolltest` compiles the real thing and there
+is no second copy to drift. A press anywhere in the strip CENTRES the
+bar on the finger rather than keeping the grab point, which makes
+press-anywhere and drag one gesture -- browser.c's choice, and the
+reason a jab at the bottom of the track goes to the bottom of the
+content instead of nudging by a bar's height.
+
+**There is no clip in gfx, so the pages clip by overdraw.** Content is
+laid out from `list_top()` as though the page were unbounded and drawn
+shifted up; then the header is drawn, then the footer, both opaque. That
+is why the header moved from the first thing each draw does to nearly
+the last. 5006's filled footer was half of this already.
+
+**One subtraction, not many.** Every box on both pages chains off
+`list_top()` -- `brightness_box()` used to compute from `LIST_TOP`
+directly and now asks `screen_box()` -- so the scroll enters the layout
+once. `panel.c` measures its content rather than predicting it: the
+draws already returned where they ended, because two of them were
+computing it to warn about overflow.
+
+Presses are gated on the viewport (`in_view`). A drag already running
+follows the finger anywhere, but a press does not START a slider on a
+row that is scrolled under the tab strip, which is what would otherwise
+happen to anything behind the bar.
+
+**The test found the strip's width.** 40 px was the first guess;
+`menuscrolltest` asserts the strip clears the sliders, and the sliders'
+knobs reach to 38 px from the right edge, so 40 would have turned "drag
+the brightness to full" into "scroll". It is 32.
+
+Neither page builds on a host, so both were additionally checked with
+`gcc -fsyntax-only` against `texttest/shim.h` and a directory of empty
+stubs -- the cheap half of the lesson in 5002, which is that a file the
+suite cannot build is a file where a rename compiles in the author's
+head and nowhere else.

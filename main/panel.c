@@ -19,6 +19,7 @@
 #include "audio_out.h"
 #include "bench.h"
 #include "gfx.h"
+#include "menuscroll.h"
 #include "panel.h"
 #include "settings.h"
 #include "wifi.h"
@@ -273,6 +274,26 @@ static int build_build(row_t *rows)
 /* The one live target in the footer. The bar itself is scenery: it is
  * drawn filled so nothing behind it shows through, and a press that
  * lands on it but outside this box does nothing at all. */
+/*
+ * The scroll, and the viewport it scrolls in.
+ *
+ * s_content_h is measured by the draw and read by everything else,
+ * including the NEXT frame's layout. That is exact rather than merely
+ * close: a tab's height is arithmetic on constants and does not change
+ * between frames, and switching tabs resets the scroll to zero, where
+ * the clamp is the identity. The one frame that could use a stale
+ * height is a frame whose scroll is zero.
+ */
+static menuscroll_t s_scroll;
+static int s_content_h;
+
+static int view_y(void) { return LIST_TOP; }
+static int view_h(void) { return gfx_h() - FOOT_H - LIST_TOP; }
+static int list_top(void)
+{
+    return view_y() - menuscroll_clamp(s_scroll.off, s_content_h, view_h());
+}
+
 static void close_box(int *x, int *y, int *w, int *h)
 {
     *w = FOOT_BTN_W;
@@ -293,11 +314,11 @@ static void draw_tab(panel_tab_t id, int x, int w)
                   label, LABEL_SCALE, w - 8, active ? C_TEXT : C_DIM);
 }
 
-static void draw_rows(const row_t *rows, int n)
+static int draw_rows(const row_t *rows, int n)
 {
     const int w = gfx_w();
     for (int i = 0; i < n; i++) {
-        const int y = LIST_TOP + i * ROW_H;
+        const int y = list_top() + i * ROW_H;
         gfx_fill_rect(0, y, w, ROW_H, (i & 1) ? C_ROW_ALT : C_ROW);
 
         const int ty = y + (ROW_H - GFX_GLYPH_H(LABEL_SCALE)) / 2;
@@ -312,6 +333,7 @@ static void draw_rows(const row_t *rows, int n)
         gfx_draw_text_tail(w - 24 - tw, ty, rows[i].value, LABEL_SCALE, avail,
                            rows[i].absent ? C_DISABLED : C_TEXT);
     }
+    return list_top() + n * ROW_H;
 }
 
 /*
@@ -333,7 +355,7 @@ static void draw_rows(const row_t *rows, int n)
 static void usb_switch_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
-    *y = LIST_TOP;
+    *y = list_top();
     *w = gfx_w();
     *h = ROW_H;
 }
@@ -393,7 +415,7 @@ static void draw_usb_switch(void)
 #define RG_NOTE_LINES       (2)
 #define ALBUM_NOTE_LINES    (4)
 
-static int rg_y(void)     { return LIST_TOP; }
+static int rg_y(void)     { return list_top(); }
 static int slider_y(void) { return rg_y() + AUDIO_SWITCH_H
                                    + AUDIO_NOTE_GAP
                                    + RG_NOTE_LINES * AUDIO_NOTE_STEP
@@ -471,7 +493,7 @@ static int draw_note(int y, const char *const *lines, int count)
 #define NET_WIFI_NOTE_LINES (3)
 #define NET_NTP_NOTE_LINES  (3)
 
-static int wifi_y(void) { return LIST_TOP; }
+static int wifi_y(void) { return list_top(); }
 static int ntp_y(void)  { return wifi_y() + AUDIO_SWITCH_H
                                  + AUDIO_NOTE_GAP
                                  + NET_WIFI_NOTE_LINES * AUDIO_NOTE_STEP
@@ -662,7 +684,7 @@ static void draw_state_pill(int px, int py, int pw, int ph, const char *text,
                   !enabled ? C_DISABLED : on ? C_BG : C_DIM);
 }
 
-static void draw_net(void)
+static int draw_net(void)
 {
     const int w = gfx_w();
     int x, y, bw, bh;
@@ -765,9 +787,10 @@ static void draw_net(void)
         ESP_LOGW(TAG, "NET tab overflows: %d px against %d",
                  used, gfx_h() - FOOT_H);
     }
+    return used;
 }
 
-static void draw_audio(void)
+static int draw_audio(void)
 {
     const int w = gfx_w();
     int x, y, bw, bh;
@@ -892,6 +915,7 @@ static void draw_audio(void)
         ESP_LOGW(TAG, "AUDIO tab overflows: %d px against %d",
                  used, gfx_h() - FOOT_H);
     }
+    return used;
 }
 
 void panel_draw(void)
@@ -914,6 +938,32 @@ void panel_draw(void)
     const int w = gfx_w(), h = gfx_h();
     gfx_fill_rect(0, 0, w, h, C_BG);
 
+    int used;
+    if (s_tab == TAB_AUDIO) {
+        used = draw_audio();
+    } else if (s_tab == TAB_NET) {
+        used = draw_net();
+    } else {
+        row_t rows[ROWS_MAX];
+        memset(rows, 0, sizeof(rows));
+        const int n = (s_tab == TAB_SD)  ? build_sd(rows)
+                    : (s_tab == TAB_USB) ? build_usb(rows)
+                                         : build_build(rows);
+        used = draw_rows(rows, n);
+        if (s_tab == TAB_USB) draw_usb_switch();
+    }
+    /* Measured, not predicted: the draws already knew where they ended
+     * -- two of them were computing it to warn about overflow -- so the
+     * scroll reads the same number rather than a second copy of the
+     * layout arithmetic that could disagree with it. */
+    s_content_h = used - list_top() + FOOT_BTN_PAD;
+
+    /*
+     * The tab strip, AFTER the content. gfx has no clip, so this is the
+     * clip: rows scrolled off the top are drawn and then covered by an
+     * opaque strip. The footer does the same underneath.
+     */
+    gfx_fill_rect(0, 0, w, LIST_TOP, C_BG);
     const int tw = w / TAB_COUNT;
     for (int i = 0; i < TAB_COUNT; i++) {
         draw_tab((panel_tab_t)i, i * tw,
@@ -921,18 +971,15 @@ void panel_draw(void)
     }
     gfx_fill_rect(0, LIST_TOP - 2, w, 2, C_RULE);
 
-    if (s_tab == TAB_AUDIO) {
-        draw_audio();
-    } else if (s_tab == TAB_NET) {
-        draw_net();
-    } else {
-        row_t rows[ROWS_MAX];
-        memset(rows, 0, sizeof(rows));
-        const int n = (s_tab == TAB_SD)  ? build_sd(rows)
-                    : (s_tab == TAB_USB) ? build_usb(rows)
-                                         : build_build(rows);
-        draw_rows(rows, n);
-        if (s_tab == TAB_USB) draw_usb_switch();
+    {
+        int bar_y, bar_h;
+        if (menuscroll_geom(&s_scroll, s_content_h, view_y(), view_h(),
+                            &bar_y, &bar_h)) {
+            gfx_fill_rect(w - MENUSCROLL_W, view_y(), MENUSCROLL_W, view_h(),
+                          C_ROW);
+            gfx_fill_rect(w - MENUSCROLL_W, bar_y, MENUSCROLL_W, bar_h,
+                          s_scroll.drag ? C_TEXT : C_DIM);
+        }
     }
 
     const int fy = h - FOOT_H;
@@ -968,6 +1015,23 @@ bool panel_touch(bool down, int x, int y)
     const int w = gfx_w(), h = gfx_h();
 
     /*
+     * The scrollbar, ahead of everything: it overlaps rows that are
+     * themselves targets, and a press in the strip belongs to it.
+     */
+    if (menuscroll_touch(&s_scroll, down, tapped, x, y, w,
+                         s_content_h, view_y(), view_h())) {
+        s_dirty = true;
+        return false;
+    }
+
+    /*
+     * A row is a target only where it can be seen. A drag already under
+     * way carries on wherever the finger goes; a press does not start
+     * one on a row scrolled under the tab strip or the footer.
+     */
+    const bool in_view = (y >= view_y() && y < view_y() + view_h());
+
+    /*
      * The slider, before the tapped test and before the row tests, for
      * browser.c's reasons: a drag is a run of downs with one edge at the
      * front, and the row underneath must not also act on a press that
@@ -977,7 +1041,7 @@ bool panel_touch(bool down, int x, int y)
         int sx, sy, sw, sh;
         xfade_slider_box(&sx, &sy, &sw, &sh);
 
-        if (s_slider_drag || (tapped && y >= sy && y < sy + sh)) {
+        if (s_slider_drag || (tapped && in_view && y >= sy && y < sy + sh)) {
             if (down) {
                 int tx0, tx1;
                 slider_track(&tx0, &tx1);
@@ -1023,6 +1087,10 @@ bool panel_touch(bool down, int x, int y)
         if (which >= TAB_COUNT) which = TAB_COUNT - 1;
         if ((panel_tab_t)which != s_tab) {
             s_tab = (panel_tab_t)which;
+            /* Each tab keeps its own length; carrying one tab's scroll
+             * onto a shorter one would open it part-way down. */
+            s_scroll.off = 0;
+            s_scroll.drag = false;
             s_dirty = true;
         }
         ESP_LOGI(TAG, "button: tab %s", k_tab_name[s_tab]);
@@ -1047,6 +1115,8 @@ bool panel_touch(bool down, int x, int y)
         ESP_LOGI(TAG, "button: close");
         return true;
     }
+
+    if (!in_view) return false;
 
     if (s_tab == TAB_NET) {
         int bx, by, bw, bh;
