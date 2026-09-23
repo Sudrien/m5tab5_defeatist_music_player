@@ -10088,3 +10088,65 @@ old row-7 comment makes about controls whose boxes disagree with their
 ink. The box is the pill's now, written out because `in_box()` takes one
 half-extent and every other control on the row is square. `BTN_R` is
 gone with its last user.
+### 5003 -- a clock floor read off the card
+
+The floor's seed is the build timestamp, which is true by construction
+and can be months stale on a device that never reaches a network. What
+is on the card is often much fresher -- an album copied on last week, a
+`stations.m3u` edited on a desktop yesterday -- and those are real
+wall-clock readings taken by a machine that knew the time, available
+before the radio is up.
+
+`cardtime.c` reads one directory per volume when `storage_generation()`
+moves, and offers what it finds to `settings_note_ntp_time()` like any
+other claim. It proposes; the floor disposes.
+
+**Only the root, and only one level, because directory mtimes do not
+bubble.** A directory's timestamp moves when an entry is added to or
+removed from THAT directory, not when a file beneath it changes -- so
+adding a track to `/sd/Boa/Twilight/` moves `Twilight`'s mtime and
+leaves `Boa`'s and the root's alone. This is emphatically **not** a
+change detector and must never be used as one; a card can be rewritten
+top to bottom without a single root entry moving. For a floor it does
+not need to be: one plausible recent reading is worth as much as ten
+thousand.
+
+**The hazard is that the floor is a permanent one-way latch** that
+accepts forward jumps without limit -- correct for NTP, where a forged
+jump forward only expires certificates early and fails closed. Media
+timestamps are foreign input, and FAT can represent 2107. One file
+stamped by a camera with a dead battery would put the clock eighty years
+ahead, permanently, and every subsequent NTP reply would fail the floor
+for the life of the device. So `cardtime_filter()` caps candidates at
+`ref + 10 years` and tests that ceiling against the **raw** mtime, so
+that subtracting the timezone margin cannot duck a poisoned value under
+the bar.
+
+**The margin is subtracted, never added.** FAT stores local wall clock
+with no offset and ESP-IDF's FAT VFS converts it through `stat()` as
+though it were UTC, so a card written at UTC+14 reads fourteen hours
+ahead. A floor a day low is harmless; a floor fourteen hours high
+refuses correct NTP for fourteen hours. One day of slack, wider than any
+offset on Earth -- the same reasoning `settings.c` already applies to the
+build stamp.
+
+exFAT carries a real per-entry UTC offset with a validity bit, which
+would make the margin unnecessary where the bit is set. It is applied
+anyway: that byte is not exposed through POSIX `stat()`, and reaching it
+means going under the VFS to `f_stat()` and `FILINFO`. Noted in the
+header so the next reader knows the margin is a limit of the interface
+rather than of the filesystem.
+
+`cardtimetest` compiles `cardtime.h` directly, the way `tailplantest`
+and `favmatchtest` do. Every decision that could brick the clock is four
+comparisons in one inline function, and all four are checked on the host
+-- including that the useful case actually works, which is the failure
+nobody would notice.
+
+**Also recorded here: the reconcile walk this is not.** A whole-tree
+scan through POSIX `readdir()` costs a `stat()` per file, because
+`struct dirent` carries no timestamps. FatFs's native `f_readdir` fills
+a `FILINFO` with size and date already in it. Anything that later walks
+the card for a catalog should go under the VFS for that reason; at a
+volume root, bounded by `CARDTIME_SCAN_MAX`, it is not worth the
+layering.

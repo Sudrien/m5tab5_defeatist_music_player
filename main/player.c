@@ -62,6 +62,7 @@
 #include "audio_out.h"
 #include "battery.h"
 #include "bench.h"
+#include "cardtime.h"
 #include "player_diag.h"
 #include "covertag.h"
 #include "cuedir.h"
@@ -12557,6 +12558,18 @@ static void player_loop(void)
                 if (storage_present(STORAGE_SD) ||
                     storage_present(STORAGE_USB)) {
                     load_station_files();
+                    /*
+                     * A volume that has just appeared is a card whose
+                     * root has not been read yet, and its timestamps
+                     * are the best clock this device has until the
+                     * radio comes up -- which on a player that never
+                     * joins a network is never. Here rather than in
+                     * settings_init() because volumes mount
+                     * asynchronously and USB is routinely a second or
+                     * two behind it; this branch is where a mount is
+                     * already noticed. See cardtime.h.
+                     */
+                    cardtime_note_volumes();
                 }
             }
 
