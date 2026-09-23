@@ -163,25 +163,45 @@ The arbiter already has the vocabulary for this -- the walk is
 background work by definition, and should take `STORAGE_IO_BACKGROUND`
 throughout, the way `cuedir_load()` does.
 
-## Still open
+## Decided since
 
-These were not decided, and the code should not assume an answer:
+Settled after this note was written, some by the code already in the
+tree and some by asking. `main/mediaindex.h` (5010) is the first code.
 
-1. **Cue sheets.** The chooser already expands them to `X.cue#NN`. Does
-   the index store the sheet, the tracks, or both? MPD has no concept
-   matching a cue parent, which argues for storing tracks and keeping
-   the parentage as a field.
-2. **Search.** Substring over the catalog is a full read. MPD clients
-   search casually. Either an auxiliary key file or an accepted linear
-   cost -- but not "we will see how slow it is".
-3. **Two volumes.** SD and USB each get their own pair of files, which
-   is settled. What is not settled is whether MPD is shown one merged
-   library or two roots.
-4. **Record size.** No budget has been set for the fixed-width key, and
-   it decides the path length limit.
-5. **Whether the index survives a version bump**, or is discarded and
-   rebuilt on a schema change. Rebuild is simpler and the cost is one
-   walk.
+1. **Cue sheets: the tracks.** A cue track is `<sheet>.cue#NN`
+   everywhere a path goes already (`cuesheet.h`), `NN` is two digits so
+   path order is track order, and `cuedir.h` hides the image a sheet
+   covers. The parent is recoverable from the path by
+   `cue_vpath_split()`, so it need not be a field. Which stamp a cue
+   track's staleness is judged by -- the sheet, the audio, or both --
+   is still the walk's to decide.
+2. **Search: needed, and from a derived search file.** MPD asks first,
+   a web UI with a keyboard later. One plain line per track, lowercased
+   tags and the catalog offset, scanned without a JSON parser; rebuilt
+   from the catalog like the index.
+3. **Two volumes: one merged library, SD preferred.** Paths are
+   relative to the volume root, so the same relative path on both is
+   one entry and the SD's copy is the one shown; folders present on
+   both list the union. With one volume mounted, it is the library.
+   Matching is byte-exact, so `ABBA/` and `Abba/` are two folders.
+4. **Record size: a path prefix, not a hash.** The merged listing needs
+   both indexes in path order, which a hash key cannot give. The key is
+   the first ~120 bytes of the path, with the catalog offset, 128 bytes
+   a record; a prefix tie is settled by reading the full path out of
+   the catalog. Paths stay good to the 512 bytes the rest of the player
+   allows.
+5. **A version bump rebuilds the index.** The index and search file are
+   derived, and the sidecar (`replaygain.h`) already showed derived data
+   needs no migration path. The catalog follows `settings.h`: a key a
+   build does not know is skipped, not fatal.
+
+**The order is not strcmp.** Found writing 5010, and worth having here
+because it is the mistake the obvious implementation makes: the index
+must be in the same order as a depth-first walk with sorted folders,
+and whole-path `strcmp()` is not that order, because `' '`, `'-'`, `'.'`
+and every other byte below `'/'` sort before it. `mediaindex.h` makes
+`'/'` sort lowest, and the walk sorts each folder by the same function
+-- not the chooser's folders-first, case-insensitive order.
 
 ## What would make this not worth building
 

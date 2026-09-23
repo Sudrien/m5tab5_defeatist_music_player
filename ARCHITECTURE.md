@@ -10355,3 +10355,76 @@ The general shape of this is worth keeping: adding a coordinate
 transform does not announce itself at the places that assumed there
 wasn't one. The two lines that broke were the two lines in the file
 already thinking about the footer, and neither was in 5007's diff.
+
+### 5010 -- the media index's order, and its reconcile step
+
+5009 was `MEDIA-INDEX.md`, the plan. This is its first code, and it is
+the part with no I/O: `main/mediaindex.h`, header-only, which nothing
+calls yet. **Host-tested, not built, not flashed.**
+
+It holds the two rules that fail silently. Neither one crashes when
+wrong. A wrong order tombstones a folder and adds it back, re-reading
+every tag, on every walk. A wrong step appends a line per dead file per
+walk, for ever. Both are checked in `texttest/mediaindextest.c`.
+
+**The order is not strcmp.** A reconcile is a merge-join of the index
+against a depth-first walk that sorts each folder, and it is only
+correct if both sides arrive in one order. Whole-path `strcmp()` is
+not the walk's order: `' '` is 0x20 and `'/'` is 0x2F, so strcmp puts
+`a b/y.flac` before `a/x.flac`, while a walk visits folder `a` before
+folder `a b`. `midx_path_cmp()` sorts `'/'` below every byte except the
+terminating NUL, which makes comparing whole paths the same as comparing
+component by component. Within one folder it is plain strcmp, since a
+name holds no `'/'`.
+
+The walk must sort with this, not with the chooser's `cmp_entry()`,
+which puts folders first and ignores case -- right for a screen and
+wrong for a merge.
+
+**The step** is `MEDIA-INDEX.md`'s five cases plus the one it left
+implicit: a path already tombstoned and still absent is KEEP, not
+BURY, so its time of death is not moved to every walk's "now" and the
+tombstone can one day age out. A tombstoned path back with a different
+stamp is UPDATE, not REVIVE, because its old tags describe another
+file. The stamp is mtime AND size, since each alone misses something
+ordinary.
+
+**Disorder stops the merge.** `midx_in_order()` is checked on every
+element taken from either side. By the time disorder is visible a wrong
+tombstone may already be written. That is survivable only because a
+tombstone revives without a tag read, which is the reason they are kept.
+A walk that cannot finish a folder must also stop rather than hand over
+a partial listing, since everything under it would come back BURY.
+
+**Mutation-checked**, seven deliberate bugs:
+
+| mutation | result |
+| --- | --- |
+| `'/'` compared as its own byte | 88 failures |
+| a tombstone buried again when still absent | 56 failures |
+| REVIVE re-reads tags | 84 failures |
+| stamp compares mtime only | 43 failures |
+| `midx_in_order()` accepts a repeat | 1 failure |
+| bytes compared signed | 465 failures |
+| names sorted by strcmp | passes -- equivalent by construction |
+
+The walk check also counts the adjacent pairs strcmp would have got
+backwards, and fails if that count is zero, so the corpus is shown to
+reach the trap instead of passing by never meeting it.
+
+**Decided, recorded in `MEDIA-INDEX.md`**: cue tracks rather than
+sheets; one merged library with SD preferred; a derived search file;
+a 128-byte index record keyed by path prefix; rebuild on a version
+bump. Still the walk's to decide: which stamp judges a cue track stale.
+
+**Noted, not done: `jsonpick.h` could become cJSON.** Its header and
+commit say it exists to keep a JSON parser off the P4. cJSON was
+already on the P4 when it was written -- `settings.c` and `replaygain.c`
+through ESP-IDF's `json` component, two weeks earlier. It stays for
+now: it works, its refusal cases are tested, and it allocates nothing.
+cJSON allocates one node per value, and with no `cJSON_InitHooks` that
+lands in internal RAM, which is the scarce heap right after a TLS
+fetch. The replacement is due when radio-browser needs a second field
+or a nested one. That is when to route cJSON to PSRAM through the
+hooks, a global change that also moves settings and the sidecar, so it
+should be made on purpose.
