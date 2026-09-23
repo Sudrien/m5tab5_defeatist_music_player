@@ -154,7 +154,8 @@ never compare across the two. One character in the JSON.
 
 ## When the index is built
 
-On mount, and on demand. **Not periodically.** A full walk competes with
+On mount, and on demand (the REINDEX button, 5015; on mount, 5018).
+**Not periodically.** A full walk competes with
 playback for the storage arbiter, and the failure mode of a periodic
 scan is a card that stutters every few minutes for no reason the
 listener can see.

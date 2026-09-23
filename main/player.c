@@ -68,6 +68,7 @@
 #include "cuedir.h"
 #include "heapcheck.h"
 #include "mediacache.h"
+#include "medialib.h"
 #include "browser.h"
 #include "cbrseek.h"
 #include "decoder.h"
@@ -6730,6 +6731,9 @@ static void ui_task(void *arg)
         const bool bdown = touch_get(&bx, &by);
 
         sleep_timer_tick();
+        /* The media index on mount. Here because this loop runs whether
+         * or not anything is playing; see medialib.h. */
+        medialib_poll();
 
         /* Every track start sets this, so it only writes and logs when
          * the duty would actually change. */

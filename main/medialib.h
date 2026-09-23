@@ -16,10 +16,10 @@
  * remove the old one, since this one cannot know what it will be.
  *
  * medialib_request() is how a reindex starts: it makes a task for the
- * run and returns. The REINDEX button on the panel's SD and USB tabs
- * calls it; an automatic run on mount is to come, and will call the
- * same thing. One run at a time, on either volume -- the engine's state
- * is static.
+ * run and returns. Two things call it: the REINDEX button on the
+ * panel's SD and USB tabs, and medialib_poll(), which starts one on
+ * each volume a little after it is mounted. One run at a time, on
+ * either volume -- the engine's state is static.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -68,6 +68,7 @@ typedef struct {
     medialib_state_t state;
     msync_stats_t    stats;     /* live while RUNNING */
     int              ms;        /* how long the last run took */
+    bool             pending;   /* mounted; an automatic run is due */
 } medialib_status_t;
 
 /*
@@ -84,6 +85,31 @@ bool medialib_request(storage_id_t vol);
 
 /* Whether a reindex is running, on either volume. A value. */
 bool medialib_busy(void);
+
+/*
+ * How long after a mount the automatic reindex waits. Boot is the
+ * busiest the card ever is -- settings, the resume track, the chooser,
+ * the playlist, cue sheets parsed for all of them -- and USB mounts a
+ * second or two behind the SD; the index can wait for all of that. It
+ * also means a card pushed in and pulled straight out again never
+ * starts a run only to have it stopped.
+ */
+#define MEDIALIB_SETTLE_MS  (10000)
+
+/*
+ * The automatic reindex. Call often, from one task -- ui_task, which
+ * runs whether or not anything is playing; the player's idle loop does
+ * not, and a drive plugged in mid-album would wait for the album.
+ *
+ * Cheap when nothing has changed: one compare of storage_generation().
+ * A volume that has newly appeared is due MEDIALIB_SETTLE_MS later, once
+ * per mount; if both are due, the SD goes first and the USB when it is
+ * done. A run that fails is not retried until the next mount or a
+ * press of REINDEX, so a card that cannot be indexed is not walked
+ * over and over. A press of REINDEX during the wait takes the place of
+ * the automatic run.
+ */
+void medialib_poll(void);
 
 /* A copy of one volume's status, for drawing. The counts in a RUNNING
  * status are read while the run writes them; each is a plain int, and

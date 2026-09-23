@@ -10862,3 +10862,32 @@ prevents.
 each cue track gets its own row's tags, a plain file gets none, a path
 other than the one offered gets none, and nothing is answered after the
 walk. Four mutations, all caught.
+
+### 5018 -- reindex on mount
+
+`medialib_poll()`, called once per pass of ui_task's loop. That loop
+runs whether or not anything is playing -- the player's idle loop,
+where `cardtime` and the station files notice a mount, does not, and a
+drive plugged in mid-album would have waited for the album. The poll
+costs one compare of `storage_generation()` when nothing has changed.
+
+A volume that has newly appeared is **due ten seconds later**
+(`MEDIALIB_SETTLE_MS`). Boot is the busiest the card ever is --
+settings, the resume track, the chooser and the playlist, cue sheets
+parsed for each of them -- and the USB drive mounts a second or two
+behind the SD. The index can wait for all of that, and a card pushed in
+and pulled straight out never starts a run only to stop it.
+
+**Once per mount, one at a time.** With both volumes present at boot
+the SD goes first and the USB starts when it finishes. A run that fails
+is not retried until the volume is mounted again or REINDEX is pressed,
+so a card that can't be indexed isn't walked over and over (the
+stations-file loop that re-read a missing file every 104 ms, recorded
+above, is the pattern avoided). A press of REINDEX during the wait
+replaces the automatic run instead of being followed by it. During the
+wait the index row reads "starts in a few seconds".
+
+It runs during playback. The reindex works under the BACKGROUND
+class, one lease per operation, which is what the arbiter exists for;
+whether a first index of a large USB drive under playback is audible
+is a question for the next log.

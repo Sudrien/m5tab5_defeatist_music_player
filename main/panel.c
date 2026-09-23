@@ -210,7 +210,9 @@ static int index_row(row_t *rows, int n, storage_id_t vol)
                                         : "failed; the log says why");
     case MEDIALIB_NONE:
     default:
-        return row_add(rows, n, "index", true, "not run this session");
+        return row_add(rows, n, "index", true, "%s",
+                       st.pending ? "starts in a few seconds"
+                                  : "not run this session");
     }
 }
 

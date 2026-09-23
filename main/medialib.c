@@ -218,6 +218,13 @@ static medialib_status_t s_status[STORAGE_COUNT];
 static volatile bool     s_busy;
 static portMUX_TYPE      s_mux = portMUX_INITIALIZER_UNLOCKED;
 
+/* The automatic run's bookkeeping. medialib_poll() is the only writer
+ * of all of it except s_pending, which medialib_request() also clears. */
+static volatile bool s_pending[STORAGE_COUNT];
+static bool          s_was_present[STORAGE_COUNT];
+static TickType_t    s_mounted_at[STORAGE_COUNT];
+static uint32_t      s_seen_gen = UINT32_MAX;
+
 static void reindex_task(void *arg)
 {
     const storage_id_t vol = (storage_id_t)(intptr_t)arg;
@@ -256,6 +263,9 @@ bool medialib_request(storage_id_t vol)
     s_status[vol].ms = 0;
     s_status[vol].state = MEDIALIB_RUNNING;
 
+    /* This run is the one an automatic run was waiting to do. */
+    s_pending[vol] = false;
+
     if (xTaskCreate(reindex_task, "reindex", MEDIALIB_STACK,
                     (void *)(intptr_t)vol, 1, NULL) != pdPASS) {
         ESP_LOGW(TAG, "no memory for the reindex task");
@@ -277,4 +287,39 @@ void medialib_status(storage_id_t vol, medialib_status_t *out)
         return;
     }
     *out = s_status[vol];
+    out->pending = s_pending[vol];
+}
+
+void medialib_poll(void)
+{
+    const TickType_t now = xTaskGetTickCount();
+
+    const uint32_t gen = storage_generation();
+    if (gen != s_seen_gen) {
+        s_seen_gen = gen;
+        for (int v = 0; v < STORAGE_COUNT; v++) {
+            const bool present = storage_present((storage_id_t)v);
+            if (present && !s_was_present[v]) {
+                s_pending[v] = true;
+                s_mounted_at[v] = now;
+            }
+            if (!present) s_pending[v] = false;
+            s_was_present[v] = present;
+        }
+    }
+
+    if (s_busy) return;
+    for (int v = 0; v < STORAGE_COUNT; v++) {
+        if (!s_pending[v]) continue;
+        if ((now - s_mounted_at[v]) < pdMS_TO_TICKS(MEDIALIB_SETTLE_MS)) continue;
+        if (medialib_request((storage_id_t)v)) {
+            ESP_LOGI(TAG, "reindex %s: automatic, on mount",
+                     storage_label((storage_id_t)v));
+            return;             /* one at a time; the other waits */
+        }
+        /* Refused. Gone again: nothing to do. Anything else (no memory
+         * for the task) is not retried every 20 ms -- the next mount or
+         * the button will try again. */
+        s_pending[v] = false;
+    }
 }
