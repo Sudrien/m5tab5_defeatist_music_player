@@ -286,6 +286,10 @@ static int build_build(row_t *rows)
  */
 static menuscroll_t s_scroll;
 static int s_content_h;
+/* What the height note last said, so a redraw that changes nothing
+ * stays quiet. */
+static int s_warned_h;
+static panel_tab_t s_warned_tab = TAB_COUNT;
 
 static int view_y(void) { return LIST_TOP; }
 static int view_h(void) { return gfx_h() - FOOT_H - LIST_TOP; }
@@ -782,11 +786,9 @@ static int draw_net(void)
      */
     const int used = ntp_used;
 
-    /* The same check draw_audio() ends with, and for the same reason. */
-    if (used > gfx_h() - FOOT_H) {
-        ESP_LOGW(TAG, "NET tab overflows: %d px against %d",
-                 used, gfx_h() - FOOT_H);
-    }
+    /* The height check moved to panel_draw(), which is the only place
+     * that can ask the question in content rather than in screen
+     * coordinates now that the page scrolls. */
     return used;
 }
 
@@ -904,17 +906,7 @@ static int draw_audio(void)
     const int used = draw_note(y + bh + AUDIO_NOTE_GAP, album_note,
                                ALBUM_NOTE_LINES);
 
-    /*
-     * The layout above is arithmetic on constants, so it can be checked
-     * rather than eyeballed. 748 against a footer at 1160 on this panel
-     * -- but the constants are the point, not the numbers: the next
-     * person to lengthen a note or grow a control finds out here instead
-     * of finding text under the CLOSE button.
-     */
-    if (used > gfx_h() - FOOT_H) {
-        ESP_LOGW(TAG, "AUDIO tab overflows: %d px against %d",
-                 used, gfx_h() - FOOT_H);
-    }
+    /* See draw_net(): the check is panel_draw()'s now. */
     return used;
 }
 
@@ -957,6 +949,31 @@ void panel_draw(void)
      * scroll reads the same number rather than a second copy of the
      * layout arithmetic that could disagree with it. */
     s_content_h = used - list_top() + FOOT_BTN_PAD;
+
+    /*
+     * How tall this tab is against the space it has.
+     *
+     * This used to live at the bottom of draw_audio() and draw_net() as
+     * `used > gfx_h() - FOOT_H`, and 5007 broke it without touching it:
+     * `used` is an absolute y, so once the page scrolled the comparison
+     * measured the SCROLL POSITION. One drag on the NET tab logged 1068,
+     * then 958, then 743, for a tab whose height never changed. In
+     * content coordinates it is 964 at every scroll, which is the number
+     * worth printing.
+     *
+     * It is also no longer a warning. The point of it was that the next
+     * person to lengthen a note would find out here instead of finding
+     * text under the CLOSE button -- and now they find a scrollbar. What
+     * is left is worth knowing and is not a fault, so it is logged once
+     * per height rather than on every one-second redraw.
+     */
+    if (s_content_h > view_h() &&
+        (s_content_h != s_warned_h || s_tab != s_warned_tab)) {
+        ESP_LOGI(TAG, "%s tab is %d px of %d; it scrolls",
+                 k_tab_name[s_tab], s_content_h, view_h());
+        s_warned_h = s_content_h;
+        s_warned_tab = s_tab;
+    }
 
     /*
      * The tab strip, AFTER the content. gfx has no clip, so this is the

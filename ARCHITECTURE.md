@@ -10325,3 +10325,33 @@ Neither page builds on a host, so both were additionally checked with
 stubs -- the cheap half of the lesson in 5002, which is that a file the
 suite cannot build is a file where a rename compiles in the author's
 head and nowhere else.
+
+### 5008 -- the overflow warning was measuring the scroll
+
+5007 broke this without editing the line. Both tab draws ended with
+
+    if (used > gfx_h() - FOOT_H)
+
+where `used` is an absolute y. Once the page scrolled, `used` moved with
+it, so the comparison measured where the content currently SAT rather
+than how tall it was. A board log caught it in one drag on the NET tab:
+1068 px, then 958, then 743, three readings of a tab whose height had
+not changed, one per redraw. In content coordinates it is 964 at every
+scroll position -- and `s_content_h` was already computing exactly that,
+correctly, six lines away.
+
+The check is now panel_draw()'s, which is the only place that holds the
+content height, and it compares against the viewport rather than the
+glass.
+
+It is also no longer a warning. Its stated purpose was that the next
+person to lengthen a note would find out here instead of finding text
+under the CLOSE button; 5007 means they find a scrollbar instead. A tab
+taller than its viewport is now a fact about the tab, so it logs at INFO
+-- and only when the height or the tab changes, rather than on every
+one-second refresh, which is what made three lines out of one gesture.
+
+The general shape of this is worth keeping: adding a coordinate
+transform does not announce itself at the places that assumed there
+wasn't one. The two lines that broke were the two lines in the file
+already thinking about the footer, and neither was in 5007's diff.
