@@ -55,6 +55,8 @@ static const char *TAG = "tab5_panel";
 #define TAB_H       (96)
 #define LIST_TOP    (TAB_H + 24)
 #define FOOT_H      (120)
+#define FOOT_BTN_W  (180)
+#define FOOT_BTN_PAD (16)
 #define ROW_H       (64)
 #define LABEL_SCALE (2)
 #define NAME_SCALE  (3)
@@ -267,6 +269,17 @@ static int build_build(row_t *rows)
 /* ------------------------------------------------------------------ */
 /* Drawing                                                             */
 /* ------------------------------------------------------------------ */
+
+/* The one live target in the footer. The bar itself is scenery: it is
+ * drawn filled so nothing behind it shows through, and a press that
+ * lands on it but outside this box does nothing at all. */
+static void close_box(int *x, int *y, int *w, int *h)
+{
+    *w = FOOT_BTN_W;
+    *h = FOOT_H - 2 * FOOT_BTN_PAD;
+    *x = gfx_w() / 2 - FOOT_BTN_W / 2;
+    *y = gfx_h() - FOOT_H + FOOT_BTN_PAD;
+}
 
 static void draw_tab(panel_tab_t id, int x, int w)
 {
@@ -930,10 +943,12 @@ void panel_draw(void)
      * is either a tab or the switch. */
     /* Greyed while setup runs -- panel_touch() refuses it then. */
     const bool can_close = !portal_running();
-    gfx_fill_rect(w / 2 - 90, fy + 16, 180, FOOT_H - 32, can_close ? C_BTN : C_TAB_OFF);
+    int cbx, cby, cbw, cbh;
+    close_box(&cbx, &cby, &cbw, &cbh);
+    gfx_fill_rect(cbx, cby, cbw, cbh, can_close ? C_BTN : C_TAB_OFF);
     const int cw = gfx_text_w("CLOSE", LABEL_SCALE);
     gfx_draw_text(w / 2 - cw / 2,
-                  fy + 16 + (FOOT_H - 32 - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                  cby + (cbh - GFX_GLYPH_H(LABEL_SCALE)) / 2,
                   "CLOSE", LABEL_SCALE, 172, can_close ? C_TEXT : C_DISABLED);
 
     gfx_blit(0, h);
@@ -1015,6 +1030,12 @@ bool panel_touch(bool down, int x, int y)
     }
 
     if (y >= h - FOOT_H) {
+        /* The bar swallows everything it is given: the content above it
+         * may run under it, and a press there must not reach whatever
+         * is drawn beneath. Only the button acts. */
+        int cbx, cby, cbw, cbh;
+        close_box(&cbx, &cby, &cbw, &cbh);
+        if (x < cbx || x >= cbx + cbw || y < cby || y >= cby + cbh) return false;
         /* Not while setup runs. It pauses playback and refuses play,
          * and a panel closed over it leaves the listener with a player
          * that will not play and nothing on screen saying why. STOP on

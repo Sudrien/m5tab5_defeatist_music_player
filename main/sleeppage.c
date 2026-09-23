@@ -25,6 +25,21 @@ static const char *TAG = "tab5_sleep";
 #define C_FAINT     RGB(0x55, 0x55, 0x55)
 #define C_RULE      RGB(0x33, 0x33, 0x33)
 
+/*
+ * The footer, and the CLOSE button inside it.
+ *
+ * ONE function for the button's rectangle, read by both the drawing and
+ * the hit test. browser.c's scrollbar learned this the expensive way --
+ * "drawing and hit-testing computed this independently in the first
+ * version of this patch and it was wrong within a day" -- and this file
+ * had a worse version of the same fault: the button was drawn 180 px
+ * wide and centred, and the hit test was the ENTIRE full-width strip.
+ * On a 1280-wide landscape screen that made 86% of the bar an invisible
+ * close button, which is exactly how it was reported from a board.
+ */
+#define FOOT_BTN_W      (180)
+#define FOOT_BTN_PAD    (16)
+
 #define HEAD_H      (96)            /* where panel.c has its tab strip */
 #define LIST_TOP    (HEAD_H + 24)
 #define FOOT_H      (120)
@@ -39,6 +54,14 @@ static const char *TAG = "tab5_sleep";
 #define SLIDER_H    (ROW_H + 96)    /* panel.c's AUDIO_SLIDER_H */
 #define SLIDER_INSET (24)
 #define SLIDER_KNOB  (28)
+
+static void close_box(int *x, int *y, int *w, int *h)
+{
+    *w = FOOT_BTN_W;
+    *h = FOOT_H - 2 * FOOT_BTN_PAD;
+    *x = gfx_w() / 2 - FOOT_BTN_W / 2;
+    *y = gfx_h() - FOOT_H + FOOT_BTN_PAD;
+}
 
 static bool s_open;
 static bool s_dirty;
@@ -277,14 +300,26 @@ void sleeppage_draw(void)
         gfx_draw_text(24, y + bh + NOTE_GAP, note[0], LABEL_SCALE, w - 48, C_DIM);
     }
 
-    /* Footer: panel.c's, one button, the way out. */
+    /*
+     * Footer: panel.c's, one button, the way out.
+     *
+     * FILLED, not just ruled. This used to draw a 2 px rule and the
+     * button, leaving the rest of the strip transparent -- so in
+     * landscape, where the content runs 140 px past the bottom, the
+     * rotation note rendered straight through the bar and came out
+     * either side of the button. Drawn last and opaque, it is a bar.
+     */
     const int fy = h - FOOT_H;
+    gfx_fill_rect(0, fy, w, FOOT_H, C_BG);
     gfx_fill_rect(0, fy, w, 2, C_RULE);
-    gfx_fill_rect(w / 2 - 90, fy + 16, 180, FOOT_H - 32, C_BTN);
+
+    int cbx, cby, cbw, cbh;
+    close_box(&cbx, &cby, &cbw, &cbh);
+    gfx_fill_rect(cbx, cby, cbw, cbh, C_BTN);
     const int cw = gfx_text_w("CLOSE", LABEL_SCALE);
-    gfx_draw_text(w / 2 - cw / 2,
-                  fy + 16 + (FOOT_H - 32 - GFX_GLYPH_H(LABEL_SCALE)) / 2,
-                  "CLOSE", LABEL_SCALE, 172, C_TEXT);
+    gfx_draw_text(cbx + (cbw - cw) / 2,
+                  cby + (cbh - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                  "CLOSE", LABEL_SCALE, cbw - 8, C_TEXT);
 
     gfx_blit(0, h);
 }
@@ -363,9 +398,27 @@ sleeppage_result_t sleeppage_touch(bool down, int x, int y)
 
     if (!tapped) return SLEEPPAGE_NONE;
 
+    /*
+     * The footer strip SINKS every press in it, and only the button
+     * acts. Two separate properties and both were missing:
+     *
+     *  - the button is the target, not the strip, so the 1100 px of bar
+     *    either side of it no longer closes the page;
+     *  - and a press anywhere else in the strip stops here rather than
+     *    falling through to the rows. That matters in landscape, where
+     *    the content overflows: rotation_box() spans 526..614 and the
+     *    strip starts at 600, so 14 px of bar sit directly over the
+     *    rotation row. Falling through would cycle the screen angle
+     *    from a tap on what is visibly a footer.
+     */
     if (y >= gfx_h() - FOOT_H) {
-        ESP_LOGI(TAG, "button: close");
-        return SLEEPPAGE_CLOSE;
+        int cbx, cby, cbw, cbh;
+        close_box(&cbx, &cby, &cbw, &cbh);
+        if (x >= cbx && x < cbx + cbw && y >= cby && y < cby + cbh) {
+            ESP_LOGI(TAG, "button: close");
+            return SLEEPPAGE_CLOSE;
+        }
+        return SLEEPPAGE_NONE;
     }
 
     int bx, by, bw, bh;

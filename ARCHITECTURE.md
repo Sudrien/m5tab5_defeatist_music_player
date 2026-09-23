@@ -10231,3 +10231,43 @@ host, this is control flow rather than arithmetic, and the failure needs
 a decode running well ahead of playback to reproduce. The reasoning is
 above and the board log is the evidence; the confirmation is opening the
 sleep page early in a short track and closing it.
+
+### 5006 -- the whole bottom of the menus was an invisible close button
+
+Two faults in one report, and the second is the one that matters.
+
+`sleeppage.c` drew its footer as a 2 px rule and a button, and nothing
+else. Everything between them was whatever the page had already drawn
+there. In landscape the sleep page needs 860 px of content and has 720,
+so the rotation note landed at y ~628 -- inside the bar -- and rendered
+on both sides of the centred button. That is exactly the report: "the
+rotation description test emerging either side of it". The footer is now
+filled `C_BG` before the rule and the button go on, as `panel.c`'s
+already was.
+
+The hit test was worse, and both files had it:
+
+    if (y >= h - FOOT_H) { ... return true; }
+
+The entire full-width 120 px strip closed the screen. On the 720 px
+portrait glass that is merely generous; rotated, the strip is 1280 px
+wide and the 180 px button is 14% of it. The board log shows closes
+firing from raw (641,616), (655,172), (667,83) and (663,630) -- four
+different places, all mapping to logical y >= 600, none of them on the
+button.
+
+Both files now bound the test to `close_box()`, which is also what draws
+the button, so the two cannot drift. A footer press outside that box
+**sinks**: it returns "handled, do nothing" rather than falling through.
+That is not tidiness. In landscape the sleep page's rotation control
+spans 526..614 and the footer starts at 600, so a fall-through would
+turn the bottom of the bar into a rotation change -- trading an
+invisible close for an invisible rotate.
+
+`rotatetest` grew four checks per orientation on the box: centred,
+inside the bar, not spanning it, and a press near the bar's left edge
+not reading as close. The geometry is duplicated there rather than
+included, because neither `panel.c` nor `sleeppage.c` builds on a host.
+
+The overflow that put the note under the bar is still there -- both
+files warn about it, and the scroller that fixes it is not this patch.

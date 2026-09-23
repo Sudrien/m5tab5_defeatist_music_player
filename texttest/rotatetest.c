@@ -330,6 +330,39 @@ int main(void)
         CHECK(strcmp(buf, "101:23") == 0, "101 minutes formats as %s", buf);
     }
 
+    /*
+     * The menu footer (5006). panel.c and sleeppage.c both draw a
+     * filled bar with one centred CLOSE button, and both used to treat
+     * the whole bar as the button -- which in landscape made 86% of a
+     * 1280 px strip an invisible close. The box must be centred, must
+     * sit inside the bar, and must leave live bar either side at every
+     * width the two orientations produce.
+     */
+    printf("  footer close box\n");
+    {
+        const int foot_h = 120, btn_w = 180, pad = 16;
+        static const int widths[] = { 720, 1280 };
+        static const int heights[] = { 1280, 720 };
+        for (size_t i = 0; i < sizeof(widths) / sizeof(widths[0]); i++) {
+            const int w = widths[i], h = heights[i];
+            const int bx = w / 2 - btn_w / 2;
+            const int by = h - foot_h + pad;
+            const int bh = foot_h - 2 * pad;
+            CHECK(bx > 0 && bx + btn_w < w,
+                  "%dx%d: close box spans the bar (%d..%d of %d)",
+                  w, h, bx, bx + btn_w, w);
+            CHECK(by >= h - foot_h && by + bh <= h,
+                  "%dx%d: close box escapes the bar", w, h);
+            CHECK(bx == w - (bx + btn_w),
+                  "%dx%d: close box is not centred (%d left, %d right)",
+                  w, h, bx, w - (bx + btn_w));
+            /* A press just inside the bar's left edge is bar, not
+             * button -- that is the whole point of the fix. */
+            CHECK(!(4 >= bx && 4 < bx + btn_w),
+                  "%dx%d: x=4 in the footer still reads as close", w, h);
+        }
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
