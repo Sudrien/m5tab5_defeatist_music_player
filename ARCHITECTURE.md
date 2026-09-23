@@ -10774,3 +10774,60 @@ because `cuedir_tags()` probes the audio's length per track. But
 WAV and MP4, and returns 0 for anything else -- so an MP3 image costs a
 sheet parse per track and no scan. The per-track re-parse is still
 there, and is still the thing to measure.
+
+### 5016 -- one catalog handle per run
+
+**The first measurements, on hardware, with 5015** -- the baseline the
+next two patches are measured against:
+
+| | tracks | time | per track |
+| --- | --- | --- | --- |
+| microSD (SD8G), first run | 52 added | 3993 ms | 77 ms |
+| USB (0781:5571), first run | 1192 added | 50067 ms | 42 ms |
+| USB, unchanged rerun | 1192 kept | 8152 ms | 7 ms, 103 catalog reads |
+
+The reindex task's stack never went below 3456 bytes free of 8192, on
+the SD run with its cue sheets; the USB runs left 5196 and 5504. 8 KB
+stands.
+
+**Every append opened, flushed and closed the catalog,** 1192 times on
+a first run. Every catalog read -- one per path longer than the index
+key, 103 on that drive -- opened and closed it too. On USB, metadata
+writes are the expensive part of this program's I/O (the sidecar's
+temp-and-rename measured 1.3 s for three), and a first index was paying
+for them per track.
+
+**`mediacat_session_open()` / `_read()` / `_close()`**: one `"a+"` handle
+for the whole run. Appends go through it buffered, with no open, flush
+or close per line. The offset is tracked, not asked for: `ftell()` on a
+buffered append stream is a flush. A write that fails refuses every line
+after it, since the tracked end and the real one then disagree. Reads go
+through the same handle, which also retires 5014's reason for opening
+per read: that was about keeping a second, staler view away from the
+appender, and with one handle there is no second view. `mediacat_append()`
+outside a session behaves as before. The open-and-close-the-torn-line
+step is shared between the two, which is why the function is
+restructured rather than extended.
+
+**The rule that comes with buffering: the catalog is flushed before the
+index goes in.** The new index points at lines that, in a session, are
+only in a buffer until the close. An index installed first and a
+battery lost second would point past the end of the catalog. The
+engine gets an optional `cat_flush` hook, called after the merge and
+before `remove` and `rename`. False fails the run and installs nothing.
+`mediasynctest` checks the hook *when* it runs -- the temporary index
+exists and the old one is still byte-identical at that moment -- that
+it runs exactly once on a run that installs and never on one that
+doesn't, and that a failed flush leaves the old index in place. Three
+mutations (never called, result ignored, called after install), all
+caught.
+
+**The summary gains a second line**: milliseconds in tag reads, in the
+catalog, and the remainder in the walk and the index. The last log
+could only support a guess about where 50 seconds went; the next one
+will say.
+
+`mediacat`'s session code was checked locally against cJSON 1.7.18, as
+5012's was, and the same CI note applies: 67 checks, including appends
+read back through the session before the flush, an append after a read,
+a second session refused, and a torn tail closed off at open.

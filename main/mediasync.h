@@ -58,6 +58,14 @@ typedef struct {
     void (*tags)(void *ctx, const char *path, mediacat_rec_t *r);
     /* The card, as mwalk_volume() offers it. */
     mwalk_result_t (*walk)(void *ctx, mwalk_fn fn, void *walk_ctx);
+    /*
+     * Make every appended line durable. Called once, after the merge
+     * and BEFORE the new index is installed, because the index points
+     * at those lines and must never outlive them; false fails the run
+     * and installs nothing. NULL when appends are durable as they
+     * return (mediacat without a session).
+     */
+    bool (*cat_flush)(void *ctx);
     void *ctx;
 
     const char *index_path;     /* the index, e.g. "/sd/.defeatist.ix1" */

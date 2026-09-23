@@ -122,11 +122,34 @@ bool mediacat_path(storage_id_t vol, char *out, size_t out_size);
  * this line would be glued to the torn one and both would fail to
  * parse, so one lost write would silently cost the next as well.
  *
- * Opens and closes the file per call, under the BACKGROUND class. The
- * caller batches nothing and holds no lease.
+ * Outside a session, opens and closes the file per call, under the
+ * BACKGROUND class. Inside one (below), writes through its handle and
+ * flushes nothing. The caller holds no lease either way.
  */
 bool mediacat_append(storage_id_t vol, const mediacat_rec_t *r,
                      uint32_t *offset);
+
+/*
+ * A session: one handle on one volume's catalog for the length of a
+ * reconcile, instead of an open, a flush and a close per line. On a USB
+ * drive those metadata writes are the expensive part -- ARCHITECTURE.md
+ * measured three of them at 1.3 s when the sidecar used a temp file --
+ * and a first index of 1192 tracks was paying them 1192 times.
+ *
+ * While one is open, mediacat_append() on that volume goes through it,
+ * buffered, and mediacat_session_read() reads through the same handle:
+ * one view of the file, so nothing read can be staler than what was
+ * written. Lines are NOT on the card until mediacat_session_close()
+ * flushes them, so nothing may point at them -- an index, above all --
+ * until it has returned true.
+ *
+ * One session at a time. open fails if one is already open.
+ */
+bool mediacat_session_open(storage_id_t vol);
+bool mediacat_session_read(uint32_t offset, mediacat_rec_t *out);
+/* Flush and close. False if the flush failed or any append in the
+ * session did; true, and nothing done, if none is open. */
+bool mediacat_session_close(void);
 
 /*
  * Read the record whose line starts at `offset`, from a file the caller

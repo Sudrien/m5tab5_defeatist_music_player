@@ -138,16 +138,53 @@ static char s_idx[256], s_tmp[256];
 static msync_stats_t s_st;
 static int64_t s_now = 1000;
 
+/*
+ * The flush hook. Its whole contract is WHEN it runs: after the new
+ * index is written and before it is installed. So at the moment it is
+ * called, the temporary file must exist and the index must still be
+ * exactly what it was before the run.
+ */
+static int      s_flushes, s_flush_early;
+static bool     s_flush_fails;
+static uint8_t *s_idx_before;
+static long     s_idx_before_n;
+static uint8_t *slurp(const char *p, long *n);
+
+static bool cat_flush(void *ctx)
+{
+    (void)ctx;
+    s_flushes++;
+    struct stat st;
+    if (stat(s_tmp, &st) != 0) s_flush_early++;
+    long n;
+    uint8_t *b = slurp(s_idx, &n);
+    if (n != s_idx_before_n ||
+        (n > 0 && (!b || !s_idx_before || memcmp(b, s_idx_before, (size_t)n))))
+        s_flush_early++;
+    free(b);
+    return !s_flush_fails;
+}
+
 static msync_result_t run(void)
 {
     s_appends = s_tagreads = 0;
     s_abort = false;
     s_now += 10;
+    s_flushes = 0;
+    free(s_idx_before);
+    s_idx_before = slurp(s_idx, &s_idx_before_n);
     const msync_ops_t ops = {
-        cat_append, cat_read, tags, walk, NULL,
+        cat_append, cat_read, tags, walk, cat_flush, NULL,
         s_idx, s_tmp, s_now, MIDX_CLOCK_SYNCED, &s_abort,
     };
-    return msync_run(&ops, &s_st);
+    const msync_result_t r = msync_run(&ops, &s_st);
+    /* Flushed exactly once on a run that installs, never otherwise --
+     * a failed run has nothing to make durable that anything points at. */
+    CHECK(s_flushes == (r == MSYNC_DONE || s_flush_fails ? 1 : 0),
+          "flushed %d times on a run that returned %d", s_flushes, r);
+    CHECK(s_flush_early == 0, "flushed %d times after the index was installed",
+          s_flush_early);
+    return r;
 }
 
 static uint8_t *slurp(const char *p, long *n)
@@ -388,6 +425,13 @@ int main(void)
         unchanged_since(before, nb, "catalog refused");
         s_fail_append_at = -1;
 
+        /* The lines are written but cannot be made durable: the index
+         * that points at them must not go in. */
+        s_flush_fails = true;
+        CHECK(run() == MSYNC_FAILED, "flush failed");
+        unchanged_since(before, nb, "flush failed");
+        s_flush_fails = false;
+
         s_ncard += 50;
     }
     free(before);
@@ -464,6 +508,7 @@ int main(void)
     }
 
 out:;
+    free(s_idx_before);
     char cmd[300];
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", dir);
     if (system(cmd) != 0) printf("  (could not remove %s)\n", dir);

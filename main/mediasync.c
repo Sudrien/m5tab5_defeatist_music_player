@@ -317,6 +317,12 @@ msync_result_t msync_run(const msync_ops_t *ops, msync_stats_t *stats)
                      : S.stopped ? MSYNC_STOPPED : MSYNC_DONE;
     if (r == MSYNC_DONE && !flushed) r = MSYNC_FAILED;
 
+    /* The catalog's lines before the index that points at them. */
+    if (r == MSYNC_DONE && ops->cat_flush && !ops->cat_flush(ops->ctx)) {
+        ESP_LOGW(TAG, "the catalog could not be flushed; index not installed");
+        r = MSYNC_FAILED;
+    }
+
     storage_io_acquire(CLS);
     if (r == MSYNC_DONE) {
         remove(ops->index_path);

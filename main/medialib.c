@@ -43,32 +43,46 @@ static const char *absolute(const ctx_t *c, const char *rel)
     return s_abs;
 }
 
+/*
+ * Where a run's time goes, so the log can say instead of leaving it to
+ * be inferred: tag reads, catalog work, and -- by subtraction -- the
+ * walk and the index. Microseconds, for this run only.
+ */
+static int64_t s_tag_us, s_cat_us;
+
 static bool cat_append(void *ctx, const mediacat_rec_t *r, uint32_t *off)
 {
     const ctx_t *c = ctx;
-    return mediacat_append(c->vol, r, off);
+    const int64_t t0 = esp_timer_get_time();
+    const bool ok = mediacat_append(c->vol, r, off);
+    s_cat_us += esp_timer_get_time() - t0;
+    return ok;
+}
+
+/* The engine's hook: the session's lines onto the card, before the new
+ * index that points at them is installed. */
+static bool cat_flush(void *ctx)
+{
+    (void)ctx;
+    const int64_t t0 = esp_timer_get_time();
+    const bool ok = mediacat_session_close();
+    s_cat_us += esp_timer_get_time() - t0;
+    return ok;
 }
 
 /*
- * Opened per read rather than held for the run. Reads are the minority
- * -- a path longer than the index key, a revive, a bury -- and a
- * handle held open beside the one mediacat_append() opens would be a
- * second view of a file being appended to, with its own cached size
- * and sector.
+ * Through the run's session: the same handle the appends go through, so
+ * there is one view of the file. (5014 opened the catalog per read to
+ * avoid a second, staler view beside the appender; with one handle for
+ * both there is no second view to avoid, and a rerun of 1192 tracks
+ * stops paying 103 opens for its long paths.)
  */
 static bool cat_read(void *ctx, uint32_t off, mediacat_rec_t *out)
 {
-    const ctx_t *c = ctx;
-    char path[32];
-    if (!mediacat_path(c->vol, path, sizeof(path))) return false;
-    storage_io_acquire(CLS);
-    FILE *f = storage_io_open(path, "rb");
-    storage_io_release();
-    if (!f) return false;
-    const bool ok = mediacat_read_at(f, off, out);
-    storage_io_acquire(CLS);
-    storage_io_close(f);
-    storage_io_release();
+    (void)ctx;
+    const int64_t t0 = esp_timer_get_time();
+    const bool ok = mediacat_session_read(off, out);
+    s_cat_us += esp_timer_get_time() - t0;
     return ok;
 }
 
@@ -78,9 +92,17 @@ static bool cat_read(void *ctx, uint32_t off, mediacat_rec_t *out)
  * else's from the file. A track with no tags is still indexed; MPD
  * shows it by name.
  */
+static void tags_read(const ctx_t *c, const char *rel, mediacat_rec_t *r);
+
 static void tags(void *ctx, const char *rel, mediacat_rec_t *r)
 {
-    const ctx_t *c = ctx;
+    const int64_t t0 = esp_timer_get_time();
+    tags_read(ctx, rel, r);
+    s_tag_us += esp_timer_get_time() - t0;
+}
+
+static void tags_read(const ctx_t *c, const char *rel, mediacat_rec_t *r)
+{
     const char *abs = absolute(c, rel);
     if (!abs) return;
 
@@ -151,6 +173,7 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
         .cat_read = cat_read,
         .tags = tags,
         .walk = walk,
+        .cat_flush = cat_flush,
         .ctx = &c,
         .index_path = index,
         .temp_path = temp,
@@ -160,7 +183,13 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
     };
 
     const int64_t t0 = esp_timer_get_time();
+    s_tag_us = s_cat_us = 0;
+    if (!mediacat_session_open(vol)) return MSYNC_FAILED;
     const msync_result_t r = msync_run(&ops, stats);
+    /* Already closed by cat_flush() on a run that installed; this is
+     * the close for every other ending, and its result does not matter
+     * -- nothing points at those lines. */
+    mediacat_session_close();
     const int ms = (int)((esp_timer_get_time() - t0) / 1000);
 
     static const char *const what[] = { "done", "stopped", "FAILED" };
@@ -169,6 +198,10 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
              storage_label(vol), what[r], ms, stats->keep, stats->add,
              stats->update, stats->revive, stats->bury, stats->cat_reads,
              stats->index_damaged ? "; the index was damaged and is gone" : "");
+    const int tag_ms = (int)(s_tag_us / 1000), cat_ms = (int)(s_cat_us / 1000);
+    ESP_LOGI(TAG, "%s: %d ms reading tags, %d ms in the catalog, "
+             "%d ms walking and indexing", storage_label(vol), tag_ms, cat_ms,
+             ms - tag_ms - cat_ms);
 
     if (r == MSYNC_DONE) storage_mark_hidden(index);
     return r;

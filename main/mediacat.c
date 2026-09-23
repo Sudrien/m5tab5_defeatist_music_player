@@ -173,6 +173,92 @@ bool mediacat_path(storage_id_t vol, char *out, size_t out_size)
                              MEDIACAT_FILENAME);
 }
 
+/*
+ * Open a catalog for appending, finishing a torn last line, and say
+ * where the end is. Called holding the lease; NULL on failure.
+ *
+ * "a+": appends always go to the end, and the last byte can still be
+ * read to see whether the previous append finished.
+ */
+static FILE *open_for_append(const char *path, long *end_out)
+{
+    FILE *f = storage_io_open(path, "a+");
+    if (!f) return NULL;
+    long end = -1;
+    bool ok = fseek(f, 0, SEEK_END) == 0 && (end = ftell(f)) >= 0;
+    if (ok && end > 0) {
+        /* A torn last line: finish it, so the next one starts on its own. */
+        int last = EOF;
+        if (fseek(f, end - 1, SEEK_SET) == 0) last = fgetc(f);
+        /* Back to the end before writing: C wants a seek between a
+         * read and a write on one stream, even in append mode. */
+        ok = fseek(f, 0, SEEK_END) == 0;
+        if (ok && last != '\n') {
+            ok = fputc('\n', f) != EOF;
+            end += 1;
+            ESP_LOGW(TAG, "%s ended mid-line; closed it off", path);
+        }
+    }
+    if (!ok) {
+        storage_io_close(f);
+        return NULL;
+    }
+    *end_out = end;
+    return f;
+}
+
+/* ---- a session: one handle for a whole reconcile ---------------------- */
+
+static FILE        *s_sess;
+static storage_id_t s_sess_vol = STORAGE_COUNT;
+static long         s_sess_end;         /* where the next line starts */
+static bool         s_sess_err;         /* a write failed: refuse the rest */
+static bool         s_sess_new;         /* the file did not exist */
+
+bool mediacat_session_open(storage_id_t vol)
+{
+    if (s_sess) return false;
+    char path[32];
+    if (!mediacat_path(vol, path, sizeof(path))) return false;
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    s_sess = open_for_append(path, &s_sess_end);
+    storage_io_release();
+    if (!s_sess) {
+        ESP_LOGW(TAG, "cannot open %s", path);
+        return false;
+    }
+    s_sess_vol = vol;
+    s_sess_err = false;
+    s_sess_new = (s_sess_end == 0);
+    return true;
+}
+
+bool mediacat_session_read(uint32_t offset, mediacat_rec_t *out)
+{
+    if (!s_sess) return false;
+    /* mediacat_read_at() seeks first, which is also what C wants
+     * between this stream's last write and a read. */
+    return mediacat_read_at(s_sess, offset, out);
+}
+
+bool mediacat_session_close(void)
+{
+    if (!s_sess) return true;
+    char path[32];
+    const bool named = mediacat_path(s_sess_vol, path, sizeof(path));
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    bool ok = fflush(s_sess) == 0;
+    ok = (storage_io_close(s_sess) == 0) && ok;
+    storage_io_release();
+    ok = ok && !s_sess_err;
+    if (ok && named && s_sess_new) storage_mark_hidden(path);
+    s_sess = NULL;
+    s_sess_vol = STORAGE_COUNT;
+    return ok;
+}
+
+/* ---- appending ------------------------------------------------------- */
+
 bool mediacat_append(storage_id_t vol, const mediacat_rec_t *r,
                      uint32_t *offset)
 {
@@ -186,28 +272,37 @@ bool mediacat_append(storage_id_t vol, const mediacat_rec_t *r,
         return false;
     }
 
-    /* "a+": appends always go to the end, and the last byte can still be
-     * read to see whether the previous append finished. */
-    storage_io_acquire(STORAGE_IO_BACKGROUND);
-    FILE *f = storage_io_open(path, "a+");
-    bool ok = f != NULL;
-    long end = -1;
-    if (ok) {
-        ok = fseek(f, 0, SEEK_END) == 0 && (end = ftell(f)) >= 0;
-    }
-    if (ok && end > 0) {
-        /* A torn last line: finish it, so this one starts on its own. */
-        int last = EOF;
-        if (fseek(f, end - 1, SEEK_SET) == 0) last = fgetc(f);
-        /* Back to the end before writing: C wants a seek between a
-         * read and a write on one stream, even in append mode. */
-        ok = fseek(f, 0, SEEK_END) == 0;
-        if (ok && last != '\n') {
-            ok = fputc('\n', f) != EOF;
-            end += 1;
-            ESP_LOGW(TAG, "%s ended mid-line; closed it off", path);
+    /*
+     * Through the session when there is one: no open, no flush, no
+     * close per line. The offset is tracked rather than asked for --
+     * ftell() on an append stream with a buffer in it is a flush -- and
+     * a write that fails refuses every line after it, because after a
+     * short write the tracked end and the file's end disagree.
+     */
+    if (s_sess && s_sess_vol == vol) {
+        if (s_sess_err) return false;
+        if ((uint64_t)s_sess_end + (uint64_t)n > UINT32_MAX) {
+            ESP_LOGW(TAG, "%s is at its size limit", path);
+            return false;
         }
+        storage_io_acquire(STORAGE_IO_BACKGROUND);
+        const bool ok = fseek(s_sess, 0, SEEK_END) == 0 &&
+                        fwrite(s_line, 1, (size_t)n, s_sess) == (size_t)n;
+        storage_io_release();
+        if (!ok) {
+            s_sess_err = true;
+            ESP_LOGW(TAG, "append to %s failed", path);
+            return false;
+        }
+        if (offset) *offset = (uint32_t)s_sess_end;
+        s_sess_end += n;
+        return true;
     }
+
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    long end = -1;
+    FILE *f = open_for_append(path, &end);
+    bool ok = f != NULL;
     /* cat_off is 32 bits: refuse a line that would start past it. */
     if (ok && (uint64_t)end + (uint64_t)n > UINT32_MAX) {
         ESP_LOGW(TAG, "%s is at its size limit", path);
