@@ -10967,3 +10967,13 @@ a folder, and the POSIX `readdir()` errno case could never be reached
 on the host. Five mutations, all caught: a read error taken as the end,
 covered audio offered, a sheet offered, the cue size from the sheet
 alone, and the lookup searching the wrong way.
+
+### 5020 -- the include 5019 put in the wrong place
+
+5019 failed to build: `diskio_sdmmc.h` names FatFs's `BYTE` without
+including `ff.h`, and 5019 had included it above `ff.h`, in sorted
+order. It now comes after `ff.h`, with a comment saying why it's out of
+order. The host checks for 5019 compiled `mediadir.c` against the real
+`ff.h` but never compiled `storage.c`, which needs the SDMMC driver. The
+error reproduces on the host against IDF v5.5's own headers in the old
+order, and the new order is clean.

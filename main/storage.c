@@ -9,9 +9,11 @@
 #include "driver/sdmmc_host.h"
 #include "esp_check.h"
 #include "esp_log.h"
-#include "diskio_sdmmc.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
+/* After ff.h, not in sorted order: it uses FatFs's BYTE and does not
+ * include ff.h itself. */
+#include "diskio_sdmmc.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
