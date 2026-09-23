@@ -15,9 +15,11 @@
  * then just a dotfile nobody reads; the build that bumps the name should
  * remove the old one, since this one cannot know what it will be.
  *
- * NOTHING CALLS THIS YET. When something does, it runs on a task with
- * room for it -- the engine's state is static, but covertag and cuedir
- * read on the caller's stack -- and only one volume at a time.
+ * medialib_request() is how a reindex starts: it makes a task for the
+ * run and returns. The REINDEX button on the panel's SD and USB tabs
+ * calls it; an automatic run on mount is to come, and will call the
+ * same thing. One run at a time, on either volume -- the engine's state
+ * is static.
  *
  * SPDX-License-Identifier: MIT
  */
@@ -42,6 +44,51 @@ extern "C" {
  */
 msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
                                   msync_stats_t *stats);
+
+/*
+ * The task a reindex runs on. Made per run and deleted after, so its
+ * stack is only held while there is work. 8 KB: the engine, the walk
+ * and the catalog keep their buffers static; what is on the stack is
+ * the tag path -- cuedir_track() and sheet_load() hold about 2.5 KB of
+ * paths, covertag about 1 KB -- and printf. The high-water mark is
+ * logged after every run, so the first run on hardware says whether
+ * that estimate holds.
+ */
+#define MEDIALIB_STACK      (8192)
+
+typedef enum {
+    MEDIALIB_NONE = 0,  /* not run this session */
+    MEDIALIB_RUNNING,
+    MEDIALIB_DONE,
+    MEDIALIB_STOPPED,   /* the volume went away mid-run */
+    MEDIALIB_FAILED,
+} medialib_state_t;
+
+typedef struct {
+    medialib_state_t state;
+    msync_stats_t    stats;     /* live while RUNNING */
+    int              ms;        /* how long the last run took */
+} medialib_status_t;
+
+/*
+ * Start a reindex of one volume on its own task, and return. False,
+ * with nothing started, if the volume is not mounted, a reindex is
+ * already running (on either volume), or the task could not be made.
+ *
+ * While it runs the volume is held with storage_hold_background(): a
+ * card pulled mid-run is marked absent and unmounted only once the run
+ * has closed its files, and the walk stops at the next track when it
+ * sees the volume gone.
+ */
+bool medialib_request(storage_id_t vol);
+
+/* Whether a reindex is running, on either volume. A value. */
+bool medialib_busy(void);
+
+/* A copy of one volume's status, for drawing. The counts in a RUNNING
+ * status are read while the run writes them; each is a plain int, and
+ * a count one behind on screen is not worth a lock. */
+void medialib_status(storage_id_t vol, medialib_status_t *out);
 
 #ifdef __cplusplus
 }

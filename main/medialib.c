@@ -5,6 +5,7 @@
  */
 #include "medialib.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -13,6 +14,8 @@
 #include "cuesheet.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "mediacat.h"
 #include "mediawalk.h"
 #include "settings.h"
@@ -26,6 +29,8 @@ static const char *TAG = "medialib";
 typedef struct {
     storage_id_t vol;
     const char  *mount;
+    mwalk_fn     fn;        /* the engine's, wrapped by guarded() */
+    void        *wctx;
 } ctx_t;
 
 /* The volume's absolute path for a relative one. Static: one reconcile
@@ -100,10 +105,29 @@ static void tags(void *ctx, const char *rel, mediacat_rec_t *r)
     storage_io_release();
 }
 
-static mwalk_result_t walk(void *ctx, mwalk_fn fn, void *wctx)
+/*
+ * Every track the walk offers goes through here first. A volume that
+ * has been marked absent -- the card pulled, the drive gone -- stops
+ * the walk at the next track, so the run closes its files and releases
+ * its hold, and the deferred unmount can happen. Stopping is not
+ * failing: nothing is buried, and the old index stands.
+ */
+static bool guarded(void *ctx, const char *path, midx_stamp_t st)
 {
     const ctx_t *c = ctx;
-    return mwalk_volume(c->mount, fn, wctx);
+    if (!storage_present(c->vol)) {
+        ESP_LOGW(TAG, "%s went away; stopping", storage_label(c->vol));
+        return false;
+    }
+    return c->fn(c->wctx, path, st);
+}
+
+static mwalk_result_t walk(void *ctx, mwalk_fn fn, void *wctx)
+{
+    ctx_t *c = ctx;
+    c->fn = fn;
+    c->wctx = wctx;
+    return mwalk_volume(c->mount, guarded, c);
 }
 
 msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
@@ -121,7 +145,7 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
         return MSYNC_FAILED;
     }
 
-    ctx_t c = { vol, mount };
+    ctx_t c = { vol, mount, NULL, NULL };
     const msync_ops_t ops = {
         .cat_append = cat_append,
         .cat_read = cat_read,
@@ -148,4 +172,71 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
 
     if (r == MSYNC_DONE) storage_mark_hidden(index);
     return r;
+}
+
+/* ---- the task --------------------------------------------------------- */
+
+static medialib_status_t s_status[STORAGE_COUNT];
+static volatile bool     s_busy;
+static portMUX_TYPE      s_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void reindex_task(void *arg)
+{
+    const storage_id_t vol = (storage_id_t)(intptr_t)arg;
+    medialib_status_t *s = &s_status[vol];
+
+    storage_hold_background(vol);
+    const int64_t t0 = esp_timer_get_time();
+    const msync_result_t r = medialib_reconcile(vol, NULL, &s->stats);
+    s->ms = (int)((esp_timer_get_time() - t0) / 1000);
+    storage_hold_background(STORAGE_COUNT);
+
+    s->state = (r == MSYNC_DONE)    ? MEDIALIB_DONE
+             : (r == MSYNC_STOPPED) ? MEDIALIB_STOPPED
+                                    : MEDIALIB_FAILED;
+
+    /* ESP-IDF counts stacks in bytes. */
+    ESP_LOGI(TAG, "reindex task: %u of %u stack bytes never touched",
+             (unsigned)uxTaskGetStackHighWaterMark(NULL),
+             (unsigned)MEDIALIB_STACK);
+
+    s_busy = false;
+    vTaskDelete(NULL);
+}
+
+bool medialib_request(storage_id_t vol)
+{
+    if (vol >= STORAGE_COUNT || !storage_present(vol)) return false;
+
+    taskENTER_CRITICAL(&s_mux);
+    const bool was = s_busy;
+    s_busy = true;
+    taskEXIT_CRITICAL(&s_mux);
+    if (was) return false;
+
+    memset(&s_status[vol].stats, 0, sizeof(s_status[vol].stats));
+    s_status[vol].ms = 0;
+    s_status[vol].state = MEDIALIB_RUNNING;
+
+    if (xTaskCreate(reindex_task, "reindex", MEDIALIB_STACK,
+                    (void *)(intptr_t)vol, 1, NULL) != pdPASS) {
+        ESP_LOGW(TAG, "no memory for the reindex task");
+        s_status[vol].state = MEDIALIB_FAILED;
+        s_busy = false;
+        return false;
+    }
+    ESP_LOGI(TAG, "reindex %s: started", storage_label(vol));
+    return true;
+}
+
+bool medialib_busy(void) { return s_busy; }
+
+void medialib_status(storage_id_t vol, medialib_status_t *out)
+{
+    if (!out) return;
+    if (vol >= STORAGE_COUNT) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = s_status[vol];
 }

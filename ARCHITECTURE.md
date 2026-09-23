@@ -10717,3 +10717,60 @@ long a first run takes on a real card. A cue track's tags come from
 `cuedir_tags()`, which parses its sheet and probes its audio's length
 for every track. An image of twenty tracks is twenty parses, which is
 fine for FLAC and could be slow for an MP3 without a Xing header.
+
+### 5015 -- a REINDEX button
+
+The first caller of 5014. The SD and USB tabs gain an `index` row and a
+**REINDEX** button under it, shown only while that volume is mounted.
+Automatic reindexing on mount comes later and will call the same
+function. **Built on the host as far as the fakes reach; not flashed.
+This is the first of the media-index patches that does anything on
+the device.**
+
+**The button only asks.** `medialib_request()` makes a task, "reindex",
+priority 1 like media_task, and returns. The press is on ui_task, the
+one writer of the framebuffer. A run is a walk of the whole volume plus
+a tag read per new track, and it doesn't belong on either the UI task
+or the player task: the benchmark button's pattern, a flag picked up by
+`player_loop()`, would block playback for the length of a first run.
+The task is made per run and deleted after, so its stack is held only
+while there is work.
+
+**8 KB, and it reports its own headroom.** The engine, walk and catalog
+keep their buffers static. What goes on the stack is the tag path --
+`cuedir_track()` and `sheet_load()` hold about 2.5 KB of path buffers,
+covertag about 1 KB -- plus printf. That is an estimate, so every run
+ends by logging `uxTaskGetStackHighWaterMark()`, and the first run on
+hardware says whether it holds.
+
+**One run at a time, on either volume,** because the engine's state is
+static. While one runs, the other tab's button is greyed and reads
+BUSY; the running tab's reads INDEXING. The row shows the live count
+("indexing, 812 so far") and then the result: "4210 tracks (+12 ~1
+-3), 41 s", "unchanged", "stopped: the volume went away", or "failed".
+The panel's one-second refresh keeps the count moving.
+
+**A second hold slot.** A run holds files open, and `storage_hold()` is
+what defers an unmount while that is true. But it is one slot, and the
+player sets and clears it on every track change, so a reindex that
+took it would be released by the next track. `storage_hold_background()`
+is a slot of its own. Either hold now defers the SD unmount and makes
+`storage_usb_busy()` true -- so the USB power switch reads IN USE and
+refuses to turn off while a drive is being indexed, as it does while a
+track plays from it.
+
+A pulled card is marked absent and its unmount deferred, as before. The
+walk sees it at the next track: `medialib.c` wraps the engine's
+callback in a check of `storage_present()`. The run stops -- stopped,
+not failed, so nothing is buried and the old index stands -- closes
+its files, and releases, and the next poll unmounts. A USB drive that is
+unplugged detaches whatever holds it, as it always has; the walk then
+fails on its next read.
+
+**A correction to 5014's last paragraph.** It worried that a cue
+image's tracks could be slow to tag for an MP3 without a Xing header,
+because `cuedir_tags()` probes the audio's length per track. But
+`duration_probe()` has no MP3 branch at all -- it handles FLAC, Ogg,
+WAV and MP4, and returns 0 for anything else -- so an MP3 image costs a
+sheet parse per track and no scan. The per-track re-parse is still
+there, and is still the thing to measure.

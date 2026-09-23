@@ -99,6 +99,12 @@ static sd_pwr_ctrl_handle_t s_pwr;
 static volatile bool s_mounted[STORAGE_COUNT];
 static volatile uint32_t s_generation;
 static volatile int s_held = STORAGE_COUNT;
+/* A second hold, for background work that has files open on a volume
+ * -- the media index -- so it does not take the player's slot from it
+ * or have its own taken. Either one defers an unmount. */
+static volatile int s_held_bg = STORAGE_COUNT;
+
+static bool held(storage_id_t id) { return s_held == id || s_held_bg == id; }
 
 /* When the USB liveness probe last ran. Set on mount as well, so a
  * freshly attached drive is not probed a tick later for no reason. */
@@ -224,6 +230,7 @@ void storage_mark_hidden(const char *path)
 uint32_t storage_generation(void) { return s_generation; }
 
 void storage_hold(storage_id_t id) { s_held = id; }
+void storage_hold_background(storage_id_t id) { s_held_bg = id; }
 
 /* Answered by the bus owner. Kept as a one-line forward rather than
  * deleted so browser.c does not have to learn about usbhost.c to ask a
@@ -435,7 +442,7 @@ static void usb_detach(void)
 
 bool storage_usb_busy(void)
 {
-    return s_held == STORAGE_USB && s_mounted[STORAGE_USB];
+    return held(STORAGE_USB) && s_mounted[STORAGE_USB];
 }
 
 bool storage_usb_power(bool on)
@@ -625,7 +632,7 @@ static void storage_task(void *arg)
          * work. Recovery can come later, on top of a detector that
          * exists.
          */
-        if (s_mounted[STORAGE_USB] && s_msc_dev && s_held != STORAGE_USB &&
+        if (s_mounted[STORAGE_USB] && s_msc_dev && !held(STORAGE_USB) &&
             (now - s_usb_pinged) >= pdMS_TO_TICKS(USB_PING_MS)) {
             s_usb_pinged = now;
 
@@ -646,19 +653,19 @@ static void storage_task(void *arg)
             if (sdmmc_get_status(s_card) != ESP_OK) {
                 s_mounted[STORAGE_SD] = false;
                 s_generation++;
-                if (s_held == STORAGE_SD) {
-                    /* Marked absent, not unmounted. The player is inside
-                     * a read on this volume; it will see the flag, stop
-                     * the track and release, and the next pass does the
-                     * unmount for real. */
-                    ESP_LOGW(TAG, "microSD pulled while playing");
+                if (held(STORAGE_SD)) {
+                    /* Marked absent, not unmounted. The player (or the
+                     * media index) is inside a read on this volume; it
+                     * will see the flag, stop and release, and the next
+                     * pass does the unmount for real. */
+                    ESP_LOGW(TAG, "microSD pulled while in use");
                 } else {
                     sd_unmount();
                 }
             }
         } else if (s_card) {
             /* Absent but still mounted: the deferred unmount above. */
-            if (s_held != STORAGE_SD) sd_unmount();
+            if (!held(STORAGE_SD)) sd_unmount();
         } else if (sd_mount(false) == ESP_OK) {
             s_mounted[STORAGE_SD] = true;
             s_generation++;

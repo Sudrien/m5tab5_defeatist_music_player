@@ -202,6 +202,15 @@ uint32_t storage_generation(void);
  */
 void storage_hold(storage_id_t id);
 
+/*
+ * The same, for background work -- the media index -- in a slot of its
+ * own. storage_hold() is the player's and is set and cleared by it
+ * without regard to anyone else, so a second holder in that slot would
+ * be released by the next track change. Either hold defers an unmount
+ * and makes storage_usb_busy() true. STORAGE_COUNT releases.
+ */
+void storage_hold_background(storage_id_t id);
+
 #ifdef __cplusplus
 }
 #endif

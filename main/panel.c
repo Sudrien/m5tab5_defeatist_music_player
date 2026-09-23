@@ -19,6 +19,7 @@
 #include "audio_out.h"
 #include "bench.h"
 #include "gfx.h"
+#include "medialib.h"
 #include "menuscroll.h"
 #include "panel.h"
 #include "settings.h"
@@ -175,6 +176,44 @@ static int row_add(row_t *rows, int n, const char *label, bool absent,
     return n + 1;
 }
 
+/*
+ * The media index, as the last row of a volume's tab: what the last
+ * reindex of this volume found, or how far the running one has got.
+ * Only for a mounted volume -- the builders return before this when
+ * there is nothing to index -- and drawn with the REINDEX button under
+ * it (draw_reindex()).
+ */
+static int index_row(row_t *rows, int n, storage_id_t vol)
+{
+    medialib_status_t st;
+    medialib_status(vol, &st);
+    const msync_stats_t *c = &st.stats;
+    const int tracks = c->keep + c->add + c->update + c->revive;
+
+    switch (st.state) {
+    case MEDIALIB_RUNNING:
+        return row_add(rows, n, "index", false, "indexing, %d so far", tracks);
+    case MEDIALIB_DONE:
+        if (c->add || c->update || c->revive || c->bury) {
+            return row_add(rows, n, "index", false,
+                           "%d tracks (+%d ~%d -%d), %d s", tracks,
+                           c->add + c->revive, c->update, c->bury,
+                           (st.ms + 500) / 1000);
+        }
+        return row_add(rows, n, "index", false, "%d tracks, unchanged, %d s",
+                       tracks, (st.ms + 500) / 1000);
+    case MEDIALIB_STOPPED:
+        return row_add(rows, n, "index", true, "stopped: the volume went away");
+    case MEDIALIB_FAILED:
+        return row_add(rows, n, "index", true, "%s",
+                       c->index_damaged ? "was damaged; reindex rebuilds it"
+                                        : "failed; the log says why");
+    case MEDIALIB_NONE:
+    default:
+        return row_add(rows, n, "index", true, "not run this session");
+    }
+}
+
 static int build_sd(row_t *rows)
 {
     storage_sd_info_t sd;
@@ -195,7 +234,7 @@ static int build_sd(row_t *rows)
      * only one of them is the bus working. */
     n = row_add(rows, n, "speed", false, "%d kHz, %d-bit",
                 sd.speed_khz, sd.bus_width);
-    return n;
+    return index_row(rows, n, STORAGE_SD);
 }
 
 static int build_usb(row_t *rows)
@@ -238,7 +277,7 @@ static int build_usb(row_t *rows)
                 (unsigned long long)usb.capacity_mb);
     n = row_add(rows, n, "sector", false, "%u bytes",
                 (unsigned)usb.sector_size);
-    return n;
+    return index_row(rows, n, STORAGE_USB);
 }
 
 static int build_build(row_t *rows)
@@ -362,6 +401,59 @@ static void usb_switch_box(int *x, int *y, int *w, int *h)
     *y = list_top();
     *w = gfx_w();
     *h = ROW_H;
+}
+
+/*
+ * REINDEX, under the index row of the SD and USB tabs. Part of the
+ * scrolling content, so its box comes from list_top() and the row count
+ * the last draw measured; the count does not change with the scroll, so
+ * a press between two draws still lands where the button was drawn.
+ */
+#define REINDEX_W       (300)
+#define REINDEX_H       (ROW_H)
+#define REINDEX_PAD     (20)
+
+static int s_reindex_rows = -1;     /* rows above it; -1 = not shown */
+
+static void reindex_box(int *x, int *y, int *w, int *h)
+{
+    *w = REINDEX_W;
+    *h = REINDEX_H;
+    *x = (gfx_w() - REINDEX_W) / 2;
+    *y = list_top() + s_reindex_rows * ROW_H + REINDEX_PAD;
+}
+
+static storage_id_t tab_volume(void)
+{
+    return (s_tab == TAB_SD) ? STORAGE_SD
+         : (s_tab == TAB_USB) ? STORAGE_USB : STORAGE_COUNT;
+}
+
+/* Returns the y below it. */
+static int draw_reindex(int nrows)
+{
+    const storage_id_t vol = tab_volume();
+    if (vol == STORAGE_COUNT || !storage_present(vol)) {
+        s_reindex_rows = -1;
+        return list_top() + nrows * ROW_H;
+    }
+    s_reindex_rows = nrows;
+
+    medialib_status_t st;
+    medialib_status(vol, &st);
+    const bool mine = st.state == MEDIALIB_RUNNING;
+    /* Greyed while any reindex runs: one at a time, and a button that
+     * looks live and does nothing reads as broken. */
+    const bool live = !medialib_busy();
+    const char *label = mine ? "INDEXING" : live ? "REINDEX" : "BUSY";
+
+    int bx, by, bw, bh;
+    reindex_box(&bx, &by, &bw, &bh);
+    gfx_fill_rect(bx, by, bw, bh, live ? C_BTN : C_TAB_OFF);
+    const int tw = gfx_text_w(label, LABEL_SCALE);
+    gfx_draw_text(bx + (bw - tw) / 2, by + (bh - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                  label, LABEL_SCALE, bw - 8, live ? C_TEXT : C_DISABLED);
+    return by + bh + REINDEX_PAD;
 }
 
 static void draw_usb_switch(void)
@@ -943,6 +1035,11 @@ void panel_draw(void)
                                          : build_build(rows);
         used = draw_rows(rows, n);
         if (s_tab == TAB_USB) draw_usb_switch();
+        if (s_tab == TAB_SD || s_tab == TAB_USB) {
+            used = draw_reindex(n);
+        } else {
+            s_reindex_rows = -1;
+        }
     }
     /* Measured, not predicted: the draws already knew where they ended
      * -- two of them were computing it to warn about overflow -- so the
@@ -1199,6 +1296,23 @@ bool panel_touch(bool down, int x, int y)
             s_dirty = true;
         }
         return false;
+    }
+
+    if ((s_tab == TAB_SD || s_tab == TAB_USB) && s_reindex_rows >= 0) {
+        int bx, by, bw, bh;
+        reindex_box(&bx, &by, &bw, &bh);
+        if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+            /* Only asks: the run is on its own task, and this is the
+             * one writer of the framebuffer. A refusal -- one already
+             * running, the volume gone -- shows as the button and the
+             * row at the next redraw. */
+            const storage_id_t vol = tab_volume();
+            const bool started = medialib_request(vol);
+            ESP_LOGI(TAG, "reindex %s: %s", storage_label(vol),
+                     started ? "requested" : "not now");
+            s_dirty = true;
+            return false;
+        }
     }
 
     if (s_tab == TAB_USB) {
