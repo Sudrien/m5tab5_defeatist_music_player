@@ -10493,3 +10493,70 @@ renamed over the old one at the end, with no sort anywhere. A reconcile
 that stops partway throws the temporary file away. The lines it has
 already appended are then orphans: harmless, and dropped by the next
 compaction.
+
+### 5012 -- the catalog's lines
+
+`main/mediacat.{h,c}`: the JSONL catalog the index points into.
+`.defeatist.cat` at the volume root, beside `.defeatist.dat`. One line
+per record, appended; a path's latest line is its record, and the index
+says which line that is. **Built into the firmware and called by
+nothing yet. Verified on the host, but not by `texttest` -- see below.**
+
+**A line** is readable words, as `settings.h` argues for anything on a
+card people put in a computer:
+
+    {"format_version":1,"path":"Artist/Album/01 Song.flac",
+     "mtime":1735500000,"size":8760320,"title":"Song",
+     "artist":"Artist","album":"Album","written":1789084800,"clock":"s"}
+
+plus `deleted_at` on a tombstone. Empty tags are left out, since an
+untagged library would otherwise spend most of its catalog on `""`.
+`written` and `deleted_at` come from `settings_now()`, and `clock`
+records whether that was the floor or a synced clock. A key this build
+doesn't know is skipped; another `format_version` isn't read at all.
+Decoding is strict in every other way: a string too long for its field
+is refused, not cut, because a cut path is a different path.
+
+**Appending, where `replaygain.c` gave it up.** The difference is
+worth recording because the two files look alike. A sidecar holds
+one record, so each appended line repeated the one before it. The
+catalog holds thousands, and a line is one of them.
+
+**A torn last line is closed off before the next append.** If a card
+is pulled mid-append, the file ends without `'\n'`. The next append
+would then join its line to the torn one, and both would fail to parse:
+one lost write would cost the next one too. `mediacat_append()` reads
+the last byte and writes a `'\n'` first if it's missing. The same gap
+exists in `settings.c`'s `write_file()` -- a failed append there is
+followed by a record glued to it, which is lost until the save after
+that. Not fixed here; noted.
+
+**cJSON is exact to fifteen digits, not to 2^53.** A double holds
+integers exactly up to 2^53, but cJSON prints numbers with `%1.15g` and
+falls back to `%1.17g` only when the text reads back different -- and
+it tests "different" with a relative epsilon. 2^53 prints as
+`9.00719925474099e+15`, passes that test, and reads back 2 short. So
+every number in a line is refused past 10^15 - 1 on the way in. That
+limit is a petabyte for a size and thirty million years for a time;
+what matters is that nothing is silently written as a different
+number. Found by the local test on its first run.
+
+`cJSON_PrintPreallocated()` into the module's static line buffer
+instead of `cJSON_PrintUnformatted()`: this runs once per track on a
+walk, and the print allocation is the one that can be avoided. The tree
+itself still allocates a node per field, which lands in internal RAM
+(5010's jsonpick note); a walk should be measured for that.
+
+**Not in `texttest`.** The host suite runs in CI before ESP-IDF is
+installed, and cJSON comes from ESP-IDF's `json` component, so there is
+no cJSON for it to link. A test that only runs on one machine is the
+thing this file has complained about before, so none is committed. The
+checks were run locally against cJSON 1.7.18 under ASan and UBSan,
+with `mediacat.c` itself compiled at `-O2 -Wall -Wextra -Werror`:
+round trips of plain, hostile (quotes, backslash, newline, control
+bytes, invalid UTF-8) and worst-case records; seventeen malformed lines
+refused; an unknown key skipped; appends returning growing offsets with
+the lease balanced; a torn line closed off; reads at a mid-line offset,
+at a torn line and past the end refused. Putting that in CI would mean
+fetching cJSON for the host build, pinned the way `cmake/vendored.cmake`
+pins minimp3 -- a decision about CI, left for the owner.
