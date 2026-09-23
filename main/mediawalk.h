@@ -33,8 +33,13 @@
  * so a re-ripped image under an untouched sheet has to count as a
  * change, and a stamp from the sheet alone would miss it.
  *
- * I/O goes under STORAGE_IO_BACKGROUND, one lease per readdir() and per
- * stat(), never across the walk.
+ * STAMPS COME FROM THE LISTING (mediadir.h): one f_readdir() pass per
+ * folder gives every entry's size and date, and there is no stat() at
+ * all -- which on FAT re-reads the folder from the top for each file.
+ * The mtime is midx_fat_time() of the entry's date and time words.
+ *
+ * I/O goes under STORAGE_IO_BACKGROUND, one lease per directory call,
+ * never across the walk.
  *
  * NOT REENTRANT: the folder stack and the path buffer are statics, as
  * nothing this size belongs on a task stack. One walk at a time.

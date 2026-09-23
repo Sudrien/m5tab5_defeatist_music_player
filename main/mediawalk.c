@@ -5,17 +5,15 @@
  */
 #include "mediawalk.h"
 
-#include <dirent.h>
-#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 
 #include "cuedir.h"
 #include "cuesheet.h"
 #include "decoder.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "mediadir.h"
 #include "storage.h"
 #include "storage_io.h"
 
@@ -23,12 +21,19 @@ static const char *TAG = "mediawalk";
 
 #define CLS     STORAGE_IO_BACKGROUND
 
-enum { K_FILE, K_DIR, K_CUE };
+/*
+ * K_SHEET and K_COVERED are kept but never offered: a sheet is not a
+ * track, and audio a sheet covers is its tracks' -- but a cue track's
+ * stamp is made of theirs, and they come from the same listing as
+ * everything else rather than from a stat() each.
+ */
+enum { K_FILE, K_DIR, K_CUE, K_SHEET, K_COVERED };
 
 typedef struct {
-    uint32_t name;      /* offset into the level's arena */
-    uint8_t  kind;
-    int      cue;       /* cuedir row, for K_CUE */
+    uint32_t     name;      /* offset into the level's arena */
+    uint8_t      kind;
+    int          cue;       /* cuedir row, for K_CUE */
+    midx_stamp_t stamp;     /* from the listing; K_CUE's is made later */
 } ent_t;
 
 /*
@@ -52,8 +57,6 @@ static level_t s_lv[MWALK_DEPTH_MAX + 1];
 static char s_path[16 + MIDX_PATH_MAX + 2];
 static size_t s_mount_len;
 
-/* Scratch for a cue track's sheet and audio paths. */
-static char s_aux[sizeof(s_path)];
 
 static void *ps_alloc(size_t n)
 {
@@ -82,7 +85,8 @@ static void level_free(level_t *lv)
     memset(lv, 0, sizeof(*lv));
 }
 
-static bool level_add(level_t *lv, const char *name, uint8_t kind, int cue)
+static bool level_add(level_t *lv, const char *name, uint8_t kind, int cue,
+                      midx_stamp_t stamp)
 {
     if (lv->n >= MWALK_DIR_MAX) return false;
     const size_t len = strlen(name) + 1;
@@ -102,6 +106,7 @@ static bool level_add(level_t *lv, const char *name, uint8_t kind, int cue)
     lv->ents[lv->n].name = (uint32_t)lv->used;
     lv->ents[lv->n].kind = kind;
     lv->ents[lv->n].cue = cue;
+    lv->ents[lv->n].stamp = stamp;
     lv->n++;
     lv->used += len;
     return true;
@@ -116,13 +121,6 @@ static int ent_cmp(const void *a, const void *b)
     return midx_name_cmp(s_sort_arena + x->name, s_sort_arena + y->name);
 }
 
-static int leased_stat(const char *path, struct stat *st)
-{
-    storage_io_acquire(CLS);
-    const int rc = stat(path, st);
-    storage_io_release();
-    return rc;
-}
 
 /*
  * Read the folder at s_path into lv, sorted. False if it could not be
@@ -133,52 +131,30 @@ static bool level_load(level_t *lv)
     memset(lv, 0, sizeof(*lv));
     lv->plen = strlen(s_path);
 
-    storage_io_acquire(CLS);
-    DIR *d = opendir(s_path);
-    storage_io_release();
-    if (!d) {
+    if (!mdir_open(s_path)) {
         ESP_LOGW(TAG, "cannot open %s", s_path);
         return false;
     }
 
     bool ok = true, any_sheet = false;
     for (;;) {
-        /* readdir() says "end" and "error" the same way; only errno
-         * tells them apart, so it is cleared first. */
-        errno = 0;
-        storage_io_acquire(CLS);
-        struct dirent *e = readdir(d);
-        const int err = errno;
-        storage_io_release();
-        if (!e) {
-            if (err) {
-                ESP_LOGW(TAG, "reading %s failed (%d)", s_path, err);
-                ok = false;
-            }
+        mdir_ent_t e;
+        const int got = mdir_next(&e);
+        if (got < 0) {
+            ESP_LOGW(TAG, "reading %s failed", s_path);
+            ok = false;
             break;
         }
-        if (storage_is_hidden(e->d_name)) continue;
+        if (got == 0) break;
+        if (storage_is_hidden(e.name)) continue;
 
-        bool is_dir = e->d_type == DT_DIR;
-        if (e->d_type == DT_UNKNOWN) {
-            /* Not what ESP-IDF's FAT gives, but cheap to be right about. */
-            struct stat st;
-            const size_t k = lv->plen;
-            if (k + 1 + strlen(e->d_name) >= sizeof(s_path)) continue;
-            s_path[k] = '/';
-            strcpy(s_path + k + 1, e->d_name);
-            const int rc = leased_stat(s_path, &st);
-            s_path[k] = '\0';
-            if (rc != 0) { ok = false; break; }
-            is_dir = S_ISDIR(st.st_mode);
-        }
-
-        if (is_dir) {
-            ok = level_add(lv, e->d_name, K_DIR, 0);
-        } else if (cue_is_sheet(e->d_name)) {
-            any_sheet = true;   /* not an entry: its tracks are */
-        } else if (decoder_supports(e->d_name)) {
-            ok = level_add(lv, e->d_name, K_FILE, 0);
+        if (e.is_dir) {
+            ok = level_add(lv, e.name, K_DIR, 0, e.stamp);
+        } else if (cue_is_sheet(e.name)) {
+            any_sheet = true;   /* not a track: its tracks are */
+            ok = level_add(lv, e.name, K_SHEET, 0, e.stamp);
+        } else if (decoder_supports(e.name)) {
+            ok = level_add(lv, e.name, K_FILE, 0, e.stamp);
         }
         if (!ok) {
             ESP_LOGW(TAG, "%s: more than %d entries, or no memory; "
@@ -186,31 +162,27 @@ static bool level_load(level_t *lv)
             break;
         }
     }
-    storage_io_acquire(CLS);
-    closedir(d);
-    storage_io_release();
+    mdir_close();
     if (!ok) return false;
 
     /*
-     * Sheets become their tracks, and hide the audio they cover, by the
-     * one derivation the chooser and the decoder use (cuedir.h). Hidden
-     * files are dropped by compacting in place; order does not matter
-     * yet, the sort is next.
+     * Sheets become their tracks, and the audio they cover stops being a
+     * track of its own, by the one derivation the chooser and the
+     * decoder use (cuedir.h). Covered audio is kept, marked, for its
+     * stamp.
      */
     if (any_sheet) {
         lv->cues = cuedir_load(s_path, CLS);
         if (lv->cues) {
-            int w = 0;
             for (int i = 0; i < lv->n; i++) {
                 if (lv->ents[i].kind == K_FILE &&
                     cuedir_hides(lv->cues, lv->arena + lv->ents[i].name)) {
-                    continue;
+                    lv->ents[i].kind = K_COVERED;
                 }
-                lv->ents[w++] = lv->ents[i];
             }
-            lv->n = w;
+            const midx_stamp_t none = { 0, 0 };
             for (int i = 0; i < cuedir_count(lv->cues) && ok; i++) {
-                ok = level_add(lv, cuedir_name(lv->cues, i), K_CUE, i);
+                ok = level_add(lv, cuedir_name(lv->cues, i), K_CUE, i, none);
             }
             if (!ok) return false;
         }
@@ -225,6 +197,25 @@ static bool level_load(level_t *lv)
     return true;
 }
 
+/* An entry of this folder by name, or NULL. The entries are sorted. */
+static const ent_t *level_find(const level_t *lv, const char *name,
+                               size_t len)
+{
+    static char key[MIDX_PATH_MAX + 1];     /* not the stack */
+    int lo = 0, hi = lv->n;
+    if (len > MIDX_PATH_MAX) return NULL;
+    memcpy(key, name, len);
+    key[len] = '\0';
+    while (lo < hi) {
+        const int mid = lo + (hi - lo) / 2;
+        const int c = midx_name_cmp(lv->arena + lv->ents[mid].name, key);
+        if (c == 0) return &lv->ents[mid];
+        if (c < 0) lo = mid + 1;
+        else       hi = mid;
+    }
+    return NULL;
+}
+
 /* s_path = the level's folder + "/" + name. False if too long. */
 static bool path_enter(const level_t *lv, const char *name)
 {
@@ -235,7 +226,8 @@ static bool path_enter(const level_t *lv, const char *name)
     return strlen(s_path) - s_mount_len - 1 <= MIDX_PATH_MAX;
 }
 
-/* A cue track's stamp: the sheet's and its audio's together. */
+/* A cue track's stamp: the sheet's and its audio's together, both from
+ * this folder's listing. */
 static bool cue_stamp(const level_t *lv, const ent_t *e, midx_stamp_t *out)
 {
     const char *vname = lv->arena + e->name;
@@ -243,23 +235,13 @@ static bool cue_stamp(const level_t *lv, const ent_t *e, midx_stamp_t *out)
     const char *audio = cuedir_audio(lv->cues, e->cue);
     if (!hash || !audio) return false;
 
-    struct stat a, b;
-    const size_t k = lv->plen;
-    const size_t sl = (size_t)(hash - vname);
-    if (k + 1 + sl >= sizeof(s_aux) ||
-        k + 1 + strlen(audio) >= sizeof(s_aux)) return false;
+    const ent_t *a = level_find(lv, vname, (size_t)(hash - vname));
+    const ent_t *b = level_find(lv, audio, strlen(audio));
+    if (!a || !b) return false;
 
-    memcpy(s_aux, s_path, k);
-    s_aux[k] = '/';
-    memcpy(s_aux + k + 1, vname, sl);
-    s_aux[k + 1 + sl] = '\0';
-    if (leased_stat(s_aux, &a) != 0) return false;
-
-    strcpy(s_aux + k + 1, audio);
-    if (leased_stat(s_aux, &b) != 0) return false;
-
-    out->mtime = (int64_t)(a.st_mtime > b.st_mtime ? a.st_mtime : b.st_mtime);
-    out->size = (uint64_t)a.st_size + (uint64_t)b.st_size;
+    out->mtime = a->stamp.mtime > b->stamp.mtime ? a->stamp.mtime
+                                                 : b->stamp.mtime;
+    out->size = a->stamp.size + b->stamp.size;
     return true;
 }
 
@@ -303,6 +285,7 @@ mwalk_result_t mwalk_volume(const char *mount, mwalk_fn fn, void *ctx)
         }
         const ent_t *e = &lv->ents[lv->next++];
         const char *name = lv->arena + e->name;
+        if (e->kind == K_SHEET || e->kind == K_COVERED) continue;
 
         if (!path_enter(lv, name)) {
             s_path[lv->plen] = '\0';
@@ -326,23 +309,14 @@ mwalk_result_t mwalk_volume(const char *mount, mwalk_fn fn, void *ctx)
             continue;
         }
 
-        midx_stamp_t st = { 0, 0 };
-        bool have;
-        if (e->kind == K_CUE) {
-            have = cue_stamp(lv, e, &st);
-        } else {
-            struct stat sb;
-            have = leased_stat(s_path, &sb) == 0;
-            if (have) {
-                st.mtime = (int64_t)sb.st_mtime;
-                st.size = (uint64_t)sb.st_size;
-            }
-        }
-        if (!have) {
-            /* Listed a moment ago and now unreadable: the card is going
-             * or something is wrong with it. Either way the rest of
-             * this walk cannot be believed. */
-            ESP_LOGW(TAG, "cannot stat %s", s_path);
+        midx_stamp_t st = e->stamp;
+        if (e->kind == K_CUE && !cue_stamp(lv, e, &st)) {
+            /* The sheet or its audio is not in the listing the sheet
+             * was resolved against: the folder changed between the two
+             * reads, or cuedir saw something this did not. Either way
+             * this track's stamp cannot be made, and a walk that skips
+             * a track reads it as deleted. */
+            ESP_LOGW(TAG, "no stamp for %s", s_path);
             free_all(depth);
             return MWALK_FAILED;
         }

@@ -172,6 +172,17 @@ msync_result_t medialib_reconcile(storage_id_t vol, const volatile bool *abort,
         return MSYNC_FAILED;
     }
 
+    /* An index from an earlier format is not read, only removed. */
+    static const char *const old_names[] = MEDIALIB_OLD_INDEX_NAMES;
+    for (size_t i = 0; i < sizeof(old_names) / sizeof(old_names[0]); i++) {
+        char old[32];
+        if (!storage_join_path(old, sizeof(old), mount, old_names[i])) continue;
+        storage_io_acquire(CLS);
+        const bool gone = remove(old) == 0;
+        storage_io_release();
+        if (gone) ESP_LOGI(TAG, "removed %s: an earlier format", old);
+    }
+
     ctx_t c = { vol, mount, NULL, NULL };
     const msync_ops_t ops = {
         .cat_append = cat_append,

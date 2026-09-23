@@ -260,7 +260,7 @@ $(MEDIAINDEX_BIN): mediaindextest.c ../main/mediaindex.h
 run-mediaindex: $(MEDIAINDEX_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(MEDIAINDEX_BIN)
 
-$(MEDIAWALK_BIN): mediawalktest.c ../main/mediawalk.c ../main/mediawalk.h ../main/mediaindex.h shim.c shim.h
+$(MEDIAWALK_BIN): mediawalktest.c ../main/mediawalk.c ../main/mediawalk.h ../main/mediadir.h ../main/mediaindex.h shim.c shim.h
 	$(CC) $(WARNCFLAGS) -c mediawalktest.c -o /dev/null
 	$(CC) $(WARNCFLAGS) -c ../main/mediawalk.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ mediawalktest.c ../main/mediawalk.c shim.c $(LDFLAGS)

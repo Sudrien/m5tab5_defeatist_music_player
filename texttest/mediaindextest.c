@@ -826,9 +826,61 @@ static void check_disagreement(void)
           "a short scratch buffer was used");
 }
 
+/* ---- FAT time ------------------------------------------------------- */
+
+#include <time.h>
+
+static void check_fat_time(void)
+{
+    printf("  FAT dates and times\n");
+    /* Every valid date and a spread of times, against the C library's
+     * own UTC conversion. */
+    int wrong = 0, n = 0;
+    for (int y = 0; y < 128; y++)
+        for (int m = 1; m <= 12; m++)
+            for (int d = 1; d <= 31; d++) {
+                struct tm tm = { 0 };
+                tm.tm_year = 80 + y; tm.tm_mon = m - 1; tm.tm_mday = d;
+                tm.tm_hour = (y + d) % 24; tm.tm_min = (m * 7) % 60;
+                tm.tm_sec = (d * 2) % 60;
+                const time_t t = timegm(&tm);
+                /* timegm normalises 31 February; FAT would store it as
+                 * written. Only compare dates that exist. */
+                if (tm.tm_mday != d) continue;
+                const uint16_t fd = (uint16_t)((y << 9) | (m << 5) | d);
+                const uint16_t ft = (uint16_t)((((y + d) % 24) << 11) |
+                                               (((m * 7) % 60) << 5) |
+                                               ((d * 2) % 60 / 2));
+                n++;
+                if (midx_fat_time(fd, ft) != (int64_t)t) wrong++;
+            }
+    CHECK(n > 40000 && wrong == 0, "%d of %d dates converted wrongly", wrong, n);
+
+    /* The extremes FAT can hold. */
+    CHECK(midx_fat_time((0 << 9) | (1 << 5) | 1, 0) == 315532800,
+          "1980-01-01 is 315532800");
+    CHECK(midx_fat_time((127u << 9) | (12 << 5) | 31,
+                        (23u << 11) | (59 << 5) | 29) == 4354819198LL,
+          "2107-12-31 23:59:58");
+
+    /* Two-second resolution: every tick is a different stamp. */
+    const uint16_t day = (46 << 9) | (9 << 5) | 22;
+    CHECK(midx_fat_time(day, 0) != midx_fat_time(day, 1),
+          "two seconds apart gave one stamp");
+
+    /* Corrupt fields still give a stamp, never one a real date gives,
+     * and a change to them is still a change. */
+    const int64_t bad1 = midx_fat_time((46 << 9) | (0 << 5) | 1, 0);
+    const int64_t bad2 = midx_fat_time((46 << 9) | (13 << 5) | 1, 0);
+    CHECK(bad1 < 0 && bad2 < 0 && bad1 != bad2,
+          "corrupt dates: %lld and %lld", (long long)bad1, (long long)bad2);
+    CHECK(midx_fat_time(day, (24u << 11)) < 0, "hour 24 taken as real");
+}
+
 int main(void)
 {
     printf("mediaindextest\n");
+    check_fat_time();
     check_order();
     check_walk();
     check_reconcile();

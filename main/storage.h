@@ -68,6 +68,14 @@ const char *storage_mount_path(storage_id_t id);
 /* "microSD", "USB" -- the tab labels. */
 const char *storage_label(storage_id_t id);
 
+/*
+ * The FatFs drive number a mounted volume is on, or -1. For the code
+ * that has to go under the VFS to FatFs itself -- the media walk, which
+ * needs f_readdir()'s sizes and dates -- and has to be sure it is
+ * reading the right volume. See storage.c.
+ */
+int storage_ff_drive(storage_id_t id);
+
 /* Which volume a path lives on, or STORAGE_COUNT for neither. */
 storage_id_t storage_of_path(const char *path);
 

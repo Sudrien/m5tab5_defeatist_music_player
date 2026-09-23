@@ -113,6 +113,7 @@ withdrawn while this was being discussed.
   `FILINFO` that has them, but the project reads through POSIX
   `readdir`, which does not -- so a walk that wants mtimes pays a
   `stat()` per file, and the walk is the expensive part, not the compare.
+  (5019: the walk now reads `FILINFO` through FatFs, `mediadir.c`.)
 
 Together these mean there is **no cheap probe for "has anything
 changed"**. The full walk is the only correct answer, and the design

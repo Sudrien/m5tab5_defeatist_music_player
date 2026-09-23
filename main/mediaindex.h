@@ -139,6 +139,49 @@ static inline bool midx_stamp_eq(midx_stamp_t a, midx_stamp_t b)
     return a.mtime == b.mtime && a.size == b.size;
 }
 
+/*
+ * A stamp's mtime from a FAT directory entry's date and time words, the
+ * way the walk reads them now (5019): straight from f_readdir()'s
+ * FILINFO, one pass over the folder, instead of a stat() per file.
+ *
+ * Seconds since 1970 for the wall clock written, read as UTC -- the same
+ * number ESP-IDF's stat() gives while nothing has set TZ (vfs_fat.c
+ * builds a struct tm from these fields and calls mktime()), but worked
+ * out here with no struct tm and no mktime(), so it cannot depend on
+ * TZ, on tm_isdst, or on anything else about the process. The index
+ * only ever compares stamps for equality; what this has to be is the
+ * same every time for the same entry, and different when the entry's
+ * time changes.
+ *
+ * exFAT keeps 10 ms and a UTC offset as well; FatFs folds its times into
+ * these same two words, so both filesystems come through here alike.
+ *
+ * A date with no such month or day -- a corrupt entry -- still gets a
+ * stamp, the raw words negated, which no real date can produce: the
+ * point is that a change to it is still a change.
+ */
+static inline int64_t midx_fat_time(uint16_t fdate, uint16_t ftime)
+{
+    const int y  = 1980 + (fdate >> 9);
+    const int m  = (fdate >> 5) & 0x0F;
+    const int d  = fdate & 0x1F;
+    const int hh = ftime >> 11;
+    const int mi = (ftime >> 5) & 0x3F;
+    const int ss = (ftime & 0x1F) * 2;
+    if (m < 1 || m > 12 || d < 1 || d > 31 || hh > 23 || mi > 59 || ss > 59) {
+        return -(((int64_t)fdate << 16) | ftime) - 1;
+    }
+    /* Days from 1970-01-01, Howard Hinnant's days_from_civil. */
+    const int yy = y - (m <= 2);
+    const int era = yy / 400;                       /* yy >= 1979 */
+    const unsigned yoe = (unsigned)(yy - era * 400);
+    const unsigned doy = (153u * (unsigned)(m + (m > 2 ? -3 : 9)) + 2u) / 5u
+                         + (unsigned)d - 1u;
+    const unsigned doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
+    const int64_t days = (int64_t)era * 146097 + (int64_t)doe - 719468;
+    return days * 86400 + hh * 3600 + mi * 60 + ss;
+}
+
 /* One entry from the walk. */
 typedef struct {
     const char  *path;

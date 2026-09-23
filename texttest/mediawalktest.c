@@ -37,8 +37,11 @@
 #include <sys/time.h>
 #include <unistd.h>
 
+#include <errno.h>
+
 #include "cuedir.h"
 #include "decoder.h"
+#include "mediadir.h"
 #include "mediawalk.h"
 #include "storage.h"
 #include "storage_io.h"
@@ -66,6 +69,60 @@ void storage_io_acquire(storage_io_class_t cls)
     s_leases++;
 }
 void storage_io_release(void) { s_depth--; }
+
+/*
+ * mediadir over POSIX. The device reads FatFs's FILINFO; here the same
+ * three things -- name, folder or not, size and mtime -- come from
+ * readdir() and stat(). "." and ".." are skipped, as f_readdir() never
+ * returns them. `s_fail_in`, when set, makes a folder whose path
+ * contains it fail after its first entry: the read error the walk must
+ * never mistake for the end of a folder.
+ */
+static DIR  *s_hd;
+static char  s_hpath[2048], s_hname[512];
+static const char *s_fail_in;
+static int   s_hcount;
+
+bool mdir_open(const char *path)
+{
+    storage_io_acquire(STORAGE_IO_BACKGROUND);
+    s_hd = opendir(path);
+    storage_io_release();
+    snprintf(s_hpath, sizeof(s_hpath), "%s", path);
+    s_hcount = 0;
+    return s_hd != NULL;
+}
+
+int mdir_next(mdir_ent_t *out)
+{
+    for (;;) {
+        if (s_fail_in && strstr(s_hpath, s_fail_in) && s_hcount >= 1) return -1;
+        storage_io_acquire(STORAGE_IO_BACKGROUND);
+        errno = 0;
+        struct dirent *e = readdir(s_hd);
+        const int err = errno;
+        storage_io_release();
+        if (!e) return err ? -1 : 0;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        char p[2600];
+        snprintf(p, sizeof(p), "%s/%s", s_hpath, e->d_name);
+        struct stat st;
+        if (stat(p, &st) != 0) return -1;
+        snprintf(s_hname, sizeof(s_hname), "%s", e->d_name);
+        out->name = s_hname;
+        out->is_dir = S_ISDIR(st.st_mode);
+        out->stamp.mtime = (int64_t)st.st_mtime;
+        out->stamp.size = S_ISDIR(st.st_mode) ? 0 : (uint64_t)st.st_size;
+        s_hcount++;
+        return 1;
+    }
+}
+
+void mdir_close(void)
+{
+    if (s_hd) closedir(s_hd);
+    s_hd = NULL;
+}
 
 /* storage.c's rule: ".", "..", and every dotfile, which covers "._". */
 bool storage_is_hidden(const char *name) { return name[0] == '.'; }
@@ -405,6 +462,17 @@ int main(void)
     r = mwalk_volume(mount, collect, NULL);
     CHECK(r == MWALK_STOPPED && s_ngot == 3, "stop: result %d after %d", r, s_ngot);
     CHECK(s_depth == 0, "lease held after a stop");
+
+    /* A folder that errors part-way is not a shorter folder. */
+    reset();
+    s_fail_in = "/b/c";
+    r = mwalk_volume(mount, collect, NULL);
+    s_fail_in = NULL;
+    CHECK(r == MWALK_FAILED, "a read error inside a folder did not fail the "
+          "walk (result %d)", r);
+    CHECK(idx_of("b/c/d/e.flac") < 0 && idx_of("\xC3\xA9t\xC3\xA9/song.flac") < 0,
+          "the walk offered tracks from or after a folder it could not finish");
+    CHECK(s_depth == 0, "lease held after a read error");
 
     reset();
     r = mwalk_volume("/nonexistent", collect, NULL);

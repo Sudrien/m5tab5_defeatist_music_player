@@ -10891,3 +10891,79 @@ It runs during playback. The reindex works under the BACKGROUND
 class, one lease per operation, which is what the arbiter exists for;
 whether a first index of a large USB drive under playback is audible
 is a question for the next log.
+
+### 5019 -- stamps from the listing, not a stat() per file
+
+**The 5018 log**, both runs automatic, both indexes already built:
+
+| | tracks | total | tags | catalog | walk + index |
+| --- | --- | --- | --- | --- | --- |
+| microSD, unchanged | 52 | 681 ms | 0 | 24 ms, 9 reads | 657 ms |
+| USB, unchanged, under playback | 1192 | 9974 ms | 0 | 496 ms, 103 reads | 9478 ms |
+
+While the USB run went on, the Bastion track playing from the same
+drive saw a worst playback wait of **5 ms** and prefetch 21 ms, with no
+underrun. The index held the drive for 30% of the track, in 5834 leases
+of at most 49 ms each. That is the arbiter doing what it was built for.
+The task never went below 4320 bytes of stack free.
+
+**So an unchanged pass is almost all walk: about 8 ms a track, and
+nearly all of it is `stat()`.** POSIX `readdir()` gives a name and a
+type, so the walk took each file's size and date from `stat()`. On FAT,
+`stat()` finds a name by reading its folder from the top. A folder of a
+hundred tracks is read about a hundred times, and `undertale` on that
+drive is 101. `MEDIA-INDEX.md` said this before any code existed.
+
+**`mediadir.{h,c}`: one `f_readdir()` pass per folder**, straight from
+FatFs, keeping each entry's `FILINFO` size and date and time words.
+ESP-IDF's own `readdir()` is that same `f_readdir()` into a `FILINFO`,
+copying out only the name, so the names are byte-for-byte what the
+chooser sees. FAT32 and exFAT alike: with `FF_FS_EXFAT` the size is a
+64-bit `FSIZE_t`, and FatFs gives exFAT's times in the same two words
+(its 10 ms and UTC offset are dropped). `mediadir.c` was syntax-checked
+against IDF v5.5's `ff.h` with exFAT off and on.
+
+**The right drive, exactly.** FatFs paths are `N:/...`, and IDF does not
+publish which N a mount got. `storage_mark_hidden()` tries each one,
+which is fine for an attribute and wrong for a walk: both volumes can
+have `Artist/`. `storage_ff_drive()` asks IDF for the SD's drive by its
+card (`ff_diskio_get_pdrv_card()`). The USB drive's number is inside
+`msc_host_vfs`'s opaque handle, but with `FF_VOLUMES` at 2 it is the
+other registered drive, and `f_opendir()` on an unregistered one fails
+with `FR_NOT_ENABLED` before touching a disk.
+
+**Sheets and covered audio stay in the folder's entry list, marked**,
+so a cue track's stamp (sheet plus audio) comes from the same listing
+through a binary search, not two `stat()`s. The walk no longer calls
+`stat()` at all.
+
+**`midx_fat_time()`** turns the date and time words into seconds since
+1970, read as UTC, by arithmetic (Hinnant's `days_from_civil`). No
+`struct tm` or `mktime()`, so nothing about TZ or `tm_isdst` can move
+it. `mediaindextest` checks it against the host's `timegm()` for every
+valid FAT date, 1980 to 2107 -- all 46 751 of them -- plus both extremes (checked
+independently), two-second resolution, and corrupt fields that still
+yield a distinct stamp no real date can produce.
+
+**Why the index is renamed `.ix2`.** ESP-IDF's `stat()` gets its mtime
+from `mktime()` of the same fields, which agrees with this while TZ is
+unset. Relying on that to the second, for every file and forever, is
+the kind of agreement that holds until it doesn't, and it would fail
+silently as a reindex that re-tags everything. So the stamp's source is
+treated as a format change: the index is now `.defeatist.ix2`,
+`MEDIALIB_OLD_INDEX_NAMES` lists `.ix1`, and the first run of this
+build removes it and rebuilds. That first run is the first-index
+measurement 5016 and 5017 were waiting for.
+
+**The catalog grows by a full set of lines on that rebuild.** The old
+lines are orphans that nothing points at. Nothing compacts the catalog
+yet; that is a task still to do, and it has to rebuild the index in the
+same step (5011).
+
+**Walk test.** `mediawalktest` supplies `mdir` over POSIX, skipping `.`
+and `..` as `f_readdir()` does, and can now make a folder fail partway
+through. That is the read error the walk must never take as the end of
+a folder, and the POSIX `readdir()` errno case could never be reached
+on the host. Five mutations, all caught: a read error taken as the end,
+covered audio offered, a sheet offered, the cue size from the sheet
+alone, and the lookup searching the wrong way.

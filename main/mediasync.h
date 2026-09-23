@@ -68,7 +68,7 @@ typedef struct {
     bool (*cat_flush)(void *ctx);
     void *ctx;
 
-    const char *index_path;     /* the index, e.g. "/sd/.defeatist.ix1" */
+    const char *index_path;     /* the index, e.g. "/sd/.defeatist.ix2" */
     const char *temp_path;      /* where the new one is built */
     int64_t     now;            /* settings_now(), for written/deleted_at */
     char        clock;          /* MIDX_CLOCK_FLOOR or MIDX_CLOCK_SYNCED */

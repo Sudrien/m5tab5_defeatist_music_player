@@ -5,15 +5,14 @@
  *
  * Two files per volume, both at the root beside .defeatist.dat, both
  * dotted and FAT-hidden: the catalog `.defeatist.cat` (mediacat.h) and
- * the index `.defeatist.ix1`, with `.defeatist.ixn` while a new one is
+ * the index `.defeatist.ix2`, with `.defeatist.ixn` while a new one is
  * being written.
  *
  * THE VERSION IS IN THE NAME. MEDIA-INDEX.md settled that a format
  * change rebuilds the index rather than migrating it, and the cheapest
  * way to make an old index unreadable to a new build is for the new
- * build to look for a different file: `.ix2` next time. The old file is
- * then just a dotfile nobody reads; the build that bumps the name should
- * remove the old one, since this one cannot know what it will be.
+ * build to look for a different file. The build that bumps the name
+ * removes the old ones (MEDIALIB_OLD_INDEX_NAMES).
  *
  * medialib_request() is how a reindex starts: it makes a task for the
  * run and returns. Two things call it: the REINDEX button on the
@@ -34,8 +33,17 @@
 extern "C" {
 #endif
 
-#define MEDIALIB_INDEX_NAME     ".defeatist.ix1"
+#define MEDIALIB_INDEX_NAME     ".defeatist.ix2"
 #define MEDIALIB_TEMP_NAME      ".defeatist.ixn"
+
+/*
+ * Indexes an earlier build wrote, removed on the next run. .ix1 held
+ * stamps from stat(), .ix2 from f_readdir() (5019): the same file gives
+ * a different mtime through each, so an .ix1 read by this build would
+ * call every track changed. A new name is the rebuild MEDIA-INDEX.md
+ * settled on for a format change.
+ */
+#define MEDIALIB_OLD_INDEX_NAMES    { ".defeatist.ix1" }
 
 /*
  * Reconcile one mounted volume's index with its card. Blocking: a walk

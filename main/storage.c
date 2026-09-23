@@ -9,6 +9,7 @@
 #include "driver/sdmmc_host.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "diskio_sdmmc.h"
 #include "esp_vfs_fat.h"
 #include "ff.h"
 #include "freertos/FreeRTOS.h"
@@ -225,6 +226,43 @@ void storage_mark_hidden(const char *path)
     }
     (void)path;
 #endif
+}
+
+/*
+ * Which FatFs drive a volume is, for code that has to go under the VFS.
+ *
+ * storage_mark_hidden() gets away with trying each drive, because
+ * setting an attribute on the right file by the wrong route is still
+ * the right file. A directory walk cannot: both volumes can have an
+ * "Artist/" at the root. So this is exact.
+ *
+ * The SD's drive is known to IDF by its card, and it will say. The USB
+ * drive's is inside msc_host_vfs's handle, which is opaque -- but with
+ * FF_VOLUMES at 2 it is whichever registered drive is not the SD's, and
+ * f_opendir() on a drive with nothing registered fails with
+ * FR_NOT_ENABLED before touching any disk.
+ */
+int storage_ff_drive(storage_id_t id)
+{
+    int sd = -1;
+    if (s_card) {
+        const BYTE pdrv = ff_diskio_get_pdrv_card(s_card);
+        if (pdrv < FF_VOLUMES) sd = pdrv;
+    }
+    if (id == STORAGE_SD) return sd;
+    if (id != STORAGE_USB || !s_msc_vfs) return -1;
+
+    for (int drv = 0; drv < FF_VOLUMES; drv++) {
+        if (drv == sd) continue;
+        char root[8];
+        snprintf(root, sizeof(root), "%d:/", drv);
+        FF_DIR d;
+        if (f_opendir(&d, root) == FR_OK) {
+            f_closedir(&d);
+            return drv;
+        }
+    }
+    return -1;
 }
 
 uint32_t storage_generation(void) { return s_generation; }
