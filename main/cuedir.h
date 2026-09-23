@@ -61,6 +61,11 @@ const char *cuedir_label(const cuedir_t *cd, int i);
  * the media index, which has to notice when that file changes as well
  * as when the sheet does. */
 const char *cuedir_audio(const cuedir_t *cd, int i);
+/* Track i's title, performer and album from the loaded sheet -- what
+ * cuedir_tags() gives for its virtual path, cut and defaulted the same
+ * way, without reading the sheet again. */
+bool cuedir_row_tags(const cuedir_t *cd, int i, char *title, char *artist,
+                     char *album, size_t each);
 
 /*
  * One track, by virtual path. Everything in it is a copy.

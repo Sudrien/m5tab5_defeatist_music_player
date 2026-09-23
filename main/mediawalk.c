@@ -263,6 +263,19 @@ static bool cue_stamp(const level_t *lv, const ent_t *e, midx_stamp_t *out)
     return true;
 }
 
+/* The entry being offered, while the callback runs; NULL otherwise. */
+static const level_t *s_cur_lv;
+static const ent_t   *s_cur_e;
+
+bool mwalk_cue_tags(const char *path, char *title, char *artist,
+                    char *album, size_t each)
+{
+    if (!s_cur_e || s_cur_e->kind != K_CUE || !path) return false;
+    if (strcmp(path, s_path + s_mount_len + 1) != 0) return false;
+    return cuedir_row_tags(s_cur_lv->cues, s_cur_e->cue, title, artist,
+                           album, each);
+}
+
 static void free_all(int depth)
 {
     for (int i = 0; i <= depth; i++) level_free(&s_lv[i]);
@@ -334,7 +347,11 @@ mwalk_result_t mwalk_volume(const char *mount, mwalk_fn fn, void *ctx)
             return MWALK_FAILED;
         }
 
+        s_cur_lv = lv;
+        s_cur_e = e;
         const bool go = fn(ctx, s_path + s_mount_len + 1, st);
+        s_cur_lv = NULL;
+        s_cur_e = NULL;
         s_path[lv->plen] = '\0';
         if (!go) {
             free_all(depth);

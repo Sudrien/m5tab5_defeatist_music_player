@@ -39,6 +39,14 @@ typedef struct {
     char vname[VNAME_MAX];
     char label[LABEL_MAX];
     int  audio;                 /* index into names: the file it plays */
+    /* The track's tags as the sheet gives them, so a caller that has the
+     * folder loaded need not parse the sheet again per track -- which
+     * is what cuedir_tags() does, and what a first media index of a
+     * folder of images was paying for every track. */
+    int  number;
+    char title[CUE_TEXT_MAX];
+    char performer[CUE_TEXT_MAX];
+    char album[CUE_TEXT_MAX];
 } cue_row_t;
 
 struct cuedir {
@@ -216,6 +224,11 @@ cuedir_t *cuedir_load(const char *dir, storage_io_class_t cls)
             snprintf(r->vname, sizeof r->vname, "%s%c%02d", names[i],
                      CUE_VPATH_SEP, t + 1);
             r->audio = file_name[cs->tracks[t].file];
+            r->number = cs->tracks[t].number;
+            snprintf(r->title, sizeof r->title, "%s", cs->tracks[t].title);
+            snprintf(r->performer, sizeof r->performer, "%s",
+                     cs->tracks[t].performer);
+            snprintf(r->album, sizeof r->album, "%s", cs->title);
             if (cs->tracks[t].title[0]) {
                 snprintf(r->label, sizeof r->label, "%02d  %s",
                          cs->tracks[t].number, cs->tracks[t].title);
@@ -265,6 +278,20 @@ const char *cuedir_audio(const cuedir_t *cd, int i)
 {
     return (cd && i >= 0 && i < cd->nrows) ? cd->names[cd->rows[i].audio]
                                            : NULL;
+}
+
+/* The same cut and the same fallback title as cuedir_tags(), from the
+ * row rather than a fresh parse, so the two cannot disagree. */
+bool cuedir_row_tags(const cuedir_t *cd, int i, char *title, char *artist,
+                     char *album, size_t each)
+{
+    if (!cd || i < 0 || i >= cd->nrows || !each) return false;
+    const cue_row_t *r = &cd->rows[i];
+    cue_text(title,  each, r->title,     strlen(r->title),     false);
+    cue_text(artist, each, r->performer, strlen(r->performer), false);
+    cue_text(album,  each, r->album,     strlen(r->album),     false);
+    if (!title[0]) snprintf(title, each, "Track %d", r->number);
+    return true;
 }
 
 bool cuedir_track(const char *vpath, storage_io_class_t cls, cuetrack_t *out)

@@ -123,6 +123,15 @@ bool cuedir_hides(const cuedir_t *cd, const char *name)
 int cuedir_count(const cuedir_t *cd) { return cd ? cd->nrows : 0; }
 const char *cuedir_name(const cuedir_t *cd, int i) { return cd->rows[i]; }
 const char *cuedir_audio(const cuedir_t *cd, int i) { return cd->audio[i]; }
+bool cuedir_row_tags(const cuedir_t *cd, int i, char *title, char *artist,
+                     char *album, size_t each)
+{
+    if (!cd || i < 0 || i >= cd->nrows) return false;
+    snprintf(title, each, "row %d of %s", i, cd->rows[i]);
+    snprintf(artist, each, "performer");
+    snprintf(album, each, "album");
+    return true;
+}
 
 /* ---- a tree --------------------------------------------------------- */
 
@@ -161,10 +170,33 @@ static char        *s_got[MAXGOT];
 static midx_stamp_t s_gotst[MAXGOT];
 static int          s_ngot, s_stop_after = -1, s_depth_bad;
 
+/* What mwalk_cue_tags() said for each entry, from inside the callback. */
+static int  s_cue_tagged, s_plain_tagged, s_wrong_path_tagged, s_cue_seen;
+static int  s_cue_title_wrong;
+
 static bool collect(void *ctx, const char *path, midx_stamp_t st)
 {
     (void)ctx;
     if (s_depth) s_depth_bad++;         /* called holding the lease */
+    {
+        char t[64], a[64], al[64];
+        const bool is_cue = strstr(path, ".cue#") != NULL;
+        const bool got = mwalk_cue_tags(path, t, a, al, sizeof(t));
+        if (is_cue) {
+            s_cue_seen++;
+            s_cue_tagged += got;
+            /* The row's own tags: "row N of <that very track's name>". */
+            const char *base = strrchr(path, '/');
+            base = base ? base + 1 : path;
+            if (got && (!strstr(t, base) || strcmp(a, "performer") ||
+                        strcmp(al, "album"))) s_cue_title_wrong++;
+        } else {
+            s_plain_tagged += got;
+        }
+        /* Only for the path being offered. */
+        s_wrong_path_tagged += mwalk_cue_tags("Album/Album.cue#01x", t, a, al,
+                                              sizeof(t));
+    }
     if (s_ngot < MAXGOT) {
         s_got[s_ngot] = strdup(path);
         s_gotst[s_ngot] = st;
@@ -297,6 +329,16 @@ int main(void)
           "lease: %d nested, depth %d at end, %d callbacks under it",
           s_nested, s_depth, s_depth_bad);
     CHECK(s_leases > 0, "the walk never took the lease");
+    CHECK(s_cue_seen == 3 && s_cue_tagged == 3 && s_cue_title_wrong == 0,
+          "cue tags from the loaded sheet: %d of %d, %d wrong", s_cue_tagged,
+          s_cue_seen, s_cue_title_wrong);
+    CHECK(s_plain_tagged == 0, "a plain file got cue tags");
+    CHECK(s_wrong_path_tagged == 0, "tags given for a path not being offered");
+    {
+        char t[64], a[64], al[64];
+        CHECK(!mwalk_cue_tags("Album/Album.cue#01", t, a, al, sizeof(t)),
+              "cue tags given outside the callback");
+    }
 
     printf("  stamps\n");
     {

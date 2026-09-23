@@ -107,7 +107,12 @@ static void tags_read(const ctx_t *c, const char *rel, mediacat_rec_t *r)
     if (!abs) return;
 
     if (cue_vpath_split(abs, NULL)) {
-        cuedir_tags(abs, r->title, r->artist, r->album, MEDIACAT_TAG_LEN);
+        /* From the sheet the walk already has open; the long way only
+         * if it cannot say (a tag read from outside the walk). */
+        if (!mwalk_cue_tags(rel, r->title, r->artist, r->album,
+                            MEDIACAT_TAG_LEN)) {
+            cuedir_tags(abs, r->title, r->artist, r->album, MEDIACAT_TAG_LEN);
+        }
         return;
     }
 

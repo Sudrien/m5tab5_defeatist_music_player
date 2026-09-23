@@ -10831,3 +10831,34 @@ will say.
 5012's was, and the same CI note applies: 67 checks, including appends
 read back through the session before the flush, an append after a read,
 a second session refused, and a torn tail closed off at open.
+
+### 5017 -- a cue track's tags from the sheet the walk has open
+
+The SD log from 5015 shows the other half of a first run's time: every
+cue track's tags came from `cuedir_tags()`, which re-reads the folder,
+re-parses the sheet and re-probes every audio file the sheet names --
+per track. `26 cue-malformed.cue` was parsed three times for its three
+tracks. `25 cue-multifile.cue` probed its three files for each of its
+three. About 60-100 ms a cue track, most of the SD run's 4 seconds,
+while the walk had that very sheet loaded in `lv->cues` the whole time.
+
+**`cuedir` rows now carry their track's tags**: number, title,
+performer and the sheet's title as the album, copied from the parse
+that already happens in `cuedir_load()`. `cuedir_row_tags()` returns
+them cut on a character boundary and defaulted to "Track N" in exactly
+the way `cuedir_tags()` does, so the two can't disagree. 384 bytes more
+per row, in PSRAM, only while a folder's sheets are loaded.
+
+**`mwalk_cue_tags(path, ...)`**: the tags of the cue track the walk is
+offering *right now*. It answers only inside the callback and only for
+the path the callback was given; anything else is false, and
+`medialib`'s tag step then takes the long way. The pointer to the
+current entry is set before the callback and cleared after it. The
+mutation that leaves it set is caught by ASan as a use-after-free of the
+folder that the walk has since freed, which is the hazard the clearing
+prevents.
+
+`mediawalktest`'s fake `cuedir` gains row tags. The callback checks that
+each cue track gets its own row's tags, a plain file gets none, a path
+other than the one offered gets none, and nothing is answered after the
+walk. Four mutations, all caught.

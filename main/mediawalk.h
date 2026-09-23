@@ -77,6 +77,17 @@ typedef bool (*mwalk_fn)(void *ctx, const char *path, midx_stamp_t stamp);
 /* Walk the volume mounted at `mount` ("/sd", "/usb"). */
 mwalk_result_t mwalk_volume(const char *mount, mwalk_fn fn, void *ctx);
 
+/*
+ * A cue track's tags from the sheet the walk has loaded, for the track
+ * being offered right now. Only from inside the callback, and only for
+ * the path it was handed: anything else is false, and the caller reads
+ * the tags the long way (cuedir_tags()) -- a sheet parse and an audio
+ * probe per track, which on a folder of images was most of a first
+ * index's time on the SD card. Avoiding that is the point of this.
+ */
+bool mwalk_cue_tags(const char *path, char *title, char *artist,
+                    char *album, size_t each);
+
 #ifdef __cplusplus
 }
 #endif
