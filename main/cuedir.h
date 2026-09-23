@@ -57,6 +57,10 @@ int         cuedir_count(const cuedir_t *cd);
 const char *cuedir_name(const cuedir_t *cd, int i);
 /* "03  Title", for drawing. */
 const char *cuedir_label(const cuedir_t *cd, int i);
+/* The name, in this folder, of the audio file track i plays from. For
+ * the media index, which has to notice when that file changes as well
+ * as when the sheet does. */
+const char *cuedir_audio(const cuedir_t *cd, int i);
 
 /*
  * One track, by virtual path. Everything in it is a copy.

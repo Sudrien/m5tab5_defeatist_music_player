@@ -38,6 +38,7 @@ static const char *TAG = "tab5_cue";
 typedef struct {
     char vname[VNAME_MAX];
     char label[LABEL_MAX];
+    int  audio;                 /* index into names: the file it plays */
 } cue_row_t;
 
 struct cuedir {
@@ -214,6 +215,7 @@ cuedir_t *cuedir_load(const char *dir, storage_io_class_t cls)
             cue_row_t *r = &cd->rows[cd->nrows++];
             snprintf(r->vname, sizeof r->vname, "%s%c%02d", names[i],
                      CUE_VPATH_SEP, t + 1);
+            r->audio = file_name[cs->tracks[t].file];
             if (cs->tracks[t].title[0]) {
                 snprintf(r->label, sizeof r->label, "%02d  %s",
                          cs->tracks[t].number, cs->tracks[t].title);
@@ -257,6 +259,12 @@ const char *cuedir_name(const cuedir_t *cd, int i)
 const char *cuedir_label(const cuedir_t *cd, int i)
 {
     return (cd && i >= 0 && i < cd->nrows) ? cd->rows[i].label : NULL;
+}
+
+const char *cuedir_audio(const cuedir_t *cd, int i)
+{
+    return (cd && i >= 0 && i < cd->nrows) ? cd->names[cd->rows[i].audio]
+                                           : NULL;
 }
 
 bool cuedir_track(const char *vpath, storage_io_class_t cls, cuetrack_t *out)

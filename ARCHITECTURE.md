@@ -10560,3 +10560,76 @@ the lease balanced; a torn line closed off; reads at a mid-line offset,
 at a torn line and past the end refused. Putting that in CI would mean
 fetching cJSON for the host build, pinned the way `cmake/vendored.cmake`
 pins minimp3 -- a decision about CI, left for the owner.
+
+### 5013 -- the walk
+
+`main/mediawalk.{h,c}`: every playable track on one volume, offered to
+a callback in the media index's order, with its stamp. This is the card
+side of a reconcile. **Built into the firmware, called by nothing yet,
+and tested on the host against a real directory tree
+(`texttest/mediawalktest.c`).**
+
+The walk owes the merge two things a listing doesn't.
+
+**Order.** Depth-first, with each folder sorted by `midx_name_cmp()`,
+so the whole walk is strictly increasing under `midx_path_cmp()`. It is
+not the chooser's order, which puts folders first and ignores case.
+
+**Completeness, or nothing.** A reconcile reads a path missing from the
+walk as a deleted file and buries it. So a folder that can't be read to
+the end fails the walk (`MWALK_FAILED`) instead of coming back shorter.
+There is no truncating cap here like the chooser's 512 or the
+playlist's 1024. The one cap, `MWALK_DIR_MAX` (8192 entries), fails.
+`readdir()` returns NULL for both "end" and "error", so errno is
+cleared before each call and checked after.
+
+What is left out is left out the same way on every walk, so it can't
+flip between them: dotfiles and `._` sidecars, anything
+`decoder_supports()` refuses, audio a cue sheet covers, folders deeper
+than 24, and paths longer than `MIDX_PATH_MAX`. Each is logged.
+
+**A cue track's stamp is the sheet's and its audio's together**: the
+later mtime and the summed size. Which tracks a sheet keeps depends on
+the audio's length, so a re-ripped image under an untouched sheet has
+to count as a change. That needed one accessor on `cuedir`,
+`cuedir_audio()`: which file in the folder track *i* plays from. That
+is the whole of this patch's change to existing code.
+
+Names go into one PSRAM arena per open folder instead of one `strdup`
+each: a few thousand small allocations would land in internal RAM.
+Everything is static or heap, and the folder stack is a static array,
+so the walk uses a fixed, small amount of task stack at any depth. One
+lease per `opendir`, `readdir`, `closedir` and `stat`, never across the
+walk and never across the callback.
+
+**The test found a bug on its first run:** an empty folder reached
+`qsort(NULL, 0, ...)`, which is undefined however small the count.
+
+`mediawalktest` compiles the real `mediawalk.c` and runs it with real
+`opendir`/`readdir`/`stat` over a tree it builds in `/tmp`: the `a/`
+versus `a b/` trap, uppercase, `_`, UTF-8, dotfiles, `._` files,
+`.Trashes`, non-audio, a sheet covering an image, a sheet with no
+audio, an empty folder, a tree exactly 24 deep with a file one level
+below it, and paths at `MIDX_PATH_MAX` exactly and one byte past it.
+It checks the walk is exactly the expected list in order; the cue stamp
+moves when either file does; two walks of an unchanged tree agree; a
+stop is a stop; a missing mount and a folder of 8193 files fail without
+offering anything past the failure, while a folder of exactly 8192 is
+fine; and the lease is never nested, never held across a callback, and
+always returned. What is stubbed is the ESP-IDF surface: the arbiter,
+`storage_is_hidden()`, `decoder_supports()`, and `cuedir`, whose real
+version needs the decoder. The fake follows `cuedir.h`'s contract.
+
+**Mutation-checked**, nine bugs, all caught: no sort; truncating at the
+cap; cue stamp from the sheet only; depth off by one; path limit off by
+one; dotfiles not skipped; covered audio not hidden; an unreadable
+folder skipped instead of failing; `stat` keeping the lease.
+
+**Left as it is, and worth knowing.** `cuedir`'s own `read_names()`
+stops at 1024 names without saying so, so in a folder bigger than that
+a sheet can fail to hide its image, or fail to resolve its FILE line.
+It does so the same way every time, so the index stays stable, but the
+image would be indexed as a track. And `cuedir_load()` returns NULL on
+no memory as well as on "no sheets". A walk that hits that shows the
+images instead of the tracks, and the next walk flips back. Both belong
+to `cuedir` and the chooser shares them; not changed here.

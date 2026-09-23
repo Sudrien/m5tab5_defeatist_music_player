@@ -124,9 +124,10 @@ static inline bool midx_in_order(const char *prev, const char *next)
  * though UTC, cardtime.h says why -- which is fine for equality: it is
  * the same wrong number every time it is read.
  *
- * For a cue track, what goes in here is the walk's decision and not
- * made yet: the tracks depend on the sheet AND on the audio's length
- * (cuedir.h), so a stamp from the sheet alone would miss a re-rip.
+ * For a cue track it is the sheet's and the audio's together -- the
+ * later mtime, the summed size -- because the tracks depend on the
+ * sheet AND on the audio's length (cuedir.h), and a stamp from the
+ * sheet alone would miss a re-rip. mediawalk.c makes it.
  */
 typedef struct {
     int64_t  mtime;

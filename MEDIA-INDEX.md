@@ -172,9 +172,9 @@ tree and some by asking. `main/mediaindex.h` (5010) is the first code.
    everywhere a path goes already (`cuesheet.h`), `NN` is two digits so
    path order is track order, and `cuedir.h` hides the image a sheet
    covers. The parent is recoverable from the path by
-   `cue_vpath_split()`, so it need not be a field. Which stamp a cue
-   track's staleness is judged by -- the sheet, the audio, or both --
-   is still the walk's to decide.
+   `cue_vpath_split()`, so it need not be a field. A cue track's stamp
+   is the sheet's and the audio's together (5013), so a re-ripped
+   image under an untouched sheet is still a change.
 2. **Search: needed, and from a derived search file.** MPD asks first,
    a web UI with a keyboard later. One plain line per track, lowercased
    tags and the catalog offset, scanned without a JSON parser; rebuilt
