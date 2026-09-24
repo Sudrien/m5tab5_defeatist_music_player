@@ -50,8 +50,19 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.5.0
+  espressif/esp_audio_effects:
+    component_hash: 6ad72ee106e25b07c9ae5b8ec77b566ef8d697473095f1c982e13247005b9ba6
+    dependencies:
+    - name: espressif/gmf_fft
+      registry_url: https://components.espressif.com
+      require: private
+      version: ~1.0
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.3.0~1
   espressif/esp_hosted:
-    component_hash: 29069693948fba65d3b45012778d49a36a751fc2d2d7760f82e39f685fc0dbcb
+    component_hash: 495dc2e4d164dad2a9e6a81ad2a7aae696572d606369bcf2ca981b5ff2d72b0b
     dependencies:
     - name: idf
       require: private
@@ -72,7 +83,7 @@ dependencies:
     - esp32h4
     - esp32h21
     - esp32p4
-    version: 3.0.7
+    version: 3.0.8
   espressif/esp_jpeg:
     component_hash: defb83669293cbf86d0fa86b475ba5517aceed04ed70db435388c151ab37b5d7
     dependencies:
@@ -171,6 +182,13 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.6.4
+  espressif/gmf_fft:
+    component_hash: b59451ef2f96d22b80c27a162515b21f1b85954dda434c0b092172164028779d
+    dependencies: []
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 1.0.0
   espressif/iot_eth:
     component_hash: 3be03ff933e27e17887becbed16305a561b35b66a5a4978ac51ae7f9f2ec70ea
     dependencies:
@@ -182,7 +200,7 @@ dependencies:
       require: private
       version: '>=4.4'
     source:
-      registry_url: https://components.espressif.com/
+      registry_url: https://components.espressif.com
       type: service
     version: 1.1.0
   espressif/iot_usbh_cdc:
@@ -311,6 +329,7 @@ dependencies:
 direct_dependencies:
 - esp_usbh_asix
 - espressif/esp_audio_codec
+- espressif/esp_audio_effects
 - espressif/esp_hosted
 - espressif/esp_jpeg
 - espressif/esp_lcd_st7121
@@ -321,6 +340,6 @@ direct_dependencies:
 - espressif/usb_host_msc
 - espressif/usb_host_uac
 - idf
-manifest_hash: 62a5f1cc7523be9a1c0ed6a09749e7eae24532a036e4827c9682de829a38292b
+manifest_hash: d02d495d29d495d3b58889cf5615eaf07076d1395f191ce88247f997e60ebfe6
 target: esp32p4
 version: 2.0.0
