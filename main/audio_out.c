@@ -25,7 +25,10 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
+
+#include "esp_ae_rate_cvt.h"
 
 #include "audio_out.h"
 #include "battery.h"
@@ -149,6 +152,100 @@ static uint32_t s_uac_seen;
  * the first attempt has been made. A volatile read is cheaper than being
  * wrong for the first second of every track. */
 static int16_t *s_scratch;
+
+/*
+ * THE USB RATE CONVERSION -- 5023.
+ *
+ * "Can take the format" used to be the end of it: a device that did not
+ * offer the file's rate was not an output for that file. The Avantree
+ * DG80 offers 48 kHz and nothing else, which made it an output for
+ * almost nothing in a CD-ripped library.
+ *
+ * Now a device that cannot take the rate is asked which rate it would
+ * take instead (uac_nearest_rate()), and the USB path alone converts to
+ * it. The I2S clock still follows the file, so the jack and the speaker
+ * stay bit-exact and an unplug mid-track falls back in one block, as it
+ * always did. A device that offers the file's rate gets the samples
+ * untouched, as it always did.
+ *
+ * WHERE EACH HALF RUNS. The converter is OPENED only in
+ * audio_out_set_format(), on the decode task, and only ever RUN from
+ * audio_out_write(), on the writer. The split is the stack: the filter
+ * design in esp_ae_rate_cvt_open() peaks at 996 bytes (measured under
+ * qemu with the P4 objects of esp_audio_effects 1.3), and the writer
+ * is a 4 KB task at priority 6 whose headroom nobody has measured. The
+ * per-block process is a few hundred bytes. A device plugged in
+ * mid-track that needs a conversion therefore waits for the next track
+ * to be taken -- the same wait a device that could not take the rate at
+ * all used to have forever.
+ *
+ * s_cv_lock covers the handle and its buffer: the decode task may swap
+ * them (a different device, a different rate) while the writer is
+ * mid-block on the old pair.
+ */
+#define CONV_IN_FRAMES          (GAIN_SCRATCH_BYTES / 4)
+#define CONV_COMPLEXITY         (2)
+
+static SemaphoreHandle_t        s_cv_lock;
+static esp_ae_rate_cvt_handle_t s_cv;
+static uint32_t                 s_cv_in, s_cv_out;
+static int16_t                 *s_cv_buf;
+static uint32_t                 s_cv_buf_frames;
+/* The rate the USB device is streaming at while it has the route; zero
+ * otherwise. Differs from s_rate exactly when the writer converts. */
+static volatile uint32_t        s_usb_rate;
+
+/* Decode task only. Makes the converter in -> out ready, or closes it
+ * when out is zero or equal to in. False if the library refuses. */
+static bool conv_prepare(uint32_t in, uint32_t out)
+{
+    if (!s_cv_lock) return false;
+    xSemaphoreTake(s_cv_lock, portMAX_DELAY);
+    bool ok = true;
+    if (!(s_cv && s_cv_in == in && s_cv_out == out)) {
+        if (s_cv) {
+            esp_ae_rate_cvt_close(s_cv);
+            s_cv = NULL;
+            s_cv_in = s_cv_out = 0;
+        }
+        if (in && out && in != out) {
+            esp_ae_rate_cvt_cfg_t cfg = {
+                .src_rate = in,
+                .dest_rate = out,
+                .channel = 2,
+                .bits_per_sample = 16,
+                .complexity = CONV_COMPLEXITY,
+                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY,
+            };
+            uint32_t need = 0;
+            ok = esp_ae_rate_cvt_open(&cfg, &s_cv) == ESP_AE_ERR_OK && s_cv &&
+                 esp_ae_rate_cvt_get_max_out_sample_num(s_cv, CONV_IN_FRAMES,
+                                                        &need) == ESP_AE_ERR_OK;
+            if (ok && need > s_cv_buf_frames) {
+                int16_t *nb = heap_caps_realloc(s_cv_buf, (size_t)need * 4,
+                                                MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                if (nb) { s_cv_buf = nb; s_cv_buf_frames = need; }
+                else ok = false;
+            }
+            if (ok) {
+                s_cv_in = in;
+                s_cv_out = out;
+            } else {
+                if (s_cv) esp_ae_rate_cvt_close(s_cv);
+                s_cv = NULL;
+                ESP_LOGW(TAG, "cannot convert %lu -> %lu Hz for USB",
+                         (unsigned long)in, (unsigned long)out);
+            }
+        }
+    }
+    xSemaphoreGive(s_cv_lock);
+    return ok;
+}
+
+static inline bool conv_ready(uint32_t in, uint32_t out)
+{
+    return s_cv && s_cv_in == in && s_cv_out == out;
+}
 
 static inline bool soft_gain(void)
 {
@@ -451,6 +548,11 @@ static void analog_set(bool enabled)
  * with one 48 kHz track in it will route to USB, drop to the speaker for
  * that track, and go back.
  *
+ * 5023 changed the second half of that: a device that cannot take the
+ * rate is now fed a conversion to one it can, when there is one and the
+ * converter is ready -- see s_usb_rate. The fallback above is what is
+ * left for a device that offers nothing usable at all.
+ *
  * Called from audio_out_set_format() and from audio_out_write() when the
  * generation moves, so a headset plugged in mid-track is picked up at
  * the next block rather than at the next track.
@@ -461,15 +563,30 @@ static void arbitrate(void)
 
     route_t want = s_headphones ? ROUTE_HEADPHONES : ROUTE_SPEAKER;
 
+    uint32_t usb_rate = 0;
     if (uac_present() && s_rate && s_channels) {
-        const esp_err_t err = uac_stream_start(s_rate, s_channels);
+        esp_err_t err = uac_stream_start(s_rate, s_channels);
         if (err == ESP_OK) {
-            want = ROUTE_USB;
+            usb_rate = s_rate;
         } else if (err == ESP_ERR_NOT_SUPPORTED) {
-            ESP_LOGI(TAG, "USB device cannot take %lu Hz %u ch; staying analog",
-                     (unsigned long)s_rate, s_channels);
+            /* 5023: the rate it would take instead, if the converter for
+             * it was made ready by audio_out_set_format(). */
+            const uint32_t alt = uac_nearest_rate(s_rate, s_channels);
+            if (alt && alt != s_rate && conv_ready(s_rate, alt) &&
+                uac_stream_start(alt, s_channels) == ESP_OK) {
+                usb_rate = alt;
+                ESP_LOGI(TAG, "USB device takes %lu Hz; converting %lu -> %lu Hz",
+                         (unsigned long)alt, (unsigned long)s_rate,
+                         (unsigned long)alt);
+            } else {
+                ESP_LOGI(TAG, "USB device cannot take %lu Hz %u ch; staying analog%s",
+                         (unsigned long)s_rate, s_channels,
+                         alt && alt != s_rate ? " until the next track" : "");
+            }
         }
+        if (usb_rate) want = ROUTE_USB;
     }
+    s_usb_rate = usb_rate;
 
     if (want == s_route) return;
 
@@ -533,6 +650,12 @@ esp_err_t audio_out_set_format(uint32_t rate, uint8_t channels)
     s_rate = rate;
     s_channels = channels;
 
+    /* 5023: the converter this track would need on USB, made ready here
+     * on the decode task so arbitrate() -- on either task -- only has to
+     * ask whether it is. Closed when nothing needs it. */
+    const uint32_t alt = uac_present() ? uac_nearest_rate(rate, channels) : 0;
+    conv_prepare(rate, (alt && alt != rate) ? alt : 0);
+
     arbitrate();
     return ESP_OK;
 }
@@ -551,6 +674,70 @@ esp_err_t audio_out_write(const void *data, size_t len)
 
     const uint8_t *src = (const uint8_t *)data;
     size_t remain = len;
+
+    /*
+     * 5023: converted to the device's rate, a CONV_IN_FRAMES slice at a
+     * time. The gain goes on AFTER the conversion and in place, because
+     * s_cv_buf belongs to this file and the samples it holds exist
+     * nowhere else. The lock is held through the write so the decode
+     * task cannot swap the buffer out from under a slice in flight; the
+     * wait it can cause there is one slice, bounded by the write's own
+     * timeout.
+     */
+    const uint32_t usb_rate = s_usb_rate;
+    if (usb_rate && usb_rate != s_rate) {
+        while (remain) {
+            size_t n = remain;
+            if (n > (size_t)CONV_IN_FRAMES * 4) n = (size_t)CONV_IN_FRAMES * 4;
+            n &= ~(size_t)3;
+            if (!n) return ESP_OK;
+
+            xSemaphoreTake(s_cv_lock, portMAX_DELAY);
+            if (!conv_ready(s_rate, usb_rate)) {
+                xSemaphoreGive(s_cv_lock);
+                ESP_LOGW(TAG, "USB converter not ready; dropped %u bytes",
+                         (unsigned)remain);
+                return ESP_ERR_INVALID_STATE;
+            }
+            uint32_t got = s_cv_buf_frames;
+            esp_err_t err = ESP_OK;
+            if (esp_ae_rate_cvt_process(s_cv, (esp_ae_sample_t)src,
+                                        (uint32_t)(n / 4),
+                                        (esp_ae_sample_t)s_cv_buf,
+                                        &got) != ESP_AE_ERR_OK) {
+                got = 0;
+            }
+            if (got) {
+                if (soft_gain()) {
+                    apply_gain(s_cv_buf, s_cv_buf, (size_t)got * 2,
+                               s_muted ? 0 : s_volume);
+                }
+                err = uac_write(s_cv_buf, (size_t)got * 4, UAC_WRITE_TIMEOUT_MS);
+            }
+            xSemaphoreGive(s_cv_lock);
+
+            if (err == ESP_ERR_INVALID_STATE) {
+                /* Unplugged mid-block. The I2S clock is at the FILE's
+                 * rate, so what is left goes out of the jack or the
+                 * speaker unconverted, which is correct there. */
+                arbitrate();
+                if (s_route != ROUTE_USB) {
+                    size_t written = 0;
+                    return i2s_channel_write(s_tx, src, remain, &written, portMAX_DELAY);
+                }
+                return err;
+            }
+            if (err != ESP_OK) {
+                ESP_LOGW(TAG, "USB output dropped %u bytes (%s)",
+                         (unsigned)n, esp_err_to_name(err));
+                return err;
+            }
+            src += n;
+            remain -= n;
+        }
+        return ESP_OK;
+    }
+
     while (remain) {
         size_t n = remain;
         const void *out = src;
@@ -681,6 +868,9 @@ esp_err_t audio_out_init(i2c_master_bus_handle_t bus,
          * this line and better than not booting. */
         ESP_LOGW(TAG, "no gain scratch buffer; USB volume will be fixed");
     }
+    /* 5023. Without it conv_prepare() refuses and a device that needs a
+     * conversion is simply not taken, which is the behaviour before. */
+    s_cv_lock = xSemaphoreCreateMutex();
 
     if (xTaskCreate(headphone_task, "hp_det", 3072, NULL, 3, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;

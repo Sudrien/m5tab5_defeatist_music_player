@@ -69,6 +69,18 @@ uint32_t uac_generation(void);
  */
 esp_err_t uac_stream_start(uint32_t rate, uint8_t channels);
 
+/*
+ * The rate this device would rather be sent, for audio at `rate`.
+ *
+ * `rate` itself when a 16-bit alternate with `channels` offers it.
+ * Otherwise the lowest offered rate above it -- a 22 kHz file goes to
+ * 44.1, not to 96 -- and failing that the highest below it, so a 96 kHz
+ * file goes to 48. Zero when no device is attached or nothing at this
+ * channel count and depth is offered at all. Asks the descriptors only;
+ * nothing is started. See audio_out.c for the conversion this chooses.
+ */
+uint32_t uac_nearest_rate(uint32_t rate, uint8_t channels);
+
 /* Stop streaming; the interface stays open. Safe when not streaming. */
 void uac_stream_stop(void);
 

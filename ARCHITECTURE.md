@@ -11049,3 +11049,40 @@ converter uses no custom instructions. It has unity gain at 1 kHz in
 block with a 6% overshoot from the phase jump. A full-scale square wave
 saturates at the rails without a single wrapped sample. The converter
 is not where the level came from.
+
+### 5023 -- USB conversion to a rate the device will take
+
+The Avantree DG80 offers one playback setting: stereo, 16-bit, 48000 Hz.
+On Linux, `speaker-test -D hw:` refuses 44100 outright. Under "a USB
+device that can take the format wins", it was an output for almost
+nothing: every 44.1 kHz file fell back to the jack.
+
+Now a device that cannot take the file's rate is asked which rate it
+would take (`uac_nearest_rate()`). The rule is the file's rate if
+offered, otherwise the lowest offered rate above it, otherwise the
+highest below it. The USB path alone converts to that rate. The I2S
+clock still follows the file, so the jack and the speaker stay
+bit-exact, and an unplug mid-block falls back to them unconverted. A
+device that offers the file's rate still gets the samples untouched.
+
+**Opened on one task, run on another.** `esp_ae_rate_cvt_open()` peaks
+at 996 bytes of stack. That was measured under `qemu-riscv32` with the
+P4 objects of `esp_audio_effects` 1.3, painting the stack across all
+six rate pairs. The writer is a 4 KB task at priority 6 whose headroom
+has never been measured. So `audio_out_set_format()`, on the decode
+task, prepares the converter, and the writer only processes. A device
+plugged in mid-track that needs a conversion is taken at the next
+track, and says so (`staying analog until the next track`).
+`s_cv_lock` covers the handle and its buffer across the two tasks.
+
+**Order on the USB path.** Convert first, then apply software gain in
+place on the converted buffer, then `uac_write()`. That is the same
+gain step as before, only on the device's rate. The converter is
+separate from 5021's `rateconv`: that one is the decode task's and
+carries state between tracks for a crossfade, and this one is the
+output's.
+
+When 5021 carries a track at the output's rate and the output is a
+48 kHz-only device, audio can be converted twice, file to clock and
+clock to device. That only happens on the boundaries 5021 exists for,
+and each conversion is transparent at complexity 2.

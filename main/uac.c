@@ -218,6 +218,54 @@ static esp_err_t pick_alt(uac_host_device_handle_t dev, uint8_t alt_count,
     return ESP_ERR_NOT_SUPPORTED;
 }
 
+/*
+ * See uac.h. A continuous range contributes its two ends, and the rate
+ * itself when it falls inside -- a range is the one case where "offered"
+ * is a comparison rather than a list lookup, which alt_offers_rate()
+ * already knows.
+ */
+uint32_t uac_nearest_rate(uint32_t rate, uint8_t channels)
+{
+    if (!s_lock || !rate) return 0;
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+
+    uint32_t above = 0, below = 0;
+    bool exact = false;
+    uac_host_dev_info_t info;
+    if (s_dev && uac_host_get_device_info(s_dev, &info) == ESP_OK) {
+        for (uint8_t alt = 1; alt <= info.iface_alt_num && !exact; alt++) {
+            uac_host_dev_alt_param_t p;
+            if (uac_host_get_device_alt_param(s_dev, alt, &p) != ESP_OK) continue;
+            if (p.format != 1 /* PCM */ || p.bit_resolution != 16) continue;
+            if (p.channels != channels) continue;
+            if (alt_offers_rate(&p, rate)) { exact = true; break; }
+
+            uint32_t cand[2 + UAC_FREQ_NUM_MAX];
+            int n = 0;
+            if (p.sample_freq_type == 0) {
+                cand[n++] = p.sample_freq_lower;
+                cand[n++] = p.sample_freq_upper;
+            } else {
+                /* The driver keeps the first UAC_FREQ_NUM_MAX; a device
+                 * listing more has the rest dropped, not stored. */
+                for (uint8_t i = 0; i < p.sample_freq_type && i < UAC_FREQ_NUM_MAX; i++) {
+                    cand[n++] = p.sample_freq[i];
+                }
+            }
+            for (int i = 0; i < n; i++) {
+                const uint32_t f = cand[i];
+                if (!f) continue;
+                if (f > rate && (!above || f < above)) above = f;
+                if (f < rate && f > below) below = f;
+            }
+        }
+    }
+    xSemaphoreGive(s_lock);
+
+    if (exact) return rate;
+    return above ? above : below;
+}
+
 /* ------------------------------------------------------------------ */
 /* Reporting                                                           */
 /* ------------------------------------------------------------------ */
