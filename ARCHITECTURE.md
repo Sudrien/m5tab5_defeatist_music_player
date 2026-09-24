@@ -11086,3 +11086,25 @@ When 5021 carries a track at the output's rate and the output is a
 48 kHz-only device, audio can be converted twice, file to clock and
 clock to device. That only happens on the boundaries 5021 exists for,
 and each conversion is transparent at complexity 2.
+
+### 5024 -- a device volume control too narrow to be one
+
+The DG80's feature unit has master volume and mute, so `apply_volume()`
+used it. Its range is -15 to 0 dB in sixteen 1 dB steps, and the
+driver's 0..100 is spread across that range. The whole slider moved the
+level 15 dB, and 0% was still clearly audible. Linux's mixer showed it
+parked at -15 dB, and the dongle remembers the setting between hosts.
+
+The span is now probed once per attach: set 0 and read the dB value,
+then set 100 and read it again. The driver has no GET_MIN/GET_MAX of its
+own. Under 40 dB (`UAC_VOL_MIN_SPAN_DB`), the device is left at the top
+of its range and the slider becomes the software gain every
+control-less device already gets. That gain reaches silence and moves
+like the other outputs. The probe holds the top for one control
+transfer at the start of a stream before the real level replaces it.
+
+**Also fixed here.** The "no volume control" latch was a `static` inside
+`apply_volume()` and was never reset, so one device without a control
+put every device attached after it on software gain until a reboot.
+It is per attach now, like the probe, and both are cleared in
+`handle_connect()`.

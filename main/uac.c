@@ -163,6 +163,29 @@ static volatile uint8_t s_want_volume = 50;
 static volatile bool    s_volume_dirty;
 static volatile bool    s_hw_volume;
 
+/*
+ * 5024. Per attach, all three, and reset in handle_connect().
+ *
+ * s_vol_failed was a `static` inside apply_volume() and was never
+ * cleared, so one device without a control latched software gain for
+ * every device attached after it until a reboot -- the comment above
+ * said "once per attach" and the code said "once per boot".
+ *
+ * s_vol_narrow is the DG80 case: a feature unit that works but spans
+ * -15..0 dB in sixteen steps, so the driver's 0..100 maps the whole
+ * slider onto 15 dB and 0% is audible. A control that narrow is held
+ * at its top and the slider becomes software gain, which reaches
+ * silence and moves in the same steps as every other output.
+ */
+static bool s_vol_failed;
+static bool s_vol_probed;
+static bool s_vol_narrow;
+
+/* Below this span a device's own control is not a volume control. 40 dB
+ * is roughly where the quiet end of the slider stops being audible in a
+ * car; the DG80's 15 dB is nowhere near it. */
+#define UAC_VOL_MIN_SPAN_DB     (40)
+
 bool     uac_present(void)    { return s_present; }
 bool     uac_streaming(void)  { return s_streaming; }
 uint32_t uac_generation(void) { return s_generation; }
@@ -421,8 +444,6 @@ void uac_set_volume(uint8_t percent)
  * the answer cannot change while the same device is attached. */
 static void apply_volume(void)
 {
-    static bool tried_and_failed;
-
     /*
      * Nothing to set the volume on until the stream is running.
      *
@@ -442,19 +463,45 @@ static void apply_volume(void)
     if (!s_streaming) return;
 
     s_volume_dirty = false;
-    if (tried_and_failed) return;
+    if (s_vol_failed || s_vol_narrow) return;
 
     const uint8_t want = s_want_volume;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t ret = ESP_ERR_INVALID_STATE;
-    if (s_dev) ret = uac_host_device_set_volume(s_dev, want);
+
+    /*
+     * The span, once per attach: bottom, read, top, read. The driver
+     * offers no GET_MIN/GET_MAX of its own, so this asks the device
+     * where its ends are by going to them. The top is held for one
+     * control transfer before the level below replaces it -- a
+     * millisecond, at the start of a stream.
+     */
+    int16_t lo = 0, hi = 0;
+    if (s_dev && !s_vol_probed) {
+        s_vol_probed = true;
+        if (uac_host_device_set_volume(s_dev, 0) == ESP_OK &&
+            uac_host_device_get_volume_db(s_dev, &lo) == ESP_OK &&
+            uac_host_device_set_volume(s_dev, 100) == ESP_OK &&
+            uac_host_device_get_volume_db(s_dev, &hi) == ESP_OK &&
+            (hi - lo) / 256 < UAC_VOL_MIN_SPAN_DB) {
+            s_vol_narrow = true;     /* left at the top, where it now is */
+        }
+    }
+    if (s_dev && !s_vol_narrow) ret = uac_host_device_set_volume(s_dev, want);
     xSemaphoreGive(s_lock);
 
+    if (s_vol_narrow) {
+        s_hw_volume = false;
+        ESP_LOGI(TAG, "device volume spans only %d dB (%.1f to %.1f); "
+                      "held at its top, gain applied in software",
+                 (hi - lo) / 256, lo / 256.0, hi / 256.0);
+        return;
+    }
     if (ret == ESP_OK) {
         s_hw_volume = true;
     } else if (ret != ESP_ERR_INVALID_STATE) {
-        tried_and_failed = true;
+        s_vol_failed = true;
         s_hw_volume = false;
         ESP_LOGI(TAG, "no device volume control; gain applied in software");
     }
@@ -575,6 +622,9 @@ static void handle_connect(uint8_t addr, uint8_t iface_num)
      * is isochronous bandwidth spent on silence. */
     s_dev = dev;
     s_hw_volume = false;
+    s_vol_failed = false;       /* 5024: per attach, not per boot */
+    s_vol_probed = false;
+    s_vol_narrow = false;
     s_volume_dirty = true;      /* apply the UI's level to the new device */
     s_rate = 0;
     s_channels = 0;
