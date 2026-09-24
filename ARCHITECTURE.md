@@ -11125,3 +11125,39 @@ thousands of new lines. One edit was needed to make it build here: the
 a path inside the esp-usb repository. It is dropped, and a comment says
 why. On IDF 5.5, the component's own CMakeLists.txt already requires
 IDF's built-in `usb`.
+
+### 5026 -- the DG80's endpoint descriptors, in the DG80's order
+
+The first board run with the DG80 on 5023/5024 never streamed. It
+failed on the first start:
+
+    W tab5_uac: device offers no 44100 Hz 2 ch 16-bit setting
+    E uac-host: uac_host_device_start(2407): Calculated packet size
+                exceeds endpoint max packet size
+    E tab5_uac: stream start failed (ESP_ERR_INVALID_SIZE)
+
+48 kHz stereo 16-bit is 192 bytes a millisecond, and the DG80's
+endpoint allows exactly 192 (`wMaxPacketSize 0x00c0`). The check could
+only fail if the driver thought the maximum was smaller, and it thought
+it was 0.
+
+`uac_host_interface_add()` reads each alternate setting's descriptors in
+order and stopped at the class-specific endpoint descriptor ("we has got
+enough information"). That assumes the standard endpoint descriptor came
+first, which is the order the UAC 1.0 spec gives. The DG80 lists them
+the other way round. `lsusb -v` shows its AudioStreaming Endpoint
+Descriptor among the interface's descriptors, ahead of the Endpoint
+Descriptor, rather than after it. So the parse stopped before
+`ep_mps`, `ep_addr` and `interval` were ever set, and nothing could
+stream to it at any rate. 5023's conversion was never reached. Current
+esp-usb master still stops at the class-specific descriptor.
+
+Now the parse stops once it has seen both descriptors, in either order,
+or at the next interface descriptor. The second stop keeps a device
+that lacks one of them from having the next alternate's endpoint read
+into this one. On a device that follows the spec, the loop ends exactly
+where it did before.
+
+Worth sending upstream to esp-usb. When a release carries it, 5025 and
+this patch can both go, and `main/idf_component.yml` gets its registry
+line back.

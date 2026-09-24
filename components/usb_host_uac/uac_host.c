@@ -792,7 +792,19 @@ static esp_err_t uac_host_interface_add(uac_device_t *uac_device, uint8_t iface_
         int cs_offset = iface_alt_offset;
         cs_desc = GET_NEXT_DESC(iface_alt_desc, total_length, cs_offset);
         bool parse_continue = true;
+        // Vendored change (m5tab5_defeatist_music_player 5026): stop only once
+        // BOTH the standard and the class-specific endpoint descriptor have been
+        // read, in whichever order the device lists them. The Avantree DG80
+        // (0a12:1004) puts CS_ENDPOINT before ENDPOINT; stopping at CS_ENDPOINT
+        // left ep_mps at 0 and every stream start failed the packet-size check.
+        bool seen_ep = false, seen_cs_ep = false;
         while (cs_desc != NULL && parse_continue) {
+            // The next interface descriptor ends this alternate setting whatever
+            // was or was not found, so a missing descriptor cannot let the loop
+            // read the next alternate's endpoint into this one.
+            if (cs_desc->bDescriptorType == USB_B_DESCRIPTOR_TYPE_INTERFACE) {
+                break;
+            }
             switch (cs_desc->bDescriptorType) {
             case UAC_CS_INTERFACE: {
                 const uac_desc_header_t *uac_desc = (const uac_desc_header_t *)cs_desc;
@@ -866,6 +878,8 @@ static esp_err_t uac_host_interface_add(uac_device_t *uac_device, uint8_t iface_
                              feature_unit_desc->bUnitID, iface_alt->vol_ch_map, iface_alt->mute_ch_map);
                 }
                 ESP_LOGD(TAG, "UAC Endpoint 0x%02X, Max Packet Size %d, Attributes 0x%02X, Interval %d", USB_EP_DESC_GET_EP_NUM(ep_desc), ep_desc->wMaxPacketSize, ep_desc->bmAttributes, ep_desc->bInterval);
+                seen_ep = true;
+                parse_continue = !seen_cs_ep;
                 break;
             }
             case UAC_CS_ENDPOINT: {
@@ -873,7 +887,8 @@ static esp_err_t uac_host_interface_add(uac_device_t *uac_device, uint8_t iface_
                 const uac_as_cs_ep_desc_t *cs_ep_desc = (const uac_as_cs_ep_desc_t *)cs_desc;
                 if (cs_ep_desc->bDescriptorSubtype == UAC_EP_GENERAL) {
                     iface_alt->freq_ctrl_supported = cs_ep_desc->bmAttributes & UAC_SAMPLING_FREQ_CONTROL;
-                    parse_continue = false;
+                    seen_cs_ep = true;
+                    parse_continue = !seen_ep;
                     ESP_LOGD(TAG, "UAC EP General, Attributes 0x%02X", cs_ep_desc->bmAttributes);
                     ESP_LOGD(TAG, "UAC EP Frequency Control %d", iface_alt->freq_ctrl_supported);
                 }
