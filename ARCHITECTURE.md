@@ -11027,3 +11027,25 @@ would be a conversion on the USB route, with its own questions.
 Converting to the running rate also leaves the filter's last millisecond
 or so of the outgoing track inside the converter at a boundary. That
 audio is under a crossfade and is never heard.
+
+### 5022 -- never convert down to a narrow output
+
+On the board, 5021 crossfaded out of `14 wav-mono-22k` into
+`15 aac-adts-cbr` and kept the clock at 22050 Hz: `on: 44100 -> 22050
+Hz`. That low-passes a whole 44.1 kHz track at 11 kHz to save one
+boundary. It did what 5021 said it would, but that rule was wrong for
+this case.
+
+The carry now refuses to convert DOWN to an output below 44.1 kHz. That
+boundary gets the dip, and the clock moves to the file, as it always
+did. Converting down to 44.1 or 48 kHz, or up from anything, is
+unchanged. Going from 48 to 44.1 loses nothing anyone can hear.
+
+The same session found the "horribly loud" seek. The converter was
+tested on the host first: the P4 objects of `esp_audio_effects` 1.3,
+linked into a freestanding harness under `qemu-riscv32`. The rate
+converter uses no custom instructions. It has unity gain at 1 kHz in
+44.1->22.05, 48->44.1, 44.1->48 and 22.05->44.1. A reset leaves one
+block with a 6% overshoot from the phase jump. A full-scale square wave
+saturates at the rails without a single wrapped sample. The converter
+is not where the level came from.

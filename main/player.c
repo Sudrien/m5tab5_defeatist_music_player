@@ -9103,7 +9103,22 @@ static track_end_t play_file(const char *path)
                     const bool continuing = rateconv_active() &&
                         rateconv_in_rate() == in_rate &&
                         rateconv_out_rate() == out_now;
-                    if (out_now && in_rate != out_now && queued &&
+                    /*
+                     * Never DOWN to a narrow output -- 5022. The board
+                     * crossfaded a 44.1 kHz AAC out of the 22 kHz mono
+                     * WAV and 5021 kept the clock at 22050, which low-
+                     * passes a whole track at 11 kHz to save one
+                     * boundary. Converting down to 44.1 or 48 costs
+                     * nothing audible; below that the dip is the
+                     * better answer, and the clock moves to the file.
+                     */
+                    const bool narrow = out_now < in_rate && out_now < 44100;
+                    if (narrow && xfade && queued) {
+                        ESP_LOGI(TAG, "no conversion: %" PRIu32 " Hz would "
+                                      "go down to %" PRIu32 " Hz",
+                                 in_rate, out_now);
+                    }
+                    if (out_now && in_rate != out_now && queued && !narrow &&
                         (xfade || continuing)) {
                         carry = rateconv_begin(in_rate, out_now,
                                                continuing && !xfade);
