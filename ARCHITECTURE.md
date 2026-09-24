@@ -11108,3 +11108,20 @@ transfer at the start of a stream before the real level replaces it.
 put every device attached after it on software gain until a reboot.
 It is per attach now, like the probe, and both are cleared in
 `handle_connect()`.
+
+### 5025 -- usb_host_uac vendored, as released
+
+`components/usb_host_uac` is `espressif/usb_host_uac` 1.5.0, the version
+`dependencies.lock` pinned. It was taken from esp-usb at `6d24137`, the
+commit that released it, with its tests and examples left out. It
+replaces the registry dependency in `main/idf_component.yml`. The
+directory name matches the component name `main` REQUIRES, so nothing
+else changes.
+
+This patch vendors the driver and nothing more, so 5026's fix to it
+reads as a diff against the released code rather than being buried in
+thousands of new lines. One edit was needed to make it build here: the
+`usb` dependency in its manifest applies only from IDF 6.0 and points at
+a path inside the esp-usb repository. It is dropped, and a comment says
+why. On IDF 5.5, the component's own CMakeLists.txt already requires
+IDF's built-in `usb`.

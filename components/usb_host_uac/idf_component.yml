@@ -1,0 +1,27 @@
+## IDF Component Manager Manifest File
+version: "1.5.0"
+description: USB Host UAC driver
+url: https://github.com/espressif/esp-usb/tree/master/host/class/uac/usb_host_uac
+issues: "https://github.com/espressif/esp-usb/issues"
+repository: "https://github.com/espressif/esp-usb.git"
+repository_info:
+  path: "host/class/uac/usb_host_uac"
+dependencies:
+  idf: ">=5.0"
+  cmake_utilities: "0.5.*"
+  # The `usb` dependency upstream declares here applies only from IDF 6.0
+  # and points at a path inside the esp-usb repository; on IDF 5.5 the
+  # built-in `usb` component is used (see CMakeLists.txt), so it is
+  # dropped from this vendored copy. See the note at the top of
+  # uac_host.c.
+targets:
+  - esp32s2
+  - esp32s3
+  - esp32s31
+  - esp32p4
+  - esp32h4
+  - linux
+files:
+  exclude:
+    - "test_app"
+    - "host_test"

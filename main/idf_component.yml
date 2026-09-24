@@ -47,7 +47,12 @@ dependencies:
   # USB audio host, for the UAC output path. Same story as the MSC driver
   # above: the host stack is in IDF, this is the class driver on top of
   # it. Both sit on the one bus that usbhost.c owns.
-  espressif/usb_host_uac: "^1.5.0"
+  #
+  # Vendored since 5025, in components/usb_host_uac: 1.5.0 as released,
+  # plus a descriptor-parser fix the registry does not have yet (5026).
+  # The directory's name is the component's name, which is what main's
+  # REQUIRES asks for. Take this line back when upstream has the fix.
+  # espressif/usb_host_uac: "^1.5.0"
 
   # Both, because the controller is probed rather than assumed: rev 1 Tab5
   # is ILI9881C + GT911, rev 2 is ST7121/ST7123 + ST7123. Dropping the one
