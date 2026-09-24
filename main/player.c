@@ -81,6 +81,7 @@
 #include "hid.h"
 #include "panel.h"
 #include "playlist.h"
+#include "rateconv.h"
 #include "settings.h"
 #include "storage.h"
 #include "storage_io.h"
@@ -1056,6 +1057,20 @@ static volatile int s_ring_pct = -1;
  * handoff without anything being reset at it. */
 static volatile uint64_t s_frames_out[PCM_RINGS];
 static volatile uint32_t s_frames_rate[PCM_RINGS];
+
+/*
+ * A file frame count in the ring's frames. Both slots above are in the
+ * ring's units -- the writer subtracts queued ring frames from one and
+ * divides by the other -- and a track rateconv is converting holds
+ * frames at a rate that is not the file's. Identity when they match,
+ * which is every track that is not converted.
+ */
+static inline uint64_t ring_frames_of(uint64_t file_frames,
+                                      uint32_t file_rate, uint32_t ring_rate)
+{
+    if (!file_rate || !ring_rate || file_rate == ring_rate) return file_frames;
+    return file_frames * ring_rate / file_rate;
+}
 
 /*
  * Bytes per frame in the ring, which is not bytes per frame in the file.
@@ -8337,6 +8352,16 @@ static track_end_t play_file(const char *path)
     }
 
     uint32_t cur_rate = 0;
+    /*
+     * The rate this track's audio has IN THE RING, which is cur_rate
+     * unless rateconv is converting it to the rate the output was
+     * already running at -- see the crossfade note where the first
+     * block is taken. frames_out stays in cur_rate's frames throughout,
+     * because the seek anchor, the cue cut, the index table and the
+     * length all count the FILE; only what is published for the writer
+     * and the position is converted to ring frames.
+     */
+    uint32_t ring_rate = 0;
     int cur_chans = 0;
     int blocks = 0;
     uint64_t frames_out = 0;
@@ -8785,7 +8810,12 @@ static track_end_t play_file(const char *path)
                      */
                     frames_out = ((uint64_t)landed_cs
                                   * (cur_rate ? cur_rate : 1)) / 100;
-                    s_frames_out[s_ring_fill] = frames_out;
+                    s_frames_out[s_ring_fill] =
+                        ring_frames_of(frames_out, cur_rate, ring_rate);
+                    /* The converter's history is audio from before the
+                     * jump; carrying it over would smear the old
+                     * position into the first milliseconds of the new. */
+                    if (rateconv_active()) rateconv_reset();
                     frames_at_seek = frames_out;
                     seeked = true;
                     /* The display is in seconds and rounds to the
@@ -9031,6 +9061,64 @@ static track_end_t play_file(const char *path)
                 }
 
                 /*
+                 * CARRY THE OUTPUT RATE ACROSS THE BOUNDARY -- 5021.
+                 *
+                 * Everything below this, down to the reconfigure, is
+                 * about the rate changing under a track that is still
+                 * playing: the crossfade refused, the dip instead, the
+                 * drain, the clock moved. All of it exists because the
+                 * two rings could not hold different rates and be mixed.
+                 *
+                 * With a converter they do not have to. When a crossfade
+                 * is armed and the outgoing track is still queued, this
+                 * track is converted to the rate the output is ALREADY
+                 * running at, its ring is labelled with that rate, and
+                 * nothing below fires: no drain, no reconfigure, no dip.
+                 * The writer finds two rings at one rate and runs the
+                 * ordinary crossfade -- xfade_can_start()'s rate test
+                 * passes because it is true.
+                 *
+                 * The output then stays at the old rate for as long as
+                 * that is what keeps playback continuous. The next track
+                 * at the SAME file rate as this one continues the
+                 * conversion with its state intact, so a gapless album
+                 * that was crossfaded into stays gapless; the first
+                 * boundary that is neither a crossfade nor that
+                 * continuation turns the converter off and moves the
+                 * clock to the file, exactly as before. Nothing is
+                 * converted that did not have to be.
+                 *
+                 * If the library refuses the pair -- it takes multiples
+                 * of 4000 and 11025 -- this falls back to the dip, which
+                 * is where every rate change went before.
+                 */
+                bool carry = false;
+                {
+                    const uint32_t out_now = audio_out_rate();
+                    const uint32_t in_rate = (uint32_t)info.sample_rate;
+                    const bool queued =
+                        s_pcm &&
+                        xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0;
+                    const bool xfade = s_xfade_armed || s_xfade_active;
+                    const bool continuing = rateconv_active() &&
+                        rateconv_in_rate() == in_rate &&
+                        rateconv_out_rate() == out_now;
+                    if (out_now && in_rate != out_now && queued &&
+                        (xfade || continuing)) {
+                        carry = rateconv_begin(in_rate, out_now,
+                                               continuing && !xfade);
+                        if (carry) {
+                            ESP_LOGI(TAG, "%s: %" PRIu32 " Hz converted to "
+                                          "the %" PRIu32 " Hz already playing",
+                                     xfade ? "crossfade across a rate change"
+                                           : "gapless, still converting",
+                                     in_rate, out_now);
+                        }
+                    }
+                    if (!carry) rateconv_end();
+                }
+
+                /*
                  * The reconfigure disables the I2S channel, so it must
                  * not happen with the previous track still playing out
                  * of the other ring -- which, without the drain, is the
@@ -9059,7 +9147,8 @@ static track_end_t play_file(const char *path)
                  * fade, and it read as Ogg misbehaving rather than as
                  * two files that cannot be overlapped.
                  */
-                if ((uint32_t)info.sample_rate != audio_out_rate() &&
+                if (!carry &&
+                    (uint32_t)info.sample_rate != audio_out_rate() &&
                     (s_xfade_armed || s_xfade_active)) {
                     ESP_LOGI(TAG, "no crossfade: %" PRIu32 " Hz into %d Hz",
                              audio_out_rate(), info.sample_rate);
@@ -9143,7 +9232,8 @@ static track_end_t play_file(const char *path)
                     s_pcm &&
                     xStreamBufferBytesAvailable(s_ring[s_ring_play]) > 0;
 
-                if ((uint32_t)info.sample_rate != audio_out_rate() &&
+                if (!carry &&
+                    (uint32_t)info.sample_rate != audio_out_rate() &&
                     tail_queued) {
                     ESP_LOGI(TAG, "rate change to %d Hz; draining %u KB first",
                              info.sample_rate,
@@ -9230,8 +9320,12 @@ static track_end_t play_file(const char *path)
                                   "track finishing", drain_ms);
                 }
 
-                const esp_err_t ferr =
+                /* Carried: the clock is already right, and moving it
+                 * would disable the channel under the outgoing track. */
+                const esp_err_t ferr = carry ? ESP_OK :
                     audio_out_set_format((uint32_t)info.sample_rate, 2);
+                ring_rate = carry ? audio_out_rate()
+                                  : (uint32_t)info.sample_rate;
                 /*
                  * The up half, started here rather than by the writer's
                  * countdown: there is nothing to count down: the ring
@@ -9469,6 +9563,11 @@ static track_end_t play_file(const char *path)
                  * permanent. */
                 while (!xStreamBufferIsEmpty(s_pcm)) vTaskDelay(1);
                 ESP_ERROR_CHECK(audio_out_set_format((uint32_t)info.sample_rate, 2));
+                /* The clock follows the file again, so a conversion to
+                 * the old clock is over. Rare enough -- no normal file
+                 * changes rate -- that the old behaviour is the answer. */
+                rateconv_end();
+                ring_rate = (uint32_t)info.sample_rate;
             }
             cur_rate = (uint32_t)info.sample_rate;
             cur_chans = info.channels;
@@ -9513,6 +9612,34 @@ static track_end_t play_file(const char *path)
             src = (const uint8_t *)pcm;
             remain = (size_t)n * sizeof(int16_t);
         }
+
+        /*
+         * Converted to the ring's rate, when that is not the file's.
+         * After the mono duplication so the converter only ever sees
+         * the ring's own format.
+         *
+         * frames_out still counts the FILE, so while a converted block
+         * goes out it is credited in proportion to how much of it the
+         * ring has taken: blk_native file frames over blk_bytes of
+         * ring. A block the filter swallowed whole on its first call
+         * produces nothing to send and is credited at once.
+         */
+        const bool conv = rateconv_active() && ring_rate != cur_rate;
+        const uint64_t blk_base = frames_out;
+        const uint64_t blk_native = (uint64_t)(remain / PCM_BYTES_PER_FRAME);
+        if (conv) {
+            size_t cf = 0;
+            const int16_t *cv = rateconv_run((const int16_t *)src,
+                                             (size_t)blk_native, &cf);
+            if (!cv) {
+                ESP_LOGW(TAG, "rate conversion failed; block dropped");
+                cf = 0;
+            }
+            src = (const uint8_t *)cv;
+            remain = cf * PCM_BYTES_PER_FRAME;
+            if (!remain) frames_out += blk_native;
+        }
+        const size_t blk_bytes = remain;
 
         const TickType_t t_send = xTaskGetTickCount();
         const bool ahead_before = (s_ring_play != s_ring_fill) ||
@@ -9574,7 +9701,9 @@ static track_end_t play_file(const char *path)
              * send -- a seek or a track change mid-block -- count what
              * was actually queued rather than the whole block.
              */
-            frames_out += sent / PCM_BYTES_PER_FRAME;
+            frames_out = conv
+                ? blk_base + (uint64_t)(blk_bytes - remain) * blk_native / blk_bytes
+                : frames_out + sent / PCM_BYTES_PER_FRAME;
 
             /*
              * One pair every `tbl_spacing` seconds of OUTPUT, not of
@@ -9695,8 +9824,9 @@ static track_end_t play_file(const char *path)
                     tbl_next = frames_out + (uint64_t)tbl_spacing * cur_rate;
                 }
             }
-            s_frames_rate[s_ring_fill] = cur_rate;
-            s_frames_out[s_ring_fill] = frames_out;
+            s_frames_rate[s_ring_fill] = ring_rate ? ring_rate : cur_rate;
+            s_frames_out[s_ring_fill] =
+                ring_frames_of(frames_out, cur_rate, ring_rate);
             /* Alongside the rate, and for the same reason: it describes
              * the audio in this ring, and the writer needs it per ring
              * to match two tracks against each other. See s_ring_lufs. */

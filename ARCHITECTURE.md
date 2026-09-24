@@ -10977,3 +10977,53 @@ order. The host checks for 5019 compiled `mediadir.c` against the real
 `ff.h` but never compiled `storage.c`, which needs the SDMMC driver. The
 error reproduces on the host against IDF v5.5's own headers in the old
 order, and the new order is clean.
+
+### 5021 -- a crossfade across a rate change
+
+Crossfades used to stop at every sample-rate change. The two rings the
+writer mixes have to hold the same rate, and there was no resampler, so
+the decode loop disarmed the fade, drained the outgoing ring, moved the
+I2S clock and played the dip instead (0719 and after). On a mixed
+library, 44.1 kHz files next to 48 kHz Opus, that was a lot of the
+boundaries.
+
+`rateconv.c` wraps `esp_ae_rate_cvt` from `espressif/esp_audio_effects`,
+the same repository and licence as `esp_audio_codec`. It is pinned
+below 1.4 for the same reason: 1.4 needs P4 silicon revision 3.0, and
+these boards are v1.3. The library is a Blackman-windowed polyphase
+FIR, and its call chain uses under a kilobyte of stack.
+
+**What it does.** At a track's first block, if a crossfade is armed, the
+outgoing track is still queued and the new file's rate differs from the
+output's, the new track is converted to the rate the output is ALREADY
+running at. Its ring is labelled with that rate. The dip, the drain and
+the reconfigure all stand down (`carry`). The writer then sees two rings
+at one rate and runs the ordinary crossfade. None of the writer's code
+changed.
+
+**When it stops.** The next track at the same file rate continues the
+conversion with its filter state kept, so a gapless album that was
+crossfaded into stays gapless. The first boundary that is neither a
+crossfade nor that continuation turns the converter off and moves the
+clock to the file, as before. Only audio that has to be converted is
+converted.
+
+**The counting.** `frames_out` still counts file frames, because the
+seek anchor, the cue cut, the index table and the length are all in the
+file's frames. What goes to `s_frames_out[]` and `s_frames_rate[]` is in
+ring frames (`ring_frames_of()`), because the writer subtracts queued
+ring frames from one and divides by the other. A converted block is
+credited to `frames_out` in proportion to how much of it the ring has
+taken. A seek resets the converter's history.
+
+**Fallbacks.** If the library refuses the pair (it takes multiples of
+4000 and 11025) or cannot allocate, `rateconv_begin()` returns false and
+the boundary gets the dip, as before. A rate change inside one file
+turns the converter off.
+
+**Not this patch.** A USB device that offers only 48 kHz still gets no
+audio from a 44.1 kHz file (`audio_out.c`, "can take the format"). That
+would be a conversion on the USB route, with its own questions.
+Converting to the running rate also leaves the filter's last millisecond
+or so of the outgoing track inside the converter at a boundary. That
+audio is under a crossfade and is never heard.
