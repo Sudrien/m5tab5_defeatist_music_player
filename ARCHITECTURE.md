@@ -11667,3 +11667,26 @@ LIMITS
   reach a full-speed device behind a high-speed hub.
 - Wi-Fi with the DG80 attached is still short of DMA-capable internal
   RAM (5032/5036). Unchanged.
+
+### 5045 -- Both Ethernet routes confirmed on the board
+
+v0.4.0's summary said the Realtek path "has not been on hardware yet".
+It has now, on an RTL8152 (0bda:8152), in builds g bf7b6f2 and g9a80628:
+
+    tab5_usbhost: 0bda:8152: asking for configuration 2 (CDC-ECM)
+    iot_usbh_ecm: ECM interface found: VID: 0BDA, PID: 8152, IFNUM: 0
+    tab5_eth: ecm: address 192.168.1.125, gateway 192.168.1.254
+    tab5_eth: ecm: wired network up; it is the default route
+    tab5_netstream: hop 1: HTTP 302 -> redirect, ... via cable (ecm) 192.168.1.125
+    tab5_eth: ecm: cable disconnected
+    tab5_eth: ecm: wired network down
+
+So ethcfg's configuration-2 selection, DHCP, taking the default route,
+an HTTPS radio stream with ICY metadata over the cable, and a clean
+unplug all work. The ASIX AX88772 did the same in the same session
+(192.168.1.124), as it had at v0.4.0.
+
+The RTL8153 (gigabit) takes the same code path and has not itself been
+plugged in. README and the esp_usbh_asix pin's comment in
+idf_component.yml are updated to match; the pin's "has not yet run on
+hardware" was the driver's own claim and was out of date here.

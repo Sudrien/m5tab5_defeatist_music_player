@@ -64,7 +64,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 - captive portal wifi config (multiple routers)
 - wifi network portal manual Internet Radio station entry 
 - Starred Favorites
-- Ethernet to usb dongles ( experimental CDC-ECM and [asix](https://github.com/Sudrien/esp_usbh_asix) port )
+- Ethernet to usb dongles: CDC-ECM (Realtek RTL8152 tested; RTL8153 same path, untested) and [ASIX AX88772](https://github.com/Sudrien/esp_usbh_asix) port, both confirmed on the board
 - Cue sheets
 
 ## v0.5.0 targets
