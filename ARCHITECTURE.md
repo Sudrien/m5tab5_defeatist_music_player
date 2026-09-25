@@ -11292,3 +11292,35 @@ What the trace sees is the pack, through the INA226. A dip on the 5 V
 or 3.3 V rail downstream of the regulators will show there only as the
 current step that caused it, so a small sag here does not clear the
 rails. A large one convicts them.
+
+### 5032 -- the UAC ring in PSRAM
+
+5030 and 5031 answered the question they were written for:
+
+    trace (usb device): ... min 8060 mV ... sag 27 mV
+    heap before open: internal 57103 free (largest 31744), DMA 18139 free (largest 10240)
+    heap after open:  internal 36591 free (largest 15360), DMA 13419 free (largest 7424)
+    read failed after 482534 audio bytes
+    eh_sdio: dma_alloc(8192) failed; dropping read
+
+It is not the supply. The pack moved 27 mV. It is memory. Opening the
+DG80's output interface took 20.5 KB of internal RAM before a single
+sample had been streamed, and it left the largest DMA-capable block at
+7424 bytes. The Wi-Fi coprocessor's SDIO transport then asked for 8192,
+did not get it, and dropped reads until the link was dead.
+
+Most of the 20.5 KB is `xRingbufferCreate(16 KB)` in
+`uac_host_interface_add`, which takes its storage from the internal
+heap regardless of size. The ring is only touched from tasks: the
+writer through `uac_write()`, and the driver's transfer callbacks, which
+run on its client task. It can live in PSRAM. The vendored driver now
+creates it with `xRingbufferCreateWithCaps(..., MALLOC_CAP_SPIRAM)`,
+falls back to the old call if that fails, and deletes it with whichever
+call matches (`xRingbufferGetStaticBuffer()` tells a WithCaps ring from
+a plain one). The ~4.7 KB of DMA the open also took is transfers and
+descriptors, and stays.
+
+5030's heap lines stay in, so the next board log shows what the open
+costs now. If the DMA pool is still short, the next step is the
+coprocessor's buffers, not the USB side: esp-hosted allocates each rx
+buffer as it goes rather than from a pool it holds.

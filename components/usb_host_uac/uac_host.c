@@ -23,6 +23,23 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/ringbuf.h"
+#include "esp_heap_caps.h"
+
+// Vendored change (5032): a ring made WithCaps must be freed WithCaps, and
+// one that fell back to xRingbufferCreate() must not be. Which it was is
+// recorded by the ring itself.
+static void uac_ringbuf_delete(RingbufHandle_t rb)
+{
+#if CONFIG_SPIRAM
+    StaticRingbuffer_t *st = NULL;
+    uint8_t *storage = NULL;
+    if (xRingbufferGetStaticBuffer(rb, &storage, &st) == pdTRUE) {
+        vRingbufferDeleteWithCaps(rb);
+        return;
+    }
+#endif
+    vRingbufferDelete(rb);
+}
 #include "usb/usb_host.h"
 #include "usb/uac_host.h"
 #include "usb/usb_types_ch9.h"
@@ -2152,7 +2169,21 @@ esp_err_t uac_host_device_open(const uac_host_device_config_t *config, uac_host_
     uac_iface->user_cb = config->callback;
     uac_iface->user_cb_arg = config->callback_arg;
     // create a ringbuffer for the incoming/outgoing data
-    uac_iface->ringbuf = xRingbufferCreate(config->buffer_size, RINGBUF_TYPE_BYTEBUF);
+    // Vendored change (m5tab5_defeatist_music_player 5032): in PSRAM when
+    // there is PSRAM. xRingbufferCreate() takes the storage from the internal
+    // heap, and on the Tab5 the 16 KB this driver is asked for left the Wi-Fi
+    // coprocessor's SDIO transport without an 8 KB DMA block -- the link died
+    // two seconds after the DG80 was plugged in, before it had streamed a
+    // byte. The ring is only touched from tasks (the writer and this driver's
+    // transfer callbacks, which run on the client task), never from an ISR.
+#if CONFIG_SPIRAM
+    uac_iface->ringbuf = xRingbufferCreateWithCaps(config->buffer_size, RINGBUF_TYPE_BYTEBUF,
+                                                   MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!uac_iface->ringbuf)
+#endif
+    {
+        uac_iface->ringbuf = xRingbufferCreate(config->buffer_size, RINGBUF_TYPE_BYTEBUF);
+    }
     UAC_GOTO_ON_FALSE(uac_iface->ringbuf, ESP_ERR_NO_MEM, "Unable to create ringbuffer");
     uac_iface->ringbuf_size = config->buffer_size;
     // if the threshold is not set, set it to 25% of the buffer size
@@ -2184,7 +2215,7 @@ fail:
         usb_host_device_close(s_uac_driver->client_handle, dev_hdl);
     }
     if (uac_iface->ringbuf) {
-        vRingbufferDelete(uac_iface->ringbuf);
+        uac_ringbuf_delete(uac_iface->ringbuf);
     }
     return ret;
 }
@@ -2284,7 +2315,7 @@ esp_err_t uac_host_device_close(uac_host_device_handle_t uac_dev_handle)
         }
         // Unblock the low priority tasks waiting for the ringbuffer before deleting it
         vTaskDelay(pdMS_TO_TICKS(CONFIG_UAC_RINGBUF_SAFE_DELETE_WAITING_MS));
-        vRingbufferDelete(uac_iface->ringbuf);
+        uac_ringbuf_delete(uac_iface->ringbuf);
         uac_iface->ringbuf = NULL;
     }
 
