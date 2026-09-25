@@ -11398,3 +11398,29 @@ block is about 8 KB (5030's numbers). `usb_disk_read()` and
 stick does not notice at audio bitrates. It also means the transfer
 never grows past 4 KB, so the path above is not reached in the first
 place.
+
+### 5036 -- streaming SDIO receive back
+
+5033 selected `ESP_HOSTED_HOST_SDIO_RX_MAX_SIZE`. Once it actually
+reached a build (it needed `rm sdkconfig`, and the first board run after
+it was still on the old choice), Wi-Fi did not work with nothing on USB
+at all. The boot said `SDIO Host operating in PACKET MODE`, the first
+probe answered (`gateway 2 ms, internet 50 ms`), every TLS connect timed
+out at 5 s, and then the gateway stopped answering. That happened on two
+stations and again after a Wi-Fi off/on.
+
+The coprocessor reports firmware 0.0.0 and `CP without SDIO SW_AGGR;
+compatible streaming mode enabled`. It frames its reads for a streaming
+host, and a host reading fixed packet-sized buffers loses them. 5033's
+own note named this as the first suspect.
+
+`sdkconfig.defaults` now says `STREAMING_MODE=y` explicitly, so a
+regenerated sdkconfig gets it whatever the component's default becomes.
+The DMA-fragmentation problem 5033 was aimed at is still open. The
+remaining levers are on the allocation side, not the transport mode:
+how much ordinary `malloc()` lands in internal RAM
+(`CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL`), and updating the C6's firmware
+to match the host so the newer transport options exist at all.
+
+The same run confirmed 5027: Wi-Fi off and on again with a stream
+retrying, and no panic.

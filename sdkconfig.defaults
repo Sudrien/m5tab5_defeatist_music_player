@@ -335,5 +335,14 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # `rm sdkconfig` before building, as above. If Wi-Fi fails to come up after
 # this, the C6's firmware (it reports 0.0.0) is the first suspect: put
 # STREAMING_MODE back and say so in the log.
-# CONFIG_ESP_HOSTED_HOST_SDIO_RX_STREAMING_MODE is not set
-CONFIG_ESP_HOSTED_HOST_SDIO_RX_MAX_SIZE=y
+#
+# TAKEN BACK IN 5036. On the board, with nothing on USB at all, the first
+# ping answered, every TLS connect timed out, and then the gateway stopped
+# answering too -- on two stations and across a Wi-Fi off/on. The C6
+# reports firmware 0.0.0 and "CP without SDIO SW_AGGR; compatible streaming
+# mode enabled": it sends streaming-framed reads, and a host reading fixed
+# packet-sized buffers cannot keep up with them. Streaming mode stays until
+# the coprocessor's firmware is updated to match the host (3.0.8). Written
+# explicitly so a regenerated sdkconfig cannot pick up the other choice.
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_STREAMING_MODE=y
+# CONFIG_ESP_HOSTED_HOST_SDIO_RX_MAX_SIZE is not set
