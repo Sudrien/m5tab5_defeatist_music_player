@@ -11614,3 +11614,56 @@ root) has not been seen yet.
 The same log has the USB conversion at 7-8% in the car, and the phone
 as the serial monitor works: Serial USB Terminal on Android, the Tab5's
 USB-C port.
+
+### 5044 -- Where the DG80 stands (board notes, no code)
+
+Logged from the car and the bench on builds through 5042, with the
+phone as the serial monitor (Serial USB Terminal on Android, on the
+Tab5's USB-C port).
+
+WORKING
+- Enumeration, 48 kHz streaming, and 44.1 -> 48 kHz conversion on the
+  USB path at 7-9% of real time, worst slice about 4.5 ms (5039).
+- Crossfade across a rate change on polyrsp (5040): 06 Vorbis 44.1 ->
+  07 Opus 48, "crossfade done; dropped 0 KB".
+- The 15 dB device volume detected, held at the top, gain in software.
+- Car play/pause over AVRCP -> DG80 -> HID report 1 bit 0 (0x00CD) ->
+  HID_BTN_PLAY_PAUSE (5042). The Prius sends the same toggle for both
+  its play and pause buttons. Pausing on the Tab5 and then pressing
+  play in the car stays in step.
+- USB power off and on from the settings panel mid-track: the DG80
+  re-enumerates about 0.4 s after VBUS returns and takes the route back
+  at once, without waiting for the next track.
+
+THE DESCRIPTOR, as the board read it (98 bytes, itf 3):
+
+    05 0C 09 01 A1 01 85 01 15 00 25 01 09 CD 09 B5 09 B6 09 B7 75 01 95 04 81 02
+    15 00 25 01 09 B0 09 B1 09 B3 09 B4 75 01 95 04 81 22
+    15 00 25 01 09 E9 09 EA 09 E2 75 01 95 03 81 22 75 05 95 01 81 01 C0
+    06 A0 FF 09 01 A1 01 85 02 09 01 15 00 26 FF 00 75 08 95 12 91 00
+    09 02 75 08 95 12 81 00 C0
+
+Report 1, Consumer: bits 0-3 Play/Pause, Next, Previous, Stop; 4-7
+Play, Pause, Fast Forward, Rewind; 8-10 Volume Up, Volume Down, Mute;
+five bits of padding. Bits 4-7 have no entry in CONSUMER_USAGES yet and
+log "unmapped" if they arrive. Nothing so far says the Prius sends
+anything but bit 0.
+
+Report 2, vendor page 0xFFA0: an 18-byte Output report and an 18-byte
+Input report. A private command channel -- Avantree's configuration
+tool, most likely. Undocumented; nothing here writes to it.
+
+NOT EXPLAINED
+- One drive ended with the DG80 absent and a panel power cycle not
+  bringing it back; a reboot of the Tab5 did. The log excerpt started
+  after it had already dropped, so the cause is unknown. The bench power
+  cycle above works, so it was not that path.
+
+LIMITS
+- No track titles on the car's screen. USB audio has no metadata
+  channel, and the DG80 has nothing to give the car over AVRCP. The
+  Prius shows a generic source.
+- The DG80 must be plugged directly into the Tab5; the host stack cannot
+  reach a full-speed device behind a high-speed hub.
+- Wi-Fi with the DG80 attached is still short of DMA-capable internal
+  RAM (5032/5036). Unchanged.
