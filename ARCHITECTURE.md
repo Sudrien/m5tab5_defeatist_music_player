@@ -12060,3 +12060,22 @@ returning -1, but the line never printed the value. If the drops stop,
 or turn into `nothing for 5000 ms`, they were this. If they go on as
 `read failed (-1)` about a second after the last byte, or as `server
 closed`, the server is closing them.
+
+### 5059 -- The splice keeps the read that overflows its hold, and counts once
+
+Two faults in 5055/5057's splice, both found on the host with 1900-byte
+reads against a reconnect with a gap:
+
+- A read that overflowed the 96 KB hold lost the part that did not fit:
+  496 bytes, exactly at offset 98304. Demuxed reads vary in size, so
+  this hit nearly every hold that filled without a match, and cost the
+  decoder a resync. The match branch had the same drop, although its
+  comment said it could not happen. splice_feed() now returns that part
+  as a second segment, which pump() sends after the first.
+- `produced` counted held bytes when they were held and again when they
+  were released: 218004 reported for 121104 sent. It is now counted
+  once, on arrival, which is what 5055's comment said it meant.
+
+Host-tested after the change: the gap case delivers all 121600 bytes in
+order, and an overlapping reconnect with random read sizes splices
+byte-exact.

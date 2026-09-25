@@ -348,13 +348,22 @@ static void splice_begin(uint32_t gen)
 
 /*
  * Feed received audio through the splice. Returns what should go to the
- * ring now in *out and *outn (possibly nothing while holding).
+ * ring now in *out and *outn (possibly nothing while holding), then
+ * *rest and *restn after it.
+ *
+ * 5059: *rest is the part of `in` that did not fit the hold. It was
+ * dropped -- up to one read, a decoder resync, on nearly every hold that
+ * filled without a match -- and in the match branch too, whose comment
+ * said it could not happen.
  */
 static void splice_feed(const uint8_t *in, size_t n,
-                        const uint8_t **out, size_t *outn)
+                        const uint8_t **out, size_t *outn,
+                        const uint8_t **rest, size_t *restn)
 {
     *out = in;
     *outn = n;
+    *rest = NULL;
+    *restn = 0;
     if (!s_splicing) return;
 
     const size_t take = (s_hold_len + n > SPLICE_HOLD) ? SPLICE_HOLD - s_hold_len : n;
@@ -375,8 +384,8 @@ static void splice_feed(const uint8_t *in, size_t n,
         s_splicing = false;
         *out = s_hold + start;
         *outn = s_hold_len - start;
-        /* Anything that did not fit the hold is lost; it cannot be, as
-         * the hold is only full when no match was found. */
+        *rest = in + take;
+        *restn = n - take;
         return;
     }
     if (s_hold_len >= SPLICE_HOLD || take < n) {
@@ -385,7 +394,8 @@ static void splice_feed(const uint8_t *in, size_t n,
         s_splicing = false;
         *out = s_hold;
         *outn = s_hold_len;
-        /* The part of `in` past the hold is dropped: at most one read. */
+        *rest = in + take;
+        *restn = n - take;
         return;
     }
     *out = NULL;
@@ -841,18 +851,22 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
         /* 5055: through the reconnect splice. What it holds back counts
          * as produced -- it arrived -- so a drop during the hold is
          * still progress to netplan. */
-        const uint8_t *out;
-        size_t outn;
-        splice_feed(audio, got, &out, &outn);
-        if (!outn) produced += got;
-        for (size_t off = 0; off < outn; ) {
-            const size_t sent = xStreamBufferSend(s_ring, out + off, outn - off,
-                                                  pdMS_TO_TICKS(SEND_SLICE_MS));
-            off += sent;
-            produced += sent;
-            if (sent == 0 && superseded(gen)) return produced;
+        /* 5059: counted once, on arrival. Counting held bytes when held
+         * and again when released reported 218 KB for 121 KB sent. */
+        const uint8_t *seg[2];
+        size_t segn[2];
+        splice_feed(audio, got, &seg[0], &segn[0], &seg[1], &segn[1]);
+        produced += got;
+        for (int k = 0; k < 2; k++) {
+            for (size_t off = 0; off < segn[k]; ) {
+                const size_t sent = xStreamBufferSend(s_ring, seg[k] + off,
+                                                      segn[k] - off,
+                                                      pdMS_TO_TICKS(SEND_SLICE_MS));
+                off += sent;
+                if (sent == 0 && superseded(gen)) return produced;
+            }
+            splice_note(seg[k], segn[k], gen);
         }
-        splice_note(out, outn, gen);
         /* Whatever that cost, whether it came from one long block or
          * fifty short ones. Near zero while the ring has room. */
         const int send_ms = (int)((esp_timer_get_time() - send_start) / 1000);
