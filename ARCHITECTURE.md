@@ -11224,3 +11224,20 @@ looked the same.
 Cost on a working network: one LAN round trip, single-digit
 milliseconds, plus a DNS-server echo when the resolver is off-LAN. The
 ping task's stack is taken from the heap for each session.
+
+### 5029 -- the internet, not just the gateway
+
+5028's second echo went to the route's DNS server, and only when that
+was not the gateway. On most home networks it is the gateway, so the
+LAN was all that got checked. Now, once the gateway answers, the probe
+pings 8.8.8.8, and 1.1.1.1 if 8.8.8.8 is silent. That proves the uplink
+before a lookup is spent finding out: `gateway 192.168.5.1 3 ms,
+internet 8.8.8.8 14 ms`. "LAN up, no internet" (a dead modem, a captive
+portal) now reads as that, not as a DNS failure.
+
+The gateway still decides and the internet echo is only reported. Some
+networks drop outbound ICMP entirely, and gating on it would make every
+station there wait out the full `NET_WAIT_MAX_MS` before trying. The
+second anchor is there so one resolver's ICMP policy is not mistaken for
+no internet. On a working network the cost is one extra WAN round trip
+per attempt.

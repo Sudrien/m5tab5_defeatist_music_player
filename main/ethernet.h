@@ -61,8 +61,8 @@ bool net_online(void);
 void net_route_describe(char *out, size_t out_size);
 
 /*
- * One ICMP echo to the default route's gateway, and one to its DNS
- * server when that is a different address -- 5028.
+ * One ICMP echo to the default route's gateway -- 5028 -- and, once
+ * that answers, one to 8.8.8.8 (1.1.1.1 if 8.8.8.8 is silent) -- 5029.
  *
  * net_online() says an interface holds an address. That is not the same
  * as packets going anywhere: the board has shown a "connected" Wi-Fi
@@ -70,12 +70,13 @@ void net_route_describe(char *out, size_t out_size);
  * then ran its full 14 s before failing. A gateway that answers is the
  * cheapest proof the link is actually up.
  *
- * Returns true when the gateway answered. `gw_ms` and `dns_ms` are round
- * trips in milliseconds, or -1 for no answer (and -1 for DNS when it is
- * the gateway, or unset). `what`, at least 64 bytes, gets a one-line
- * account for the log. Blocks the caller for at most two timeouts.
+ * Returns true when the gateway answered; the internet echo is reported
+ * in `what` and `net_ms` but does not decide. `gw_ms` and `net_ms` are
+ * round trips in milliseconds, or -1 for no answer (or not asked).
+ * `what`, at least 96 bytes, gets a one-line account for the log.
+ * Blocks the caller for at most three timeouts.
  */
-bool net_probe(uint32_t timeout_ms, int *gw_ms, int *dns_ms,
+bool net_probe(uint32_t timeout_ms, int *gw_ms, int *net_ms,
                char *what, size_t what_size);
 
 #ifdef __cplusplus

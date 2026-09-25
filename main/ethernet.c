@@ -143,11 +143,11 @@ static int ping_once(const ip_addr_t *target, uint32_t timeout_ms)
     return rtt;
 }
 
-bool net_probe(uint32_t timeout_ms, int *gw_ms, int *dns_ms,
+bool net_probe(uint32_t timeout_ms, int *gw_ms, int *net_ms,
                char *what, size_t what_size)
 {
     *gw_ms = -1;
-    *dns_ms = -1;
+    *net_ms = -1;
 
     esp_netif_t *nif = esp_netif_get_default_netif();
     esp_netif_ip_info_t ip = { 0 };
@@ -161,34 +161,43 @@ bool net_probe(uint32_t timeout_ms, int *gw_ms, int *dns_ms,
     gw.u_addr.ip4.addr = ip.gw.addr;
     *gw_ms = ping_once(&gw, timeout_ms);
 
-    /* The DNS server too, when it is somewhere else: that is the next
-     * hop getaddrinfo() will need, and "gateway answers, DNS server does
-     * not" is a different fault from "nothing answers". Only IPv4 and
-     * only when set; a failure here is reported, not gated on -- plenty
-     * of public resolvers drop ICMP. */
-    esp_netif_dns_info_t dns = { 0 };
-    const bool have_dns =
-        esp_netif_get_dns_info(nif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK &&
-        dns.ip.type == ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr &&
-        dns.ip.u_addr.ip4.addr != ip.gw.addr;
-    if (have_dns && *gw_ms >= 0) {
-        ip_addr_t d = { 0 };
-        d.type = IPADDR_TYPE_V4;
-        d.u_addr.ip4.addr = dns.ip.u_addr.ip4.addr;
-        *dns_ms = ping_once(&d, timeout_ms);
+    /*
+     * And an address on the internet itself -- 5029. The gateway only
+     * proves the LAN; 8.8.8.8 answering proves the uplink too, before a
+     * lookup is spent finding out. 1.1.1.1 is asked only when 8.8.8.8 is
+     * silent, so one resolver's ICMP policy is not mistaken for no
+     * internet. Reported, not gated on: some networks drop outbound ICMP
+     * entirely, and gating on it would make every station wait out the
+     * full NET_WAIT_MAX_MS there. Only asked once the gateway answered --
+     * without it the answer is already known.
+     */
+    static const uint32_t anchors[] = {
+        ESP_IP4TOADDR(8, 8, 8, 8),
+        ESP_IP4TOADDR(1, 1, 1, 1),
+    };
+    uint32_t asked = 0;
+    if (*gw_ms >= 0) {
+        for (size_t k = 0; k < sizeof(anchors) / sizeof(anchors[0]); k++) {
+            ip_addr_t a = { 0 };
+            a.type = IPADDR_TYPE_V4;
+            a.u_addr.ip4.addr = anchors[k];
+            asked = anchors[k];
+            *net_ms = ping_once(&a, timeout_ms);
+            if (*net_ms >= 0) break;
+        }
     }
 
     if (what && what_size) {
-        char gws[24], dnss[40] = "";
+        char gws[24], nets[48] = "";
         if (*gw_ms >= 0) snprintf(gws, sizeof(gws), "%d ms", *gw_ms);
         else             snprintf(gws, sizeof(gws), "no answer");
-        if (have_dns && *gw_ms >= 0) {
-            if (*dns_ms >= 0) snprintf(dnss, sizeof(dnss), ", dns " IPSTR " %d ms",
-                                       IP2STR(&dns.ip.u_addr.ip4), *dns_ms);
-            else              snprintf(dnss, sizeof(dnss), ", dns " IPSTR " no answer",
-                                       IP2STR(&dns.ip.u_addr.ip4));
+        if (asked) {
+            esp_ip4_addr_t a = { .addr = asked };
+            if (*net_ms >= 0) snprintf(nets, sizeof(nets), ", internet " IPSTR " %d ms",
+                                       IP2STR(&a), *net_ms);
+            else              snprintf(nets, sizeof(nets), ", internet no answer (8.8.8.8, 1.1.1.1)");
         }
-        snprintf(what, what_size, "gateway " IPSTR " %s%s", IP2STR(&ip.gw), gws, dnss);
+        snprintf(what, what_size, "gateway " IPSTR " %s%s", IP2STR(&ip.gw), gws, nets);
     }
     return *gw_ms >= 0;
 }

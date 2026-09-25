@@ -151,9 +151,10 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
  */
 #define NET_WAIT_MAX_MS         (25000)
 #define NET_WAIT_SLICE_MS       (100)
-/* 5028. One echo each to the gateway and the DNS server before every
- * attempt; a LAN round trip is single-digit milliseconds, so a second
- * without an answer is not a slow network, it is a dead one. */
+/* 5028. One echo to the gateway before every
+ * attempt (5029: then 8.8.8.8); a LAN round trip is single-digit
+ * milliseconds, so a second without an answer is not a slow network,
+ * it is a dead one. */
 #define NET_PROBE_TIMEOUT_MS    (1000)
 #define NET_PROBE_EVERY_MS      (2000)
 
@@ -952,10 +953,10 @@ static void netstream_task(void *arg)
              * treated the same way: waited out, not counted, re-probed
              * every NET_PROBE_EVERY_MS, bounded by NET_WAIT_MAX_MS.
              */
-            int gw_ms = -1, dns_ms = -1;
+            int gw_ms = -1, net_ms = -1;
             char probe[96];
             bool path = net_online() &&
-                net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &dns_ms,
+                net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
                           probe, sizeof(probe));
             if (!path) {
                 if (!net_online()) {
@@ -972,7 +973,7 @@ static void netstream_task(void *arg)
                     since_probe += NET_WAIT_SLICE_MS;
                     if (net_online() && since_probe >= NET_PROBE_EVERY_MS) {
                         since_probe = 0;
-                        path = net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &dns_ms,
+                        path = net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
                                          probe, sizeof(probe));
                     }
                 }
