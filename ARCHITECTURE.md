@@ -11579,3 +11579,38 @@ screen when it finishes, which is what already covered that.
 The same boot also played the 06 -> 07 crossfade at 44.1 kHz across
 Opus's 48 kHz on 5040's converter ("on: 48000 -> 44100 Hz", "crossfade
 done; dropped 0 KB"). It sounded right.
+
+### 5042 -- Bitmap consumer keys, from the descriptor
+
+The first run with the DG80 in the car, logged from a phone, had every
+key from its remote interface arriving and none acted on:
+
+    tab5_hid: remote: 01 01 00 -> Vol+
+    tab5_hid: itf 3: consumer usage 0x0001 unmapped
+    tab5_hid: remote: 01 00 00 -> Vol+
+
+The interface declares the Consumer page and Report IDs, so it is
+classified HID_KIND_CONSUMER. report_consumer() then reads the two bytes
+after the ID as a usage code, which is right for an array field and
+wrong for this one. The DG80 sends Report 1 with sixteen one-bit fields,
+and bit 0 set reads as "usage 0x0001". The "-> Vol+" on the raw line is
+also wrong: it is the headset remote's bit table applied to the Report
+ID byte.
+
+report_desc_scan() now also walks the descriptor for its fields (Usage
+Page, Report Size/Count/ID, Usage and Usage Min/Max, Input items).
+Each Variable, non-Constant, one-bit Input on the Consumer page maps its
+bits to its usages in order, per report ID. report_consumer() dispatches
+a bit on its rising edge against the previous report of the same ID,
+and falls back to the array reading for any report with no bitmap
+fields. The raw line keeps the bit names only for the BITMASK kind.
+
+The descriptor is logged as hex at attach, followed by one line per
+mapped bit, so the next log says what bit 0 of the DG80 is rather than
+this entry guessing. Tested on the host against a CSR-style sample
+descriptor; the DG80's own (98 bytes, "UNAVAILABLE" to lsusb without
+root) has not been seen yet.
+
+The same log has the USB conversion at 7-8% in the car, and the phone
+as the serial monitor works: Serial USB Terminal on Android, the Tab5's
+USB-C port.

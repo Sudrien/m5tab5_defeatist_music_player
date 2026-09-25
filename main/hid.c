@@ -105,6 +105,28 @@ static const struct {
  *                           itself gets the old table and the old
  *                           behaviour, which is confirmed on hardware.
  */
+/*
+ * 5042: one bit of a bitmap-style consumer field -- which report, which
+ * bit after the ID byte, which usage the descriptor gave it.
+ *
+ * The Avantree DG80's remote interface is this shape. Its reports are
+ * three bytes, a Report ID and sixteen one-bit fields:
+ *
+ *   remote: 01 01 00      a key down: bit 0 of report 1
+ *   remote: 01 00 00      released
+ *
+ * and report_consumer() read "01 00" as the usage 0x0001, which is no
+ * usage at all ("consumer usage 0x0001 unmapped"). What bit 0 means is
+ * the descriptor's to say: a bitmap field lists its usages in order,
+ * one per bit, and those are what this table holds.
+ */
+#define HID_MAX_CBITS           (32)
+typedef struct {
+    uint8_t  id;            /* report ID, 0 when the device uses none */
+    uint8_t  bit;           /* bit offset after the ID byte */
+    uint16_t usage;         /* Consumer page usage */
+} hid_cbit_t;
+
 typedef enum {
     HID_KIND_BITMASK = 0,
     HID_KIND_BOOT_KEYBOARD,
@@ -119,6 +141,11 @@ typedef struct {
     hid_kind_t kind;
     bool       report_ids;   /* descriptor declared Report IDs */
     uint8_t    keys[6];      /* boot keyboard: the previous keycodes */
+    /* 5042: a bitmap-style consumer field, from the descriptor. */
+    hid_cbit_t cbits[HID_MAX_CBITS];
+    uint8_t    n_cbits;
+    uint8_t    prev_id;      /* the last report's ID ... */
+    uint8_t    prev[HID_MAX_IN_REPORT];     /* ... and its bytes */
 } hid_ctx_t;
 
 /*
@@ -291,11 +318,55 @@ static void report_boot_keyboard(hid_ctx_t *ctx, const uint8_t *data, int len)
  * -- unlike the remote in the bitmask path, a consumer collection does
  * send a clean release.
  */
+static void dispatch_usage(hid_ctx_t *ctx, uint16_t usage)
+{
+    for (size_t i = 0; i < sizeof(CONSUMER_USAGES) / sizeof(CONSUMER_USAGES[0]); i++) {
+        if (CONSUMER_USAGES[i].usage != usage) continue;
+        ESP_LOGI(TAG, "itf %u: consumer %s", ctx->itf_num, CONSUMER_USAGES[i].name);
+        if (s_cb) s_cb(CONSUMER_USAGES[i].button);
+        return;
+    }
+    ESP_LOGI(TAG, "itf %u: consumer usage 0x%04X unmapped", ctx->itf_num, usage);
+}
+
+/* 5042: a report whose ID has bitmap fields. Dispatches each bit that
+ * went from clear to set since the previous report of the same ID, so a
+ * held key is one press and a release is nothing. False when no bitmap
+ * field belongs to this report, and the array reading below applies. */
+static bool report_consumer_bits(hid_ctx_t *ctx, const uint8_t *data, int len)
+{
+    const int off = ctx->report_ids ? 1 : 0;
+    const uint8_t id = ctx->report_ids ? data[0] : 0;
+    bool mine = false;
+    for (int i = 0; i < ctx->n_cbits; i++) {
+        if (ctx->cbits[i].id == id) { mine = true; break; }
+    }
+    if (!mine) return false;
+
+    uint8_t prev[HID_MAX_IN_REPORT] = {0};
+    if (ctx->prev_id == id) memcpy(prev, ctx->prev, sizeof(prev));
+
+    for (int i = 0; i < ctx->n_cbits; i++) {
+        const hid_cbit_t *b = &ctx->cbits[i];
+        if (b->id != id) continue;
+        const int byte = off + b->bit / 8;
+        if (byte >= len || byte >= HID_MAX_IN_REPORT) continue;
+        const uint8_t mask = (uint8_t)(1u << (b->bit % 8));
+        if ((data[byte] & mask) && !(prev[byte] & mask)) dispatch_usage(ctx, b->usage);
+    }
+
+    ctx->prev_id = id;
+    memset(ctx->prev, 0, sizeof(ctx->prev));
+    memcpy(ctx->prev, data, len < HID_MAX_IN_REPORT ? (size_t)len : HID_MAX_IN_REPORT);
+    return true;
+}
+
 static void report_consumer(hid_ctx_t *ctx, const uint8_t *data, int len)
 {
     /* Skip the report ID when the descriptor declared any. */
     const int off = ctx->report_ids ? 1 : 0;
     if (len <= off) return;
+    if (report_consumer_bits(ctx, data, len)) return;
 
     const uint16_t usage = (len - off >= 2)
         ? (uint16_t)(data[off] | ((uint16_t)data[off + 1] << 8))
@@ -303,17 +374,10 @@ static void report_consumer(hid_ctx_t *ctx, const uint8_t *data, int len)
 
     if (usage == 0) return;         /* release */
 
-    for (size_t i = 0; i < sizeof(CONSUMER_USAGES) / sizeof(CONSUMER_USAGES[0]); i++) {
-        if (CONSUMER_USAGES[i].usage != usage) continue;
-        ESP_LOGI(TAG, "itf %u: consumer %s", ctx->itf_num, CONSUMER_USAGES[i].name);
-        if (s_cb) s_cb(CONSUMER_USAGES[i].button);
-        return;
-    }
-
-    /* Named by number rather than swallowed, for the same reason the
-     * bitmask path names unknown bits: a key that does nothing and says
-     * nothing looks identical to one whose reports are not arriving. */
-    ESP_LOGI(TAG, "itf %u: consumer usage 0x%04X unmapped", ctx->itf_num, usage);
+    /* Unmapped usages are named by number rather than swallowed: a key
+     * that does nothing and says nothing looks identical to one whose
+     * reports are not arriving. */
+    dispatch_usage(ctx, usage);
 }
 
 static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
@@ -339,7 +403,11 @@ static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
     char names[64];
     int m = 0;
     names[0] = '\0';
-    for (int bit = 0; bit < 8; bit++) {
+    /* 5042: the bit names are the headset remote's table, and only mean
+     * anything for a BITMASK interface -- on the DG80's consumer
+     * interface byte 0 is a Report ID and "01" is not Vol+. The other
+     * kinds name what they decode on their own line. */
+    for (int bit = 0; bit < 8 && ctx->kind == HID_KIND_BITMASK; bit++) {
         if (!(now & (1 << bit))) continue;
         const int e = entry_for_bit(bit);
         if (e >= 0) {
@@ -356,7 +424,11 @@ static void hid_report(hid_ctx_t *ctx, const uint8_t *data, int len)
         if (m >= (int)sizeof(names) - 8) break;
     }
 
-    ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "(release)", names);
+    if (ctx->kind == HID_KIND_BITMASK) {
+        ESP_LOGI(TAG, "remote: %s%s%s", hex, names[0] ? "-> " : "(release)", names);
+    } else {
+        ESP_LOGI(TAG, "remote: %s", hex);
+    }
 
     switch (ctx->kind) {
     case HID_KIND_BOOT_KEYBOARD:
@@ -559,11 +631,88 @@ static void ctrl_cb(usb_transfer_t *t)
     xSemaphoreGive(c->done);
 }
 
+/*
+ * 5042: the fields of a report descriptor, as far as bitmap-style
+ * consumer keys need them. HID 1.11 section 6.2.2: Usage Page, Report
+ * Size, Report Count and Report ID are global and persist; Usage and
+ * Usage Minimum/Maximum are local and are spent by the next main item.
+ * Every Input item advances its report's bit offset by size x count;
+ * one that is Variable, not Constant, one bit wide and on the Consumer
+ * page assigns its usages to its bits in order.
+ */
+static void report_desc_fields(const uint8_t *d, int n, hid_cbit_t *out, uint8_t *n_out)
+{
+    uint16_t page = 0, rsize = 0, rcount = 0;
+    uint8_t id = 0;
+    uint16_t usages[24];
+    int nu = 0;
+    uint32_t umin = 0, umax = 0;
+    bool have_range = false;
+    struct { uint8_t id; uint16_t off; } offs[8];
+    int noffs = 0;
+    *n_out = 0;
+
+    for (int i = 0; i < n; ) {
+        const uint8_t prefix = d[i];
+        if (prefix == 0xFE) {
+            if (i + 1 >= n) break;
+            i += 3 + d[i + 1];
+            continue;
+        }
+        int size = prefix & 0x03;
+        if (size == 3) size = 4;
+        if (i + 1 + size > n) break;
+        uint32_t v = 0;
+        for (int k = 0; k < size; k++) v |= (uint32_t)d[i + 1 + k] << (8 * k);
+
+        switch (prefix & 0xFC) {
+        case 0x04: page = (uint16_t)v; break;               /* Usage Page */
+        case 0x74: rsize = (uint16_t)v; break;              /* Report Size */
+        case 0x94: rcount = (uint16_t)v; break;             /* Report Count */
+        case 0x84: id = (uint8_t)v; break;                  /* Report ID */
+        case 0x08: if (nu < 24) usages[nu++] = (uint16_t)v; break;  /* Usage */
+        case 0x18: umin = v; have_range = true; break;      /* Usage Minimum */
+        case 0x28: umax = v; break;                         /* Usage Maximum */
+        case 0x80: {                                        /* Input */
+            int o = 0;
+            while (o < noffs && offs[o].id != id) o++;
+            if (o == noffs && noffs < 8) { offs[noffs].id = id; offs[noffs].off = 0; noffs++; }
+            if (o >= 8) break;
+            const bool variable = v & 0x02, constant = v & 0x01;
+            if (page == 0x0C && variable && !constant && rsize == 1) {
+                for (int k = 0; k < rcount && *n_out < HID_MAX_CBITS; k++) {
+                    uint16_t u;
+                    if (k < nu) u = usages[k];
+                    else if (have_range && umin + k <= umax) u = (uint16_t)(umin + k);
+                    else if (nu) u = usages[nu - 1];
+                    else continue;
+                    const uint32_t bit = offs[o].off + k;
+                    if (bit > 255) break;
+                    out[*n_out].id = id;
+                    out[*n_out].bit = (uint8_t)bit;
+                    out[*n_out].usage = u;
+                    (*n_out)++;
+                }
+            }
+            offs[o].off += rsize * rcount;
+        }   /* fall through: Input is a main item */
+        /* fall through */
+        case 0x90: case 0xB0: case 0xA0: case 0xC0:         /* Output Feature Collection End */
+            nu = 0; have_range = false; umin = umax = 0;
+            break;
+        default: break;
+        }
+        i += 1 + size;
+    }
+}
+
 static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
-                             bool *has_consumer, bool *report_ids)
+                             bool *has_consumer, bool *report_ids,
+                             hid_cbit_t *cbits, uint8_t *n_cbits)
 {
     *has_consumer = false;
     *report_ids = false;
+    *n_cbits = 0;
 
     ctrl_ctx_t *c = calloc(1, sizeof(*c));
     if (!c) return false;
@@ -725,6 +874,22 @@ static bool report_desc_scan(usb_device_handle_t dev, uint8_t itf_num,
 
             i += 1 + size;
         }
+
+        /* 5042: the descriptor itself, once per attach -- the evidence a
+         * key mapping is argued from -- and the bitmap fields in it. */
+        for (int i = 0; i < n; i += 32) {
+            char hex[3 * 32 + 1];
+            int h = 0;
+            for (int k = i; k < n && k < i + 32; k++) {
+                h += snprintf(hex + h, sizeof(hex) - h, "%02X ", d[k]);
+            }
+            ESP_LOGI(TAG, "itf %u report descriptor [%d]: %s", itf_num, i, hex);
+        }
+        report_desc_fields(d, n, cbits, n_cbits);
+        for (int k = 0; k < *n_cbits; k++) {
+            ESP_LOGI(TAG, "itf %u: report %u bit %u is consumer usage 0x%04X",
+                     itf_num, cbits[k].id, cbits[k].bit, cbits[k].usage);
+        }
         ok = true;
     }
 
@@ -779,7 +944,8 @@ static esp_err_t hid_claim(usb_device_handle_t dev, const usb_intf_desc_t *intf,
     if (intf->bInterfaceProtocol == 1) {
         ctx->kind = HID_KIND_BOOT_KEYBOARD;
     } else if (report_desc_scan(dev, intf->bInterfaceNumber,
-                                &has_consumer, &report_ids) && has_consumer) {
+                                &has_consumer, &report_ids,
+                                ctx->cbits, &ctx->n_cbits) && has_consumer) {
         ctx->kind = HID_KIND_CONSUMER;
         ctx->report_ids = report_ids;
     } else {
