@@ -474,6 +474,11 @@ static char s_hdr_name[NETSTREAM_NAME_MAX];
 static char s_hdr_logo[NETSTREAM_URL_MAX];
 static char s_hdr_ctype[64];
 
+/* 5066: the last title logged and published, by this task only. Module
+ * scope: ICY_TITLE_MAX is 256. Cleared when a station is requested, so a
+ * new station's first title is always shown. */
+static char s_title_logged[ICY_TITLE_MAX];
+
 static void set_state(netstream_state_t st)
 {
     if (s_state == st) return;
@@ -816,8 +821,14 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
 
         if (d->titles != last_titles) {
             last_titles = d->titles;
-            ESP_LOGI(TAG, "title: \"%.80s\"", d->title);
-            publish_title(d->title);
+            /* 5066: only when the text changed. d->titles counts metadata
+             * blocks, and LBC sends its title in every one -- the same
+             * line logged every 0.4 s through the burst. */
+            if (strcmp(d->title, s_title_logged) != 0) {
+                snprintf(s_title_logged, sizeof(s_title_logged), "%s", d->title);
+                ESP_LOGI(TAG, "title: \"%.80s\"", d->title);
+                publish_title(d->title);
+            }
         }
 
         /*
@@ -1085,6 +1096,7 @@ static void netstream_task(void *arg)
         ESP_LOGI(TAG, "stream requested: %.60s <%.160s>", s_name_req, s_url);
         publish_name(s_name_req);
         publish_title("");
+        s_title_logged[0] = '\0';              /* 5066 */
         s_failures = 0;
         s_last_status = 0;
         s_kbps = 0;

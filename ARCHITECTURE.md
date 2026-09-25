@@ -12260,3 +12260,29 @@ up a second later does not pull the view away from it; its tab is one
 tap away. Not host-tested (browser.c). What to look for: a card-less
 boot shows the radio menu, and the first logged button is a station
 row, not `tab RADIO`.
+
+### 5066 -- A title is news once
+
+Three things confirmed on the board (v0.4.0-71), in one run from a
+card-less boot:
+- 5065: the first button logged is `row 0 (station)`, not `tab RADIO`.
+- 5064: `from flash: volume=11, brightness=90, rotation=0, ntp=on`.
+- 5054, at last: `AAC (ADTS) decoder open ... (cost 2568)`, down from
+  14860. The earlier AAC failure (dma_alloc, a dead link) was a build on
+  a stale sdkconfig; after `rm sdkconfig` LBC's AAC stream played with
+  the radio up.
+
+LBC UK sends its title in every ICY metadata block, so netstream logged
+and published the same `title: "Leading Britain's Conversation - ..."`
+every 0.4 s through the burst and every 1.3 s after. d->titles counts
+blocks, not changes. The title is now logged and published only when
+its text differs from the last one; the copy is cleared when a station
+is requested, so a new station's first title always shows. The player's
+own title line already did this.
+
+Still open from the same log: a cluster of `eh_sdio: mempool OOM`, RX
+and TX, over the 4 s after first sound, while the artwork (a 22 KB PNG
+over TLS) and the directory click were fetched. Each cleared within
+milliseconds and the stream held at 30 s of reserve. This is the
+DMA-memory dip at first sound from 5057's open list. Requesting the
+artwork once the reserve is up, not at first sound, is the candidate.
