@@ -246,6 +246,118 @@ static bool s_has_title;
 static icydemux_t *s_demux;     /* 4392 bytes */
 static uint8_t    *s_rx;        /* READ_CHUNK, off the socket */
 static uint8_t    *s_audio;     /* READ_CHUNK, after the demuxer */
+
+/*
+ * 5055: SPLICING A RECONNECT, so the server's burst is not heard twice.
+ *
+ * A live server that drops us is reconnected to (netplan), and a
+ * reconnect is answered the way a first connect is: with a burst of the
+ * last several seconds it has buffered. Those seconds were already
+ * received on the connection that dropped and are already in the rings,
+ * so the listener heard them twice. BBC World Service closed on us every
+ * 6-11 s for two minutes, and each time about 15 s of it repeated.
+ *
+ * The burst is the same bytes the server sent before, so the join can be
+ * found in the bytes. SPLICE_SIG bytes of audio from the end of the last
+ * connection are kept (s_tail). On a reconnect within the same
+ * generation, new audio is held back (s_hold, PSRAM) until the signature
+ * turns up in it. Then everything up to and including it is dropped, and
+ * the stream carries on from the byte after. Found nowhere in the first
+ * SPLICE_HOLD bytes -- a server that does not burst, or one that sends
+ * something else -- and the hold goes out whole, which is what happened
+ * before.
+ *
+ * Holding costs nothing audible: the PCM ring has seconds in it on any
+ * connection that lasted long enough to drop.
+ */
+#define SPLICE_SIG      (2048)
+#define SPLICE_HOLD     (256 * 1024)
+static uint8_t  *s_tail;          /* SPLICE_SIG, PSRAM */
+static size_t    s_tail_len;
+static uint32_t  s_tail_gen;
+static uint8_t  *s_hold;          /* SPLICE_HOLD, PSRAM, allocated on use */
+static size_t    s_hold_len;
+static size_t    s_hold_searched; /* bytes of s_hold already searched */
+static bool      s_splicing;
+
+/* Keep the last SPLICE_SIG bytes that went into the ring. */
+static void splice_note(const uint8_t *p, size_t n, uint32_t gen)
+{
+    if (!n) return;
+    if (!s_tail) {
+        s_tail = heap_caps_malloc(SPLICE_SIG, MALLOC_CAP_SPIRAM);
+        if (!s_tail) return;
+    }
+    if (gen != s_tail_gen) { s_tail_len = 0; s_tail_gen = gen; }
+    if (n >= SPLICE_SIG) {
+        memcpy(s_tail, p + n - SPLICE_SIG, SPLICE_SIG);
+        s_tail_len = SPLICE_SIG;
+        return;
+    }
+    const size_t keep = (s_tail_len + n > SPLICE_SIG) ? SPLICE_SIG - n : s_tail_len;
+    memmove(s_tail, s_tail + s_tail_len - keep, keep);
+    memcpy(s_tail + keep, p, n);
+    s_tail_len = keep + n;
+}
+
+/* At the start of a connection: splice if this is a reconnect of the
+ * stream whose tail we hold. */
+static void splice_begin(uint32_t gen)
+{
+    s_splicing = (gen == s_tail_gen && s_tail_len == SPLICE_SIG);
+    s_hold_len = 0;
+    s_hold_searched = 0;
+    if (s_splicing && !s_hold) {
+        s_hold = heap_caps_malloc(SPLICE_HOLD, MALLOC_CAP_SPIRAM);
+        if (!s_hold) s_splicing = false;
+    }
+}
+
+/*
+ * Feed received audio through the splice. Returns what should go to the
+ * ring now in *out and *outn (possibly nothing while holding).
+ */
+static void splice_feed(const uint8_t *in, size_t n,
+                        const uint8_t **out, size_t *outn)
+{
+    *out = in;
+    *outn = n;
+    if (!s_splicing) return;
+
+    const size_t take = (s_hold_len + n > SPLICE_HOLD) ? SPLICE_HOLD - s_hold_len : n;
+    memcpy(s_hold + s_hold_len, in, take);
+    s_hold_len += take;
+
+    const size_t from = s_hold_searched > SPLICE_SIG ? s_hold_searched - SPLICE_SIG + 1 : 0;
+    const uint8_t *hit = NULL;
+    if (s_hold_len >= SPLICE_SIG) {
+        hit = memmem(s_hold + from, s_hold_len - from, s_tail, SPLICE_SIG);
+    }
+    s_hold_searched = s_hold_len;
+
+    if (hit) {
+        const size_t start = (size_t)(hit - s_hold) + SPLICE_SIG;
+        ESP_LOGI(TAG, "reconnect spliced: the server repeated %u bytes; skipped",
+                 (unsigned)start);
+        s_splicing = false;
+        *out = s_hold + start;
+        *outn = s_hold_len - start;
+        /* Anything that did not fit the hold is lost; it cannot be, as
+         * the hold is only full when no match was found. */
+        return;
+    }
+    if (s_hold_len >= SPLICE_HOLD || take < n) {
+        ESP_LOGW(TAG, "reconnect: no overlap in the first %u KB; playing it all",
+                 (unsigned)(SPLICE_HOLD / 1024));
+        s_splicing = false;
+        *out = s_hold;
+        *outn = s_hold_len;
+        /* The part of `in` past the hold is dropped: at most one read. */
+        return;
+    }
+    *out = NULL;
+    *outn = 0;
+}
 static uint8_t    *s_sniff;     /* SNIFF_BYTES, first bytes of a body */
 static char       *s_url;       /* NETSTREAM_URL_MAX */
 static char       *s_name_req;  /* NETSTREAM_NAME_MAX */
@@ -584,6 +696,8 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
     int64_t  last_progress = last_window;
     int      zero_reads = 0;
 
+    splice_begin(gen);                          /* 5055 */
+
     while (!superseded(gen)) {
         const int n = esp_http_client_read(c, (char *)buf, READ_CHUNK);
         if (n < 0) {
@@ -675,13 +789,21 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
          * hole in the audio.
          */
         const int64_t send_start = esp_timer_get_time();
-        for (size_t off = 0; off < got; ) {
-            const size_t sent = xStreamBufferSend(s_ring, audio + off, got - off,
+        /* 5055: through the reconnect splice. What it holds back counts
+         * as produced -- it arrived -- so a drop during the hold is
+         * still progress to netplan. */
+        const uint8_t *out;
+        size_t outn;
+        splice_feed(audio, got, &out, &outn);
+        if (!outn) produced += got;
+        for (size_t off = 0; off < outn; ) {
+            const size_t sent = xStreamBufferSend(s_ring, out + off, outn - off,
                                                   pdMS_TO_TICKS(SEND_SLICE_MS));
             off += sent;
             produced += sent;
             if (sent == 0 && superseded(gen)) return produced;
         }
+        splice_note(out, outn, gen);
         /* Whatever that cost, whether it came from one long block or
          * fifty short ones. Near zero while the ring has room. */
         const int send_ms = (int)((esp_timer_get_time() - send_start) / 1000);

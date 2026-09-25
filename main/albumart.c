@@ -1126,8 +1126,31 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
         .conv_std = JPEG_YUV_RGB_CONV_STD_BT601,
     };
     uint32_t decoded = 0;
-    ESP_GOTO_ON_ERROR(jpeg_decoder_process(dec, &cfg, in, jpeg_len, rgb, rgb_size, &decoded),
-                      cleanup, TAG, "jpeg decode");
+    {
+        const esp_err_t hw = jpeg_decoder_process(dec, &cfg, in, jpeg_len, rgb,
+                                                  rgb_size, &decoded);
+        if (hw != ESP_OK) {
+            /*
+             * 5055: the hardware refuses some JPEGs outright -- a
+             * station logo at 145x145 gave "Picture sizes not divisible
+             * by 8 are not supported" -- and a refusal used to be the
+             * end of the picture. TJpgDec has no such limit, and a logo
+             * is small enough that its cost is nothing. Same fallback as
+             * the can-not-allocate branch above, reached from a second
+             * door.
+             */
+            ESP_LOGW(TAG, "hardware decode refused (%s); trying software",
+                     esp_err_to_name(hw));
+            free(rgb);
+            rgb = NULL;
+            rgb_size = 0;
+            ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
+                                  &rgb, &rgb_size, &soft_w, &soft_h);
+            if (ret != ESP_OK) goto cleanup;
+            soft = true;
+            goto have_pixels;
+        }
+    }
 
     /*
      * The decoder reports what it actually wrote. Cross-check it, because

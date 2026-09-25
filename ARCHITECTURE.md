@@ -11919,3 +11919,39 @@ PSRAM. None is expected at these rates. The first number to check is
 the `cost` on the decoder-open line, which should fall to near zero.
 
 rm sdkconfig before building.
+
+### 5055 -- A reconnect spliced, not repeated; station logos the hardware refuses
+
+5054 on the board, Wi-Fi, no card, no USB: DMA-capable memory held at
+16-17 KB free through a stream, where it had been at 4 KB. It dipped to
+4 KB once, with an artwork fetch, a TLS session and the decoder all at
+the same moment. The listener reported repeating audio and no artwork.
+
+REPEATS. BBC World Service
+(http://stream.live.vc.bbcmedia.co.uk/bbc_world_service) closed the
+connection every 6-11 s, 88-134 KB in each time. A clean close: the
+reader returned -1 with no transport error, and DMA memory was fine at
+every drop. Each reconnect was answered with the server's burst of
+recent audio, which had already been received on the connection that
+dropped. So the listener heard it again. The PCM reserve grew from 3 s
+to 31 s over two minutes of drops, and that growth was the repeats
+piling up.
+
+netstream.c now keeps the last 2 KB of audio sent to the ring (after
+ICY demux). On a reconnect in the same generation, new audio is held in
+a 256 KB PSRAM buffer until those 2 KB turn up in it. Everything
+through them is dropped, and the stream continues from the next byte.
+With no match in 256 KB, the hold goes out whole, as before. A new
+station or a resume (a new generation) never splices. Tested on the
+host: three connections with overlapping bursts and random read sizes
+produce output byte-identical to the source.
+
+Why the BBC server closes is not known. The URL is an old one. Log:
+`reconnect spliced: the server repeated N bytes; skipped`.
+
+ARTWORK. The station's logo was 145x145, and the hardware decoder
+refuses sizes not divisible by 8 ("Picture sizes not divisible by 8 are
+not supported"). A refusal was the end of the picture. albumart.c now
+falls back to TJpgDec on any hardware decode failure, the same path the
+can-not-allocate branch already used. A logo costs almost nothing in
+software.
