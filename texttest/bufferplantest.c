@@ -430,23 +430,39 @@ int main(void)
         set_capacity(20400);
         bufplan_init(&b, 0);
         step(0, 0, false, false);
+        /* 5060: it now starts at the first window that is above the
+         * floor and projects past the deadline -- 10 s, at 4000 -- rather
+         * than waiting the thirty out. Before 10 s it must not start. */
         int buffered = 0;
+        int64_t started = -1;
         for (int64_t t = 1000; t < BUFPLAN_PREROLL_GIVEUP_MS; t += 1000) {
             buffered += 400;
             step(t, buffered, false, false);
+            if (started < 0 && out.audible) started = t;
         }
-        CHECK(b.phase == BUFPLAN_PREROLL, "left preroll early: %s",
-              bufplan_phase_name(b.phase));
-        CHECK(buffered >= bufplan_start_floor_ms(20400),
-              "the fixture never cleared the floor: %d", buffered);
-        CHECK(buffered < bufplan_start_target_ms(20400),
-              "the fixture reached target, so it tests nothing: %d", buffered);
-
-        buffered += 400;
-        step(BUFPLAN_PREROLL_GIVEUP_MS, buffered, false, false);
+        CHECK(started == 10000,
+              "a growing stream that cannot reach target started at %lld, "
+              "not 10000", (long long)started);
         CHECK(b.phase == BUFPLAN_PLAYING,
-              "a growing stream above the floor was ended at the deadline: %s",
+              "a growing stream above the floor did not play: %s",
               bufplan_phase_name(b.phase));
+    }
+
+    /* 5060: the BBC board run. 24 kHz, a 37.5 s ring and a 28 s
+     * target, the reserve climbing 1.5 s a window. Starts at the first
+     * window above the floor, not at thirty seconds. */
+    {
+        set_capacity(37500);
+        bufplan_init(&b, 0);
+        int64_t started = -1;
+        for (int64_t t = 0; t <= BUFPLAN_PREROLL_GIVEUP_MS; t += 500) {
+            step(t, (int)(t * 3 / 10), false, false);
+            if (started < 0 && out.audible) started = t;
+        }
+        CHECK(started > 0 && started <= 15000,
+              "BBC's climb started at %lld", (long long)started);
+        CHECK(started < 0 || started * 3 / 10 >= bufplan_start_floor_ms(37500),
+              "started below the floor");
     }
 
     /* And the same deadline, below the floor, still ends. The two

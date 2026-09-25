@@ -297,7 +297,27 @@ static inline void bufplan_step(bufplan_t *b, const bufplan_in_t *in,
          */
         bool stalled = false;
         if (in->now_ms - b->preroll_mark_at >= BUFPLAN_START_WINDOW_MS) {
-            stalled = (buffered - b->preroll_mark_ms) < BUFPLAN_START_GROWTH_MS;
+            const int grown = buffered - b->preroll_mark_ms;
+            stalled = grown < BUFPLAN_START_GROWTH_MS;
+            /*
+             * 5060: OR GROWING TOO SLOWLY TO ARRIVE BEFORE THE DEADLINE.
+             *
+             * BBC World Service, 56 kbit/s at 24 kHz: the ring holds
+             * 37.5 s there, so the target is 28 s, and the reserve
+             * climbed about 1.5 s a window -- growth, not a stall. Both
+             * connects on the board waited out the full thirty seconds
+             * (`first sound at 30106 ms`, `30035 ms`) with 6-12 s in
+             * hand from about 15 s on. The deadline was always going to
+             * start it at whatever it had; this starts it at the window
+             * that shows the target cannot be reached in time.
+             */
+            if (!stalled && grown > 0) {
+                const int64_t eta = (int64_t)(target - buffered) *
+                                    (in->now_ms - b->preroll_mark_at) / grown;
+                const int64_t left = BUFPLAN_PREROLL_GIVEUP_MS -
+                                     (in->now_ms - b->phase_since_ms);
+                if (eta > left) stalled = true;
+            }
             b->preroll_mark_ms = buffered;
             b->preroll_mark_at = in->now_ms;
         }

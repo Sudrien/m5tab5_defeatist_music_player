@@ -12079,3 +12079,35 @@ reads against a reconnect with a gap:
 Host-tested after the change: the gap case delivers all 121600 bytes in
 order, and an overlapping reconnect with random read sizes splices
 byte-exact.
+
+### 5060 -- A preroll that cannot reach its target starts when it knows
+
+5058 and 5059 on the board (v0.4.0-64), Wi-Fi, BBC World Service, two
+connects of about 60 s and 40 s. No `read failed`, no `server closed`,
+no `nothing for 5000 ms`, and no reconnect at all, where 5055-5057 saw
+one every 6-13 s. Windows of 40-48 kbit/s against 56 needed are where a
+second went quiet, and those used to be reconnects. So the drops were
+5058's one-second timeout, not the server. The splice now has nothing to
+do on this station.
+
+Both connects took 30 s to first sound (`first sound at 30106 ms`,
+`30035 ms`). That is BUFPLAN_PREROLL_GIVEUP_MS. The stream is 56 kbit/s
+MP3 at 24 kHz. At that rate the 3520 KB PCM ring is 37.5 s, so the 75%
+start target is 28 s. The reserve climbed about 1.5 s a window, well
+over START_GROWTH_MS, so it was not stalled either, and it was 6-12 s by
+the deadline. The deadline was always going to start it with that much.
+
+Now a preroll window that closes above the floor also checks whether
+the current growth would reach the target before the deadline, and
+starts if it would not. On BBC that is the first window above 4 s,
+about 15 s in. bufferplantest has the case; the "growing, short at the
+deadline" case now starts at 10 s instead of 30.
+
+STILL OPEN, from the same log:
+- Why the reserve grows at only ~0.3x real time in preroll while the
+  station delivers 1.07x (bytes ring at 0%). netdec decodes one frame
+  per call and refill() waits up to RING_WAIT_MS on an empty byte ring
+  even when its window already holds frames. With 24 ms frames that
+  caps the decode rate, which fits these numbers but is not measured.
+- The logo is a progressive JPEG (145x145, JDR_FMT3), as before.
+- `mempool OOM` once, at the artwork fetch just after first sound.
