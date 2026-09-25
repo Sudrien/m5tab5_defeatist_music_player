@@ -589,6 +589,13 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
         if (n < 0) {
             ESP_LOGW(TAG, "read failed after %llu audio bytes",
                      (unsigned long long)produced);
+            /* 5030: the heap at the moment the link died, for the case
+             * where a USB device arriving starved the Wi-Fi transport. */
+            ESP_LOGW(TAG, "  internal %u free (largest %u), DMA %u free (largest %u)",
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
             break;
         }
         if (n == 0) {

@@ -11241,3 +11241,33 @@ station there wait out the full `NET_WAIT_MAX_MS` before trying. The
 second anchor is there so one resolver's ICMP policy is not mistaken for
 no internet. On a working network the cost is one extra WAN round trip
 per attempt.
+
+### 5030 -- the heap when a USB device arrives, and when a stream dies
+
+Two board runs, the same shape. A radio stream plays over Wi-Fi, the
+DG80 is plugged in, and within two seconds the stream's read fails and
+the link stays dead. The second run shows why the link is dead:
+
+    33306  USBH_CDC: New device connected, address: 1
+    33314  tab5_uac: USB audio output attached (itf 2, addr 1)
+    35098  tab5_netstream: read failed after 492565 audio bytes
+    39104  eh_sdio: dma_alloc(5120) failed; dropping read
+    45117  tab5_netstream: gateway 192.168.5.1 no answer; waiting ...
+
+`eh_sdio` could not get a DMA-capable buffer for the coprocessor's
+rx path, so Wi-Fi traffic stopped. 5028's probe reported that as a
+silent gateway rather than a 14 s lookup. The boot log reserves 32 KB of
+internal memory for DMA and internal allocations. The SDIO transport
+and the USB host both draw on it, and a new USB device adds to that
+host's side: control transfers, the HID interrupt transfer, the CDC
+probe that `iot_usbh_cdc` runs on every device, and the UAC interface.
+That is a hypothesis, not a finding. This patch is here to test it.
+
+`uac.c` logs internal and DMA-capable free memory, with the largest
+block of each, just before and just after `uac_host_device_open()`.
+Netstream logs the same four numbers the moment a read fails. The
+largest block matters because the failing allocation is 5120 bytes, and
+fragmentation can refuse that with plenty free in total.
+
+If the numbers confirm it, the fix is to give the DMA pool more room or
+make the USB side take less, and the numbers will say which.

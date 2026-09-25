@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -190,6 +191,19 @@ bool     uac_present(void)    { return s_present; }
 bool     uac_streaming(void)  { return s_streaming; }
 uint32_t uac_generation(void) { return s_generation; }
 const char *uac_product(void) { return s_product; }
+
+/* 5030. One line: internal and DMA-capable free, and the largest block
+ * of each -- the allocation that fails is one that does not fit a
+ * block, and the total alone cannot say that. */
+static void heap_report(const char *when)
+{
+    ESP_LOGI(TAG, "heap %s: internal %u free (largest %u), DMA %u free (largest %u)",
+             when,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
+}
 
 /* ------------------------------------------------------------------ */
 /* Format selection                                                    */
@@ -603,8 +617,16 @@ static void handle_connect(uint8_t addr, uint8_t iface_num)
         .callback_arg = NULL,
     };
 
+    /* 5030: what the open costs in internal and DMA-capable RAM. Twice
+     * now the Wi-Fi coprocessor has lost its rx buffers (`eh_sdio:
+     * dma_alloc(5120) failed`) within two seconds of this device
+     * arriving, and the stream died with it. The DMA pool is shared --
+     * 32 KB reserved at boot for the SDIO transport and the USB host
+     * both -- so these two lines say whether this is where it went. */
+    heap_report("before open");
     uac_host_device_handle_t dev = NULL;
     const esp_err_t err = uac_host_device_open(&cfg, &dev);
+    heap_report("after open");
     if (err != ESP_OK) {
         xSemaphoreGive(s_lock);
         ESP_LOGE(TAG, "could not open output interface: %s", esp_err_to_name(err));
