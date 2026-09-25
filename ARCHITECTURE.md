@@ -12322,3 +12322,45 @@ in 5066). The full-reserve start target means the reserve is already
 request goes out today and changes nothing. The OOM cluster in the LBC
 log came from the three HTTPS requests (the favicon lookup, a 22 KB PNG,
 the click) against the stream's steady 48 kbit/s, not from a burst.
+
+### 5068 -- The next address when one does not answer
+
+5067 on the board: `directory: waiting for the network`, then `network up
+after 4300 ms`, and the news list arrived 1.8 s later from a tap made
+before the join.
+
+The same run: RFI Monde (http://live02.rfi.fr/rfimonde-64.mp3) failed
+five times in 39 s with `esp-tls: select() timeout`, the TCP connect
+getting no answer, while the gateway and 8.8.8.8 answered in 2-17 ms
+before every attempt. Linux Firefox plays it. Not headers: nothing HTTP
+was ever sent. live02.rfi.fr is a CNAME to
+live-reflector-rr.ice.infomaniak.ch, twelve A records (185.74.70.23-36),
+60 s TTL, no AAAA. A browser tries the next address when one is silent.
+esp-tls connects to the first address getaddrinfo() returns, lwIP kept
+only one per name (CONFIG_LWIP_DNS_MAX_HOST_IP=1) and cached it for the
+TTL, so every attempt went to the same address. The log never printed
+which, so that is inferred, not seen; this patch prints it.
+
+- CONFIG_LWIP_DNS_MAX_HOST_IP=4 (sdkconfig.defaults, rm sdkconfig).
+- pin_address() in netstream.c resolves the station URL's host (IPv4, up
+  to four addresses), picks one by s_addr_turn, and for plain http opens
+  the URL with that address in place of the name and the name back in
+  the Host header. s_addr_turn advances whenever the first hop fails to
+  open, and restarts at 0 for each station.
+- `HOST is ADDR (i of n)` before each attempt, and `(address ADDR)` on a
+  first-hop `open failed`.
+- https is logged the same way but still connects by name: the name is
+  also the TLS server name and the certificate's name, and
+  esp_http_client takes that (common_name) only at init, where it would
+  be wrong after a redirect to another host. For https the address
+  logged is the first, which is the one esp-tls takes.
+- Redirects are unchanged: a Location with a host resets the Host header
+  to it (esp_http_client_set_url), and a relative one keeps ours.
+
+main/addrpin.h is the URL half (parse, rebuild with an address, Host
+header), host-tested by addrpintest: ports, queries, fragments, an '@' in
+the path, and refusals for address literals, IPv6, credentials, bad
+ports, an over-long host and a short output buffer. The netstream half is
+not host-tested. What to look for on the board: RFI Monde logging
+`(1 of 4)`, then on a failure `(address X)` and the next attempt's
+`(2 of 4)` with a different address.

@@ -21,6 +21,10 @@
 #include "freertos/stream_buffer.h"
 #include "freertos/task.h"
 
+#include "lwip/netdb.h"
+#include "lwip/sockets.h"
+
+#include "addrpin.h"
 #include "icydemux.h"
 #include "streamsniff.h"
 #include "ethernet.h"
@@ -580,9 +584,73 @@ static bool wait_ms(int ms, uint32_t gen)
  * open with a body waiting. Returns the action decided for the final
  * response: PLAY, RETRY or FATAL.
  */
+/*
+ * 5068: WHICH ADDRESS. See addrpin.h for why.
+ *
+ * Module scope, like the rest of this task's working set: the URL is 512
+ * bytes. s_addr_turn picks among the host's addresses and advances when a
+ * first hop fails to open, so a silent pool member is left behind on the
+ * next attempt rather than retried until the backoff runs out. It starts
+ * again at 0 for each station.
+ */
+static char          s_pin_url[NETSTREAM_URL_MAX];
+static char          s_pin_host[ADDRPIN_HOST_MAX + 8];  /* "host:65535" */
+static char          s_pin_ip[16];
+static addrpin_url_t s_pin_parsed;
+static int           s_addr_turn;
+static bool          s_open_failed;     /* set by connect_hops() */
+
+/*
+ * The URL to open for this attempt. For plain http, the host's address
+ * chosen by `turn`, with s_pin_host set to the Host header to send; for
+ * https, or anything that will not parse or resolve, `url` unchanged and
+ * s_pin_host empty. s_pin_ip is the address picked, or "".
+ *
+ * getaddrinfo() here, on this task, is the same call esp-tls would make on
+ * this task inside esp_http_client_open(), so it costs no stack that the
+ * open did not already.
+ */
+static const char *pin_address(const char *url, int turn)
+{
+    s_pin_ip[0] = '\0';
+    s_pin_host[0] = '\0';
+    if (!addrpin_parse(url, &s_pin_parsed)) return url;
+
+    const struct addrinfo hints = {
+        .ai_family = AF_INET,
+        .ai_socktype = SOCK_STREAM,
+    };
+    struct addrinfo *res = NULL;
+    if (getaddrinfo(s_pin_parsed.host, NULL, &hints, &res) != 0 || !res) {
+        /* Left to esp-tls, which will fail the same way and say so in
+         * the words the log has always used. */
+        return url;
+    }
+    int n = 0;
+    for (const struct addrinfo *ai = res; ai; ai = ai->ai_next) n++;
+    /* https: esp-tls takes the first address itself, so that is the one
+     * to name; only plain http moves along the list. */
+    const int pick = s_pin_parsed.https ? 0 : turn % n;
+    const struct addrinfo *ai = res;
+    for (int i = 0; i < pick; i++) ai = ai->ai_next;
+    inet_ntop(AF_INET, &((const struct sockaddr_in *)ai->ai_addr)->sin_addr,
+              s_pin_ip, sizeof(s_pin_ip));
+    freeaddrinfo(res);
+
+    ESP_LOGI(TAG, "%s is %s (%d of %d)%s", s_pin_parsed.host, s_pin_ip,
+             pick + 1, n, s_pin_parsed.https ? "; https connects by name" : "");
+    if (s_pin_parsed.https) return url;
+    if (!addrpin_build(url, &s_pin_parsed, s_pin_ip, s_pin_url, sizeof(s_pin_url))) {
+        return url;
+    }
+    addrpin_host_header(&s_pin_parsed, s_pin_host, sizeof(s_pin_host));
+    return s_pin_url;
+}
+
 static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
 {
     netplan_action_t act = NETPLAN_RETRY;
+    s_open_failed = false;                      /* 5068 */
 
     for (int hop = 0; hop <= NETPLAN_HOPS_MAX; hop++) {
         if (superseded(gen)) return NETPLAN_FATAL;
@@ -605,8 +673,14 @@ static netplan_action_t connect_hops(esp_http_client_handle_t c, uint32_t gen)
         const esp_err_t err = esp_http_client_open(c, 0);
         const int64_t t1 = esp_timer_get_time();
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "hop %d: open failed after %lld ms: %s", hop + 1,
-                     (long long)((t1 - t0) / 1000), esp_err_to_name(err));
+            /* 5068: and to which address, on the first hop, where it
+             * was chosen here. A later hop's address is esp-tls's. */
+            ESP_LOGW(TAG, "hop %d: open failed after %lld ms: %s%s%s%s", hop + 1,
+                     (long long)((t1 - t0) / 1000), esp_err_to_name(err),
+                     (hop == 0 && s_pin_ip[0]) ? " (address " : "",
+                     (hop == 0 && s_pin_ip[0]) ? s_pin_ip : "",
+                     (hop == 0 && s_pin_ip[0]) ? ")" : "");
+            if (hop == 0) s_open_failed = true;
             /* A refused connection, a DNS failure or a TLS failure are
              * all transient as far as this file can tell: the radio may
              * have just come back, or the relay may be busy. */
@@ -1100,6 +1174,7 @@ static void netstream_task(void *arg)
         publish_name(s_name_req);
         publish_title("");
         s_title_logged[0] = '\0';              /* 5066 */
+        s_addr_turn = 0;                        /* 5068 */
         s_failures = 0;
         s_last_status = 0;
         s_kbps = 0;
@@ -1227,8 +1302,11 @@ static void netstream_task(void *arg)
              * resolved URL works in testing and fails in use. */
             const char *from = netplan_reconnect_from(s_url, NULL);
 
+            /* 5068: an address of the host, for plain http. */
+            const char *open_url = pin_address(from, s_addr_turn);
+
             esp_http_client_config_t cfg = {
-                .url = from,
+                .url = open_url,
                 .event_handler = on_event,
                 .crt_bundle_attach = esp_crt_bundle_attach,
                 .disable_auto_redirect = true,
@@ -1244,8 +1322,13 @@ static void netstream_task(void *arg)
                 goto backoff;
             }
             esp_http_client_set_header(c, "Icy-MetaData", "1");
+            /* 5068: the name back, after init set Host from the address. */
+            if (s_pin_host[0]) esp_http_client_set_header(c, "Host", s_pin_host);
 
             const netplan_action_t act = connect_hops(c, gen);
+            /* 5068: that address did not answer; the next attempt takes
+             * the next one. */
+            if (s_open_failed) s_addr_turn++;
             if (act == NETPLAN_PLAY) {
                 if (s_hdr_name[0]) publish_name(s_hdr_name);
                 /* A reconnect keeps the title on screen and restarts the
