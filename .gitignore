@@ -13,6 +13,7 @@
 /components/pngle/pngle.h
 /components/pngle/miniz.c
 /components/pngle/miniz.h
+/components/stbjpeg/stb_image.h
 /components/fatfs/
 /components/esp_lcd/
 

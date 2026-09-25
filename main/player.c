@@ -5606,7 +5606,10 @@ static bool stream_art_decodable(const uint8_t *img, size_t len)
     if (img[0] != 0xFF) return true;                /* PNG */
     uint8_t sof = 0;
     uint32_t w = 0, h = 0;
-    return albumart_jpeg_is_baseline(img, len, &sof, &w, &h);
+    /* 5062: progressive too, now that stb_image is behind the other two.
+     * Still a marker walk: whether it fits in memory is the draw's
+     * question, and a station logo always does. */
+    return albumart_jpeg_is_baseline(img, len, &sof, &w, &h) || sof == 0xC2;
 }
 
 /*

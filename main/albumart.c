@@ -20,9 +20,11 @@
 #include "esp_lcd_panel_ops.h"
 #include "esp_log.h"
 #include "esp_heap_caps.h"
+#include "esp_timer.h"
 
 #include "jpeg_decoder.h"   /* espressif/esp_jpeg: TJpgDec */
 #include "pngle.h"
+#include "stbjpeg.h"  /* 5062: stb_image, the last JPEG decoder */
 
 #include "albumart.h"
 #include "storage_io.h"
@@ -237,6 +239,53 @@ static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
     heap_caps_free(work);
     ESP_LOGW(TAG, "no scale of this cover fits; showing the format instead");
     return ESP_ERR_NO_MEM;
+}
+
+/*
+ * 5062: THE LAST JPEG DECODER, for what the hardware and TJpgDec both
+ * refused -- a progressive cover, or a flavour TJpgDec calls JDR_FMT3
+ * (BBC World Service's 145x145 logo). stb_image, in PSRAM, at full size
+ * and thinned to the screen box. See components/stbjpeg/stbjpeg.h.
+ *
+ * Asked about memory first, because a progressive decode holds every
+ * coefficient of the picture at once: about 10 bytes a pixel, so a
+ * 1000x1000 cover is 10 MB for a moment. Refused with a line that says
+ * how much, rather than by the allocator halfway through.
+ */
+static esp_err_t decode_stb(const uint8_t *jpeg, size_t jpeg_len,
+                            int screen_w, int screen_h,
+                            uint8_t **out_buf, size_t *out_size,
+                            int *out_w, int *out_h)
+{
+    int w = 0, h = 0;
+    const stbjpeg_err_t info = stbjpeg_info(jpeg, jpeg_len, &w, &h);
+    if (info != STBJPEG_OK) {
+        ESP_LOGW(TAG, "stb_image: %s (%dx%d)", stbjpeg_err_name(info), w, h);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    const size_t peak = stbjpeg_peak_bytes(w, h);
+    const size_t free_ps = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (free_ps < peak) {
+        ESP_LOGW(TAG, "stb_image: %dx%d needs up to %u KB of PSRAM, %u KB free",
+                 w, h, (unsigned)(peak / 1024), (unsigned)(free_ps / 1024));
+        return ESP_ERR_NO_MEM;
+    }
+
+    const int64_t t0 = esp_timer_get_time();
+    uint16_t *px = NULL;
+    const char *why = NULL;
+    const stbjpeg_err_t err = stbjpeg_decode_rgb565(jpeg, jpeg_len, screen_w, screen_h,
+                                                    &px, out_size, out_w, out_h, &why);
+    if (err != STBJPEG_OK) {
+        ESP_LOGW(TAG, "stb_image: %dx%d %s (%s)", w, h, stbjpeg_err_name(err),
+                 why ? why : "no reason given");
+        return err == STBJPEG_NO_MEM ? ESP_ERR_NO_MEM : ESP_FAIL;
+    }
+    *out_buf = (uint8_t *)px;
+    ESP_LOGI(TAG, "cover decoded by stb_image: %dx%d -> %dx%d, %u KB, %lld ms",
+             w, h, *out_w, *out_h, (unsigned)(*out_size / 1024),
+             (long long)((esp_timer_get_time() - t0) / 1000));
+    return ESP_OK;
 }
 
 /*
@@ -917,10 +966,26 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
     uint8_t sof = 0;
     uint32_t sof_w = 0, sof_h = 0;
     if (!albumart_jpeg_is_baseline(jpeg, jpeg_len, &sof, &sof_w, &sof_h)) {
-        ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X), %"PRIu32"x%"PRIu32"; "
-                      "this decoder is baseline-only", sof_name(sof), sof,
-                 sof_w, sof_h);
-        return ESP_ERR_NOT_SUPPORTED;
+        if (sof != 0xC2) {
+            ESP_LOGW(TAG, "cover is a %s JPEG (SOF marker 0x%02X), %"PRIu32"x%"PRIu32"; "
+                          "no decoder here reads it", sof_name(sof), sof,
+                     sof_w, sof_h);
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        /* 5062: progressive. Neither the hardware nor TJpgDec can read
+         * it at all, so stb_image is the only decoder asked. */
+        ESP_LOGI(TAG, "cover is a progressive JPEG, %"PRIu32"x%"PRIu32"; "
+                      "trying stb_image", sof_w, sof_h);
+        ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
+                         &rgb, &rgb_size, &soft_w, &soft_h);
+        if (ret != ESP_OK) return ret;
+        ret = blit_cover(panel, screen_w, screen_h, rgb, soft_w, soft_h, soft_w);
+        if (ret == ESP_OK &&
+            cover_retain(rgb, rgb_size, soft_w, soft_h, soft_w, in_hash)) {
+            rgb = NULL;
+        }
+        free(rgb);
+        return ret;
     }
 
     const jpeg_decode_engine_cfg_t engine = { .timeout_ms = 5000 };
@@ -1084,6 +1149,12 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
          */
         ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
                               &rgb, &rgb_size, &soft_w, &soft_h);
+        if (ret == ESP_FAIL) {
+            /* 5062: TJpgDec refused the format, not the memory. */
+            ESP_LOGW(TAG, "trying stb_image");
+            ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
+                             &rgb, &rgb_size, &soft_w, &soft_h);
+        }
         if (ret != ESP_OK) goto cleanup;
         soft = true;
         goto have_pixels;
@@ -1146,6 +1217,13 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
             rgb_size = 0;
             ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
                                   &rgb, &rgb_size, &soft_w, &soft_h);
+            if (ret == ESP_FAIL) {
+                /* 5062: TJpgDec refused the format, not the memory --
+                 * JDR_FMT3 on the BBC logo. The last decoder. */
+                ESP_LOGW(TAG, "trying stb_image");
+                ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
+                                 &rgb, &rgb_size, &soft_w, &soft_h);
+            }
             if (ret != ESP_OK) goto cleanup;
             soft = true;
             goto have_pixels;

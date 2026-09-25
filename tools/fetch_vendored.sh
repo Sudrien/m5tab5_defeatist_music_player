@@ -24,16 +24,19 @@ set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 MINIMP3="$ROOT/components/minimp3"
 PNGLE="$ROOT/components/pngle"
+STBJPEG="$ROOT/components/stbjpeg"
 
 # Same pins as cmake/vendored.cmake. If you change one, change both --
 # CMake verifies a SHA256 per file and will refetch anything this script
 # leaves behind that does not match.
 MINIMP3_REF=ea99364f61c14656440e8d77e9c233ccf3124633
 PNGLE_REF=b1c68193f1d3f8642b3e0e095d457a828038e6fb
+STB_REF=013ac3beddff3dbffafd5177e7972067cd2b5083
 
 if [ "${1:-}" = "--revert" ]; then
     rm -f "$MINIMP3/minimp3.h" "$MINIMP3/minimp3_ex.h"
     rm -f "$PNGLE/pngle.c" "$PNGLE/pngle.h" "$PNGLE/miniz.c" "$PNGLE/miniz.h"
+    rm -f "$STBJPEG/stb_image.h"
     echo "removed vendored headers (CMakeLists.txt kept)"
     exit 0
 fi
@@ -56,6 +59,10 @@ fetch "$BASE/pngle.c" "$PNGLE/pngle.c"
 fetch "$BASE/pngle.h" "$PNGLE/pngle.h"
 fetch "$BASE/miniz.c" "$PNGLE/miniz.c"
 fetch "$BASE/miniz.h" "$PNGLE/miniz.h"
+
+echo "stb_image -> components/stbjpeg/"
+mkdir -p "$STBJPEG"
+fetch "https://raw.githubusercontent.com/nothings/stb/$STB_REF/stb_image.h" "$STBJPEG/stb_image.h"
 
 cat <<'MSG'
 

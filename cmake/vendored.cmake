@@ -22,6 +22,8 @@
 
 set(MINIMP3_COMMIT ea99364f61c14656440e8d77e9c233ccf3124633)
 set(PNGLE_COMMIT   b1c68193f1d3f8642b3e0e095d457a828038e6fb)
+# 5062: stb_image v2.30, the last JPEG decoder. See components/stbjpeg.
+set(STB_COMMIT     013ac3beddff3dbffafd5177e7972067cd2b5083)
 
 # The font is no longer fetched here. components/ark12 is generated from
 # Ark Pixel Font by tools/gen_ark12.py and committed, because Ark ships
@@ -112,3 +114,9 @@ vendored_fetch("${_pngle_base}/miniz.c" "${_pngle_dir}/miniz.c"
 vendored_fetch("${_pngle_base}/miniz.h" "${_pngle_dir}/miniz.h"
                8a638511f9f98e8240fc00522989fe7908a06f73a6386191e4374046c993cfa0)
 
+
+set(_stb_base "https://raw.githubusercontent.com/nothings/stb/${STB_COMMIT}")
+set(_stb_dir "${CMAKE_CURRENT_LIST_DIR}/../components/stbjpeg")
+
+vendored_fetch("${_stb_base}/stb_image.h" "${_stb_dir}/stb_image.h"
+               594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3)

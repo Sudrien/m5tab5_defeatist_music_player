@@ -12137,3 +12137,57 @@ next run without this change, and near zero with it, with the reserve
 climbing near the delivery rate.
 
 Not host-tested; netdec.c needs IDF to build. rm sdkconfig not needed.
+
+### 5062 -- stb_image, the last JPEG decoder
+
+5061 on the board: the preroll reserve built at the delivery rate
+(12.3 s in the first five seconds, not 2.0), held 27-29 s for five and a
+half minutes including a 42% window, and there were no reconnects. The
+decoder's window stayed at 5-10 KB undecoded, so the per-frame wait was
+the whole of it. First sound at 23.7 s is the 28 s start target on a
+24 kHz ring, reached rather than cut short. The maintainer chose to keep
+the full reserve.
+
+THE LOGO. The BBC World Service logo never printed "cover is a
+progressive JPEG", so it passed the SOF0/SOF1 marker walk. The hardware
+refused it on size (145x145, not a multiple of 8) and TJpgDec refused it
+as JDR_FMT3, an unsupported flavour: SOF1, or a chroma layout TJpgDec
+does not do. The file could not be fetched from the session to say
+which. Either way it is not progressive, and 5057's note was wrong about
+that.
+
+components/stbjpeg wraps stb_image v2.30 (public domain, pinned to
+013ac3b, fetched and SHA256-checked by cmake/vendored.cmake like minimp3
+and pngle). JPEG only; everything allocated in PSRAM; output converted to
+this panel's RGB565 and thinned by whole steps to the smallest size that
+still covers the screen box. It is asked only when the others cannot
+answer:
+- a progressive (SOF2) cover, which the marker walk used to refuse
+  outright, goes straight to it;
+- after TJpgDec fails on the format (ESP_FAIL), on both the
+  hardware-refused and the too-big-for-hardware branches. A TJpgDec
+  out-of-memory does not try it, since stb_image needs more.
+
+Memory is asked for first: a progressive decode holds every coefficient
+of the picture at once, about 10 bytes a pixel at the peak with the
+output, so a 1000x1000 cover is about 10 MB for a moment. Anything over
+STBJPEG_MAX_PIXELS (4 MP), or over free PSRAM, is refused with a line
+that says how much it wanted. stream_art_decodable() now passes
+progressive station logos instead of sending them to the directory.
+
+stb_image is compiled -fwrapv. texttest's corruption sweep (9000
+damaged copies of three fixtures, under ASan and UBSan) found a signed
+overflow in its IDCT on damaged input. Defined as wrapping, that is
+garbage pixels, not undefined behaviour. With it, none of the 9000
+crashed or read out of bounds, and 4631 still decoded to something.
+
+stbjpegtest: baseline, progressive, SOF1 and progressive greyscale at
+145x145 all decode; progressive matches baseline to within encoding
+noise; SOF1 matches SOF0 exactly; 1500x1000 into a 720x400 box comes out
+750x500; a 5000x5000 header is refused before any allocation. Fixtures
+are made with PIL and committed, so CI needs no PIL. The Makefile fetches
+stb_image.h with the same pin and hash.
+
+What to look for on the board: `cover decoded by stb_image: 145x145 ->
+145x145, 41 KB, N ms` for the BBC logo. No idf_component.yml or
+sdkconfig.defaults change.

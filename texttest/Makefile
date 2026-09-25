@@ -167,6 +167,14 @@ PCMFOLD_BIN := pcmfoldtest
 # chopping rather than as a pause.
 BUFPLAN_BIN := bufferplantest
 
+# 5062: stb_image as the last JPEG decoder -- progressive covers and the
+# flavours TJpgDec calls JDR_FMT3. stb_image.h is gitignored; fetched
+# here, pinned and hash-checked, the same as cmake/vendored.cmake.
+STBJPEG_BIN := stbjpegtest
+STB_H   := ../components/stbjpeg/stb_image.h
+STB_URL := https://raw.githubusercontent.com/nothings/stb/013ac3beddff3dbffafd5177e7972067cd2b5083/stb_image.h
+STB_SHA := 594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3
+
 # Which decoder a stream's bytes go to. The bytes win over Content-Type,
 # because handing AAC to minimp3 does not fail -- it produces noise, and
 # noise from a live stream is hard to tell from a bad connection.
@@ -213,7 +221,7 @@ NETLINK_BIN := netlinktest
 # ../test_audio_files so the bytes under test are the bytes on the card.
 CUE_BIN := cuesheettest
 
-all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
+all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -367,7 +375,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN) $(MEDIAINDEX_BIN) $(MEDIAWALK_BIN) $(MEDIASYNC_BIN) $(MENUSCROLL_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN) $(MEDIAINDEX_BIN) $(MEDIAWALK_BIN) $(MEDIASYNC_BIN) $(MENUSCROLL_BIN) $(STBJPEG_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -427,6 +435,20 @@ $(BUFPLAN_BIN): bufferplantest.c ../main/bufferplan.h
 run-bufplan: $(BUFPLAN_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BUFPLAN_BIN)
 
+$(STB_H):
+	curl -fsSL "$(STB_URL)" -o $@.tmp
+	echo "$(STB_SHA)  $@.tmp" | sha256sum -c - >/dev/null || (rm -f $@.tmp; echo "stb_image.h: hash mismatch"; exit 1)
+	mv $@.tmp $@
+
+$(STBJPEG_BIN): stbjpegtest.c ../components/stbjpeg/stbjpeg.c ../components/stbjpeg/stbjpeg.h $(STB_H)
+	$(CC) $(WARNCFLAGS) -I../components/stbjpeg -c stbjpegtest.c -o /dev/null
+	$(CC) $(CFLAGS) -I../components/stbjpeg -Wno-sign-compare -Wno-unused-function \
+	    -Wno-unused-but-set-variable -Wno-type-limits -Wno-shift-negative-value \
+	    -Wno-implicit-fallthrough -fwrapv -fno-sanitize=signed-integer-overflow -o $@ stbjpegtest.c ../components/stbjpeg/stbjpeg.c $(LDFLAGS)
+
+run-stbjpeg: $(STBJPEG_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(STBJPEG_BIN)
+
 $(LEVELHIST_BIN): levelhisttest.c ../main/levelhist.h
 	$(CC) $(WARNCFLAGS) -c levelhisttest.c -o /dev/null
 	$(CC) $(CFLAGS) -D_GNU_SOURCE -o $@ levelhisttest.c $(LDFLAGS)
@@ -482,4 +504,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue clean
