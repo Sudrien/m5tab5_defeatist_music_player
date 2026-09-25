@@ -572,6 +572,11 @@ void browser_set_radio_status(const char *line)
     s_dirty = true;
 }
 
+/* 5063: defined with browser_set_station() below; declared here because
+ * load_stations() re-finds the playing row by URL. */
+static int  s_playing_station;
+static char s_playing_url[STATION_URL_MAX];
+
 /* Fill the rows from the station list. Same entry_t the files use, so
  * everything downstream of here is unchanged. */
 static void load_stations(void)
@@ -586,6 +591,7 @@ static void load_stations(void)
         }
     }
     const int n = stations_count();
+    int found = -1;     /* 5063: the playing station's row in THIS list */
     for (int i = 0; i < n && s_count < MAX_ENTRIES; i++) {
         station_t st;
         if (!stations_get(i, &st)) continue;
@@ -593,8 +599,12 @@ static void load_stations(void)
         if (!s_entries[s_count].name) break;
         s_entries[s_count].is_dir = false;
         s_entries[s_count].fav = favorites_contains(st.url);
+        if (found < 0 && s_playing_url[0] && strcmp(st.url, s_playing_url) == 0) {
+            found = s_count;
+        }
         s_count++;
     }
+    s_playing_station = found;
     /* NOT sorted. The file's order is the listener's order -- it is what
      * next and previous move through, and what stations_index() counts
      * in. Sorting the display would make the first row and the first
@@ -864,8 +874,25 @@ static char s_playing[512];
  */
 static int s_playing_station = -1;
 
+/*
+ * 5063: AND ITS URL, because the index belongs to the list it was chosen
+ * from. BBC World Service played as station 2 of 2 from the kept list;
+ * opening "news", where it is row 0, left the marker on row 1 -- the
+ * index carried into a list it was never an index of. load_stations()
+ * finds the row again by this. The scratch is module scope, not a
+ * local: a station_t is over 600 bytes (CLAUDE.md), and this runs on the
+ * player task.
+ */
+static char      s_playing_url[STATION_URL_MAX];
+static station_t s_set_scratch;
+
 void browser_set_station(int index)
 {
+    if (index >= 0 && stations_get(index, &s_set_scratch)) {
+        snprintf(s_playing_url, sizeof(s_playing_url), "%s", s_set_scratch.url);
+    } else {
+        s_playing_url[0] = '\0';
+    }
     if (index == s_playing_station) return;
     s_playing_station = index;
     s_dirty = true;     /* same reason as browser_set_playing()'s */

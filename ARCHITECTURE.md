@@ -12191,3 +12191,27 @@ stb_image.h with the same pin and hash.
 What to look for on the board: `cover decoded by stb_image: 145x145 ->
 145x145, 41 KB, N ms` for the BBC logo. No idf_component.yml or
 sdkconfig.defaults change.
+
+### 5063 -- The playing station is marked by URL, not by a stale index
+
+5062 on the board (v0.4.0-67): `cover decoded by stb_image: 145x145 ->
+145x145, 41 KB, 11 ms`, then `cover enlarged to 560x560`. BBC World
+Service has its logo.
+
+The same run: the highlighted station in the "news" list was one row
+off. BBC was started as station 2 of 2 from the kept list, so
+browser_set_station() was told 1. Opening "news", where BBC is row 0,
+kept the 1, and row 1 was marked. The index belonged to the list it was
+chosen from and was carried into one it was never an index of.
+
+browser_set_station() now also keeps the station's URL, and
+load_stations() finds that URL's row in whatever list it has just loaded
+(first match), or marks nothing when the station is not in it. Not
+host-tested: browser.c does not build on a host. What to look for: play
+a kept station, open a directory list that has it at another position,
+and the marker is on its row there.
+
+Also seen, not changed: tapping the station already playing, from a
+different list, restarts it. The fade dropped 3.4 MB (about 35 s) of
+queued audio and the reserve started again from nothing, at 3-4 s,
+SHORT. The player could treat the same URL as already playing.
