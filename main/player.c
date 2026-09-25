@@ -6209,6 +6209,11 @@ static void sleep_timer_tick(void)
  * bound as netstream's NET_WAIT_MAX_MS.
  */
 #define FETCH_NET_WAIT_MS   (25000)
+
+/* 5074: a station tapped with no network, held on the list. Same bound. */
+#define STATION_NET_WAIT_MS (25000)
+static int      s_held_station = -1;
+static int64_t  s_held_since;
 static int64_t s_fetch_wait_since;      /* 0 when not waiting */
 
 static void service_station_fetch(void)
@@ -7029,6 +7034,30 @@ static void ui_task(void *arg)
                 break;
             case BROWSER_PLAY_STREAM: {
                 /*
+                 * 5074: NO NETWORK YET, SO THE LIST STAYS.
+                 *
+                 * Leaving for the player screen with nothing to connect
+                 * to put "Reconnecting" over a blank card for as long as
+                 * the join took. The tap is held instead: the chooser
+                 * stays up with a spinner and the station's name, and
+                 * the pass below plays it and closes the list when
+                 * net_online() says there is a network -- or gives up
+                 * after STATION_NET_WAIT_MS and says why, still on the
+                 * list. A second tap replaces the first; cancel drops it.
+                 */
+                if (!net_online() && settings_wifi_enabled()) {
+                    station_t held;
+                    char line[96];
+                    snprintf(line, sizeof(line), "waiting for the network to play %s",
+                             stations_get(r.index, &held) ? held.name : "that");
+                    if (s_held_station < 0) s_held_since = esp_timer_get_time();
+                    s_held_station = r.index;
+                    ESP_LOGI(TAG, "station %d held until the network is up", r.index + 1);
+                    browser_set_radio_status(line);
+                    browser_set_radio_busy(true);
+                    break;
+                }
+                /*
                  * The index is the choice; stations.c is asked what it
                  * means. Setting the index first is what makes next and
                  * previous continue from the station that was picked
@@ -7049,6 +7078,8 @@ static void ui_task(void *arg)
                 break;
             }
             case BROWSER_CANCELLED:
+                s_held_station = -1;                /* 5074 */
+                browser_set_radio_busy(false);
                 browser_close();
                 touch_swallow();        /* mirror image: see touch_swallow() */
                 s_repaint_art = true;
@@ -7129,6 +7160,38 @@ static void ui_task(void *arg)
                 break;
             }
 
+            /* 5074: a station held for the network. See BROWSER_PLAY_STREAM. */
+            if (s_held_station >= 0) {
+                const int64_t held_ms = (esp_timer_get_time() - s_held_since) / 1000;
+                /* The list closed some other way this pass: the hold goes
+                 * with it, so it cannot fire later over something else. */
+                if (!browser_is_open()) {
+                    s_held_station = -1;
+                    browser_set_radio_busy(false);
+                } else if (held_ms >= STATION_NET_WAIT_MS) {
+                    ESP_LOGW(TAG, "no network after %lld ms; station not started",
+                             (long long)held_ms);
+                    s_held_station = -1;
+                    browser_set_radio_busy(false);
+                    browser_set_radio_status("no network - check Wi-Fi, then tap again");
+                } else if (net_online()) {
+                    const int idx = s_held_station;
+                    s_held_station = -1;
+                    browser_set_radio_busy(false);
+                    browser_set_radio_status("");
+                    station_t st;
+                    stations_set_index(idx);
+                    if (stations_get(idx, &st)) {
+                        ESP_LOGI(TAG, "network up after %lld ms; station %d of %d: %s",
+                                 (long long)held_ms, idx + 1, stations_count(), st.name);
+                        request_stream(st.url, st.name);
+                    }
+                    browser_close();
+                    touch_swallow();
+                    s_repaint_art = true;
+                }
+            }
+
             /*
              * And the answer, when it comes.
              *
@@ -7144,6 +7207,11 @@ static void ui_task(void *arg)
                 const uint32_t now_epoch = s_stations_epoch;
                 if (now_epoch != drawn_epoch) {
                     drawn_epoch = now_epoch;
+                    /* 5074: a held row number means nothing in a new list. */
+                    if (s_held_station >= 0) {
+                        s_held_station = -1;
+                        browser_set_radio_busy(false);
+                    }
                     browser_stations_reloaded();
                 }
                 static uint32_t drawn_stars;

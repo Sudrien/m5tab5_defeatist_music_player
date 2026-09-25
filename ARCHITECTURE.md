@@ -12474,3 +12474,32 @@ Not host-tested (netstream.c). What to look for: after a drop,
 `gateway ... no answer straight after a drop; asking for a radio
 restart`, `restarting the radio`, then `joined` and the stream back,
 all within about 15 s of the drop.
+
+### 5074 -- No network, so the list stays
+
+5072-5073 on the board (v0.4.0-79). 5073 and 5069 recovered a dead
+link for the first time: the drop at 57.3 s, `gateway 192.168.5.1 no
+answer straight after a drop; asking for a radio restart` at 58.4,
+`joined fivescore` at 77.7, audio again by 92. 5068's failover did its
+job too: .24, .24 and .25 silent, .33 played. Still to do from the same
+log: the router hands back the pool in a new order on each lookup, so
+"the next address" can be one already tried (.24 twice); the restart
+spent 10 s on two RPC timeouts to a transport already known dead; and
+5072's larger reserve did not stop `dma_alloc(5120) failed` 460 ms after
+`artwork requested ...; DMA 15691 free (largest 5888)` -- whether that
+build had the 64K pool is not in the log, which starts after boot.
+
+The request here is the maintainer's: a station tapped before there is
+a network should not leave the list. It did -- the player screen came
+up saying Connecting or Reconnecting over a blank card for as long as
+the join took.
+
+Now BROWSER_PLAY_STREAM, with no network and Wi-Fi switched on, holds
+the row instead. The chooser stays up with 5067's spinner and `waiting
+for the network to play NAME`. The chooser pass plays it and closes the
+list the moment net_online() is true (`network up after N ms; station
+...`), or after 25 s gives up on the list with `no network - check
+Wi-Fi, then tap again`. A second tap replaces the held station, cancel
+drops it, and so do the list closing some other way or the station list
+being reloaded, so a stale hold cannot fire later. Not host-tested
+(player.c).
