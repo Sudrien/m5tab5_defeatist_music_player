@@ -12450,3 +12450,27 @@ rather than guessed.
 
 sdkconfig.defaults changed: rm sdkconfig before building. Proof: the
 boot line says `Reserving pool of 64K`.
+
+### 5073 -- A dead link is found at the drop
+
+The same log, the other half. After `dma_alloc(5120) failed` the stream
+went quiet, `nothing for 5000 ms; treating as a drop`, and 5056's rule
+reconnected at once without a probe (`link was carrying audio; no
+probe`). The link was dead, so the connect sat in a 14 s DNS failure,
+the attempt took 27.7 s, and only then did the first probe run --
+`gateway 192.168.5.1 no answer` 29 s after the drop, which is the probe
+5069's restart waits on. The listener paused before its second probe.
+
+5056 skipped the probe to save the reserve on BBC's drops every 6-13 s.
+Those were 5058's one-second read timeout, not drops, and real drops
+have been rare since. A healthy probe answers in 5-40 ms (every log of
+this series). So after a drop the probe runs again, and if it finds the
+gateway silent on Wi-Fi it asks for the restart right there -- no second
+probe, because a link that was carrying audio a moment ago and now has a
+silent gateway is not a slow network. wifi.c still holds it to one a
+minute, and the wait loop's two-probe rule stays for the other cases.
+
+Not host-tested (netstream.c). What to look for: after a drop,
+`gateway ... no answer straight after a drop; asking for a radio
+restart`, `restarting the radio`, then `joined` and the stream back,
+all within about 15 s of the drop.

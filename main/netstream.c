@@ -1251,8 +1251,24 @@ static void netstream_task(void *arg)
              */
             bool path;
             if (s_after_drop && net_online()) {
-                path = true;
-                snprintf(probe, sizeof(probe), "link was carrying audio; no probe");
+                /*
+                 * 5073: probed after all, and a silence here restarts the
+                 * radio at once. 5056 skipped this probe to save the
+                 * reserve on BBC's drops every 6-13 s; those were 5058's
+                 * one-second read timeout, and drops are rare now. A
+                 * healthy probe is tens of milliseconds. What the skip
+                 * cost was a dead link found 29 s late: after
+                 * `dma_alloc(5120) failed` the reconnect went straight to
+                 * a 14 s DNS failure, and the first probe -- the one 5069
+                 * waits on -- came after it.
+                 */
+                path = net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
+                                 probe, sizeof(probe));
+                if (!path && !ethernet_connected()) {
+                    ESP_LOGW(TAG, "%s straight after a drop; asking for a "
+                                  "radio restart", probe);
+                    wifi_request_restart("the gateway went silent under a stream");
+                }
             } else {
                 path = net_online() &&
                     net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
