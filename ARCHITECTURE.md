@@ -11867,3 +11867,26 @@ of its own header.
 
 Needs `rm sdkconfig` before building. The existing sdkconfig keeps
 HARDWARE_AES=y otherwise.
+
+### 5053 -- The Wi-Fi switch, acted on with no card
+
+5052 on the board: with the cable streaming and Wi-Fi switched on, the
+stream held (no esp-aes failures). The radio came up half-way instead:
+`mempool OOM start (TX)` with no end, the first RPC unanswered, scans
+refused. Internal free fell from 80 KB to 42 KB. The next boot says `CPU
+has been reset by WDT`, so that half-up radio probably ended the
+session. The tail that would name the task was not captured.
+
+The same boot showed the other half of 5049 not working: Wi-Fi had been
+left on, and nothing brought it up. The radio's only boot push is
+wifi_apply_settings() in restore_last_track(), inside the gate that
+waits for a card's settings to be adopted. With no card that gate never
+opens. The switch was in NVS and read in time (5051), and nothing
+applied it.
+
+The idle loop's generation-gated branch, which 5048 already runs with
+no volume, now calls wifi_apply_settings() when nothing is mounted. It
+is a comparison and returns at once when the radio already matches.
+
+Still open: Wi-Fi does not fit beside USB Ethernet (the radio's own
+buffers), and a start that half-fails is not powered back down.

@@ -12759,6 +12759,20 @@ static void player_loop(void)
                      * already noticed. See cardtime.h.
                      */
                     cardtime_note_volumes();
+                } else {
+                    /*
+                     * 5053: no volume, so no settings file, so the one
+                     * push that brings the radio up at boot --
+                     * wifi_apply_settings() in restore_last_track(),
+                     * which runs only once a card's settings are adopted
+                     * -- never happens. The switch has been in NVS since
+                     * 5049 and read in time since 5051, and nothing acted
+                     * on it: a card-less boot with Wi-Fi left on stayed
+                     * off until a track played. Applied here instead, on
+                     * each change of what is mounted while nothing is.
+                     * It is a comparison, so a second call does nothing.
+                     */
+                    wifi_apply_settings();
                 }
             }
 
