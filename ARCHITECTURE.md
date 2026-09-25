@@ -11495,3 +11495,39 @@ flash is exonerated. The remaining knob would then be the converter's
 complexity (1 is about half the instructions of 2), and past that the
 flash mode itself (QIO/80 MHz), which is a board question, not a
 code one.
+
+### 5039 -- The USB path's own resampler
+
+5038 put esp_ae_rate_cvt's inner loop in IRAM and the board still said
+`223% of real time, worst slice 53120 us`. Espressif's own table for
+that library (docs/README_RATE_CVT.md, ESP32-S3 at 240 MHz) gives
+44.1 -> 48 kHz at complexity 2 as 1.7% of a core. The P4 build of 1.3.0
+is two orders of magnitude off its own documentation, on a pinned
+version this tree cannot move past (1.4 needs rev 3 silicon), and
+nothing left to try from outside a precompiled archive. Its per-sample
+object calls a 64-bit divide (`__divdi3`) from four places, which is
+the likeliest story and not one this tree can fix.
+
+So the USB path stops using it. `main/polyrsp.c` is a plain polyphase
+resampler: the reduced ratio L/M (160/147 for 44.1 -> 48 kHz), one
+Kaiser-windowed sinc (beta 6) designed in floating point at open, split
+into L rows of 48 Q15 taps (scaled up by in/out when converting down,
+at most 96), each row normalised to unity gain. Per output frame it is
+48 multiply-adds per channel into int32 and a saturating shift, no
+divides; the phase step is an add and a compare. 44.1 -> 48 kHz is
+about 4.6 M multiply-adds a second. The table is 15 KB at that ratio,
+in PSRAM so the radio's DMA keeps the internal RAM; the row a sample
+reads is 96 contiguous bytes.
+
+Measured on the host against a fitted sine, stereo, 1024-frame blocks
+and odd block sizes alike: 72-80 dB SNR through 19 kHz for 44.1 -> 48,
+48 -> 44.1, 88.2/96 -> 48 and 22.05/32/11.025 -> 48; passband within
+0.15 dB at 19 kHz; content above the lower rate's Nyquist gone. That is
+below what esp_ae claims at complexity 2 and far above what reaches a
+car through a Bluetooth codec.
+
+5037's log line and valve stay unchanged, so the board's number decides
+it. rateconv.c (the crossfade carry, 5021) still uses esp_ae on the
+decode task; if this one measures well, that is the next thing to move.
+5038's linker fragment now places code nothing on the USB path calls;
+left in until that is settled.

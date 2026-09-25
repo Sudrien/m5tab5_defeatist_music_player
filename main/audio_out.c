@@ -29,7 +29,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-#include "esp_ae_rate_cvt.h"
+#include "polyrsp.h"
 
 #include "audio_out.h"
 #include "battery.h"
@@ -172,8 +172,8 @@ static int16_t *s_scratch;
  * WHERE EACH HALF RUNS. The converter is OPENED only in
  * audio_out_set_format(), on the decode task, and only ever RUN from
  * audio_out_write(), on the writer. The split is the stack: the filter
- * design in esp_ae_rate_cvt_open() peaks at 996 bytes (measured under
- * qemu with the P4 objects of esp_audio_effects 1.3), and the writer
+ * design in polyrsp_open() is floating point with its scratch on the
+ * heap (5039; it was esp_ae_rate_cvt_open() before), and the writer
  * is a 4 KB task at priority 6 whose headroom nobody has measured. The
  * per-block process is a few hundred bytes. A device plugged in
  * mid-track that needs a conversion therefore waits for the next track
@@ -185,10 +185,10 @@ static int16_t *s_scratch;
  * mid-block on the old pair.
  */
 #define CONV_IN_FRAMES          (GAIN_SCRATCH_BYTES / 4)
-#define CONV_COMPLEXITY         (2)
 
 static SemaphoreHandle_t        s_cv_lock;
-static esp_ae_rate_cvt_handle_t s_cv;
+/* 5039: polyrsp, not esp_ae_rate_cvt -- see polyrsp.h. */
+static polyrsp_t               *s_cv;
 static uint32_t                 s_cv_in, s_cv_out;
 static int16_t                 *s_cv_buf;
 static uint32_t                 s_cv_buf_frames;
@@ -229,25 +229,14 @@ static bool conv_prepare(uint32_t in, uint32_t out)
     bool ok = true;
     if (!(s_cv && s_cv_in == in && s_cv_out == out)) {
         if (s_cv) {
-            esp_ae_rate_cvt_close(s_cv);
+            polyrsp_close(s_cv);
             s_cv = NULL;
             s_cv_in = s_cv_out = 0;
         }
         if (in && out && in != out) {
-            esp_ae_rate_cvt_cfg_t cfg = {
-                .src_rate = in,
-                .dest_rate = out,
-                .channel = 2,
-                .bits_per_sample = 16,
-                .complexity = CONV_COMPLEXITY,
-                /* 5037: SPEED, the variant with its tables in internal
-                 * RAM -- see s_cv_us. */
-                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
-            };
-            uint32_t need = 0;
-            ok = esp_ae_rate_cvt_open(&cfg, &s_cv) == ESP_AE_ERR_OK && s_cv &&
-                 esp_ae_rate_cvt_get_max_out_sample_num(s_cv, CONV_IN_FRAMES,
-                                                        &need) == ESP_AE_ERR_OK;
+            s_cv = polyrsp_open(in, out, CONV_IN_FRAMES);
+            uint32_t need = s_cv ? polyrsp_max_out(s_cv) : 0;
+            ok = s_cv != NULL;
             if (ok && need > s_cv_buf_frames) {
                 /* 5037: internal first -- it is read and written once per
                  * slice on the writer -- and PSRAM only if that fails. */
@@ -266,7 +255,7 @@ static bool conv_prepare(uint32_t in, uint32_t out)
                 s_cv_in = in;
                 s_cv_out = out;
             } else {
-                if (s_cv) esp_ae_rate_cvt_close(s_cv);
+                if (s_cv) polyrsp_close(s_cv);
                 s_cv = NULL;
                 ESP_LOGW(TAG, "cannot convert %lu -> %lu Hz for USB",
                          (unsigned long)in, (unsigned long)out);
@@ -738,15 +727,10 @@ esp_err_t audio_out_write(const void *data, size_t len)
                          (unsigned)remain);
                 return ESP_ERR_INVALID_STATE;
             }
-            uint32_t got = s_cv_buf_frames;
             esp_err_t err = ESP_OK;
             const int64_t t0 = esp_timer_get_time();
-            if (esp_ae_rate_cvt_process(s_cv, (esp_ae_sample_t)src,
-                                        (uint32_t)(n / 4),
-                                        (esp_ae_sample_t)s_cv_buf,
-                                        &got) != ESP_AE_ERR_OK) {
-                got = 0;
-            }
+            const uint32_t got = polyrsp_process(s_cv, (const int16_t *)src,
+                                                 (uint32_t)(n / 4), s_cv_buf);
             const uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
             s_cv_us += dt;
             if (dt > s_cv_us_max) s_cv_us_max = dt;
