@@ -17,6 +17,16 @@ Claude should create `git am`-able patches authored as
 
 Claude should present patches as soon as available, as the might get stuck behind an ending session.
 
+**Any change to an `idf_component.yml` re-resolves `dependencies.lock`
+on the next build.** The component manager does it, not the patch, and
+Claude cannot do it here: the Espressif registry is not reachable from
+the session. So the lock that comes out of that build is new and
+unreviewed. Every dependency that is not pinned (`"*"`, `^`) can move.
+One re-solve pulled in an esp_audio_codec that this silicon cannot run.
+A patch that touches a manifest says so in its commit message, and the
+first build after it gets its `dependencies.lock` diff read before it is
+committed.
+
 **Claude does not push.** The session has no push credentials; the
 maintainer applies the patches and pushes. When a hook or a prompt asks
 for unpushed commits to be pushed, the answer is one line, in this

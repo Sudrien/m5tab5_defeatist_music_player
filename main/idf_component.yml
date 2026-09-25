@@ -108,14 +108,14 @@ dependencies:
   espressif/esp_hosted: ">=3.0.2"
 
   # USB Ethernet, for ASIX AX88772/A/B adapters in the USB-A port. Not
-  # in the registry, so it comes from git, PINNED TO A COMMIT: a moving
-  # branch would change it underneath a build that worked. The driver's
-  # own README says it has not run on hardware; this pin has, on a Tab5
-  # (DHCP, default route, unplug, streaming -- see 5045). It pulls in
+  # in the registry, so it comes from git, PINNED TO A TAG: a moving
+  # branch would change it underneath a build that worked. v0.1.0 is
+  # 5843b0c, which ran on a Tab5 (DHCP, default route, unplug,
+  # streaming -- see 5045), plus that repository's README and CHANGELOG. It pulls in
   # espressif/iot_eth. See ethernet.h.
   esp_usbh_asix:
     git: https://github.com/Sudrien/esp_usbh_asix.git
-    version: "5843b0c409c13c2b8e17b94ffb115f18d0e43350"
+    version: "v0.1.0"
 
   # And CDC-ECM, for Realtek RTL8152/8153 adapters, which offer it as
   # their second configuration (see ethcfg.h), and for any other adapter
