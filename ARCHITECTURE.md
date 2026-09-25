@@ -11424,3 +11424,40 @@ to match the host so the newer transport options exist at all.
 
 The same run confirmed 5027: Wi-Fi off and on again with a stream
 retrying, and no panic.
+
+### 5037 -- the conversion's cost, measured, and a valve
+
+With Wi-Fi off, the DG80 in the port and a 44.1 kHz file, the whole
+USB chain came up for the first time:
+
+    uac-host: Set EP 3 frequency 48000
+    tab5_uac: streaming: alt 1, 2 ch, 16-bit, 48000 Hz               (5026)
+    tab5_audio: USB device takes 48000 Hz; converting 44100 -> 48000 Hz (5023)
+    tab5_uac: device volume spans only 15 dB ...; held at its top   (5024)
+    tab5_audio: output: USB audio
+
+Then the task watchdog fired twice. IDLE0 was starved, `i2s_wr` was the
+running task, and the second dump was inside `fa_resample_process`. The
+decode task got only the gaps (`ring send blocked 500 ms` with the ring
+empty, every half second).
+
+Under qemu the P4 objects of `esp_audio_effects` 1.3 cost about 37 M
+instructions per second of 44.1->48 kHz stereo at complexity 2, in either
+perf variant. That is a tenth of a 360 MHz core. The hardware disagreed
+by a large factor. Memory is the suspect. The output buffer was in PSRAM,
+the library was in its MEMORY variant, and on this board PSRAM also
+feeds a 720x1280 display that already logs DSI underruns. qemu has no
+cache and no contention, so its instruction count cannot see that.
+
+So:
+
+- The library runs in its SPEED variant (tables in internal RAM), and
+  the output buffer is allocated internal first, falling back to PSRAM.
+- Each slice's `esp_ae_rate_cvt_process()` is timed. Once per second of
+  input the log says `USB conversion 44100 -> 48000 Hz: N% of real time,
+  worst slice M us`.
+- Past `CONV_MAX_LOAD_PCT` (50%) over a second, the USB route is
+  abandoned for the rest of the track (`s_cv_too_slow`, which
+  `arbitrate()` now respects) and the audio goes to the jack. The next
+  track tries again. The writer at priority 6 cannot be the reason the
+  board resets, whatever the cause turns out to be.

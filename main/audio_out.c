@@ -24,6 +24,7 @@
 #include "esp_check.h"
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
@@ -195,6 +196,30 @@ static uint32_t                 s_cv_buf_frames;
  * otherwise. Differs from s_rate exactly when the writer converts. */
 static volatile uint32_t        s_usb_rate;
 
+/*
+ * 5037: what the conversion costs, measured where it runs.
+ *
+ * The first board run with the DG80 streaming converted 44.1 -> 48 kHz on
+ * the writer and the task watchdog fired twice -- IDLE0 starved, i2s_wr
+ * the running task, the second dump inside fa_resample_process -- with
+ * the decode task getting only the gaps. Under qemu the same library
+ * costs about 37 M instructions per second of audio, a tenth of a core,
+ * so the hardware disagrees with the instruction count by a large factor,
+ * and memory is the suspect: the output buffer was in PSRAM and the
+ * library in its MEMORY variant, on a board whose PSRAM also feeds the
+ * display. Both are internal now; these numbers say whether that was it.
+ *
+ * And whatever the cause, the writer must never be the reason the board
+ * resets. Over one second of audio, conversion taking more than
+ * CONV_MAX_LOAD_PCT of real time abandons the USB route for the rest of
+ * the track (s_cv_too_slow, cleared at the next audio_out_set_format()).
+ */
+#define CONV_MAX_LOAD_PCT       (50)
+static uint64_t s_cv_us;            /* process() time this window */
+static uint32_t s_cv_us_max;        /* worst single slice */
+static uint32_t s_cv_frames;        /* input frames this window */
+static volatile bool s_cv_too_slow;
+
 /* Decode task only. Makes the converter in -> out ready, or closes it
  * when out is zero or equal to in. False if the library refuses. */
 static bool conv_prepare(uint32_t in, uint32_t out)
@@ -215,16 +240,26 @@ static bool conv_prepare(uint32_t in, uint32_t out)
                 .channel = 2,
                 .bits_per_sample = 16,
                 .complexity = CONV_COMPLEXITY,
-                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY,
+                /* 5037: SPEED, the variant with its tables in internal
+                 * RAM -- see s_cv_us. */
+                .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED,
             };
             uint32_t need = 0;
             ok = esp_ae_rate_cvt_open(&cfg, &s_cv) == ESP_AE_ERR_OK && s_cv &&
                  esp_ae_rate_cvt_get_max_out_sample_num(s_cv, CONV_IN_FRAMES,
                                                         &need) == ESP_AE_ERR_OK;
             if (ok && need > s_cv_buf_frames) {
-                int16_t *nb = heap_caps_realloc(s_cv_buf, (size_t)need * 4,
+                /* 5037: internal first -- it is read and written once per
+                 * slice on the writer -- and PSRAM only if that fails. */
+                heap_caps_free(s_cv_buf);
+                s_cv_buf_frames = 0;
+                s_cv_buf = heap_caps_malloc((size_t)need * 4,
+                                            MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+                if (!s_cv_buf) {
+                    s_cv_buf = heap_caps_malloc((size_t)need * 4,
                                                 MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-                if (nb) { s_cv_buf = nb; s_cv_buf_frames = need; }
+                }
+                if (s_cv_buf) s_cv_buf_frames = need;
                 else ok = false;
             }
             if (ok) {
@@ -572,7 +607,7 @@ static void arbitrate(void)
             /* 5023: the rate it would take instead, if the converter for
              * it was made ready by audio_out_set_format(). */
             const uint32_t alt = uac_nearest_rate(s_rate, s_channels);
-            if (alt && alt != s_rate && conv_ready(s_rate, alt) &&
+            if (alt && alt != s_rate && !s_cv_too_slow && conv_ready(s_rate, alt) &&
                 uac_stream_start(alt, s_channels) == ESP_OK) {
                 usb_rate = alt;
                 ESP_LOGI(TAG, "USB device takes %lu Hz; converting %lu -> %lu Hz",
@@ -655,6 +690,10 @@ esp_err_t audio_out_set_format(uint32_t rate, uint8_t channels)
      * ask whether it is. Closed when nothing needs it. */
     const uint32_t alt = uac_present() ? uac_nearest_rate(rate, channels) : 0;
     conv_prepare(rate, (alt && alt != rate) ? alt : 0);
+    s_cv_too_slow = false;              /* 5037: a new track tries again */
+    s_cv_us = 0;
+    s_cv_us_max = 0;
+    s_cv_frames = 0;
 
     arbitrate();
     return ESP_OK;
@@ -701,12 +740,17 @@ esp_err_t audio_out_write(const void *data, size_t len)
             }
             uint32_t got = s_cv_buf_frames;
             esp_err_t err = ESP_OK;
+            const int64_t t0 = esp_timer_get_time();
             if (esp_ae_rate_cvt_process(s_cv, (esp_ae_sample_t)src,
                                         (uint32_t)(n / 4),
                                         (esp_ae_sample_t)s_cv_buf,
                                         &got) != ESP_AE_ERR_OK) {
                 got = 0;
             }
+            const uint32_t dt = (uint32_t)(esp_timer_get_time() - t0);
+            s_cv_us += dt;
+            if (dt > s_cv_us_max) s_cv_us_max = dt;
+            s_cv_frames += (uint32_t)(n / 4);
             if (got) {
                 if (soft_gain()) {
                     apply_gain(s_cv_buf, s_cv_buf, (size_t)got * 2,
@@ -734,6 +778,31 @@ esp_err_t audio_out_write(const void *data, size_t len)
             }
             src += n;
             remain -= n;
+
+            /* 5037: once a second of input, the load, and the valve. */
+            if (s_rate && s_cv_frames >= s_rate) {
+                const uint64_t audio_us = (uint64_t)s_cv_frames * 1000000u / s_rate;
+                const unsigned pct = (unsigned)(s_cv_us * 100u / (audio_us ? audio_us : 1));
+                ESP_LOGI(TAG, "USB conversion %lu -> %lu Hz: %u%% of real time, "
+                              "worst slice %lu us",
+                         (unsigned long)s_rate, (unsigned long)usb_rate, pct,
+                         (unsigned long)s_cv_us_max);
+                s_cv_us = 0;
+                s_cv_us_max = 0;
+                s_cv_frames = 0;
+                if (pct > CONV_MAX_LOAD_PCT) {
+                    ESP_LOGW(TAG, "USB conversion too slow (%u%% > %d%%); "
+                                  "analog for the rest of this track",
+                             pct, CONV_MAX_LOAD_PCT);
+                    s_cv_too_slow = true;
+                    arbitrate();
+                    if (s_route != ROUTE_USB && remain) {
+                        size_t written = 0;
+                        return i2s_channel_write(s_tx, src, remain, &written, portMAX_DELAY);
+                    }
+                    return ESP_OK;
+                }
+            }
         }
         return ESP_OK;
     }
