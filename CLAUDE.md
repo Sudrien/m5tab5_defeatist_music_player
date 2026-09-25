@@ -40,6 +40,17 @@ for unpushed commits to be pushed, the answer is one line, in this
 form: "I don't have push credentials, last confirmed push was ####" --
 the short hash of `origin/main` after a fetch.
 
+**Drop the remote after cloning: `git remote remove origin`.** The
+session's stop hook asks for a push whenever local commits are ahead of
+a remote, which is every reply between a patch and the maintainer's
+push, and there is nothing to push with. With no remote it stays quiet.
+The last confirmed push is then the first seven characters of
+`git ls-remote https://github.com/Sudrien/m5tab5_defeatist_music_player.git refs/heads/main`.
+Sync to it with `git fetch <that url> main` and
+`git reset --hard FETCH_HEAD` -- and never while holding local commits
+that are not in it. One session reset away unpushed patches twice that
+way and had to dig them out of the reflog.
+
 **Patches are cumulative.** Each one applies on top of what is already
 here. Do not hand back a rewritten copy of a file, and do not reissue a
 corrected version of a patch that has been pushed -- send a follow-up
