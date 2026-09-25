@@ -1267,6 +1267,9 @@ static void netstream_task(void *arg)
                     ESP_LOGW(TAG, "%s; waiting before the lookup", probe);
                 }
                 int waited = 0, since_probe = 0;
+                /* 5069: probes that found an address and a silent
+                 * gateway, counting the one that brought us here. */
+                int silent = net_online() ? 1 : 0;
                 s_waiting_net = true;           /* 5067 */
                 while (!path && waited < NET_WAIT_MAX_MS &&
                        !superseded(gen)) {
@@ -1277,6 +1280,20 @@ static void netstream_task(void *arg)
                         since_probe = 0;
                         path = net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
                                          probe, sizeof(probe));
+                        /*
+                         * 5069: an address and a gateway that has not
+                         * answered twice is a radio that has stopped
+                         * moving packets, not a slow network -- the
+                         * transport out of DMA memory never came back by
+                         * itself. Restart it, once; wifi.c holds it to
+                         * one a minute. Not when a cable holds the route:
+                         * that silence is not the radio's.
+                         */
+                        if (!path && ++silent == 2 && !ethernet_connected()) {
+                            ESP_LOGW(TAG, "%s twice with an address; "
+                                          "asking for a radio restart", probe);
+                            wifi_request_restart("the gateway stopped answering");
+                        }
                     }
                 }
                 s_waiting_net = false;          /* 5067 */

@@ -12364,3 +12364,39 @@ ports, an over-long host and a short output buffer. The netstream half is
 not host-tested. What to look for on the board: RFI Monde logging
 `(1 of 4)`, then on a failure `(address X)` and the next attempt's
 `(2 of 4)` with a different address.
+
+### 5069 -- A silent gateway restarts the radio
+
+5068 on the board (v0.4.0-74, home network): `live02.rfi.fr is
+185.74.70.36 (1 of 4)` -- the DNS setting took -- and RFI Monde played
+at once. Two seconds after first sound, with the station's opening burst
+still arriving and the artwork lookup starting:
+
+    eh_sdio: dma_alloc(8192) failed; dropping read
+    tab5_netstream: nothing for 5000 ms; treating as a drop
+    hop 1: open failed after 5005 ms: ESP_ERR_HTTP_CONNECT (address 185.74.70.36)
+    gateway 192.168.5.1 no answer; waiting before the lookup
+
+and nothing after it worked -- the stream, the directory, the click --
+until the session ended. The same death as the Bossa run on the stale
+sdkconfig, without the AAC decoder: the ESP-Hosted transport out of DMA
+memory does not recover by itself. The address failover never got a
+fair try: the link was dead before a second address was reached.
+
+wifi_request_restart(): a flag and a wake for wifi.c's worker, which
+then runs wifi_stop() and wifi_start() in order under the apply lock
+(the order the header says keeps ESP-Hosted from abort()ing), and then
+the saved-network join it runs after every wake. At most once a minute,
+and not while the portal owns the radio. Logged as `restarting the
+radio: the gateway stopped answering`.
+
+netstream asks for it from its network wait: an address held and two
+probes in a row that found the gateway silent (about 3 s), and no cable
+holding the route. After a drop that is roughly: the drop, one failed
+connect, then the wait's first probe -- 10 s or so -- and the radio
+restart and join fit inside NET_WAIT_MAX_MS.
+
+Not host-tested (wifi.c, netstream.c). What to look for: the next time
+`gateway ... no answer` follows a working stream, `asking for a radio
+restart`, `restarting the radio`, `joined`, `network up after`, and the
+stream back.

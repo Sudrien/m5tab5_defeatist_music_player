@@ -373,6 +373,12 @@ static i2c_master_dev_handle_t s_exp2;
 static SemaphoreHandle_t s_lock;
 static SemaphoreHandle_t s_wake;
 
+/* 5069: see wifi_request_restart(). */
+#define RESTART_MIN_GAP_US  (60LL * 1000 * 1000)
+static volatile bool s_restart_req;
+static const char   *s_restart_why = "";
+static int64_t       s_restart_last_us;
+
 /* Defined below; the worker is declared here because wifi_init() has to
  * create the task before the reader exists in the file. */
 esp_err_t wifi_apply_settings(void);
@@ -823,11 +829,40 @@ static void wifi_task(void *arg)
         /* A wake is a switch press or a radio that has just come up; a
          * timeout is the retry for a player carried back into range. */
         const bool woke = xSemaphoreTake(s_wake, pdMS_TO_TICKS(RETRY_MS)) == pdTRUE;
+        if (woke && s_restart_req) {
+            /* 5069: stop and start in order, under the apply lock, so a
+             * switch press cannot land in the middle; the join below
+             * then runs as it does after any wake. */
+            s_restart_req = false;
+            if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
+            if (s_up && !portal_running()) {
+                ESP_LOGW(TAG, "restarting the radio: %s", s_restart_why);
+                s_restart_last_us = esp_timer_get_time();
+                wifi_stop();
+                const esp_err_t err = wifi_start();
+                if (err != ESP_OK) {
+                    ESP_LOGE(TAG, "radio did not come back: %s", esp_err_to_name(err));
+                }
+            }
+            if (s_lock) xSemaphoreGive(s_lock);
+        }
         if (woke) wifi_apply_settings();
         connect_saved(woke);
     }
 }
 
+
+void wifi_request_restart(const char *why)
+{
+    if (!s_wake || s_restart_req) return;
+    if (s_restart_last_us &&
+        esp_timer_get_time() - s_restart_last_us < RESTART_MIN_GAP_US) {
+        return;
+    }
+    s_restart_why = why ? why : "";
+    s_restart_req = true;
+    xSemaphoreGive(s_wake);
+}
 
 void wifi_request_apply(void)
 {

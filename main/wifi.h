@@ -213,6 +213,19 @@ esp_err_t wifi_apply_settings(void);
 void wifi_request_apply(void);
 
 /*
+ * 5069: power-cycle the radio and rejoin, soon, and return at once.
+ *
+ * For a link that has an address and has stopped moving packets: the
+ * ESP-Hosted transport out of DMA memory (`eh_sdio: dma_alloc(8192)
+ * failed`) never recovered on its own, and every request after it failed
+ * until a reboot. The worker runs wifi_stop() and wifi_start() in order
+ * under the same lock as wifi_request_apply(), then the saved-network
+ * join it always runs after a wake. At most once a minute, and not while
+ * the portal owns the radio. `why` goes in the log.
+ */
+void wifi_request_restart(const char *why);
+
+/*
  * Scan and log what is in the air. Requires the radio to be up.
  *
  * What the spike did, kept because it is the only way to see that the
