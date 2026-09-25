@@ -14,6 +14,7 @@
 #include "usb/usb_host.h"
 
 #include "ethcfg.h"
+#include "battery.h"
 #include "usbhost.h"
 
 static const char *TAG = "tab5_usbhost";
@@ -151,6 +152,12 @@ static void usb_lib_task(void *arg)
  */
 static bool enum_filter(const usb_device_desc_t *dev, uint8_t *config)
 {
+    /* 5031: the supply as the device is configured -- the moment it is
+     * allowed its full current. A bus-powered keyboard once browned the
+     * board out on plug-in (battery.h), and the DG80 arriving has twice
+     * been followed by the Wi-Fi link dying; this says whether the pack
+     * saw it. */
+    battery_trace_arm("usb device");
     const uint8_t want = ethcfg_select(dev->idVendor, dev->idProduct,
                                        dev->bNumConfigurations);
     if (want) {

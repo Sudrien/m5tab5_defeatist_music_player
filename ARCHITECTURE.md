@@ -11271,3 +11271,24 @@ fragmentation can refuse that with plenty free in total.
 
 If the numbers confirm it, the fix is to give the DMA pool more room or
 make the USB side take less, and the numbers will say which.
+
+### 5031 -- the supply when a USB device arrives, and when it streams
+
+The other half of 5030's question. Memory is one way the DG80 arriving
+could take Wi-Fi down. The supply is another. battery.h already records
+a bus-powered keyboard browning the board out on every plug-in, so a
+load step on the USB-A port is known to be able to reach the SoC. The
+Wi-Fi coprocessor sits on the same supply.
+
+`battery_trace_arm()` now fires at two moments. The first is
+`enum_filter()`, which runs as each device is about to be configured,
+the point where it is allowed its full current. The second is a
+successful `uac_stream_start()`, where isochronous data starts flowing
+and, on a Bluetooth transmitter, its radio starts sending. Each trace is
+the existing 1200-sample window with minimum, mean and sag, already
+used for seeks.
+
+What the trace sees is the pack, through the INA226. A dip on the 5 V
+or 3.3 V rail downstream of the regulators will show there only as the
+current step that caused it, so a small sag here does not clear the
+rails. A large one convicts them.

@@ -408,6 +408,9 @@ esp_err_t uac_stream_start(uint32_t rate, uint8_t channels)
     s_rate = rate;
     s_channels = channels;
     s_streaming = true;
+    /* 5031: the second load step -- isochronous data flowing and, on a
+     * Bluetooth transmitter, its radio starting to send it. */
+    battery_trace_arm("usb stream");
     ESP_LOGI(TAG, "streaming: alt %u, %u ch, 16-bit, %lu Hz",
              alt, channels, (unsigned long)rate);
 
