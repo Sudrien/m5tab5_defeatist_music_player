@@ -14,6 +14,7 @@
 #include "freertos/semphr.h"
 
 #include "stations.h"
+#include "radiokeep.h"
 #include "storage.h"
 #include "storage_io.h"
 
@@ -99,8 +100,21 @@ bool stations_load(void)
         if (n > 0) { from = (storage_id_t)id; break; }
     }
     if (from == STORAGE_COUNT) {
-        ESP_LOGI(TAG, "no %s on any volume", STATIONS_FILENAME);
         free(text);
+        /* 5048: no volume at all, rather than volumes without the file.
+         * Then the stations kept in flash are the list -- see
+         * radiokeep.h. With any volume present its list stands, even an
+         * absent one. */
+        bool any = false;
+        for (int id = 0; id < STORAGE_COUNT; id++) {
+            if (storage_present((storage_id_t)id)) any = true;
+        }
+        if (!any) {
+            static station_t kept[2];   /* 1.2 KB: not on the caller's stack */
+            const int k = radiokeep_list(kept);
+            if (k > 0) return stations_set_remote(kept, k, RADIOKEEP_LABEL);
+        }
+        ESP_LOGI(TAG, "no %s on any volume", STATIONS_FILENAME);
         return false;
     }
 

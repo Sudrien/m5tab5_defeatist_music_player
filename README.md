@@ -68,7 +68,7 @@ Note: the goal of this project is to max out the potential of this hardware with
 - Cue sheets
 
 ## v0.5.0 targets
-- zero storage internet radio scenario
+- zero storage internet radio scenario: the last station played and one starred station kept in flash, for a Tab5 with no card or drive (5048, needs a board run)
 - Expand web ui (is there an api to mirror/ map to local functions?)
 - Audio recording, since the hardware is  right there
   - input toggle (onboard array / headset mic / UAC)

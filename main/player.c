@@ -103,6 +103,7 @@
 #include "favorites.h"
 #include "starred.h"
 #include "stations.h"
+#include "radiokeep.h"
 #include "radiobrowser.h"
 #include "streamgain.h"
 #include "streamplan.h"
@@ -12090,6 +12091,10 @@ static track_end_t play_stream(const char *url, const char *name)
                 s_art_url[0] = '\0';
                 s_art_decoded = false;
                 s_art_screen_stale = false;
+                /* 5048: kept in flash for a boot with no media. A write
+                 * only when the station changed, and seconds of audio
+                 * are already in the ring. See radiokeep.h. */
+                radiokeep_note_played(s_stream_name, s_stream_url);
             }
             /* The click and the artwork fetch have moved: see below.
              * This branch now only does what its name says -- notices
@@ -12737,9 +12742,11 @@ static void player_loop(void)
             const uint32_t sgen = storage_generation();
             if (sgen != stations_gen) {
                 stations_gen = sgen;
+                /* 5048: loaded with no volume too, which installs the
+                 * stations kept in flash -- see radiokeep.h. */
+                load_station_files();
                 if (storage_present(STORAGE_SD) ||
                     storage_present(STORAGE_USB)) {
-                    load_station_files();
                     /*
                      * A volume that has just appeared is a card whose
                      * root has not been read yet, and its timestamps

@@ -15,6 +15,7 @@
 
 #include "favmatch.h"
 #include "favorites.h"
+#include "radiokeep.h"
 #include "stations.h"
 #include "storage.h"
 #include "storage_io.h"
@@ -44,9 +45,21 @@ bool favorites_url_eq(const char *a, const char *b)
     return favmatch_eq(a, b);
 }
 
+/* 5048: no volume at all. The one case in which the flash STAR stands in
+ * for favorites.m3u -- see radiokeep.h. With media present it is
+ * neither read nor changed. */
+static bool no_media(void)
+{
+    for (int id = 0; id < STORAGE_COUNT; id++) {
+        if (storage_present((storage_id_t)id)) return false;
+    }
+    return true;
+}
+
 bool favorites_contains(const char *url)
 {
     if (!url || !url[0]) return false;
+    if (no_media()) return radiokeep_star_is(url);
     lock_init();
 
     bool found = false;
@@ -442,6 +455,7 @@ bool favorites_remove(const char *url)
 bool favorites_toggle(const char *name, const char *url)
 {
     if (!url || !url[0]) return false;
+    if (no_media()) return radiokeep_star_toggle(name, url);
 
     if (favorites_contains(url)) {
         favorites_remove(url);

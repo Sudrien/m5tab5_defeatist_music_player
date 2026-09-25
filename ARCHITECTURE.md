@@ -11711,3 +11711,38 @@ The manifest changed, so the next build re-resolves dependencies.lock
 espressif/gmf_fft entries go, esp_audio_effects leaves
 direct_dependencies, and manifest_hash changes. Nothing else should
 move.
+
+### 5048 -- Two stations kept in flash, for no media
+
+The README's "zero storage internet radio scenario": a Tab5 with a saved
+network and nothing mounted had nothing to play, because every station
+list lives on a volume. radiokeep.c keeps two in NVS, namespace
+"radiokeep", beside the saved networks:
+
+- LAST, the last station to reach first sound. Written with media or
+  without, from play_stream()'s first-sound branch when the station is
+  not a reconnect of the same one, and only when the name or URL
+  changed.
+- STAR, one starred station. With any volume present it is neither
+  read nor changed: favorites_contains() and favorites_toggle() mean
+  favorites.m3u exactly as before. With no volume, those two go to the
+  flash slot instead, so the star button keeps working with nothing
+  mounted and holds one station.
+
+With no volume present, stations_load() installs STAR then LAST (when
+it is a different URL) through stations_set_remote(), labelled "Kept on
+this Tab5". A volume present without a stations.m3u keeps its old
+answer, no list. The player's generation-gated load now runs with no
+volume too, which is what puts the kept list up at a card-less boot and
+after a card is pulled.
+
+Each slot is a blob "name\0url\0uuid\0", usually around a hundred
+bytes. NVS appends entries and erases a 4 KB page only once it is full,
+and LAST is not rewritten for the same station, so the 20 KB partition
+takes millions of station changes before its sectors wear. The write
+happens on the decode loop at first sound, with seconds already in the
+ring, and it is skipped on reconnects.
+
+Built, not yet run on the board. The test: play a station with a card
+in, pull the card, reboot, and the RADIO tab should offer it. Star
+something with no media, reboot, and it should be first.
