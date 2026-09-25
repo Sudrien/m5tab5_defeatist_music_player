@@ -1,6 +1,6 @@
 dependencies:
   esp_usbh_asix:
-    component_hash: 1dac3eb5de88b091d2aa09cf0886802b8c93385498d0b56dfd2cc53e8ea4e4ef
+    component_hash: 379ee7d5917b12397161d97957371607d5356bbbfb8c00055725e60e3176b5df
     dependencies:
     - name: idf
       version: '>=5.4'
@@ -15,7 +15,7 @@ dependencies:
     - esp32s2
     - esp32s3
     - esp32p4
-    version: 5843b0c409c13c2b8e17b94ffb115f18d0e43350
+    version: 5ceb50dc77df3437c8fb0d8f30ea5b3871f51521
   espressif/cmake_utilities:
     component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
     dependencies:
@@ -50,17 +50,6 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 2.5.0
-  espressif/esp_audio_effects:
-    component_hash: 6ad72ee106e25b07c9ae5b8ec77b566ef8d697473095f1c982e13247005b9ba6
-    dependencies:
-    - name: espressif/gmf_fft
-      registry_url: https://components.espressif.com
-      require: private
-      version: ~1.0
-    source:
-      registry_url: https://components.espressif.com/
-      type: service
-    version: 1.3.0~1
   espressif/esp_hosted:
     component_hash: 495dc2e4d164dad2a9e6a81ad2a7aae696572d606369bcf2ca981b5ff2d72b0b
     dependencies:
@@ -182,13 +171,6 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 1.6.4
-  espressif/gmf_fft:
-    component_hash: b59451ef2f96d22b80c27a162515b21f1b85954dda434c0b092172164028779d
-    dependencies: []
-    source:
-      registry_url: https://components.espressif.com
-      type: service
-    version: 1.0.0
   espressif/iot_eth:
     component_hash: 3be03ff933e27e17887becbed16305a561b35b66a5a4978ac51ae7f9f2ec70ea
     dependencies:
@@ -278,7 +260,6 @@ direct_dependencies:
 - esp_usbh_asix
 - espressif/cmake_utilities
 - espressif/esp_audio_codec
-- espressif/esp_audio_effects
 - espressif/esp_hosted
 - espressif/esp_jpeg
 - espressif/esp_lcd_st7121
@@ -287,6 +268,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/iot_usbh_ecm
 - idf
-manifest_hash: 457239c9118858b1a2abae56a6f5edda5d6ba74acaf3c2297474f13114750b40
+manifest_hash: 890d64002e193533a369ccc66f16aa6efa303bd4f309f4e895df42fa51d2e1f6
 target: esp32p4
 version: 2.0.0
