@@ -13177,18 +13177,14 @@ void app_main(void)
      * and the player agree on something. The real value arrives at the
      * first settings_note_path() in player_loop().
      */
-    settings_init();
-    s_volume = settings_volume();
-    audio_out_set_volume((uint8_t)s_volume);
-
     /*
      * NVS, and the saved networks in it.
      *
      * Before wifi_init(), and before the first wifi_apply_settings()
      * that could bring the radio up -- the store is the only thing that
      * will want them,
-     * and after settings_init() only because nothing here depends on the
-     * order -- the two stores are unrelated and live in different media.
+     * and before settings_init(), which reads the Wi-Fi switch from here
+     * (5049, 5051).
      *
      * The erase-and-retry is IDF's documented idiom, not defensiveness:
      * a partition that is full or was written by a different NVS version
@@ -13211,6 +13207,15 @@ void app_main(void)
         ESP_LOGE(TAG, "nvs_flash_init: %s", esp_err_to_name(nvs_err));
     }
     wifistore_init();
+
+    /* 5051: after NVS, not before it. 5049 made settings_init() read the
+     * Wi-Fi switch from NVS, and here it ran ahead of nvs_flash_init(),
+     * so the read always failed and a card-less boot always had the
+     * radio off. Nothing between the old place and this one reads a
+     * setting. */
+    settings_init();
+    s_volume = settings_volume();
+    audio_out_set_volume((uint8_t)s_volume);
 
     /* Just the expander handle; nothing is powered until
      * wifi_apply_settings() runs from the settings push below. */

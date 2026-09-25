@@ -11805,3 +11805,33 @@ older IDF, whose mount cleanup did not release the slot.
 Rule for anything else that touches this controller: exactly one
 sdmmc_host_deinit_slot() per successful sdmmc_host_init_slot(), and
 never sdmmc_host_deinit().
+
+### 5051 -- settings_init() after NVS, and a word from the kept list
+
+5050 on the board, no card: Wi-Fi switched on from the panel came up
+and joined. The shared-host panic is gone. Two things were still wrong.
+
+THE SWITCH WAS NEVER READ. app_main() called settings_init() before
+nvs_flash_init(). The NVS read 5049 put in settings_init() therefore
+always failed, and a card-less boot always had the radio off. The
+comment above the NVS init said the two were unrelated, which was true
+until 5049. settings_init() and the volume push now follow
+wifistore_init(). Nothing between the two places reads a setting.
+
+THE KEPT LIST CAME UP EMPTY on one card-less boot, after a station had
+been kept (`last played kept: Спокойное радио`) and after an earlier
+boot had shown `1 stations from Kept on this Tab5`. The log could not
+say why. radiokeep_list() now logs, once per load, which slots it found
+and the NVS result of the last read:
+
+    tab5_keep: kept list: star no, last yes (last: ESP_OK, 58 bytes)
+
+The same log also showed:
+- `E BOD: Brownout detector was triggered` and the INA226 reading about
+  1.85 V. The board was on USB power only, with no battery. Not a code
+  problem, but a USB-only Tab5 with Wi-Fi and a USB device attached can
+  brown out.
+- With Wi-Fi up, `eh_sdio: mempool OOM` bursts, a stream read failure,
+  and the RTL8152 failing to claim its interface (`EP Alloc error:
+  ESP_ERR_NO_MEM`). DMA-capable internal RAM fell to 5 KB free. That is
+  the known Wi-Fi + USB DMA shortage (5032/5036), still open.

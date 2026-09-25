@@ -25,6 +25,7 @@ static const char *TAG = "tab5_keep";
  * serialises every use of it. */
 #define BLOB_MAX        (STATION_NAME_MAX + STATION_URL_MAX + STATION_UUID_MAX)
 static char s_blob[BLOB_MAX];
+static char s_last_err[64];     /* 5051: why the last read went as it did */
 
 static SemaphoreHandle_t s_lock;
 static StaticSemaphore_t s_lock_buf;
@@ -45,10 +46,16 @@ static bool slot_read(const char *key, station_t *out)
 {
     memset(out, 0, sizeof(*out));
     nvs_handle_t h;
-    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) return false;
+    const esp_err_t oe = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (oe != ESP_OK) {
+        snprintf(s_last_err, sizeof(s_last_err), "open: %s", esp_err_to_name(oe));
+        return false;
+    }
     size_t len = sizeof(s_blob);
     const esp_err_t err = nvs_get_blob(h, key, s_blob, &len);
     nvs_close(h);
+    snprintf(s_last_err, sizeof(s_last_err), "%s: %s, %u bytes",
+             key, esp_err_to_name(err), (unsigned)len);
     if (err != ESP_OK || len < 3 || s_blob[len - 1] != '\0') return false;
 
     const char *name = s_blob;
@@ -147,11 +154,17 @@ int radiokeep_list(station_t out[2])
 {
     int n = 0;
     lock();
-    if (slot_read(KEY_STAR, &out[0])) n = 1;
-    if (slot_read(KEY_LAST, &out[n]) &&
-        !(n == 1 && favorites_url_eq(out[0].url, out[1].url))) {
+    const bool star = slot_read(KEY_STAR, &out[0]);
+    if (star) n = 1;
+    const bool last = slot_read(KEY_LAST, &out[n]);
+    if (last && !(n == 1 && favorites_url_eq(out[0].url, out[1].url))) {
         n++;
     }
     unlock();
+    /* 5051: said once per load. A card-less boot once came up with an
+     * empty kept list after a station had been kept, and the log could
+     * not say which slot was missing or why. */
+    ESP_LOGI(TAG, "kept list: star %s, last %s (%s)",
+             star ? "yes" : "no", last ? "yes" : "no", s_last_err);
     return n;
 }
