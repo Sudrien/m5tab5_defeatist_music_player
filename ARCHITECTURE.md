@@ -11161,3 +11161,36 @@ where it did before.
 Worth sending upstream to esp-usb. When a release carries it, 5025 and
 this patch can both go, and `main/idf_component.yml` gets its registry
 line back.
+
+### 5027 -- the Wi-Fi netifs go before esp_wifi_deinit()
+
+Switching Wi-Fi off while a stream was retrying panicked:
+
+    esp_wifi_remote: esp_wifi_internal_reg_rxcb: sta: 0x0
+    Guru Meditation Error: Core 0 panic'ed (Instruction access fault)
+    MEPC 0x00000000, RA esp_pbuf_free
+      pbuf_free <- tcp_seg_free <- tcp_free_ooseq <- tcp_pcb_purge
+      <- tcp_abort <- tcp_netif_ip_addr_changed <- netif_remove
+      <- esp_netif_destroy_default_wifi
+
+`wifi_stop()` called `esp_wifi_deinit()` and then destroyed the netifs,
+which is the order the IDF examples use. Destroying a netif aborts the
+TCP pcbs bound to its address and frees what they still hold. Freeing a
+pbuf the Wi-Fi driver handed up calls back into the driver to release
+its rx buffer. With the native driver that function always exists. With
+`esp_wifi_remote`, `esp_wifi_deinit()` unregisters it. The retries had
+left sockets with out-of-order segments still queued, and their free
+jumped through the NULL.
+
+The netifs are now destroyed between `esp_wifi_stop()` and
+`esp_wifi_deinit()`, while esp-hosted and the free path are both still
+up. The start-failure path in `wifi_start()` keeps its order, because it
+fails before the radio has connected, so nothing can be holding a
+received pbuf.
+
+The same log had `eh_host_feat_rpc: request: no response ... (5000 ms)`
+and a run of `eh_sdio: mempool OOM` just before the stop, plus `major
+version mismatch -- OTA coprocessor from host` (host 3.0.8, coprocessor
+reporting 0.0.0) at start. Those are the coprocessor struggling, not
+this bug. The 5-second RPC timeout only made the stop slower to reach
+the crash.

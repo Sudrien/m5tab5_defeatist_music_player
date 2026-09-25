@@ -911,9 +911,31 @@ esp_err_t wifi_stop(void)
     err = esp_wifi_stop();
     if (err != ESP_OK && first == ESP_OK) first = err;
 
-    err = esp_wifi_deinit();
-    if (err != ESP_OK && first == ESP_OK) first = err;
-
+    /*
+     * THE NETIFS GO BEFORE esp_wifi_deinit(), NOT AFTER -- 5027.
+     *
+     * Destroying a netif removes it from lwIP, which aborts every TCP
+     * pcb bound to its address and frees whatever those pcbs still hold,
+     * out-of-order segments included. Those are pbufs the Wi-Fi driver
+     * handed up, and freeing one calls back into the driver to release
+     * its rx buffer. With esp_wifi_remote that callback belongs to the
+     * remote driver, and esp_wifi_deinit() unregisters it
+     * (`esp_wifi_internal_reg_rxcb: sta: 0x0`). Deinit first, destroy
+     * second, and the free jumps through a NULL:
+     *
+     *   Guru Meditation Error: Core 0 panic'ed (Instruction access fault)
+     *   MEPC 0x00000000, RA esp_pbuf_free
+     *     pbuf_free <- tcp_seg_free <- tcp_free_ooseq <- tcp_pcb_purge
+     *     <- tcp_abort <- tcp_netif_ip_addr_changed <- netif_remove
+     *     <- esp_netif_destroy_default_wifi
+     *
+     * The board hit it switching Wi-Fi off while a stream was retrying,
+     * so there were half-dead sockets with segments still queued. With
+     * the native driver the free function never goes away, which is why
+     * the IDF examples' order (deinit, then destroy) is safe there and
+     * not here. esp-hosted is still up at this point, so the free has
+     * somewhere to go.
+     */
     if (s_sta_netif) {
         esp_netif_destroy_default_wifi(s_sta_netif);
         s_sta_netif = NULL;
@@ -922,6 +944,9 @@ esp_err_t wifi_stop(void)
         esp_netif_destroy_default_wifi(s_ap_netif);
         s_ap_netif = NULL;
     }
+
+    err = esp_wifi_deinit();
+    if (err != ESP_OK && first == ESP_OK) first = err;
 
     /*
      * ESP-HOSTED HAS TO COME DOWN TOO, AND BEFORE THE POWER.
