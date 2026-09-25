@@ -11355,3 +11355,14 @@ It is a Kconfig choice, so it needs `rm sdkconfig`. The C6 reports
 firmware 0.0.0 and no SW_AGGR, and whether it is happy with a host
 reading fixed sizes is the board's to answer. If Wi-Fi does not come up,
 this is the line to take back.
+
+### 5034 -- usb_host_msc vendored, as released
+
+`components/usb_host_msc` is `espressif/usb_host_msc` 1.3.0, the version
+`dependencies.lock` pinned, taken from esp-usb at `d96b561` without tests
+or examples. It replaces the registry line in `main/idf_component.yml`.
+The one edit is the one 5025 made to the UAC driver: the manifest's
+IDF-6-only `usb` dependency is dropped. The pre-6.0 build path
+(`diskio_usb.c`, no BDL) is what IDF 5.5 compiles. This patch is
+vendoring only; 5035 is the fix, readable as a diff against released
+code.

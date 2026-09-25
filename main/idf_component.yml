@@ -42,7 +42,11 @@ dependencies:
   # tree carries the host stack itself (the `usb` component); this is the
   # class driver on top of it, and it lives in the registry rather than in
   # IDF.
-  espressif/usb_host_msc: "^1.1.0"
+  #
+  # Vendored since 5034, in components/usb_host_msc: 1.3.0 as released
+  # (the version dependencies.lock pinned), plus the fixes in 5035. Take
+  # this line back when upstream has them.
+  # espressif/usb_host_msc: "^1.1.0"
 
   # USB audio host, for the UAC output path. Same story as the MSC driver
   # above: the host stack is in IDF, this is the class driver on top of
