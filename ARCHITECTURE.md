@@ -11890,3 +11890,32 @@ is a comparison and returns at once when the radio already matches.
 
 Still open: Wi-Fi does not fit beside USB Ethernet (the radio's own
 buffers), and a start that half-fails is not powered back down.
+
+### 5054 -- Small allocations to PSRAM too
+
+5053 on the board: the card-less boot brought Wi-Fi up by itself
+(`joined fivescore`, NTP synced), so the switch works. Then the kept
+station, a 64 kbit/s AAC stream over Wi-Fi with no USB device attached,
+failed within a second of first audio:
+
+    tab5_netdec: AAC (ADTS) decoder open (parser-framed); internal free 60091 -> 45231 (cost 14860)
+    eh_sdio: mempool OOM start (TX)
+    eh_sdio: dma_alloc(2560) failed; dropping read
+    tab5_netstream:   internal 43707 free (largest 31744), DMA 4147 free (largest 1536)
+
+After two attempts the gateway stopped answering, and the link stayed
+dead.
+
+"Internal free" counts RETENT_RAM and RTCRAM, which are not DMA-capable,
+so 43 KB of it meant 4 KB of what the radio needs. The AAC decoder's
+14.8 KB was a plain malloc. CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+sends every plain allocation up to 16 KB to internal RAM first. It is
+now 4096, so the decoder's state and every other mid-sized plain
+allocation go to PSRAM. Anything that needs DMA memory asks by
+capability and keeps getting it.
+
+Watch for: a decode or UI path that slows measurably with its state in
+PSRAM. None is expected at these rates. The first number to check is
+the `cost` on the decoder-open line, which should fall to near zero.
+
+rm sdkconfig before building.

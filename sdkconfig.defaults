@@ -319,6 +319,26 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # CONFIG_MBEDTLS_HARDWARE_SHA is not set
 
 # ---------------------------------------------------------------------------
+# 5054: SMALL ALLOCATIONS TO PSRAM TOO.
+#
+# The default sends every malloc() of 16 KB or less to internal RAM first.
+# With Wi-Fi up and no USB device at all, opening an AAC stream moved
+# internal free from 60 KB to 45 KB -- the esp_audio_codec decoder is a
+# 14.8 KB plain malloc -- and the radio's SDIO buffers, which must be
+# DMA-capable internal RAM, then failed within a second:
+#
+#   eh_sdio: dma_alloc(2560) failed; dropping read
+#   tab5_netstream:   internal 43707 free (largest 31744), DMA 4147 free
+#
+# and the link never recovered. At 4096, plain allocations above 4 KB go
+# to PSRAM. Drivers that need DMA memory ask for it by capability and are
+# not affected. What moves is decoder state and the like, which runs a
+# little slower from PSRAM and is nowhere near its time budget.
+#
+# rm sdkconfig before building.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
+
+# ---------------------------------------------------------------------------
 # NOT HERE: LWIP TCP RECEIVE TUNING. 0044 raised CONFIG_LWIP_TCP_WND_DEFAULT
 # to 65534, the TCP and TCPIP receive mailboxes to 64 and turned on
 # SACK_OUT, from ESP-Hosted's iperf host defaults. On hardware, idle, the
