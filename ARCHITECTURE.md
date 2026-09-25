@@ -11690,3 +11690,24 @@ The RTL8153 (gigabit) takes the same code path and has not itself been
 plugged in. README and the esp_usbh_asix pin's comment in
 idf_component.yml are updated to match; the pin's "has not yet run on
 hardware" was the driver's own claim and was out of date here.
+
+### 5047 -- esp_audio_effects removed
+
+Nothing has called it since 5040: the USB path (5039) and the crossfade
+carry (5040) both use polyrsp.c. This drops the dependency from
+main/idf_component.yml. It also drops main/linker.lf and its
+LDFRAGMENTS line, 5038's IRAM mapping for the library's rsp_proc object,
+which placed code nothing reached.
+
+The reasons it went, for whoever reaches for it again: its P4 build of
+1.3.0 measured 223% of real time for 44.1 -> 48 kHz stereo on this
+board, flash or IRAM alike. 1.4.0 added P4 vector assembly for the
+filter, said to be 4x faster (about 56% here, still over 5037's valve),
+and 1.4.2 refuses to build for silicon below revision 3.0. 1.4.3 is the
+same converter. polyrsp does the same job at 7-9%.
+
+The manifest changed, so the next build re-resolves dependencies.lock
+(see CLAUDE.md). Expected: the espressif/esp_audio_effects and
+espressif/gmf_fft entries go, esp_audio_effects leaves
+direct_dependencies, and manifest_hash changes. Nothing else should
+move.

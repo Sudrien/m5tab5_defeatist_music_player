@@ -15,12 +15,10 @@ dependencies:
   # what every board run so far has used.
   espressif/esp_audio_codec: ">=2.3.0,<2.6.0"
 
-  # The sample-rate converter, for crossfades across a rate change -- see
-  # rateconv.h. Same repository, same licence and the same wall as the
-  # line above: 1.4.0 turned on P4 assembly that needs silicon revision
-  # 3.0, and 1.4.2 made the build refuse anything older. 1.3.0 has the
-  # same esp_ae_rate_cvt API, reset included.
-  espressif/esp_audio_effects: ">=1.3.0,<1.4.0"
+  # esp_audio_effects is gone as of 5047: both sample-rate conversions
+  # are polyrsp.c now (5039, 5040). Its P4 build below 1.4 measured
+  # 223% of real time for 44.1 -> 48 kHz; 1.4 and later need silicon
+  # revision 3.0. See ARCHITECTURE.md.
 
   # TJpgDec, as the software JPEG fallback for covers the hardware
   # decoder cannot allocate for. The P4's decoder has no scaler --
