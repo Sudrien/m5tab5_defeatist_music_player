@@ -11,6 +11,7 @@ idf_component_register(
              nvs_flash esp_netif esp_event esp_http_server esp_http_client mbedtls
              esp_usbh_asix iot_eth iot_usbh_ecm iot_usbh_cdc
     PRIV_REQUIRES pngle minimp3 ark12
+    LDFRAGMENTS "linker.lf"
 )
 
 # Heap integrity checkpoints, off by default. Build with

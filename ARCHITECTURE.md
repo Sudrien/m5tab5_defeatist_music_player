@@ -11461,3 +11461,37 @@ So:
   `arbitrate()` now respects) and the audio goes to the jack. The next
   track tries again. The writer at priority 6 cannot be the reason the
   board resets, whatever the cause turns out to be.
+
+### 5038 -- the converter's inner loop in IRAM
+
+5037's valve caught the overload and gave the measurement:
+
+    USB conversion 44100 -> 48000 Hz: 234% of real time, worst slice 56024 us
+    USB conversion too slow (234% > 50%); analog for the rest of this track
+
+That is with the SPEED variant and an internal output buffer, so the
+memory hypothesis was wrong. qemu counts about 37 M instructions per
+second of audio for the same objects, which is a tenth of a 360 MHz
+core. The board is spending twenty-odd times that.
+
+Instruction count cannot see the instruction fetch. The library is
+precompiled into flash and executes in place, and this board's flash
+runs at 40 MHz DIO (the boot log's `SPI Speed: 40MHz`, `SPI Mode: DIO`).
+The cache that serves it is shared with the decoder, the display code
+and everything else. An inner loop evicted between slices refetches over
+that bus.
+
+`main/linker.lf` maps `rsp_proc` from `libesp_audio_effects.a`
+(`noflash`) into internal RAM. That object holds `fa_resample_process`,
+`fa_interp_process` and `fa_decimate_process`, the per-sample paths,
+about 5.3 KB. A full link in the host harness puts them at 0x4ff0....
+The 64-bit divide they call, `__divdi3`, already resolves to ROM
+(0x4fc0....). Open and close stay in flash, since they run once per
+track.
+
+5037's measurement stays, and its log line says whether this was it. If
+the load is still over the valve's 50% with the loop in IRAM, the
+flash is exonerated. The remaining knob would then be the converter's
+complexity (1 is about half the instructions of 2), and past that the
+flash mode itself (QIO/80 MHz), which is a board question, not a
+code one.
