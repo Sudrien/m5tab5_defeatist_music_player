@@ -11746,3 +11746,36 @@ ring, and it is skipped on reconnects.
 Built, not yet run on the board. The test: play a station with a card
 in, pull the card, reboot, and the RADIO tab should offer it. Star
 something with no media, reboot, and it should be first.
+
+### 5049 -- Wi-Fi with no card: the switch in NVS, and the shared SDMMC host
+
+The first card-less boot on 5048 found two things.
+
+THE SWITCH WAS ON THE CARD. The saved networks are in NVS
+(wifistore.c, "3 saved networks" at boot with nothing mounted), but the
+Wi-Fi on/off setting was only in .defeatist.dat. No card meant the
+default, off, so a Tab5 with networks saved and stations kept in flash
+had its radio down until the panel switch was used. The switch is now
+mirrored in NVS (namespace "radiokeep", key "wifi_on", one byte, written
+only when it differs). settings_init() starts from it, a card's record
+still overrides it (and is written through), and the panel's toggle
+writes through.
+
+TURNING IT ON PANICKED.
+
+    assert failed: xQueueSemaphoreTake queue.c:1709 (( pxQueue ))
+    #4 sdmmc_host_do_transaction (slot=1, ...)
+    #7 sdmmc_io_reset
+    #9 eh_host_port_sdio_card_init
+
+The C6 radio is slot 1 of the same SDMMC controller the card uses as
+slot 0. With no card, storage's poll tries to mount every second, and
+on failure called sdmmc_host_deinit(), the whole controller. That
+deleted the host's transaction queue under esp_hosted's card init. With
+a card in, the mount succeeds and never reaches that line, which is why
+no earlier run saw it. It is now sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0).
+The mount's own cleanup already deinits slot 0 through
+SDMMC_HOST_DEFAULT()'s deinit_p, so the second call returns
+ESP_ERR_INVALID_STATE without touching the slot count.
+
+Built, not yet run on the board.

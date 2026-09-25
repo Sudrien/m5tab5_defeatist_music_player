@@ -24,6 +24,44 @@
 #include <strings.h>
 
 #include "cJSON.h"
+#include "nvs.h"
+
+/*
+ * 5049: the Wi-Fi switch, mirrored into NVS.
+ *
+ * Every other setting lives in the card's .defeatist.dat, and so did
+ * this one -- which made a Tab5 with no card a Tab5 whose radio was off,
+ * with its saved networks (in NVS, wifistore.c) sitting unused. The
+ * stations kept in flash (5048) are no use without it. So the flag is
+ * also kept in NVS: settings_init() starts from it, a card's record
+ * still overrides it, and any change is written through.
+ *
+ * One byte, written only when it differs.
+ */
+#define WIFI_NVS_NS     "radiokeep"
+#define WIFI_NVS_KEY    "wifi_on"
+
+static bool wifi_nvs_read(bool *on)
+{
+    nvs_handle_t h;
+    if (nvs_open(WIFI_NVS_NS, NVS_READONLY, &h) != ESP_OK) return false;
+    uint8_t v = 0;
+    const esp_err_t err = nvs_get_u8(h, WIFI_NVS_KEY, &v);
+    nvs_close(h);
+    if (err != ESP_OK) return false;
+    *on = v != 0;
+    return true;
+}
+
+static void wifi_nvs_sync(bool on)
+{
+    bool cur;
+    if (wifi_nvs_read(&cur) && cur == on) return;
+    nvs_handle_t h;
+    if (nvs_open(WIFI_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_u8(h, WIFI_NVS_KEY, on ? 1 : 0) == ESP_OK) (void)nvs_commit(h);
+    nvs_close(h);
+}
 
 static const char *TAG = "tab5_settings";
 
@@ -339,6 +377,7 @@ void settings_set_wifi_enabled(bool on)
 {
     if (on == s_wifi_enabled) return;
     s_wifi_enabled = on;
+    wifi_nvs_sync(on);                  /* 5049 */
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -512,6 +551,7 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
         const cJSON *wf = cJSON_GetObjectItemCaseSensitive(root, "wifi");
         if (take_settings && cJSON_IsBool(wf)) {
             s_wifi_enabled = cJSON_IsTrue(wf);
+            wifi_nvs_sync(s_wifi_enabled);      /* 5049 */
             any = true;
         }
 
@@ -626,6 +666,7 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
      * refusing it would be arbitrary. */
     if (strcmp(key, "wifi") == 0) {
         s_wifi_enabled = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
+        wifi_nvs_sync(s_wifi_enabled);          /* 5049 */
         return true;
     }
     if (strcmp(key, "ntp") == 0) {
@@ -1240,6 +1281,14 @@ static int64_t parse_build_time(const char *date, const char *time_)
 
 void settings_init(void)
 {
+    /* 5049: the Wi-Fi switch as last set, from NVS, until a card says
+     * otherwise. Absent (first boot after this patch) keeps the default,
+     * off. */
+    {
+        bool on;
+        if (wifi_nvs_read(&on)) s_wifi_enabled = on;
+    }
+
     /*
      * Seeded from the build timestamp, through the same checked entry
      * point everything else uses. s_last_ntp_epoch is 0 here so the floor

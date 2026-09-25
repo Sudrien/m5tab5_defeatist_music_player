@@ -368,8 +368,20 @@ static esp_err_t sd_mount_at(bool verbose, int freq_khz)
          * This matters far more now than it did when the mount was tried
          * once at boot: the poll retries it every second forever, so a
          * leak here is a guaranteed failure a second later rather than a
-         * one-off. */
-        (void)sdmmc_host_deinit();
+         * one-off.
+         *
+         * 5049: THE SLOT, NOT THE HOST. The host is shared: the C6 radio
+         * is on slot 1 of the same SDMMC controller. sdmmc_host_deinit()
+         * tore the whole controller down under it, once a second with no
+         * card in, and turning Wi-Fi on then panicked inside esp_hosted's
+         * first command -- xQueueSemaphoreTake on the host's deleted
+         * queue, from sdmmc_host_do_transaction(). A card that mounted
+         * never reached this line, which is why it had never been seen.
+         * The mount's own cleanup already deinits slot 0 through
+         * SDMMC_HOST_DEFAULT()'s deinit_p; this is the belt, and it
+         * returns ESP_ERR_INVALID_STATE without touching the slot count
+         * when that has happened. */
+        (void)sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0);
         s_card = NULL;
         if (verbose) {
             if (ret == ESP_FAIL) {
