@@ -45,6 +45,9 @@
  */
 #include <string.h>
 
+/* 5052: esp_crt_bundle.h uses bool and only got <stdbool.h> by way of
+ * the hardware AES headers. */
+#include <stdbool.h>
 #include "esp_crt_bundle.h"
 #include "esp_app_desc.h"
 #include "esp_heap_caps.h"

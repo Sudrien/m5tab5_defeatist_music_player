@@ -11835,3 +11835,35 @@ The same log also showed:
   and the RTL8152 failing to claim its interface (`EP Alloc error:
   ESP_ERR_NO_MEM`). DMA-capable internal RAM fell to 5 KB free. That is
   the known Wi-Fi + USB DMA shortage (5032/5036), still open.
+
+### 5052 -- TLS without the crypto engines' DMA
+
+The log that ended 5051's run had the RTL8152 streaming when Wi-Fi was
+switched on. DMA-capable internal RAM fell to 1395 bytes free, and the
+AES engine could not get its descriptors:
+
+    esp-aes: Failed to allocate memory for the array of DMA descriptors
+    esp-tls-mbedtls: read error :-0x0001
+    esp-tls-mbedtls: mbedtls_ctr_drbg_seed returned -0x0001
+
+The stream dropped, the directory lookup failed, and the C6 never
+answered esp_wifi_init. mbedTLS's own buffers were already in PSRAM
+(CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC, from the stream-probe work). What was
+left was the P4's AES and SHA accelerators, which allocate DMA
+descriptors and alignment buffers from internal DMA RAM on every
+operation.
+
+sdkconfig.defaults now turns off CONFIG_MBEDTLS_HARDWARE_AES (and with
+it HARDWARE_GCM) and CONFIG_MBEDTLS_HARDWARE_SHA. The bignum and ECC
+engines stay, since they take no DMA memory. Cost: software AES and SHA
+on a 360 MHz core, against 8-40 KB/s of ciphertext for a radio stream.
+That is well under 1% of a core by the usual cycles-per-byte figures
+(not measured here). Handshakes are already network-bound at 0.7-2.2 s.
+
+One side effect at build time: esp_crt_bundle.h uses bool and had only
+been getting <stdbool.h> through the hardware AES headers.
+radiobrowser.c now includes it first. netstream.c already had it by way
+of its own header.
+
+Needs `rm sdkconfig` before building. The existing sdkconfig keeps
+HARDWARE_AES=y otherwise.

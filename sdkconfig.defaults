@@ -295,6 +295,30 @@ CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
 CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 
 # ---------------------------------------------------------------------------
+# 5052: SOFTWARE AES AND SHA, SO TLS TAKES NO DMA MEMORY.
+#
+# The line above already put mbedTLS's buffers in PSRAM. What was left in
+# internal RAM was the crypto engines' own DMA: the P4's AES and SHA
+# accelerators allocate DMA descriptors, and alignment buffers, from
+# DMA-capable internal RAM on every operation. With the RTL8152
+# streaming and the radio starting, that pool fell to 1395 bytes and
+# the engines failed mid-stream:
+#
+#   esp-aes: Failed to allocate memory for the array of DMA descriptors
+#   esp-tls-mbedtls: read error :-0x0001
+#   esp-tls-mbedtls: mbedtls_ctr_drbg_seed returned -0x0001
+#
+# In software they need no DMA memory at all. The cost is CPU, and not
+# much of it: a radio stream is 8-40 KB/s of ciphertext against software
+# AES in the tens of MB/s on a 360 MHz core, and a handshake here is
+# network-bound (0.7-2.2 s of round trips). GCM goes with AES; the
+# bignum and ECC engines stay, since they use no DMA.
+#
+# rm sdkconfig before building, as above.
+# CONFIG_MBEDTLS_HARDWARE_AES is not set
+# CONFIG_MBEDTLS_HARDWARE_SHA is not set
+
+# ---------------------------------------------------------------------------
 # NOT HERE: LWIP TCP RECEIVE TUNING. 0044 raised CONFIG_LWIP_TCP_WND_DEFAULT
 # to 65534, the TCP and TCPIP receive mailboxes to 64 and turned on
 # SACK_OUT, from ESP-Hosted's iperf host defaults. On hardware, idle, the
