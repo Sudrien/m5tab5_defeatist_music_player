@@ -12422,3 +12422,31 @@ by first sound and nothing changes: the line says 0 ms. Not host-tested
 (player.c). What to look for: RFI Monde, first sound early, then the
 artwork line some seconds later with delivery near 64, and no
 `dma_alloc` failure between them.
+
+### 5072 -- 64 KB kept for DMA
+
+5069-5071 on the board (v0.4.0-77, home network). 5070 did as written:
+first sound at 20 s with the burst long over, `artwork requested 63 ms
+after first sound (67 kbit/s of 65)`. Half a second later:
+
+    eh_sdio: dma_alloc(5120) failed; dropping read
+
+and the link was gone -- the stream, the directory, DNS. So it is not the
+burst: one HTTPS request beside a settled 64 kbit/s stream is enough to
+take the ESP-Hosted transport's DMA memory to nothing. Waiting cannot fix
+that; room can.
+
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL goes from 32768 to 65536. It is
+the pool the boot log calls `Reserving pool of 32K of internal memory
+for DMA/internal allocations`, the one eh_sdio's explicit DMA allocations
+draw from; plain malloc() falls back to it only when the rest of internal
+RAM is gone (and since 5054 plain allocations over 4 KB go to PSRAM
+anyway). Task stacks also come from it. Internal free runs near 50 KB
+during playback, so the cost is affordable.
+
+And the artwork line now ends `; DMA N free (largest M)`, at the moment
+of the request that has been the trigger, so the margin is in the log
+rather than guessed.
+
+sdkconfig.defaults changed: rm sdkconfig before building. Proof: the
+boot line says `Reserving pool of 64K`.

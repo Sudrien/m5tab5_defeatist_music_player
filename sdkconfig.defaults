@@ -339,6 +339,26 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=4096
 
 # ---------------------------------------------------------------------------
+# 5072: 64 KB OF INTERNAL RAM KEPT FOR DMA, NOT 32.
+#
+# With 5054 in (the AAC decoder's cost down to 2568) the transport still
+# died with the stream alone and one HTTPS request beside it: RFI Monde,
+# settled at 64 kbit/s, 500 ms after the artwork request --
+#
+#   eh_sdio: dma_alloc(5120) failed; dropping read
+#
+# -- and the link never came back. The boot line `Reserving pool of 32K
+# of internal memory for DMA/internal allocations` is the pool eh_sdio's
+# dma_alloc draws on; a plain malloc() reaches it only once the rest of
+# internal RAM is gone. Internal free sits near 50 KB during playback
+# and 197 KB at boot, so 32 more for the pool is affordable. Task stacks
+# also come from it, which is part of why it runs out.
+#
+# rm sdkconfig before building. Proof it took: the boot line reads
+# `Reserving pool of 64K`, and the artwork line's `DMA N free` is higher.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
+
+# ---------------------------------------------------------------------------
 # NOT HERE: LWIP TCP RECEIVE TUNING. 0044 raised CONFIG_LWIP_TCP_WND_DEFAULT
 # to 65534, the TCP and TCPIP receive mailboxes to 64 and turned on
 # SACK_OUT, from ESP-Hosted's iperf host defaults. On hardware, idle, the

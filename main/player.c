@@ -12014,9 +12014,15 @@ static track_end_t play_stream(const char *url, const char *name)
             const bool settled = kbps > 0 && need > 0 &&
                                  kbps * 100 <= need * ART_AFTER_RATE_PCT;
             if (settled || waited_ms >= ART_AFTER_MAX_MS) {
+                /* 5072: with the DMA-capable memory the Wi-Fi transport
+                 * draws from, because this request is what has run it
+                 * out, and the margin is the number to watch. */
                 ESP_LOGI(TAG, "artwork requested %lld ms after first sound "
-                              "(%d kbit/s of %d)%s", (long long)waited_ms,
-                         kbps, need, settled ? "" : ", not settled");
+                              "(%d kbit/s of %d)%s; DMA %u free (largest %u)",
+                         (long long)waited_ms, kbps, need,
+                         settled ? "" : ", not settled",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
                 s_stream_art_pending = false;
                 s_stream_art_want = true;
             }
