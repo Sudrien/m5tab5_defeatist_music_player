@@ -66,6 +66,37 @@ static void wifi_nvs_sync(bool on)
 static const char *TAG = "tab5_settings";
 
 /*
+ * 5064: AND FOUR MORE, the ones a Tab5 with no card also needs.
+ *
+ * Volume, brightness, screen rotation and the NTP switch lived only on
+ * the card, so a card-less radio came up at the defaults every boot --
+ * the same fault 5049 fixed for the Wi-Fi switch. The file-only settings
+ * (ReplayGain, crossfade, the track) stay on the card: without one there
+ * is nothing for them to act on. ntp_epoch stays too; it is rewritten
+ * constantly and is the one that would wear the flash.
+ *
+ * One 5-byte blob beside the Wi-Fi byte. Read once in settings_init(),
+ * before any card. Written by the settings task after SETTINGS_SETTLE_MS,
+ * so a volume slide is one write and not one per step; and after a
+ * card's record is read, so the card still wins and NVS then agrees with
+ * it. Compared against the last blob read or written, so an unchanged
+ * value is never written, and nothing is read back each pass.
+ */
+#define PREFS_NVS_KEY     "prefs"
+#define PREFS_NVS_VERSION (1)
+
+typedef struct {
+    uint8_t version;
+    uint8_t volume;
+    uint8_t brightness;
+    uint8_t screen_rot;
+    uint8_t ntp;
+} prefs_nvs_t;
+
+static prefs_nvs_t s_prefs_nvs;         /* what NVS holds, when known */
+static bool        s_prefs_nvs_known;
+
+/*
  * Dotfiles, and hidden on FAT once written.
  *
  * The old names had no dot and sat in the root of whatever volume held
@@ -244,6 +275,49 @@ static bool s_loaded;
  * compaction without stat()ing first. Per volume, because the two files
  * fill up independently. */
 static size_t s_bytes[STORAGE_COUNT];
+
+/* 5064: see PREFS_NVS_KEY. */
+static void prefs_nvs_load(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(WIFI_NVS_NS, NVS_READONLY, &h) != ESP_OK) return;
+    prefs_nvs_t p;
+    size_t len = sizeof(p);
+    const esp_err_t err = nvs_get_blob(h, PREFS_NVS_KEY, &p, &len);
+    nvs_close(h);
+    if (err != ESP_OK || len != sizeof(p) || p.version != PREFS_NVS_VERSION) return;
+
+    s_prefs_nvs = p;
+    s_prefs_nvs_known = true;
+    if (p.volume <= 100) s_volume = p.volume;
+    if (p.brightness >= SETTINGS_BRIGHTNESS_MIN &&
+        p.brightness <= SETTINGS_BRIGHTNESS_MAX) s_brightness = p.brightness;
+    if (p.screen_rot <= 3) s_screen_rot = p.screen_rot;
+    s_ntp_enabled = p.ntp != 0;
+    ESP_LOGI(TAG, "from flash: volume=%u, brightness=%u, rotation=%u, ntp=%s",
+             p.volume, p.brightness, p.screen_rot, p.ntp ? "on" : "off");
+}
+
+static void prefs_nvs_sync(void)
+{
+    const prefs_nvs_t p = {
+        .version = PREFS_NVS_VERSION,
+        .volume = s_volume,
+        .brightness = s_brightness,
+        .screen_rot = s_screen_rot,
+        .ntp = s_ntp_enabled ? 1 : 0,
+    };
+    if (s_prefs_nvs_known && memcmp(&p, &s_prefs_nvs, sizeof(p)) == 0) return;
+
+    nvs_handle_t h;
+    if (nvs_open(WIFI_NVS_NS, NVS_READWRITE, &h) != ESP_OK) return;
+    if (nvs_set_blob(h, PREFS_NVS_KEY, &p, sizeof(p)) == ESP_OK &&
+        nvs_commit(h) == ESP_OK) {
+        s_prefs_nvs = p;
+        s_prefs_nvs_known = true;
+    }
+    nvs_close(h);
+}
 
 uint8_t settings_volume(void) { return s_volume; }
 
@@ -734,6 +808,10 @@ static bool load_file(storage_id_t id, const char *name, bool take_settings,
     }
     storage_io_close(f);
 
+    /* 5064: a card's settings, taken, go to flash too, so a later boot
+     * without the card starts where this one did. */
+    if (take_settings && any) prefs_nvs_sync();
+
     /*
      * The file's newest timestamp, offered once now that the whole file
      * has been seen. Refused in silence if it is behind -- which is the
@@ -1166,6 +1244,10 @@ static void settings_task(void *arg)
          * pass; clearing afterwards would swallow that change instead. */
         s_dirty = false;
 
+        /* 5064: flash first, card or no card. Settled already, and a
+         * no-op when nothing it holds has changed. */
+        prefs_nvs_sync();
+
         /*
          * EVERY VOLUME PRESENT, NOT THE ONE PLAYING.
          *
@@ -1288,6 +1370,7 @@ void settings_init(void)
         bool on;
         if (wifi_nvs_read(&on)) s_wifi_enabled = on;
     }
+    prefs_nvs_load();                   /* 5064 */
 
     /*
      * Seeded from the build timestamp, through the same checked entry

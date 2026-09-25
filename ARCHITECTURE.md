@@ -12215,3 +12215,33 @@ Also seen, not changed: tapping the station already playing, from a
 different list, restarts it. The fade dropped 3.4 MB (about 35 s) of
 queued audio and the reserve started again from nothing, at 3-4 s,
 SHORT. The player could treat the same URL as already playing.
+
+### 5064 -- Four more settings kept in flash
+
+5049 put the Wi-Fi switch in NVS so a Tab5 with no card could use its
+saved networks. The other settings a card-less radio needs were still
+card-only, so it came up at the defaults every boot: volume 50, the
+default brightness, upright, NTP on.
+
+Now volume, brightness, screen rotation and the NTP switch are also a
+5-byte blob, `prefs` in the `radiokeep` namespace beside `wifi_on`:
+- read once in settings_init(), before any card, and logged as
+  `from flash: volume=N, brightness=N, rotation=N, ntp=on|off`;
+- written by the settings task after SETTINGS_SETTLE_MS, card or no
+  card, so dragging the volume is one write, not one per step;
+- written after a card's record is taken, so the card still wins and
+  flash then agrees with it;
+- compared against the last blob read or written, so an unchanged value
+  is never written and nothing is read back each pass. Without a card
+  the task re-arms every 500 ms (5049's "kept in memory" rule) and
+  compares, but does not write.
+
+Left on the card: ReplayGain, crossfade and the track, which have
+nothing to act on without one; and ntp_epoch, which is rewritten
+constantly and is the one that would wear the flash. The NVS partition
+is 20 KB.
+
+Not host-tested: settings.c does not build on a host. A syntax check
+against texttest's fakes showed no warnings on the new lines. What to
+look for: boot with no card after changing the volume with one, and the
+`from flash:` line carries it.
