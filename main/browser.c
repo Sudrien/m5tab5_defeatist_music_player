@@ -12,6 +12,8 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #include "browser.h"
 #include "cuedir.h"
@@ -289,7 +291,45 @@ static void stars_resolve(void)
     }
 }
 
+/*
+ * 5041: one listing at a time.
+ *
+ * load_dir() is called from two tasks. At boot the decode task's resume
+ * reopens the chooser on the track's folder (browser_open(), from
+ * restore_last_track()) while ui_task's draw sees the card's mount and
+ * loads the root of the tab. Each empties the list, sets s_dir and
+ * appends -- so run together they left the Selections folder's path over
+ * the root's folders and the Selections files, one list, and a tap on
+ * test_audio_files opened /sd/Selections_.../test_audio_files:
+ *
+ *   button: row 1 (dir) "test_audio_files"
+ *   cannot open /sd/Selections_from_the_2005-2006_Season-12519/test_audio_files
+ *
+ * The lock makes each listing whole; the draw-side loads also re-check
+ * under it, so a draw that queued behind browser_open() does not then
+ * replace the folder that was just opened with the root.
+ */
+static SemaphoreHandle_t load_lock(void)
+{
+    static portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
+    static StaticSemaphore_t buf;
+    static SemaphoreHandle_t h;
+    taskENTER_CRITICAL(&mux);
+    if (!h) h = xSemaphoreCreateMutexStatic(&buf);
+    taskEXIT_CRITICAL(&mux);
+    return h;
+}
+
+static void load_dir_locked(const char *dir);
+
 static void load_dir(const char *dir)
+{
+    xSemaphoreTake(load_lock(), portMAX_DELAY);
+    load_dir_locked(dir);
+    xSemaphoreGive(load_lock());
+}
+
+static void load_dir_locked(const char *dir)
 {
     if (!s_entries) {
         s_entries = heap_caps_calloc(MAX_ENTRIES, sizeof(entry_t),
@@ -934,15 +974,21 @@ void browser_draw(void)
                  * Adopting the volume that just appeared is not
                  * overriding a choice, because none has been made.
                  */
-                for (int i = 0; i < STORAGE_COUNT; i++) {
-                    if (!storage_present((storage_id_t)i)) continue;
-                    s_tab = (browser_tab_t)i;
-                    load_dir(tab_root());
-                    break;
+                xSemaphoreTake(load_lock(), portMAX_DELAY);
+                if (!s_dir[0] && !storage_present((storage_id_t)s_tab)) {
+                    for (int i = 0; i < STORAGE_COUNT; i++) {
+                        if (!storage_present((storage_id_t)i)) continue;
+                        s_tab = (browser_tab_t)i;
+                        load_dir_locked(tab_root());
+                        break;
+                    }
                 }
+                xSemaphoreGive(load_lock());
             }
         } else if (s_count == 0 || !s_dir[0]) {
-            load_dir(s_dir[0] ? s_dir : tab_root());
+            xSemaphoreTake(load_lock(), portMAX_DELAY);
+            if (s_count == 0 || !s_dir[0]) load_dir_locked(s_dir[0] ? s_dir : tab_root());
+            xSemaphoreGive(load_lock());
         }
         }
     }

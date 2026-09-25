@@ -11553,3 +11553,29 @@ re-solves dependencies.lock, and the last re-solve is what pulled in an
 esp_audio_codec this silicon cannot run. The fragment places code the
 linker's section GC then discards, so it costs nothing. Both go in a
 patch of their own, with the lock checked by hand.
+
+### 5041 -- One chooser listing at a time
+
+At boot with a track to resume, the chooser came up showing the card's
+top-level folders and the resumed album's files in one list, under the
+album's path. Tapping a top-level folder then failed:
+
+    button: row 1 (dir) "test_audio_files"
+    cannot open /sd/Selections_from_the_2005-2006_Season-12519/test_audio_files
+
+It was two load_dir() calls running at once. The decode task's
+restore_last_track() reopens the chooser on the track's folder, and
+ui_task's browser_draw() sees the card's mount generation change with
+an empty list and loads the tab's root. Each empties the list, sets
+s_dir and appends. Interleaved, they produced one list with one path.
+
+load_dir() now holds a mutex (created statically on first use), and the
+two draw-side loads re-check their condition under it. A draw that
+queued behind browser_open() therefore finds the folder already listed
+and leaves it, rather than replacing it with the root. The draw loop
+still reads the rows without the lock, as before; a load re-dirties the
+screen when it finishes, which is what already covered that.
+
+The same boot also played the 06 -> 07 crossfade at 44.1 kHz across
+Opus's 48 kHz on 5040's converter ("on: 48000 -> 44100 Hz", "crossfade
+done; dropped 0 KB"). It sounded right.
