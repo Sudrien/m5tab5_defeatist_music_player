@@ -287,6 +287,6 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/iot_usbh_ecm
 - idf
-manifest_hash: be95349dea2a3318297daec27986c69d2e5790a74b2566373308851e90721fa1
+manifest_hash: 457239c9118858b1a2abae56a6f5edda5d6ba74acaf3c2297474f13114750b40
 target: esp32p4
 version: 2.0.0
