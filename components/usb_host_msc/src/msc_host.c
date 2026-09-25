@@ -684,10 +684,23 @@ esp_err_t msc_bulk_transfer(msc_device_t *device, uint8_t *data, size_t size, ms
     size_t transfer_size = (ep == MSC_EP_IN) ? usb_round_up_to_mps(size, device->config.bulk_in_mps) : size;
 
     if (xfer->data_buffer_size < transfer_size) {
-        // The allocated buffer is not large enough -> realloc
-        MSC_RETURN_ON_ERROR( usb_host_transfer_free(xfer) );
-        MSC_RETURN_ON_ERROR( usb_host_transfer_alloc(transfer_size, 0, &device->xfer) );
-        xfer = device->xfer;
+        // The allocated buffer is not large enough -> realloc.
+        //
+        // Vendored change (m5tab5_defeatist_music_player 5035): allocate the
+        // new transfer BEFORE freeing the old one. Upstream freed first and
+        // returned on a failed alloc with device->xfer still pointing at the
+        // freed transfer; the next command read it and freed it again. On
+        // the Tab5, with Wi-Fi up, a 16 KB DMA transfer failed to allocate
+        // during a library reindex and the second free panicked the heap:
+        //   E USB_MSC: msc_bulk_transfer(689)
+        //   assert failed: tlsf_free ... "block already marked as free"
+        // Now a failed alloc leaves the old, smaller transfer in place and
+        // the command fails cleanly.
+        usb_transfer_t *bigger = NULL;
+        MSC_RETURN_ON_ERROR( usb_host_transfer_alloc(transfer_size, 0, &bigger) );
+        usb_host_transfer_free(xfer);
+        device->xfer = bigger;
+        xfer = bigger;
     }
 
     if (ep == MSC_EP_IN) {

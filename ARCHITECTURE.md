@@ -11366,3 +11366,35 @@ IDF-6-only `usb` dependency is dropped. The pre-6.0 build path
 (`diskio_usb.c`, no BDL) is what IDF 5.5 compiles. This patch is
 vendoring only; 5035 is the fix, readable as a diff against released
 code.
+
+### 5035 -- a failed MSC transfer alloc, and 16 KB commands
+
+A USB stick plugged in during a Wi-Fi stream. The stream survived it,
+which answered 5033's question: the DG80's effect on Wi-Fi is that
+device's, not USB's in general. But the library reindex that followed
+panicked the heap:
+
+    E USB_MSC: msc_bulk_transfer(689)
+    assert failed: tlsf_free tlsf.c:630 ("block already marked as free")
+      urb_free <- usb_host_transfer_free <- msc_bulk_transfer (msc_host.c:688)
+      <- bot_execute_command <- scsi_cmd_sense <- scsi_cmd_read10
+      <- usb_disk_read <- f_read (16384) <- ... <- covertag <- medialib
+
+**The double free.** `msc_bulk_transfer()` grows its transfer by freeing
+the old one (line 688) and then allocating the larger one (689). When
+689 fails, it returns with `device->xfer` still pointing at the freed
+transfer. The failed read is followed by a REQUEST SENSE, whose transfer
+call reads that pointer and frees it again. The new transfer is now
+allocated first, and the old one freed only once the new one exists. A
+failed allocation leaves the old transfer in place and the command
+fails cleanly. esp-usb master has the same two lines.
+
+**Why the allocation failed.** FatFs hands a whole multi-sector read to
+the disk, and the player reads in 16 KB chunks. So the transfer needed a
+16 KB contiguous DMA-capable buffer, and with Wi-Fi up the largest such
+block is about 8 KB (5030's numbers). `usb_disk_read()` and
+`usb_disk_write()` now issue at most 4 KB per SCSI command
+(`USB_DISK_MAX_XFER_BYTES`). That is more round trips, which a USB 2.0
+stick does not notice at audio bitrates. It also means the transfer
+never grows past 4 KB, so the path above is not reached in the first
+place.

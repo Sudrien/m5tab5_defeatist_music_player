@@ -31,6 +31,24 @@ static usb_disk_t *s_disks[FF_VOLUMES] = { NULL };
 
 static const char *TAG = "diskio_usb";
 
+/*
+ * Vendored change (m5tab5_defeatist_music_player 5035): FatFs hands a
+ * multi-sector read straight to the disk -- the player reads 16 KB at a
+ * time -- and msc_bulk_transfer() needs a DMA-capable transfer buffer of
+ * the whole command's size, contiguous, from internal RAM. With Wi-Fi up
+ * the Tab5's largest DMA block is about 8 KB, so a 16 KB command could not
+ * be allocated at all. Splitting into 4 KB commands keeps the transfer
+ * inside what the heap can supply; the cost is a few more SCSI round trips,
+ * which a USB 2.0 stick does not notice at audio bitrates.
+ */
+#define USB_DISK_MAX_XFER_BYTES  (4096)
+
+static UINT usb_disk_chunk(size_t sector_size)
+{
+    const size_t n = sector_size ? USB_DISK_MAX_XFER_BYTES / sector_size : 1;
+    return n ? (UINT)n : 1;
+}
+
 static DSTATUS usb_disk_initialize(BYTE pdrv)
 {
     return RES_OK;
@@ -50,10 +68,19 @@ static DRESULT usb_disk_read(BYTE pdrv, BYTE *buff, DWORD sector, UINT count)
     size_t sector_size = disk->block_size;
     msc_device_t *dev = __containerof(disk, msc_device_t, disk);
 
-    esp_err_t err = scsi_cmd_read10(dev, buff, sector, count, sector_size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "scsi_cmd_read10 failed (%d)", err);
-        return RES_ERROR;
+    // Vendored change (5035): at most USB_DISK_MAX_XFER_BYTES per SCSI
+    // command -- see the note at usb_disk_chunk().
+    const UINT per = usb_disk_chunk(sector_size);
+    while (count) {
+        const UINT n = count < per ? count : per;
+        esp_err_t err = scsi_cmd_read10(dev, buff, sector, n, sector_size);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "scsi_cmd_read10 failed (%d)", err);
+            return RES_ERROR;
+        }
+        buff += (size_t)n * sector_size;
+        sector += n;
+        count -= n;
     }
 
     return RES_OK;
@@ -68,10 +95,17 @@ static DRESULT usb_disk_write(BYTE pdrv, const BYTE *buff, DWORD sector, UINT co
     size_t sector_size = disk->block_size;
     msc_device_t *dev = __containerof(disk, msc_device_t, disk);
 
-    esp_err_t err = scsi_cmd_write10(dev, buff, sector, count, sector_size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "scsi_cmd_write10 failed (%d)", err);
-        return RES_ERROR;
+    const UINT per = usb_disk_chunk(sector_size);
+    while (count) {
+        const UINT n = count < per ? count : per;
+        esp_err_t err = scsi_cmd_write10(dev, buff, sector, n, sector_size);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "scsi_cmd_write10 failed (%d)", err);
+            return RES_ERROR;
+        }
+        buff += (size_t)n * sector_size;
+        sector += n;
+        count -= n;
     }
     return RES_OK;
 }
