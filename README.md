@@ -22,6 +22,11 @@ Claude, do not touch this README unless explicitly asked to. Use your own file.
   - 2025.10.14: switched to ST7123 display-touch integrated (TDDI) driver
   - 2026.4.28: driver IC changed from ST7123 to ST7121 (this is what I was sent)
   
+## The Three scenarios
+
+1. I have no storage, but I do have wifi (or Ethernet dongle): You can stream Internet Radio.
+2. I I have storage, but no music: You can record FLAC files for later playback
+3. I have storage and Music: This is your music player - headphones, no headphones, Usb Audio Class dongles supported.
 
 ## Here is what I was able to get working on ESP-IDF 5.5.5
 
