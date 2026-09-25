@@ -11324,3 +11324,34 @@ descriptors, and stays.
 costs now. If the DMA pool is still short, the next step is the
 coprocessor's buffers, not the USB side: esp-hosted allocates each rx
 buffer as it goes rather than from a pool it holds.
+
+### 5033 -- ESP-Hosted SDIO receive into fixed buffers
+
+5032 moved the UAC ring to PSRAM, and the board showed it worked
+(internal cost of the open: 20.5 KB down to 4 KB). The stream still
+died a second after the DG80 arrived. The DMA-capable side was nearly
+unchanged: 17191 free, largest 10240, down to 13187, largest 7168.
+After that, pings answered (`gateway ... 7 ms, internet 8.8.8.8 45 ms`)
+and every TLS connection timed out. Small packets got through and large
+reads did not.
+
+That is how ESP-Hosted's default receive mode behaves.
+`CONFIG_ESP_HOSTED_HOST_SDIO_RX_STREAMING_MODE` reads each burst from
+the C6 into one of two DMA buffers that grow on demand
+(`sdio_rx_get_buffer()`: a larger read frees the buffer and allocates a
+bigger one, contiguous). The transport therefore needs an 8-9 KB
+contiguous DMA block whenever traffic gets bursty. The note in
+sdkconfig.defaults about 0044's TCP window is the same failure under
+load. A USB device's transfers are enough to fragment the pool below
+that size.
+
+`CONFIG_ESP_HOSTED_HOST_SDIO_RX_MAX_SIZE` reads each transfer into a
+fixed one-packet buffer (`MAX_SDIO_BUFFER_SIZE`, about 1.6 KB), which a
+fragmented heap can still supply. It costs throughput, one SDIO transfer
+per packet rather than per burst, and nothing here streams fast enough
+to notice.
+
+It is a Kconfig choice, so it needs `rm sdkconfig`. The C6 reports
+firmware 0.0.0 and no SW_AGGR, and whether it is happy with a host
+reading fixed sizes is the board's to answer. If Wi-Fi does not come up,
+this is the line to take back.

@@ -312,3 +312,28 @@ CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 # needs. The iperf example can afford it; a player with a display, a
 # decoder and a card cannot. Taken back out in 0045. Do not re-add without
 # the transport's buffers somewhere other than internal RAM.
+
+# ---------------------------------------------------------------------------
+# ESP-HOSTED SDIO RECEIVE: FIXED BUFFERS, NOT STREAMING -- 5033.
+#
+# The default, STREAMING_MODE, reads each burst from the C6 into one of two
+# DMA buffers that GROW to fit it: a burst larger than the buffer frees it
+# and allocates a bigger one, contiguous, from internal DMA-capable RAM. So
+# the transport needs a single 8-9 KB DMA block free at the moment traffic
+# gets bursty -- the note above is that failing under TLS load, and 5030's
+# board log is it failing when the DG80 was plugged in:
+#
+#   heap after open: ... DMA 13187 free (largest 7168)
+#   eh_sdio: dma_alloc(8192) failed; dropping read
+#
+# 13 KB free, no 8 KB of it in one piece, and the link dead while ICMP still
+# answered. RX_MAX_SIZE reads every transfer into a fixed buffer of one
+# transport packet (about 1.6 KB) instead, which a fragmented heap can still
+# supply. It costs SDIO throughput -- one transfer per packet rather than
+# one per burst -- which a 64-320 kbit/s stream does not need.
+#
+# `rm sdkconfig` before building, as above. If Wi-Fi fails to come up after
+# this, the C6's firmware (it reports 0.0.0) is the first suspect: put
+# STREAMING_MODE back and say so in the log.
+# CONFIG_ESP_HOSTED_HOST_SDIO_RX_STREAMING_MODE is not set
+CONFIG_ESP_HOSTED_HOST_SDIO_RX_MAX_SIZE=y
