@@ -151,6 +151,11 @@ _Static_assert(NETSTREAM_TITLE_MAX == ICY_TITLE_MAX,
  */
 #define NET_WAIT_MAX_MS         (25000)
 #define NET_WAIT_SLICE_MS       (100)
+/* 5028. One echo each to the gateway and the DNS server before every
+ * attempt; a LAN round trip is single-digit milliseconds, so a second
+ * without an answer is not a slow network, it is a dead one. */
+#define NET_PROBE_TIMEOUT_MS    (1000)
+#define NET_PROBE_EVERY_MS      (2000)
 
 #define SOCKET_TIMEOUT_MS   (1000)
 #define DROP_SILENCE_MS     (5000)
@@ -934,23 +939,56 @@ static void netstream_task(void *arg)
              * which puts the real error in the log rather than leaving
              * the screen on "Connecting" for ever.
              */
-            if (!net_online()) {
-                ESP_LOGI(TAG, "no network yet; waiting before the first "
-                              "lookup");
-                int waited = 0;
-                while (!net_online() && waited < NET_WAIT_MAX_MS &&
+            /*
+             * AND A PING BEFORE THE LOOKUP -- 5028.
+             *
+             * An address on an interface is not a working link. The
+             * board had Wi-Fi "connected" through a coprocessor that had
+             * stopped moving packets (mempool OOM, RPCs timing out), and
+             * each attempt then spent 5 s in select() or 14 s in
+             * getaddrinfo() before failing -- counted, so the backoff
+             * ran out against the same non-station fault the wait above
+             * exists for. A gateway that does not answer an echo is
+             * treated the same way: waited out, not counted, re-probed
+             * every NET_PROBE_EVERY_MS, bounded by NET_WAIT_MAX_MS.
+             */
+            int gw_ms = -1, dns_ms = -1;
+            char probe[96];
+            bool path = net_online() &&
+                net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &dns_ms,
+                          probe, sizeof(probe));
+            if (!path) {
+                if (!net_online()) {
+                    ESP_LOGI(TAG, "no network yet; waiting before the first "
+                                  "lookup");
+                } else {
+                    ESP_LOGW(TAG, "%s; waiting before the lookup", probe);
+                }
+                int waited = 0, since_probe = 0;
+                while (!path && waited < NET_WAIT_MAX_MS &&
                        !superseded(gen)) {
                     vTaskDelay(pdMS_TO_TICKS(NET_WAIT_SLICE_MS));
                     waited += NET_WAIT_SLICE_MS;
+                    since_probe += NET_WAIT_SLICE_MS;
+                    if (net_online() && since_probe >= NET_PROBE_EVERY_MS) {
+                        since_probe = 0;
+                        path = net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &dns_ms,
+                                         probe, sizeof(probe));
+                    }
                 }
                 if (superseded(gen)) break;
-                if (net_online()) {
-                    ESP_LOGI(TAG, "network up after %d ms; connecting",
-                             waited);
+                if (path) {
+                    ESP_LOGI(TAG, "network up after %d ms (%s); connecting",
+                             waited, probe);
+                } else if (net_online()) {
+                    ESP_LOGW(TAG, "%s after %d ms; trying anyway",
+                             probe, waited);
                 } else {
                     ESP_LOGW(TAG, "still no network after %d ms; trying "
                                   "anyway", waited);
                 }
+            } else {
+                ESP_LOGI(TAG, "%s", probe);
             }
 
             const int64_t attempt_start = esp_timer_get_time();

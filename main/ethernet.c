@@ -10,6 +10,10 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "lwip/ip_addr.h"
+#include "ping/ping_sock.h"
 
 #include "esp_usbh_asix.h"
 #include "iot_usbh_cdc.h"
@@ -93,6 +97,100 @@ void net_route_describe(char *out, size_t out_size)
     } else {
         snprintf(out, out_size, "cable (%s) " IPSTR, what, IP2STR(&ip.ip));
     }
+}
+
+/*
+ * One echo, waited for. esp_ping runs its own task per session and
+ * reports through callbacks, so the end callback releases a semaphore
+ * and this reads the result from the session's profile afterwards.
+ */
+static void ping_end_cb(esp_ping_handle_t hdl, void *arg)
+{
+    xSemaphoreGive((SemaphoreHandle_t)arg);
+}
+
+static int ping_once(const ip_addr_t *target, uint32_t timeout_ms)
+{
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (!done) return -1;
+
+    esp_ping_config_t cfg = ESP_PING_DEFAULT_CONFIG();
+    cfg.target_addr = *target;
+    cfg.count = 1;
+    cfg.timeout_ms = timeout_ms;
+    cfg.data_size = 32;
+    esp_ping_callbacks_t cbs = {
+        .cb_args = done,
+        .on_ping_end = ping_end_cb,
+    };
+
+    int rtt = -1;
+    esp_ping_handle_t hdl = NULL;
+    if (esp_ping_new_session(&cfg, &cbs, &hdl) == ESP_OK &&
+        esp_ping_start(hdl) == ESP_OK) {
+        /* The session's own timeout plus slack for the task to report. */
+        if (xSemaphoreTake(done, pdMS_TO_TICKS(timeout_ms + 500)) == pdTRUE) {
+            uint32_t replies = 0, ms = 0;
+            esp_ping_get_profile(hdl, ESP_PING_PROF_REPLY, &replies, sizeof(replies));
+            esp_ping_get_profile(hdl, ESP_PING_PROF_DURATION, &ms, sizeof(ms));
+            if (replies) rtt = (int)ms;
+        } else {
+            esp_ping_stop(hdl);
+        }
+    }
+    if (hdl) esp_ping_delete_session(hdl);
+    vSemaphoreDelete(done);
+    return rtt;
+}
+
+bool net_probe(uint32_t timeout_ms, int *gw_ms, int *dns_ms,
+               char *what, size_t what_size)
+{
+    *gw_ms = -1;
+    *dns_ms = -1;
+
+    esp_netif_t *nif = esp_netif_get_default_netif();
+    esp_netif_ip_info_t ip = { 0 };
+    if (!nif || esp_netif_get_ip_info(nif, &ip) != ESP_OK || ip.gw.addr == 0) {
+        if (what && what_size) snprintf(what, what_size, "no gateway on the default route");
+        return false;
+    }
+
+    ip_addr_t gw = { 0 };
+    gw.type = IPADDR_TYPE_V4;
+    gw.u_addr.ip4.addr = ip.gw.addr;
+    *gw_ms = ping_once(&gw, timeout_ms);
+
+    /* The DNS server too, when it is somewhere else: that is the next
+     * hop getaddrinfo() will need, and "gateway answers, DNS server does
+     * not" is a different fault from "nothing answers". Only IPv4 and
+     * only when set; a failure here is reported, not gated on -- plenty
+     * of public resolvers drop ICMP. */
+    esp_netif_dns_info_t dns = { 0 };
+    const bool have_dns =
+        esp_netif_get_dns_info(nif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK &&
+        dns.ip.type == ESP_IPADDR_TYPE_V4 && dns.ip.u_addr.ip4.addr &&
+        dns.ip.u_addr.ip4.addr != ip.gw.addr;
+    if (have_dns && *gw_ms >= 0) {
+        ip_addr_t d = { 0 };
+        d.type = IPADDR_TYPE_V4;
+        d.u_addr.ip4.addr = dns.ip.u_addr.ip4.addr;
+        *dns_ms = ping_once(&d, timeout_ms);
+    }
+
+    if (what && what_size) {
+        char gws[24], dnss[40] = "";
+        if (*gw_ms >= 0) snprintf(gws, sizeof(gws), "%d ms", *gw_ms);
+        else             snprintf(gws, sizeof(gws), "no answer");
+        if (have_dns && *gw_ms >= 0) {
+            if (*dns_ms >= 0) snprintf(dnss, sizeof(dnss), ", dns " IPSTR " %d ms",
+                                       IP2STR(&dns.ip.u_addr.ip4), *dns_ms);
+            else              snprintf(dnss, sizeof(dnss), ", dns " IPSTR " no answer",
+                                       IP2STR(&dns.ip.u_addr.ip4));
+        }
+        snprintf(what, what_size, "gateway " IPSTR " %s%s", IP2STR(&ip.gw), gws, dnss);
+    }
+    return *gw_ms >= 0;
 }
 
 bool ethernet_ip(char *out, size_t out_size)

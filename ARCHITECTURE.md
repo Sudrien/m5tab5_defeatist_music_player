@@ -11194,3 +11194,33 @@ version mismatch -- OTA coprocessor from host` (host 3.0.8, coprocessor
 reporting 0.0.0) at start. Those are the coprocessor struggling, not
 this bug. The 5-second RPC timeout only made the stop slower to reach
 the crash.
+
+### 5028 -- a ping before the lookup
+
+`net_online()` means an interface holds an address. It does not mean
+packets are moving. The 5027 log had Wi-Fi "connected" through a
+coprocessor that had stopped passing traffic (`eh_sdio: mempool OOM`,
+RPCs timing out). Each stream attempt then spent 5 s in `select()` or
+14 s in `getaddrinfo()` before failing, and each failure counted, so the
+backoff schedule ran out against a fault that had nothing to do with
+the station.
+
+`net_probe()` in `ethernet.c` sends one ICMP echo to the default route's
+gateway, and one to its DNS server when that is a different address. It
+uses `esp_ping` (a session per echo, its own task, a semaphore on the end
+callback). Before every attempt, netstream now requires `net_online()`
+and a gateway that answers. A gateway that stays silent is handled like
+"no network": waited out, not counted, re-probed every 2 s
+(`NET_PROBE_EVERY_MS`), and bounded by the same 25 s `NET_WAIT_MAX_MS`,
+after which the attempt goes ahead and fails honestly.
+
+Only the gateway gates. The DNS server's answer is logged, not required:
+plenty of public resolvers drop ICMP, and a lookup that then fails
+still puts its own error in the log. The line reads like `gateway
+192.168.5.1 3 ms, dns 8.8.8.8 14 ms`. "Gateway answers, DNS server does
+not" and "nothing answers" are different faults, and before this they
+looked the same.
+
+Cost on a working network: one LAN round trip, single-digit
+milliseconds, plus a DNS-server echo when the resolver is off-LAN. The
+ping task's stack is taken from the heap for each session.
