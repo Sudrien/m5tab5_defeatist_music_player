@@ -12245,3 +12245,18 @@ Not host-tested: settings.c does not build on a host. A syntax check
 against texttest's fakes showed no warnings on the new lines. What to
 look for: boot with no card after changing the volume with one, and the
 `from flash:` line carries it.
+
+### 5065 -- No storage, so the chooser opens on RADIO
+
+v0.5.0's zero-storage radio works (5048, 5049, 5064), but a Tab5 with
+no card or drive still booted to `nothing to play; opening the chooser`
+with both volume tabs grey and no rows. Every board log of this series
+then shows the same two taps: `tab RADIO`, then the kept list.
+
+browser_open()'s "nothing mounted" case now selects the RADIO tab. It
+still tries the current track's volume first, then any mounted volume.
+The radio tab already ignores mount changes, so a USB drive that turns
+up a second later does not pull the view away from it; its tab is one
+tap away. Not host-tested (browser.c). What to look for: a card-less
+boot shows the radio menu, and the first logged button is a station
+row, not `tab RADIO`.

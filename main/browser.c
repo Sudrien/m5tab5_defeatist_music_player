@@ -741,9 +741,17 @@ void browser_open(const char *start)
         }
     }
 
-    /* Nothing mounted. Both tabs grey, no rows. */
-    entries_free();
-    s_dir[0] = '\0';
+    /*
+     * 5065: nothing mounted, so the radio. It used to be both volume tabs
+     * grey with no rows, and on a Tab5 with no card or drive that was the
+     * whole boot screen: two taps (RADIO, then the kept list) before
+     * anything could be chosen, every time. The radio tab is the one
+     * thing that works without storage, and since 5048 there is a kept
+     * list for it to show. A drive that mounts afterwards does not move
+     * the view -- mount changes leave the radio tab alone -- and its tab
+     * is one tap away.
+     */
+    select_tab(BROWSER_TAB_RADIO);
 }
 
 void browser_close(void)
