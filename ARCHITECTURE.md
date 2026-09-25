@@ -12038,3 +12038,25 @@ OPEN AT THE END OF THIS SERIES (5039-5057), for whoever picks it up:
   unmapped. The Prius has only sent bit 0 so far.
 - One card-less boot showed an empty kept list. It has not recurred
   since 5051 added the line that would explain it.
+
+### 5058 -- A quiet second is not a drop
+
+`pump()` took `esp_http_client_read()` to return 0 for "nothing yet".
+In IDF 5.1 through 5.5.5 a read that times out with nothing returns
+`-ESP_ERR_HTTP_EAGAIN` (-0x7007), silently at the default log level. With
+`SOCKET_TIMEOUT_MS` at 1000, any second without a byte was logged as
+`read failed` and reconnected, and the `DROP_SILENCE_MS` path never ran:
+`nothing for 5000 ms` appears in no log here. The other way round, a
+server's clean close of a body with no Content-Length makes every read
+return 0, so a real close waited 5 s before reconnecting.
+
+Now -0x7007 is quiet (the 5 s rule decides), 0 with the body complete
+is `server closed the stream ... N ms after the last byte` and
+reconnects at once, and anything else is `read failed (n) ... N ms after
+the last byte`.
+
+WHAT THE NEXT BBC RUN SAYS. 5055 read its drops as a clean close
+returning -1, but the line never printed the value. If the drops stop,
+or turn into `nothing for 5000 ms`, they were this. If they go on as
+`read failed (-1)` about a second after the last byte, or as `server
+closed`, the server is closing them.

@@ -733,9 +733,25 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
 
     while (!superseded(gen)) {
         const int n = esp_http_client_read(c, (char *)buf, READ_CHUNK);
-        if (n < 0) {
-            ESP_LOGW(TAG, "read failed after %llu audio bytes",
-                     (unsigned long long)produced);
+        /*
+         * 5058: IDF 5.1-5.5.5 returns -ESP_ERR_HTTP_EAGAIN, not 0, for a
+         * read that timed out with nothing, so one quiet second went down
+         * the branch below as a drop and DROP_SILENCE_MS never ran. And a
+         * server's clean close of a body with no length returns 0 for
+         * ever, which waited out the full 5 s. Now EAGAIN is quiet, a
+         * completed body is a close at once, and the line says which.
+         */
+        const int64_t since_ms = (esp_timer_get_time() - last_progress) / 1000;
+        if (n == 0 && esp_http_client_is_complete_data_received(c)) {
+            ESP_LOGW(TAG, "server closed the stream after %llu audio bytes, "
+                          "%lld ms after the last byte",
+                     (unsigned long long)produced, (long long)since_ms);
+            break;
+        }
+        if (n < 0 && n != -ESP_ERR_HTTP_EAGAIN) {
+            ESP_LOGW(TAG, "read failed (%d) after %llu audio bytes, "
+                          "%lld ms after the last byte",
+                     n, (unsigned long long)produced, (long long)since_ms);
             /* 5030: the heap at the moment the link died, for the case
              * where a USB device arriving starved the Wi-Fi transport. */
             ESP_LOGW(TAG, "  internal %u free (largest %u), DMA %u free (largest %u)",
@@ -745,7 +761,7 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
             break;
         }
-        if (n == 0) {
+        if (n <= 0) {
             /* esp_http_client_read() returns 0 both for "nothing yet"
              * and for a body that has ended, and a live stream never
              * ends on purpose. Told apart by time: a station that has
