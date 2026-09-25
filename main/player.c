@@ -3416,6 +3416,24 @@ static char               s_stream_art_uuid[STATION_UUID_MAX];
 static char               s_stream_art_for[NETSTREAM_URL_MAX];
 static volatile bool      s_stream_art_want;
 
+/*
+ * 5070: THE REQUEST WAITS FOR THE BURST TO END.
+ *
+ * It went out at first sound. A station whose server bursts reaches first
+ * sound while that burst is still arriving -- RFI Monde, 2 s after
+ * connecting -- and the artwork lookup's HTTPS on top of it took the
+ * ESP-Hosted transport's DMA memory to nothing (`dma_alloc(8192)
+ * failed`), which killed the link. So first sound now only marks it
+ * pending, and the stream loop sends it once delivery is back near the
+ * station's own rate: a measured window at no more than 1.5x what the
+ * audio costs. ART_AFTER_MAX_MS bounds the wait on a station that stays
+ * ahead, or one that never reports a rate.
+ */
+#define ART_AFTER_MAX_MS          (10000)
+#define ART_AFTER_RATE_PCT        (150)
+static bool                s_stream_art_pending;
+static int64_t             s_stream_art_pending_us;
+
 static uint8_t           *s_stream_art_img;
 static size_t             s_stream_art_len;
 static char               s_stream_art_got_for[NETSTREAM_URL_MAX];
@@ -11986,6 +12004,24 @@ static track_end_t play_stream(const char *url, const char *name)
         bufplan_out_t out;
         bufplan_step(&plan, &in, &out);
 
+        /* 5070: the artwork, once the burst is over. */
+        if (s_stream_art_pending) {
+            const int kbps = netstream_kbps();
+            const int need = netstream_actual_kbps() > 0 ? netstream_actual_kbps()
+                                                         : netstream_declared_kbps();
+            const int64_t waited_ms =
+                (esp_timer_get_time() - s_stream_art_pending_us) / 1000;
+            const bool settled = kbps > 0 && need > 0 &&
+                                 kbps * 100 <= need * ART_AFTER_RATE_PCT;
+            if (settled || waited_ms >= ART_AFTER_MAX_MS) {
+                ESP_LOGI(TAG, "artwork requested %lld ms after first sound "
+                              "(%d kbit/s of %d)%s", (long long)waited_ms,
+                         kbps, need, settled ? "" : ", not settled");
+                s_stream_art_pending = false;
+                s_stream_art_want = true;
+            }
+        }
+
         /*
          * The levelling, said out loud when it moves.
          *
@@ -12230,7 +12266,9 @@ static track_end_t play_stream(const char *url, const char *name)
                  * as the same station and does not ask again. */
                 snprintf(s_art_stream_url, sizeof(s_art_stream_url), "%s",
                         s_stream_url);
-                s_stream_art_want = true;
+                /* 5070: pending, not sent. See s_stream_art_pending. */
+                s_stream_art_pending = true;
+                s_stream_art_pending_us = esp_timer_get_time();
             }
             /* Same station: s_art_img is still valid, still painted,
              * and the directory has already had its click. Nothing to
@@ -12526,6 +12564,7 @@ static track_end_t play_stream(const char *url, const char *name)
      * the same disposal path and one station later.
      */
     s_stream_art_want = false;
+    s_stream_art_pending = false;           /* 5070 */
     if (s_stream_art_ready) {
         s_stream_art_ready = false;
         free(s_stream_art_img);

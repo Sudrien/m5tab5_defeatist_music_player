@@ -12400,3 +12400,25 @@ Not host-tested (wifi.c, netstream.c). What to look for: the next time
 `gateway ... no answer` follows a working stream, `asking for a radio
 restart`, `restarting the radio`, `joined`, `network up after`, and the
 stream back.
+
+### 5070 -- The artwork waits for the burst
+
+The other half of 5069's log. The artwork request went out at first
+sound. With the full-reserve start that is normally long after a
+server's burst, but a station that bursts its whole reserve reaches
+first sound while the burst is still arriving -- RFI Monde did it 2 s
+after connecting -- and the artwork lookup's HTTPS on top of that burst
+is what the transport ran out of DMA memory under.
+
+First sound now marks the request pending. The stream loop sends it
+once netstream's last rate window is measured and no more than 1.5x what
+the audio costs (the decoder's rate, else icy-br), or after 10 s,
+whichever is first. Logged as `artwork requested N ms after first sound
+(K kbit/s of NEED)`, with `, not settled` when the 10 s ran out. A
+stream that ends first clears it with the rest of the artwork state.
+
+On a station that prerolls its full reserve at 1x the window is settled
+by first sound and nothing changes: the line says 0 ms. Not host-tested
+(player.c). What to look for: RFI Monde, first sound early, then the
+artwork line some seconds later with delivery near 64, and no
+`dma_alloc` failure between them.
