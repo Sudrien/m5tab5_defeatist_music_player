@@ -559,10 +559,14 @@ void radiobrowser_click(const char *uuid)
  *     not unusual, and albumart_is_supported_image() is already the one
  *     place that question is answered -- 0417's header made the same
  *     argument about not having two of anything.
- *   - REDIRECTS, left to esp_http_client's own limit and NOT extended
- *     to the plain-http downgrade 0418 allows for audio. A picture is
- *     not worth relaxing a policy for; if it will not come over the
- *     scheme it was advertised on, the screen stays blank.
+ *   - REDIRECTS, followed by hand, at most RB_ART_HOPS, and never the
+ *     plain-http downgrade 0418 allows for audio: a picture is not worth
+ *     relaxing a policy for. esp_http_client_set_redirection() refuses
+ *     https -> http itself. 5075: they were meant to be "left to
+ *     esp_http_client's own limit", but open() and fetch_headers() --
+ *     unlike perform() -- follow nothing, so every redirect was a silent
+ *     blank. RFI's logo is http://www.rfi.fr/apple-touch-icon.png, a 301
+ *     to https, which is the ordinary shape of it now: an upgrade.
  *
  * The caller owns the buffer on success and must free it.
  *
@@ -571,6 +575,7 @@ void radiobrowser_click(const char *uuid)
  * link, and a blank square is not a fault.
  */
 #define RB_ART_MAX      (192 * 1024)
+#define RB_ART_HOPS     (3)         /* 5075: redirects followed */
 
 bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)
 {
@@ -603,10 +608,34 @@ bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)
     size_t got = 0;
     bool ok = false;
 
-    if (esp_http_client_open(c, 0) != ESP_OK) goto done;
-    esp_http_client_fetch_headers(c);
+    int status = 0;
+    for (int hop = 0; ; hop++) {
+        if (esp_http_client_open(c, 0) != ESP_OK) goto done;
+        esp_http_client_fetch_headers(c);
+        status = esp_http_client_get_status_code(c);
 
-    if (esp_http_client_get_status_code(c) != 200) goto close;
+        /* 5075: follow a redirect, upgrade included. See above. */
+        const bool redirect = status == 301 || status == 302 || status == 303 ||
+                              status == 307 || status == 308;
+        if (!redirect || hop >= RB_ART_HOPS) break;
+        const esp_err_t rerr = esp_http_client_set_redirection(c);
+        if (rerr != ESP_OK) {
+            ESP_LOGI(TAG, "artwork: %d not followed (%s)", status,
+                     esp_err_to_name(rerr));
+            goto close;
+        }
+        char to[160];
+        if (esp_http_client_get_url(c, to, sizeof(to)) == ESP_OK) {
+            ESP_LOGI(TAG, "artwork: %d to %.120s", status, to);
+        }
+        esp_http_client_close(c);
+    }
+
+    if (status != 200) {
+        /* Said, at last: a blank square used to have no line at all. */
+        ESP_LOGI(TAG, "artwork: HTTP %d; no picture", status);
+        goto close;
+    }
 
     {
         char *ctype = NULL;

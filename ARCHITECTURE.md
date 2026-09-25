@@ -12503,3 +12503,27 @@ Wi-Fi, then tap again`. A second tap replaces the held station, cancel
 drops it, and so do the list closing some other way or the station list
 being reloaded, so a stale hold cannot fire later. Not host-tested
 (player.c).
+
+### 5075 -- The artwork follows a redirect
+
+5074 on the board (v0.4.0-80): `station 1 held until the network is up`,
+the chooser up through a join that needed its second try, then `network
+up after 10427 ms; station 1 of 1: RFI Monde`. 5068's failover: .26
+silent, .30 played. And no `dma_alloc` failure this time: the artwork
+request saw `DMA 15739 free (largest 8704)`, against 5888 the run
+before, which fits 5072's 64K pool.
+
+But no picture, and no line saying why. The directory's favicon for RFI
+is http://www.rfi.fr/apple-touch-icon.png, a 301 to https.
+radiobrowser_art_fetch()'s header said redirects were "left to
+esp_http_client's own limit", but that limit lives in
+esp_http_client_perform(); open() and fetch_headers() follow nothing.
+So every redirect was a status that was not 200 and a silent blank.
+
+The fetch now follows up to RB_ART_HOPS (3) redirects by hand through
+esp_http_client_set_redirection(), which switches transport for an
+http -> https upgrade and refuses https -> http itself, so the old rule
+(a picture never costs a downgrade) stands. Logged as `artwork: 301 to
+https://...`, and a final status other than 200 is now `artwork: HTTP N;
+no picture` instead of nothing. Not host-tested (radiobrowser.c). What
+to look for: RFI Monde, the 301 line, then `artwork: N bytes`.
