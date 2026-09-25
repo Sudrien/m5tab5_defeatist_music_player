@@ -12,6 +12,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -58,6 +59,10 @@ _Static_assert(NETDEC_MAX_INT16 >= MINIMP3_MAX_SAMPLES_PER_FRAME,
  * full ring drains at the rate it fills.
  */
 #define REFILL_BYTES        (2048)
+
+/* 5061: held this much, refill() does not wait. Above the largest MP3
+ * frame (1441) and an AAC/HE-AAC access unit (6144 per channel pair). */
+#define REFILL_NOWAIT_BYTES (8192)
 
 /* One stream, one decoder; module scope for the same reason netstream's
  * working set is, and in PSRAM for the reason 0115 exists. */
@@ -143,6 +148,13 @@ static uint64_t s_samples;
 static uint64_t s_cost_out_mark;    /* s_win.out at the last report */
 static uint64_t s_cost_samples;
 static uint32_t s_resyncs;
+/* 5061: how often refill() waited on an empty byte ring, and when the
+ * window was last reported. See refill(). */
+static uint32_t s_refill_waits;
+static int64_t  s_window_logged_us;
+/* 5061: the last call produced a frame, so the window is frames and not
+ * a resync hunt, which must keep waiting rather than spin. */
+static bool     s_last_decoded;
 static bool     s_reported;     /* the format line has been logged */
 /* The stream is 24-bit and is being folded -- see pcmfold.h. Reset with
  * s_reported at open, because a reconnect to a different station is a
@@ -233,6 +245,9 @@ bool netdec_open(void)
     s_frames = 0;
     s_samples = 0;
     s_resyncs = 0;
+    s_refill_waits = 0;
+    s_window_logged_us = 0;
+    s_last_decoded = false;
     s_reported = false;
     s_folding = false;
     s_open = true;
@@ -296,7 +311,23 @@ static size_t refill(void)
     const size_t room = framewin_space(&s_win);
     if (!room) return 0;
     const size_t want = room < REFILL_BYTES ? room : REFILL_BYTES;
-    const size_t got = netstream_read(framewin_tail(&s_win), want, RING_WAIT_MS);
+    /*
+     * 5061: NO WAIT WHEN THE WINDOW ALREADY HOLDS FRAMES.
+     *
+     * Every call decodes one frame and refilled first with a 100 ms
+     * wait. On a byte ring that is empty by design -- this reader takes
+     * everything as it arrives -- that wait was paid per FRAME, even
+     * with the window full of undecoded audio. At BBC's 24 kHz a frame
+     * is 24 ms, so decoding was capped near a quarter of real time, and
+     * the preroll reserve grew about 1.5 s in every 5 while the station
+     * delivered at 1.07x. With a few KB in hand -- more than any frame
+     * of either codec -- the refill only takes what is already there.
+     */
+    const int wait = (s_last_decoded &&
+                      framewin_avail(&s_win) >= REFILL_NOWAIT_BYTES)
+                   ? 0 : RING_WAIT_MS;
+    const size_t got = netstream_read(framewin_tail(&s_win), want, wait);
+    if (!got && wait) s_refill_waits++;
     if (got && !framewin_commit(&s_win, got)) {
         /* Cannot happen: got <= want <= room. Checked because believing
          * a bad length here is how the window loses its place. */
@@ -571,6 +602,7 @@ static int esp_read(int16_t *out, int max_int16, netdec_info_t *info)
                  fold ? " folded to 16" : "",
                  (unsigned)raw.consumed, produced / fi.channel);
     }
+    s_last_decoded = true;      /* 5061 */
     return produced;
 }
 
@@ -579,7 +611,19 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
     if (!s_open || !out || max_int16 < NETDEC_MAX_INT16) return -1;
 
     refill();
+    s_last_decoded = false;     /* 5061: set again only by a frame */
     identify();
+
+    /* 5061: what the window holds, every five seconds, beside
+     * netstream's rate line: undecoded bytes are a reserve that line
+     * cannot see. */
+    const int64_t now_us = esp_timer_get_time();
+    if (now_us - s_window_logged_us >= 5000000) {
+        s_window_logged_us = now_us;
+        ESP_LOGI(TAG, "window %u bytes undecoded, %" PRIu32 " frames, "
+                      "%" PRIu32 " empty refill waits",
+                 (unsigned)framewin_avail(&s_win), s_frames, s_refill_waits);
+    }
 
     if (s_not_audio) {
         /*
@@ -696,5 +740,6 @@ int netdec_read(int16_t *out, int max_int16, netdec_info_t *info)
                  fi.layer, fi.hz, fi.channels, fi.bitrate_kbps,
                  fi.frame_bytes, samples);
     }
+    s_last_decoded = true;      /* 5061 */
     return produced;
 }

@@ -12111,3 +12111,29 @@ STILL OPEN, from the same log:
   caps the decode rate, which fits these numbers but is not measured.
 - The logo is a progressive JPEG (145x145, JDR_FMT3), as before.
 - `mempool OOM` once, at the artwork fetch just after first sound.
+
+### 5061 -- The decoder does not wait on an empty ring with frames in hand
+
+5060 on the board (v0.4.0-65), BBC World Service: `first sound at
+20334 ms`, down from 30106 and 30035. It started at 4.87 s of reserve,
+and the reserve then slid 3.6 -> 2.5 s over forty seconds, with SHORT on
+the windows at 44-50 kbit/s. It has less to spend than before because
+it started earlier. That makes the slow preroll growth 5060 left open
+the thing to fix. The first window delivered 149 kbit/s for 5 s, about
+13 s of 56 kbit/s audio, and the reserve showed 1.96 s.
+
+netdec_read() decodes one frame per call and refilled first with
+RING_WAIT_MS (100 ms). The byte ring is empty by design, since this
+reader takes everything as it arrives, so that wait was paid per frame,
+even with the window full. A frame at 24 kHz is 24 ms. Now refill()
+does not wait when the last call decoded a frame and the window holds
+at least 8 KB (above any MP3 frame or AAC access unit). A resync hunt
+still waits, so it cannot spin.
+
+And a line every 5 s:
+`window N bytes undecoded, F frames, W empty refill waits`. If the
+window was the reservoir, N should be large on the first lines of the
+next run without this change, and near zero with it, with the reserve
+climbing near the delivery rate.
+
+Not host-tested; netdec.c needs IDF to build. rm sdkconfig not needed.
