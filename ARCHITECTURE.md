@@ -11779,3 +11779,29 @@ SDMMC_HOST_DEFAULT()'s deinit_p, so the second call returns
 ESP_ERR_INVALID_STATE without touching the slot count.
 
 Built, not yet run on the board.
+
+### 5050 -- The shared SDMMC host, again: no second slot release
+
+5049 on the board, no card, Wi-Fi switched on: the same panic, the same
+backtrace (xQueueSemaphoreTake from sdmmc_host_do_transaction, slot 1,
+inside eh_host_port_sdio_card_init).
+
+5049 swapped storage's sdmmc_host_deinit() for
+sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0) and called it a belt, on the
+belief that a second slot release was refused when the mount's cleanup
+had already done one. IDF 5.5.5's sdmmc_host_deinit_slot() checks only
+that the host is up. It then decrements num_of_init_slots whether or not
+that slot was initialised, and deinitialises the whole controller when
+the count reaches zero. The failed mount's own cleanup (call_host_deinit
+-> deinit_p -> sdmmc_host_deinit_slot(0), since SDMMC_HOST_DEFAULT() sets
+SDMMC_HOST_FLAG_DEINIT_ARG) had already taken the count from 2 to 1. The
+second call took the radio's 1 to 0.
+
+So storage calls nothing after a failed mount. The cleanup inside
+esp_vfs_fat_sdmmc_mount() is the release, and it is the only one. The
+GPIO conflict the old sdmmc_host_deinit() was added for came from an
+older IDF, whose mount cleanup did not release the slot.
+
+Rule for anything else that touches this controller: exactly one
+sdmmc_host_deinit_slot() per successful sdmmc_host_init_slot(), and
+never sdmmc_host_deinit().

@@ -377,11 +377,18 @@ static esp_err_t sd_mount_at(bool verbose, int freq_khz)
          * first command -- xQueueSemaphoreTake on the host's deleted
          * queue, from sdmmc_host_do_transaction(). A card that mounted
          * never reached this line, which is why it had never been seen.
-         * The mount's own cleanup already deinits slot 0 through
-         * SDMMC_HOST_DEFAULT()'s deinit_p; this is the belt, and it
-         * returns ESP_ERR_INVALID_STATE without touching the slot count
-         * when that has happened. */
-        (void)sdmmc_host_deinit_slot(SDMMC_HOST_SLOT_0);
+         * 5050: AND NOT THE SLOT EITHER. The mount's own cleanup already
+         * deinits slot 0, through SDMMC_HOST_DEFAULT()'s deinit_p
+         * (SDMMC_HOST_FLAG_DEINIT_ARG). 5049 called
+         * sdmmc_host_deinit_slot(0) a second time as a belt, on the
+         * belief that a second call was refused. It is not:
+         * sdmmc_host_deinit_slot() checks only that the HOST is up, then
+         * decrements the initialised-slot count regardless. With the
+         * radio's slot 1 as the only one left, that took the count to
+         * zero and tore the whole controller down -- the same panic,
+         * from the other door. Nothing is called here now; the cleanup
+         * inside esp_vfs_fat_sdmmc_mount() is the release, and it is the
+         * only one. */
         s_card = NULL;
         if (verbose) {
             if (ret == ESP_FAIL) {
