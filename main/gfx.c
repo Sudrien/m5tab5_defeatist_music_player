@@ -471,6 +471,25 @@ void gfx_fill_rect(int x, int y, int w, int h, uint16_t c)
     }
 }
 
+/* 5067: see gfx.h. Unit circle at 45-degree steps, x1000, from 12 o'clock
+ * clockwise. */
+void gfx_draw_spinner(int cx, int cy, int r, uint32_t ms, uint16_t on, uint16_t off)
+{
+    static const int16_t ux[8] = {    0,  707, 1000,  707,    0, -707, -1000, -707 };
+    static const int16_t uy[8] = { -1000, -707,    0,  707, 1000,  707,     0, -707 };
+    const int lit = (int)((ms / 100u) % 8u);
+    const int dot = r / 4 > 1 ? r / 4 : 2;
+    /* Half way between off and on, per RGB565 channel. */
+    const uint16_t mid = (uint16_t)((((on >> 11) + (off >> 11)) / 2) << 11 |
+                                    ((((on >> 5) & 63) + ((off >> 5) & 63)) / 2) << 5 |
+                                    (((on & 31) + (off & 31)) / 2));
+    for (int i = 0; i < 8; i++) {
+        const uint16_t c = (i == lit) ? on : (i == (lit + 7) % 8) ? mid : off;
+        gfx_fill_circle(cx + ux[i] * (r - dot) / 1000, cy + uy[i] * (r - dot) / 1000,
+                        dot, c);
+    }
+}
+
 void gfx_fill_circle(int cx, int cy, int r, uint16_t c)
 {
     for (int dy = -r; dy <= r; dy++) {

@@ -147,6 +147,10 @@ typedef struct {
      */
     const char *stream_status;
 
+    /* 5067: draw a spinner after stream_status -- the stream is waiting
+     * for the network, not for the station. */
+    bool stream_spinner;
+
     /*
      * The ICY title -- what is playing on the station right now -- or
      * NULL/"" when the station is not sending one, or is sending its own

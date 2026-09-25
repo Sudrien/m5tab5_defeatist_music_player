@@ -12,6 +12,7 @@
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
 
@@ -176,6 +177,9 @@ static bool s_radio_menu;
 /* Set by the player task while a fetch is in flight, or after one
  * failed. Cleared when a list arrives. */
 static char s_radio_status[96];
+/* 5067: see browser_set_radio_busy(). */
+static volatile bool s_radio_busy;
+static uint32_t      s_spin_frame;      /* last spinner step drawn */
 static char s_dir[512];
 static char s_result[512];
 
@@ -563,6 +567,13 @@ static void load_radio_menu(void)
         s_count++;
     }
     s_top = 0;
+    s_dirty = true;
+}
+
+void browser_set_radio_busy(bool busy)
+{
+    if (busy == s_radio_busy) return;
+    s_radio_busy = busy;
     s_dirty = true;
 }
 
@@ -1028,6 +1039,15 @@ void browser_draw(void)
         }
     }
 
+    /* 5067: the spinner moves on the clock, so a new step is a repaint. */
+    const bool spin = s_radio && s_radio_busy;
+    if (spin) {
+        const uint32_t step = (uint32_t)(esp_timer_get_time() / 100000);
+        if (step != s_spin_frame) {
+            s_spin_frame = step;
+            s_dirty = true;
+        }
+    }
     if (!s_dirty) return;
     s_dirty = false;
 
@@ -1073,6 +1093,13 @@ void browser_draw(void)
          * it, and it is the front that the rows are missing. */
         gfx_draw_text(16, TAB_H + 2 * pad + gh, note, LABEL_SCALE,
                       w - 32, C_FAINT);
+    } else if (spin) {
+        /* 5067: the spinner at the right of the row, the text short of it. */
+        const int r = GFX_GLYPH_H(LABEL_SCALE) / 2 + 4;
+        gfx_draw_text_tail(16, TAB_H + (PATH_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
+                           status_line(), LABEL_SCALE, w - 48 - 2 * r, C_DIM);
+        gfx_draw_spinner(w - 16 - r, TAB_H + PATH_H / 2, r,
+                         (uint32_t)(esp_timer_get_time() / 1000), C_TEXT, C_FAINT);
     } else {
         gfx_draw_text_tail(16, TAB_H + (PATH_H - GFX_GLYPH_H(LABEL_SCALE)) / 2,
                            status_line(), LABEL_SCALE, w - 32, C_DIM);

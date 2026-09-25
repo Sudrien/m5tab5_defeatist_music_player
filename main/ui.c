@@ -10,6 +10,7 @@
 
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "gfx.h"
 #include "freertos/FreeRTOS.h"
@@ -1287,6 +1288,19 @@ static void draw_live(const ui_state_t *st)
     const int sx = bar_x0() + pw + LIVE_GAP;
     gfx_draw_text(sx, py + LIVE_PAD_Y, st->stream_status, 3,
                   x1 - sx, C_THUMB);
+
+    /* 5067: waiting for the network. After the words, on the pill's
+     * centre line, turning on the clock; this bar is redrawn every frame
+     * while streaming, so nothing else has to ask for it. */
+    if (st->stream_spinner) {
+        const int r = GFX_GLYPH_H(3) / 2 + 4;
+        const int cx = sx + gfx_text_w(st->stream_status, 3) + LIVE_GAP + r;
+        if (cx + r <= x1) {
+            gfx_draw_spinner(cx, py + ph / 2, r,
+                             (uint32_t)(esp_timer_get_time() / 1000),
+                             C_THUMB, C_ALBUM);
+        }
+    }
 }
 
 /*

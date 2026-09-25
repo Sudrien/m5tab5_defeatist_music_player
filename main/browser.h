@@ -153,6 +153,10 @@ void browser_stars_changed(void);
  */
 void browser_set_radio_status(const char *line);
 
+/* 5067: a spinner beside the radio status line while true -- a list
+ * waiting for the network, or being fetched. */
+void browser_set_radio_busy(bool busy);
+
 /* Open on the folder of `start` when it is on a mounted volume, otherwise
  * on the first volume that is. Safe to call when nothing is mounted: the
  * chooser opens with both tabs greyed and an empty list, which is a

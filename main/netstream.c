@@ -284,6 +284,9 @@ static size_t    s_hold_searched; /* bytes of s_hold already searched */
 static bool      s_splicing;
 /* 5056: the last attempt ended in a drop after audio played. */
 static bool      s_after_drop;
+/* 5067: true while a connection attempt is held waiting for a network.
+ * Published for the screen; see netstream_waiting_for_net(). */
+static volatile bool s_waiting_net;
 
 /* Keep the last SPLICE_SIG bytes that went into the ring. */
 static void splice_note(const uint8_t *p, size_t n, uint32_t gen)
@@ -1189,6 +1192,7 @@ static void netstream_task(void *arg)
                     ESP_LOGW(TAG, "%s; waiting before the lookup", probe);
                 }
                 int waited = 0, since_probe = 0;
+                s_waiting_net = true;           /* 5067 */
                 while (!path && waited < NET_WAIT_MAX_MS &&
                        !superseded(gen)) {
                     vTaskDelay(pdMS_TO_TICKS(NET_WAIT_SLICE_MS));
@@ -1200,6 +1204,7 @@ static void netstream_task(void *arg)
                                          probe, sizeof(probe));
                     }
                 }
+                s_waiting_net = false;          /* 5067 */
                 if (superseded(gen)) break;
                 if (path) {
                     ESP_LOGI(TAG, "network up after %d ms (%s); connecting",
@@ -1540,6 +1545,8 @@ void netstream_title(char *out, size_t out_size)
 }
 
 bool netstream_has_title(void) { return s_has_title; }
+
+bool netstream_waiting_for_net(void) { return s_waiting_net; }   /* 5067 */
 
 /*
  * The station's declared bitrate, or 0 if it did not say.

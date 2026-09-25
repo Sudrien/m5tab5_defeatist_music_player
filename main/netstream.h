@@ -217,6 +217,11 @@ void netstream_name(char *out, size_t out_size);
 void netstream_title(char *out, size_t out_size);
 bool netstream_has_title(void);
 
+/* 5067: a stream was asked for and is being held until a network is up
+ * (no address yet, or a gateway that does not answer). A value, safe
+ * anywhere; the screen shows a spinner for it. */
+bool netstream_waiting_for_net(void);
+
 /*
  * Tell the reader what the audio actually costs, in kbit/s, as decoded.
  *

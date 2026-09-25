@@ -12286,3 +12286,39 @@ over TLS) and the directory click were fetched. Each cleared within
 milliseconds and the stream held at 30 s of reserve. This is the
 DMA-memory dip at first sound from 5057's open list. Requesting the
 artwork once the reserve is up, not at first sound, is the candidate.
+
+### 5067 -- A spinner while the network is still being joined
+
+Two requests need a network and could be made before there was one.
+
+A DIRECTORY LIST (a tag, the charts) tapped while Wi-Fi was on but not
+yet joined was refused at once: `no Wi-Fi - the directory needs a
+connection`, and the tap had to be repeated. service_station_fetch() now
+keeps the row and returns, and the loops that call it every pass ask
+again. The status line says `waiting for the network...` with a spinner
+at its right until net_online() is true, then the fetch runs. After
+FETCH_NET_WAIT_MS (25 s, netstream's NET_WAIT_MAX_MS) it gives up with
+the old message. Logged as `directory: waiting for the network` and
+`directory: network up after N ms`. The fetch itself still blocks the
+player task, so nothing turns during it, and no spinner is shown for it.
+
+A STATION tapped before the network was already held in netstream's
+wait loop, but the screen said `Connecting`, which reads as the station
+being slow. netstream_waiting_for_net() is true for that loop (no
+address yet, or a gateway that does not answer), and the main screen
+then says `Waiting for network` with the spinner after the words.
+
+gfx_draw_spinner(): eight dots on a circle, the lit one stepping every
+100 ms of the caller's clock, the one behind it half lit. The browser
+marks itself dirty on each step while busy. The stream bar is redrawn
+every frame anyway.
+
+Not host-tested: gfx.c passes a syntax check against texttest's fakes;
+ui.c and browser.c do not build on a host.
+
+NOT DONE: holding the artwork request until the reserve is up (proposed
+in 5066). The full-reserve start target means the reserve is already
+28-30 s at first sound, so that condition is true at the moment the
+request goes out today and changes nothing. The OOM cluster in the LBC
+log came from the three HTTPS requests (the favicon lookup, a 22 KB PNG,
+the click) against the stream's steady 48 kbit/s, not from a burst.

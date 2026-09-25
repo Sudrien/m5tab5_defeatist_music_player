@@ -144,6 +144,13 @@ void gfx_fill_poly(const int *xy, int n, uint16_t c);
  * favourite is marked with, and the reason gfx_fill_poly() exists. */
 void gfx_fill_star(int cx, int cy, int r, uint16_t c);
 
+/*
+ * 5067: a loading spinner -- eight dots on a circle of radius r, the lit
+ * one stepping every 100 ms of `ms`, the one behind it half lit. The
+ * caller supplies the clock and repaints; this only draws one frame.
+ */
+void gfx_draw_spinner(int cx, int cy, int r, uint32_t ms, uint16_t on, uint16_t off);
+
 /* Seven-segment metrics, exported because callers lay out around them. */
 #define GFX_DIG_W       (20)
 #define GFX_DIG_H       (38)

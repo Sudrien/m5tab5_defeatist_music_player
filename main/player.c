@@ -6183,11 +6183,40 @@ static void sleep_timer_tick(void)
  * than a task: the mirror that needs six seconds is not the one worth
  * waiting for.
  */
+/*
+ * 5067: a list asked for while the network is still being joined waits
+ * for it rather than failing. The row stays in s_fetch_row, this returns
+ * at once, and the loops that call this come back every pass -- so the
+ * wait costs nothing and a stop or a different tap is not held up. Same
+ * bound as netstream's NET_WAIT_MAX_MS.
+ */
+#define FETCH_NET_WAIT_MS   (25000)
+static int64_t s_fetch_wait_since;      /* 0 when not waiting */
+
 static void service_station_fetch(void)
 {
     const int row = s_fetch_row;
     if (row < 0) return;
+
+    if (!net_online() && settings_wifi_enabled()) {
+        const int64_t now = esp_timer_get_time();
+        if (!s_fetch_wait_since) {
+            s_fetch_wait_since = now;
+            ESP_LOGI(TAG, "directory: waiting for the network");
+            browser_set_radio_status("waiting for the network...");
+            browser_set_radio_busy(true);
+        }
+        if (now - s_fetch_wait_since < (int64_t)FETCH_NET_WAIT_MS * 1000) {
+            return;                     /* asked again next pass */
+        }
+        ESP_LOGW(TAG, "directory: no network after %d ms", FETCH_NET_WAIT_MS);
+    } else if (s_fetch_wait_since) {
+        ESP_LOGI(TAG, "directory: network up after %lld ms",
+                 (long long)((esp_timer_get_time() - s_fetch_wait_since) / 1000));
+    }
+    s_fetch_wait_since = 0;
     s_fetch_row = -1;
+    browser_set_radio_busy(false);
 
     radiobrowser_kind_t kind;
     const char *value = NULL;
@@ -7196,6 +7225,9 @@ static void ui_task(void *arg)
          */
         st.live = s_streaming;
         st.stream_status = streamplan_status_text(s_stream_status);
+        /* 5067: held for a network, which "Connecting" does not say. */
+        st.stream_spinner = s_streaming && netstream_waiting_for_net();
+        if (st.stream_spinner) st.stream_status = "Waiting for network";
         st.stream_title = s_stream_bottom;
         /* The level strip, only while streaming: a file's bar already
          * has an envelope and a seek position, which say more. */
