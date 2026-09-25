@@ -271,7 +271,10 @@ static uint8_t    *s_audio;     /* READ_CHUNK, after the demuxer */
  * connection that lasted long enough to drop.
  */
 #define SPLICE_SIG      (2048)
-#define SPLICE_HOLD     (256 * 1024)
+/* 5057: 96 KB, not 256. The bursts seen are 20-64 KB; a hold that has
+ * not matched by 96 KB will not, and every byte held is a byte of reserve
+ * the listener is not getting. */
+#define SPLICE_HOLD     (96 * 1024)
 static uint8_t  *s_tail;          /* SPLICE_SIG, PSRAM */
 static size_t    s_tail_len;
 static uint32_t  s_tail_gen;
@@ -300,6 +303,34 @@ static void splice_note(const uint8_t *p, size_t n, uint32_t gen)
     memmove(s_tail, s_tail + s_tail_len - keep, keep);
     memcpy(s_tail + keep, p, n);
     s_tail_len = keep + n;
+}
+
+/*
+ * 5057: a connection that ends while its audio is still held gives the
+ * hold to the ring rather than to the next splice_begin(), which threw it
+ * away. On the board, a reconnect after a failed attempt never matched
+ * (the gap had outrun the server's burst), the hold grew to 134 KB, the
+ * server dropped us again, and the next connection reset the hold: ten
+ * and more seconds received and never played, the amplifier idle between
+ * drops.
+ */
+static bool superseded(uint32_t gen);
+
+static void splice_flush(uint32_t gen)
+{
+    if (!s_splicing) return;
+    s_splicing = false;
+    if (!s_hold_len) return;
+    ESP_LOGW(TAG, "reconnect ended before the join was found; "
+                  "playing the %u bytes held", (unsigned)s_hold_len);
+    for (size_t off = 0; off < s_hold_len; ) {
+        const size_t sent = xStreamBufferSend(s_ring, s_hold + off, s_hold_len - off,
+                                              pdMS_TO_TICKS(SEND_SLICE_MS));
+        off += sent;
+        if (sent == 0 && superseded(gen)) return;
+    }
+    splice_note(s_hold, s_hold_len, gen);
+    s_hold_len = 0;
 }
 
 /* At the start of a connection: splice if this is a reconnect of the
@@ -972,6 +1003,7 @@ static uint64_t pump(esp_http_client_handle_t c, uint32_t gen, icydemux_t *d)
             }
         }
     }
+    splice_flush(gen);                          /* 5057 */
     return produced;
 }
 

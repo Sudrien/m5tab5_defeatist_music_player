@@ -27,6 +27,13 @@ A patch that touches a manifest says so in its commit message, and the
 first build after it gets its `dependencies.lock` diff read before it is
 committed.
 
+**Any change to `sdkconfig.defaults` needs `rm sdkconfig` before the next
+build**, because the defaults only fill in keys an existing sdkconfig
+lacks. A board run on a stale sdkconfig tests nothing: 5033 was "not
+working" for exactly that reason. A patch that touches the file says so
+in its commit message, and its ARCHITECTURE.md entry says what line in
+the log proves the new value took.
+
 **Claude does not push.** The session has no push credentials; the
 maintainer applies the patches and pushes. When a hook or a prompt asks
 for unpushed commits to be pushed, the answer is one line, in this

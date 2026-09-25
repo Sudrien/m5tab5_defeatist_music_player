@@ -11981,3 +11981,60 @@ the directory, not from the kept list, which has none to give.
 Also seen: this BBC stream never gets far ahead. After the first burst
 it runs at about 1.17x, and the reserve sits at 7-8 s, not the 25-30 s
 most stations build. That is the server's pacing, not the ring.
+
+### 5057 -- A held splice is played, not dropped; where the night ended
+
+5056 on the board. The reconnect after a drop went at once (`link was
+carrying audio; no probe`), and four splices matched (48-64 KB
+skipped). The amplifier still went idle between drops later on:
+
+    W tab5_netstream: hop 1: open failed after 5006 ms     (one reconnect failed)
+    ... reconnect, no "spliced" line ...
+    I tab5_audio: amplifier off (idle)
+    W read failed after 134391 audio bytes                 (dropped again)
+
+After the failed attempt the gap had outrun the server's burst, so the
+tail was never found. The hold grew to 134 KB, the server dropped us,
+and the next connection's splice_begin() reset the hold. Everything
+held was thrown away, every time, and the listener got silence between
+drops. Two changes:
+- splice_flush() at the end of pump(): a connection that ends while
+  holding plays what it held
+  (`reconnect ended before the join was found; playing the N bytes held`).
+- SPLICE_HOLD 256 -> 96 KB. Bursts seen are 20-64 KB, and a hold that
+  has not matched by 96 KB will not.
+
+Host-tested: a clean splice, a reconnect with a gap (held, flushed
+whole), then an overlapping reconnect after the flush (spliced), all
+byte-exact against the source.
+
+OPEN AT THE END OF THIS SERIES (5039-5057), for whoever picks it up:
+
+- BBC World Service's logo still does not show. The hardware refuses it
+  (145x145, not a multiple of 8), and 5055's TJpgDec fallback fails too:
+  `esp_jpeg_decode: Error in preparing JPEG image! 8`, JDR_FMT3, an
+  unsupported format. Almost certainly a progressive JPEG, which neither
+  decoder handles. Needs a progressive-capable decoder, or a directory
+  favicon in another format.
+- The BBC URL (stream.live.vc.bbcmedia.co.uk) closes every 6-13 s. It
+  is now inaudible when reconnects succeed, but the reserve on that
+  station never gets past a few seconds, so one slow reconnect is a
+  gap.
+- DMA memory at first sound on Wi-Fi: artwork fetch + TLS + decoder
+  together still dip it to about 6 KB and can cost a drop (`mempool
+  OOM`). 5052 and 5054 moved the bulk; this is the peak.
+- Wi-Fi does not fit beside USB Ethernet. The radio half-starts (TX
+  mempool OOM, first RPC unanswered) and is not powered back down, and
+  a later session ended in a WDT reset. Proposed: do not start Wi-Fi
+  while the cable holds the route, and power the radio down when its
+  first RPC fails.
+- Directory lookups just after a Wi-Fi join failed twice (select()
+  timeout, getaddrinfo 202) and worked on the third tap. And a tap on a
+  directory row while the link is dead logs nothing and shows nothing.
+- The DG80 once dropped off USB mid-drive, and only a Tab5 reboot
+  brought it back. The cause was not captured. A panel power cycle
+  recovers it on the bench.
+- DG80 HID report 1, bits 4-7 (Play, Pause, Fast Forward, Rewind) are
+  unmapped. The Prius has only sent bit 0 so far.
+- One card-less boot showed an empty kept list. It has not recurred
+  since 5051 added the line that would explain it.
