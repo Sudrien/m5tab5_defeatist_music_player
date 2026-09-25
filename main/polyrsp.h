@@ -25,6 +25,9 @@ typedef struct polyrsp polyrsp_t;
 polyrsp_t *polyrsp_open(uint32_t in_rate, uint32_t out_rate, uint32_t max_in_frames);
 void       polyrsp_close(polyrsp_t *r);
 
+/* Clears the filter history to silence, as after a seek. */
+void       polyrsp_reset(polyrsp_t *r);
+
 /* The most frames one call can return for max_in_frames of input. */
 uint32_t   polyrsp_max_out(const polyrsp_t *r);
 

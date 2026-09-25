@@ -139,6 +139,14 @@ void polyrsp_close(polyrsp_t *r)
     free(r);
 }
 
+void polyrsp_reset(polyrsp_t *r)
+{
+    if (!r) return;
+    memset(r->buf, 0, (size_t)(r->T - 1) * 2 * sizeof(int16_t));
+    r->pos = r->T - 1;
+    r->phase = 0;
+}
+
 uint32_t polyrsp_max_out(const polyrsp_t *r)
 {
     return (uint32_t)(((uint64_t)r->max_in * r->L + r->M - 1) / r->M) + 1;

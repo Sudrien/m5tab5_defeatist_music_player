@@ -11531,3 +11531,25 @@ it. rateconv.c (the crossfade carry, 5021) still uses esp_ae on the
 decode task; if this one measures well, that is the next thing to move.
 5038's linker fragment now places code nothing on the USB path calls;
 left in until that is settled.
+
+### 5040 -- The crossfade's converter onto polyrsp
+
+5039 measured 9% of real time for 44.1 -> 48 kHz on the board where
+esp_ae_rate_cvt measured 223%. rateconv.c, which converts an incoming
+track to the running output rate so a crossfade can span a rate change
+(5021), was still on esp_ae -- on the decode task, where the cost hid
+as a slower decode rather than a watchdog, but the same cost.
+
+rateconv.c now wraps polyrsp. The interface is unchanged: begin with
+keep for the gapless case, reset for a seek (polyrsp_reset(), new,
+zeroes the history), run on any block size. polyrsp takes a bounded
+block, so rateconv_run() feeds it RATECONV_SLICE (4096) frames at a
+time into one output buffer sized for the whole block plus a frame per
+slice.
+
+Nothing calls esp_audio_effects now. The dependency, its lock entry and
+5038's linker fragment stay for this patch: dropping the dependency
+re-solves dependencies.lock, and the last re-solve is what pulled in an
+esp_audio_codec this silicon cannot run. The fragment places code the
+linker's section GC then discards, so it costs nothing. Both go in a
+patch of their own, with the lock checked by hand.

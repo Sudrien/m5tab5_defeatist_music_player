@@ -1,10 +1,10 @@
 /*
  * rateconv.h -- the one sample-rate converter, and when it runs.
  *
- * A wrapper around esp_audio_effects' esp_ae_rate_cvt: a Blackman-
- * windowed polyphase FIR, precompiled, from the same esp-adf-libs
- * repository as esp_audio_codec and under the same licence. See the
- * pin in idf_component.yml for why it is held below 1.4.
+ * A wrapper around polyrsp (polyrsp.h), the fixed-point polyphase
+ * resampler the USB path uses. Until 5040 it wrapped esp_audio_effects'
+ * esp_ae_rate_cvt, which measured 223% of real time on this board for
+ * 44.1 -> 48 kHz where polyrsp measures 9% -- see 5039 and 5040.
  *
  * It exists for one job: letting a crossfade span a sample-rate change.
  * A track whose rate differs from what the output is clocked at is
@@ -45,9 +45,8 @@ extern "C" {
  * history is the right history. A different pair of rates, or keep ==
  * false, starts from silence.
  *
- * Returns false, with the converter off, when the library refuses the
- * pair (it takes multiples of 4000 and 11025 between 4 and 192 kHz) or
- * cannot allocate. The caller then does what it did before this file
+ * Returns false, with the converter off, when polyrsp refuses the pair
+ * (a ratio needing more than its coefficient cap) or cannot allocate. The caller then does what it did before this file
  * existed.
  */
 bool rateconv_begin(uint32_t in_rate, uint32_t out_rate, bool keep);
