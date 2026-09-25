@@ -11955,3 +11955,29 @@ not supported"). A refusal was the end of the picture. albumart.c now
 falls back to TJpgDec on any hardware decode failure, the same path the
 can-not-allocate branch already used. A logo costs almost nothing in
 software.
+
+### 5056 -- Reconnect at once, no probe after a drop; the kept station's uuid
+
+5055 on the board: `reconnect spliced: the server repeated 20999 /
+36397 / 22398 / 22399 bytes; skipped`. The repeats are gone. Two things
+were still wrong.
+
+A GAP AT EACH DROP. The amplifier went idle for four seconds mid-stream.
+A drop was followed by 1000 ms of backoff, then the 5028 probe, which
+took 2.0 s (an echo each to the gateway and to 8.8.8.8, about a second
+apiece), then connect and headers, then the splice's hold. That is
+about 6 s against a 3-8 s reserve. After a drop from a stream that was
+playing, the reconnect now goes at once and skips the probe, since the
+link carried audio a moment ago. A reconnect that then fails has
+s_failures > 0, and gets the full backoff and the probe as before.
+
+NO ART FOR A KEPT STATION. The logo is looked up by the directory's
+uuid, and 5048 kept a name and a URL only. radiokeep's fill() now takes
+the uuid from the current station when its URL matches, and LAST is
+rewritten when a uuid arrives for a station that had none. A station
+kept before this patch gets its uuid the next time it is played from
+the directory, not from the kept list, which has none to give.
+
+Also seen: this BBC stream never gets far ahead. After the first burst
+it runs at about 1.17x, and the reserve sits at 7-8 s, not the 25-30 s
+most stations build. That is the server's pacing, not the ring.

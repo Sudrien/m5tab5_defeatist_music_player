@@ -279,6 +279,8 @@ static uint8_t  *s_hold;          /* SPLICE_HOLD, PSRAM, allocated on use */
 static size_t    s_hold_len;
 static size_t    s_hold_searched; /* bytes of s_hold already searched */
 static bool      s_splicing;
+/* 5056: the last attempt ended in a drop after audio played. */
+static bool      s_after_drop;
 
 /* Keep the last SPLICE_SIG bytes that went into the ring. */
 static void splice_note(const uint8_t *p, size_t n, uint32_t gen)
@@ -1084,9 +1086,27 @@ static void netstream_task(void *arg)
              */
             int gw_ms = -1, net_ms = -1;
             char probe[96];
-            bool path = net_online() &&
-                net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
-                          probe, sizeof(probe));
+            /*
+             * 5056: not after a drop from a stream that was playing. The
+             * link carried audio a second ago, and the probe costs about
+             * two seconds (an echo each to the gateway and the
+             * internet), which on a reconnect comes straight out of the
+             * audio reserve. BBC World Service drops us every 6-13 s
+             * with 3-8 s buffered, and 1 s of backoff + 2 s of probe + a
+             * connect ran the reserve dry: the amplifier went idle for
+             * four seconds mid-programme. A failed reconnect still
+             * probes, since s_after_drop is cleared by any attempt.
+             */
+            bool path;
+            if (s_after_drop && net_online()) {
+                path = true;
+                snprintf(probe, sizeof(probe), "link was carrying audio; no probe");
+            } else {
+                path = net_online() &&
+                    net_probe(NET_PROBE_TIMEOUT_MS, &gw_ms, &net_ms,
+                              probe, sizeof(probe));
+            }
+            s_after_drop = false;
             if (!path) {
                 if (!net_online()) {
                     ESP_LOGI(TAG, "no network yet; waiting before the first "
@@ -1245,10 +1265,13 @@ static void netstream_task(void *arg)
                 wait = 0;
                 set_state(NETSTREAM_RETRYING);
             } else if (s_failures == 0) {
-                wait = netplan_backoff_ms(0);
+                /* 5056: at once, and without the probe. One reconnect per
+                 * drop is not hammering, and a second failure in a row
+                 * has s_failures > 0 and the full schedule. */
+                wait = 0;
+                s_after_drop = true;
                 set_state(NETSTREAM_RETRYING);
-                ESP_LOGW(TAG, "dropped after playing; reconnecting in %d ms",
-                         wait);
+                ESP_LOGW(TAG, "dropped after playing; reconnecting now");
             } else {
                 wait = netplan_backoff_ms(s_failures - 1);
                 if (wait < 0) {

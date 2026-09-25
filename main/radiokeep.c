@@ -13,6 +13,7 @@
 #include "nvs.h"
 
 #include "favorites.h"      /* favorites_url_eq() */
+#include "stations.h"       /* 5056: the uuid of the station being kept */
 
 static const char *TAG = "tab5_keep";
 
@@ -100,11 +101,22 @@ static bool slot_write(const char *key, const station_t *st)
     return err == ESP_OK;
 }
 
+/*
+ * 5056: and the directory's uuid, when the current station is this one.
+ * A kept station without it plays but has no artwork: the logo is looked
+ * up by uuid (radiobrowser.c), and 5048 stored name and URL only, so a
+ * station replayed from the kept list came up with a blank square.
+ * Under the lock; `look` is static for its size.
+ */
 static void fill(station_t *st, const char *name, const char *url)
 {
+    static station_t look;
     memset(st, 0, sizeof(*st));
     snprintf(st->name, sizeof(st->name), "%s", name ? name : "");
     snprintf(st->url, sizeof(st->url), "%s", url);
+    if (stations_get(stations_index(), &look) && favorites_url_eq(look.url, url)) {
+        memcpy(st->uuid, look.uuid, sizeof(st->uuid));
+    }
 }
 
 void radiokeep_note_played(const char *name, const char *url)
@@ -112,9 +124,10 @@ void radiokeep_note_played(const char *name, const char *url)
     if (!url || !url[0]) return;
     static station_t cur, fresh;    /* static for size; used under the lock */
     lock();
+    fill(&fresh, name, url);
     if (!slot_read(KEY_LAST, &cur) || !favorites_url_eq(cur.url, url) ||
-        strcmp(cur.name, name ? name : "") != 0) {
-        fill(&fresh, name, url);
+        strcmp(cur.name, fresh.name) != 0 ||
+        (fresh.uuid[0] && strcmp(cur.uuid, fresh.uuid) != 0)) {
         if (slot_write(KEY_LAST, &fresh)) {
             ESP_LOGI(TAG, "last played kept: %.60s", fresh.name);
         }
