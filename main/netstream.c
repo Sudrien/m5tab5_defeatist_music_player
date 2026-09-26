@@ -601,6 +601,34 @@ static int           s_addr_turn;
 static bool          s_open_failed;     /* set by connect_hops() */
 
 /*
+ * 5083: the addresses that have already failed to open for this station.
+ * The turn counter alone cannot keep them apart: the router hands the
+ * pool back in a new order on every lookup, so "the next one" was .26
+ * straight after .26 on the board. Four, CONFIG_LWIP_DNS_MAX_HOST_IP.
+ */
+#define PIN_SKIP_MAX 4
+static char s_pin_skip[PIN_SKIP_MAX][16];
+static int  s_pin_nskip;
+
+static bool pin_skipped(const char *ip)
+{
+    for (int i = 0; i < s_pin_nskip; i++) {
+        if (strcmp(s_pin_skip[i], ip) == 0) return true;
+    }
+    return false;
+}
+
+static void pin_skip(const char *ip)
+{
+    if (!ip[0] || pin_skipped(ip)) return;
+    if (s_pin_nskip == PIN_SKIP_MAX) {          /* oldest out */
+        memmove(s_pin_skip[0], s_pin_skip[1], sizeof(s_pin_skip[0]) * (PIN_SKIP_MAX - 1));
+        s_pin_nskip--;
+    }
+    strlcpy(s_pin_skip[s_pin_nskip++], ip, sizeof(s_pin_skip[0]));
+}
+
+/*
  * The URL to open for this attempt. For plain http, the host's address
  * chosen by `turn`, with s_pin_host set to the Host header to send; for
  * https, or anything that will not parse or resolve, `url` unchanged and
@@ -630,15 +658,38 @@ static const char *pin_address(const char *url, int turn)
     for (const struct addrinfo *ai = res; ai; ai = ai->ai_next) n++;
     /* https: esp-tls takes the first address itself, so that is the one
      * to name; only plain http moves along the list. */
-    const int pick = s_pin_parsed.https ? 0 : turn % n;
+    int pick = s_pin_parsed.https ? 0 : turn % n;
+    /*
+     * 5083: from there, the first address that has not already failed
+     * to open for this station. When every one has, forget them and
+     * start the round again -- a pool that was all silent a minute ago
+     * may not be now.
+     */
+    int passed = 0;
+    if (!s_pin_parsed.https && s_pin_nskip > 0) {
+        char ip[16];
+        for (; passed < n; passed++) {
+            const struct addrinfo *c = res;
+            for (int i = 0; i < (pick + passed) % n; i++) c = c->ai_next;
+            inet_ntop(AF_INET, &((const struct sockaddr_in *)c->ai_addr)->sin_addr,
+                      ip, sizeof(ip));
+            if (!pin_skipped(ip)) break;
+        }
+        if (passed == n) {
+            s_pin_nskip = 0;
+            passed = 0;
+        }
+        pick = (pick + passed) % n;
+    }
     const struct addrinfo *ai = res;
     for (int i = 0; i < pick; i++) ai = ai->ai_next;
     inet_ntop(AF_INET, &((const struct sockaddr_in *)ai->ai_addr)->sin_addr,
               s_pin_ip, sizeof(s_pin_ip));
     freeaddrinfo(res);
 
-    ESP_LOGI(TAG, "%s is %s (%d of %d)%s", s_pin_parsed.host, s_pin_ip,
-             pick + 1, n, s_pin_parsed.https ? "; https connects by name" : "");
+    ESP_LOGI(TAG, "%s is %s (%d of %d)%s%s", s_pin_parsed.host, s_pin_ip,
+             pick + 1, n, s_pin_parsed.https ? "; https connects by name" : "",
+             passed ? "; passed over the ones that did not answer" : "");
     if (s_pin_parsed.https) return url;
     if (!addrpin_build(url, &s_pin_parsed, s_pin_ip, s_pin_url, sizeof(s_pin_url))) {
         return url;
@@ -1175,6 +1226,7 @@ static void netstream_task(void *arg)
         publish_title("");
         s_title_logged[0] = '\0';              /* 5066 */
         s_addr_turn = 0;                        /* 5068 */
+        s_pin_nskip = 0;                        /* 5083 */
         s_failures = 0;
         s_last_status = 0;
         s_kbps = 0;
@@ -1361,7 +1413,10 @@ static void netstream_task(void *arg)
             const netplan_action_t act = connect_hops(c, gen);
             /* 5068: that address did not answer; the next attempt takes
              * the next one. */
-            if (s_open_failed) s_addr_turn++;
+            if (s_open_failed) {
+                pin_skip(s_pin_ip);             /* 5083 */
+                s_addr_turn++;
+            }
             if (act == NETPLAN_PLAY) {
                 if (s_hdr_name[0]) publish_name(s_hdr_name);
                 /* A reconnect keeps the title on screen and restarts the

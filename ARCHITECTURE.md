@@ -12832,3 +12832,44 @@ needed for this one. Not built here.
 
 What to look for: no second warning from 5077 at configure time, and
 no more lines that start in the middle of another.
+
+### 5083 -- An address that did not answer is not tried again
+
+5077-5082 on the board (v0.4.0-90), sdkconfig rebuilt. The memory
+series did its job: no `mempool OOM`, no `dma_alloc ... failed`, and the
+artwork request beside RFI-Afrique saw `DMA 20575 free (largest
+13824)` against 15639 / 6400 in the last log. Internal free sits near
+60 KB through playback. Both stations played through the artwork fetch
+and a click report without a stall worth the name.
+
+What cost time was RFI's pool. RFI-Afrique: .29 and .24 silent for 5 s
+each, .36 played. RFI Monde:
+
+    live02.rfi.fr is 185.74.70.26 (1 of 4)   -> 5 s, nothing
+    live02.rfi.fr is 185.74.70.26 (2 of 4)   -> 5 s, nothing
+    live02.rfi.fr is 185.74.70.25 (3 of 4)   -> 5 s, nothing
+    live02.rfi.fr is 185.74.70.35 (4 of 4)   -> played
+
+5074 named it: the router hands the pool back in a new order on each
+lookup, so 5068's turn counter, which picks index `turn % n` of
+whatever order this lookup returned, can land on an address it has
+just watched fail. Here that cost a whole five-second attempt, and
+first sound came at 39.5 s.
+
+netstream now keeps the addresses that failed to open on the first hop
+for the current station (up to four, CONFIG_LWIP_DNS_MAX_HOST_IP), and
+pin_address() starts at the turn's index as before and walks forward
+past any of them. If every address has failed, the list is forgotten
+and the round starts again. A new station clears it, beside
+s_addr_turn. The log line gains `; passed over the ones that did not
+answer` when the walk moved.
+
+Host-tested by lifting pin_skip() and pin_address() into a program with
+a getaddrinfo() that returns the pool in a new order each call, three
+of four members silent: .26, then .25 (index 3, passing .26 at index 2),
+then .35 which plays -- three attempts where the old rule could take
+any number. Not built under IDF.
+
+The five seconds per silent member is CONNECT_TIMEOUT_MS and is left
+alone: a slow but live server is worth the wait more than a silent one
+is worth skipping faster.
