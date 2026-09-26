@@ -583,8 +583,12 @@ void radiobrowser_click(const char *uuid)
  * which takes the software path for seconds (see 5093). 192 KB refused
  * Спокойное радио's `196x196/favicon.png`, which is evidently much larger
  * than its name.
+ *
+ * 5103: 2 MB. That favicon is 1,369,443 bytes, and it is a PNG: pngle
+ * streams it into the scaled framebuffer, no full-size copy, at idle
+ * priority now like the software JPEG path. The buffer is PSRAM.
  */
-#define RB_ART_MAX      (512 * 1024)
+#define RB_ART_MAX      (2 * 1024 * 1024)
 #define RB_ART_HOPS     (3)         /* 5075: redirects followed */
 
 bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)

@@ -13446,3 +13446,28 @@ reproducing this. Host tests: clocktest 80/0, cardtimetest 20/0.
 `-Werror=format-truncation` against dirent's 256-byte d_name. The name
 is for a log line, so a long one is cut at 63 bytes, and `%.63s` tells
 GCC so.
+
+### 5103 -- A 2 MB station logo, decoded at idle priority
+
+Спокойное радио's `196x196/favicon.png` is 1,369,443 bytes, and 5095
+refuses it by its Content-Length (`artwork is 1337 KB, over the 512 KB
+limit`). The maintainer wants it shown. That is also the only way to
+exercise 5093 on a station.
+
+- radiobrowser.c: RB_ART_MAX 512 KB -> 2 MB. The buffer is PSRAM (17 MB
+  largest free in every heap map), held for one fetch and then for the
+  station's life as the redraw copy.
+- albumart.c: PNG goes through pngle, which is software every time and
+  was not one of 5093's three sites. It now runs between
+  `soft_decode_begin()` and `soft_decode_end()`, and logs `png: N bytes
+  decoded in M ms`. pngle streams rows into the scaled framebuffer, so
+  a large PNG costs time, not a full-size copy.
+
+The costs are in the log. Before 5098, 512 KB of this logo took 22 s
+on Wi-Fi next to a 320 kbit/s stream that was already short of data. The
+whole 1.3 MB is now fetched, from the directory's side of the connection,
+while the stream plays, so watch the netstream percentage during the
+fetch. The decode is at idle priority, so the cover appears whenever
+spare CPU allows, and it is repeated each time the settings panel closes
+and the cover is redrawn. If either is too slow, the cap goes back
+down, and the numbers will say how far.

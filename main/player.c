@@ -12772,7 +12772,7 @@ static track_end_t play_stream(const char *url, const char *name)
 
     /*
      * A request nobody has picked up is about a station that is over.
-     * A reply that has already landed is 512 KB at most (5094) and there is
+     * A reply that has already landed is 2 MB at most (5103) and there is
      * nothing left to show it on, so it goes here rather than waiting
      * for the next station's install to reject it.
      *

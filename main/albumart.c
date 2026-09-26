@@ -1537,7 +1537,16 @@ static esp_err_t albumart_draw_png(esp_lcd_panel_handle_t panel,
     pngle_set_draw_callback(p, png_on_draw);
 
     esp_err_t ret = ESP_OK;
+    /* 5103: PNG is always the software path, so it gets 5093's idle
+     * priority too, and says how long it took. */
+    const int64_t t0 = esp_timer_get_time();
+    const UBaseType_t prio = soft_decode_begin();
     const int fed = pngle_feed(p, png, png_len);
+    soft_decode_end(prio);
+    if (ctx.saw_init) {
+        ESP_LOGI(TAG, "png: %u bytes decoded in %lld ms", (unsigned)png_len,
+                 (long long)((esp_timer_get_time() - t0) / 1000));
+    }
     if (fed < 0) {
         ESP_LOGE(TAG, "png decode failed: %s", pngle_error(p));
         ret = ESP_FAIL;
