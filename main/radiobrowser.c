@@ -656,6 +656,24 @@ bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)
         }
     }
 
+    {
+        /*
+         * 5095: SAID SIZE, REFUSED BEFORE THE FIRST BYTE. Спокойное
+         * радио's `196x196/favicon.png` is 1369443 bytes (the server says
+         * so in Content-Length), and the fetch read 512 KB of it -- 22 s
+         * on Wi-Fi, beside a 320 kbit/s stream that was already short --
+         * before `filled the buffer` gave up. A declared length over the
+         * limit is now refused here. Chunked or undeclared (-1) still
+         * goes through the bounded read below.
+         */
+        const int64_t clen = esp_http_client_get_content_length(c);
+        if (clen > (int64_t)RB_ART_MAX) {
+            ESP_LOGW(TAG, "artwork is %lld KB, over the %u KB limit; not fetched",
+                     (long long)(clen / 1024), (unsigned)(RB_ART_MAX / 1024));
+            goto close;
+        }
+    }
+
     while (got < RB_ART_MAX) {
         const int n = esp_http_client_read(c, (char *)buf + got,
                                            (int)(RB_ART_MAX - got));

@@ -13202,3 +13202,37 @@ decodes in hardware in well under a second. So 512 KB still refuses the
 kind that costs seconds, and the refusal is still whole rather than a
 truncated decode. One comment in player.c that quoted the old figure is
 corrected. Not host-tested (radiobrowser.c).
+
+### 5095 -- Oversized artwork refused by its declared length
+
+5093-5094 on the board (v0.4.0-102). With 512 KB, Спокойное радио's
+artwork still logged `artwork filled the 512 KB buffer; not decoding
+it`. The maintainer's curl settles why:
+
+    GET /5f/9c/2c/4e16165627237138cbc3273f76782d56f9/196x196/favicon.png
+    Content-Type: image/png
+    Content-Length: 1369443
+
+A 1.37 MB PNG behind a path that says 196x196 -- the original, not a
+thumbnail. The refusal is right (pngle decodes in software, pixel by
+pixel), but it came late: the fetch read 512 KB first, and on Wi-Fi that
+was 22 s (67670 -> 89858) of airtime taken from a 320 kbit/s stream
+already arriving at 65% of its rate, which rebuffered through it.
+
+After the status and content-type checks, a Content-Length over
+RB_ART_MAX is now refused before the first byte is read: `artwork is
+1337 KB, over the 512 KB limit; not fetched`. A chunked or undeclared
+response (-1) still goes through the bounded read, which keeps its own
+refusal. Not host-tested (radiobrowser.c).
+
+Also in that log, not changed here:
+- Over the USB Ethernet adapter the same station arrives at 247-284
+  kbit/s of 319: that server, not the Wi-Fi, is short.
+- With the SD card, a USB drive and Wi-Fi up, the adapter plugged in
+  at 150.6 s failed: `USBH: EP Alloc error: ESP_ERR_NO_MEM`, `Claiming
+  interface error`. DMA-capable internal RAM (15 KB free, largest 4 KB)
+  ran out for the USB host rather than for esp_hosted.
+- A brownout reset at about 301 s, adapter plugged in: power, not code.
+- After the reset, with Wi-Fi switched off and the cable still getting
+  its address, "ambient" said `no Wi-Fi; cannot reach the directory`
+  instead of waiting for the wired network.
