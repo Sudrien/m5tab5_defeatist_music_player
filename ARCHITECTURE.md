@@ -12788,3 +12788,47 @@ one mirror, thirteen-second DNS failure on the other). Not host-tested
 (player.c). What to look for: after a drop with a radio restart, the
 stream coming back by itself once `joined` appears, with no `stream
 ended` in between.
+
+### 5082 -- The two lines 5077 found
+
+5077's second warning, on the maintainer's first build with it:
+
+    sdkconfig.defaults sets symbols this build does not have:
+      CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE=4096
+      CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+
+**The console buffer never existed.** IDF 5.5 has no Kconfig for a
+USB-serial-JTAG console buffer; the size lives in
+usb_serial_jtag_driver_config_t, and the driver is not installed unless
+something installs it. Nothing here did. So since 3a88a45 (the 4 KB
+line, and the evening its comment describes) the console has written
+byte by byte into the peripheral's 64-byte FIFO -- spinning while it is
+full, dropping bytes once 50 ms pass without progress
+(usb_serial_jtag_vfs.c, TX_FLUSH_TIMEOUT_US). That is the log line in
+0086's first board log that reads `... audio 12.09s, stalleI (78827)
+tab5_mp3: levelling ...`: the tail of one line dropped, the next line
+printed into the gap. The reasoning in the defaults comment was right;
+the setting was never applied. battery.c's note that the buffer "is
+4096" is true from this patch, not before it.
+
+app_main() now installs the driver before the banner with a 4096-byte
+TX ring (the default 256 RX) and switches the console VFS to it. The
+driver-mode writer tries without waiting, then once with the same
+50 ms, and after that drops at once until a write goes through, so a
+board with no host reading the port does not block on its log. The
+ring is 4 KB of internal RAM (FreeRTOS's allocator), the cost the
+defaults comment already priced.
+
+**The reset polarity option is gone upstream, and not needed.**
+esp_hosted 3.0.8's eh_host_port_power.c drives EN high, LOW for the
+pulse, and parks it HIGH, unconditionally -- active low, what this
+board needs; every boot log shows `reset done pin=15 parked=1`. The line
+is removed; its long comment stays, with a note for the day a polarity
+option comes back.
+
+Both key lines are replaced by comments. Removing a symbol the build
+does not have changes nothing in sdkconfig, so no `rm sdkconfig` is
+needed for this one. Not built here.
+
+What to look for: no second warning from 5077 at configure time, and
+no more lines that start in the middle of another.

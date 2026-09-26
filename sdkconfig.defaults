@@ -39,7 +39,13 @@ CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
 # The buffer only defers the loss rather than removing it: a host that
 # stops draining still fills any buffer eventually. If lines go missing
 # again, look for a burst first and do not assume the code stopped.
-CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE=4096
+#
+# 5082: AND IT WAS NEVER HERE. The line that stood below,
+# CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE=4096, is not a symbol in
+# IDF 5.5 -- 5077's check reported it -- so every build since 3a88a45 ran
+# on the 64-byte hardware FIFO with no buffer at all. The buffer is set in
+# code now: app_main() installs the USB-serial-JTAG driver with a 4 KB TX
+# ring and points the console at it, before the banner.
 
 # MP3 decode buffers live in PSRAM.
 CONFIG_SPIRAM=y
@@ -266,7 +272,14 @@ CONFIG_ESP_HOSTED_HOST_RESET_GPIO=15
 #
 # Set explicitly rather than left to the default, because it was wrong
 # once and a comment on an absent line cannot say why.
-CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y
+#
+# 5082: THE LINE IS GONE BECAUSE THE OPTION IS. It read
+# CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW=y, and esp_hosted 3.0.8 has no
+# such symbol (5077 reported it): eh_host_port_power.c drives EN
+# unconditionally -- high, LOW for the pulse, then parked HIGH -- which is
+# exactly what this board needs. Proof on every boot: `reset done pin=15
+# parked=1`. If a later esp_hosted grows a polarity option again, it
+# must be active low, for the reasons above.
 
 # Room for the three NIST servers wifi.c asks for. The default is 1, and
 # it sizes the array that ESP_SNTP_SERVER_LIST initialises -- exceeding it

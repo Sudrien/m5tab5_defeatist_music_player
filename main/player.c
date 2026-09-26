@@ -51,6 +51,8 @@
 #include "freertos/stream_buffer.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "driver/usb_serial_jtag.h"      /* 5082: the console TX buffer */
+#include "driver/usb_serial_jtag_vfs.h"
 #include "esp_lcd_mipi_dsi.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_ops.h"
@@ -13198,6 +13200,31 @@ static void player_loop(void)
 
 void app_main(void)
 {
+    /*
+     * 5082: THE CONSOLE'S 4 KB TX BUFFER, WHICH WAS NEVER THERE.
+     *
+     * sdkconfig.defaults has asked for it since 3a88a45 with
+     * CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG_TX_BUF_SIZE=4096, and IDF 5.5
+     * has no such symbol (5077 found it). Without the driver the console
+     * writes byte by byte into the peripheral's 64-byte FIFO, spinning
+     * while it is full, and after 50 ms without progress drops bytes
+     * until it drains -- which is how a board log came to read
+     * `stalleI (78827) ...`, a line cut off by the next one. The only
+     * way to a buffer is to install the driver and point the console at
+     * it. Once a write fails to make room in 50 ms, later bytes drop at
+     * once until one gets through, so with no host reading the log
+     * nothing blocks. Before the banner, so everything from here is
+     * buffered; the 4 KB ring comes from internal RAM, as the defaults'
+     * note always meant it to.
+     */
+    {
+        usb_serial_jtag_driver_config_t usj = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
+        usj.tx_buffer_size = 4096;
+        if (usb_serial_jtag_driver_install(&usj) == ESP_OK) {
+            usb_serial_jtag_vfs_use_driver();
+        }
+    }
+
     /* The SD drivers narrate every probe; let this file decide what is
      * worth printing. Needs CONFIG_LOG_DYNAMIC_LEVEL_CONTROL on v6.
      *
