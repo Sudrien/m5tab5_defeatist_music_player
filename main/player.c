@@ -11708,6 +11708,28 @@ static track_end_t play_stream(const char *url, const char *name)
                  waited += FADE_WAIT_SLICE_MS) {
                 vTaskDelay(pdMS_TO_TICKS(FADE_WAIT_SLICE_MS));
             }
+            /*
+             * 5090: A RAMP THAT DID NOT FINISH IS CANCELLED HERE, NOT
+             * CARRIED INTO THE NEXT STATION. The writer only advances the
+             * ramp over audio it plays, and a stream in REBUFFERING plays
+             * none -- Спокойное радио, 320 kbit/s arriving at 205, left
+             * mid-rebuffer: `fading out 514 KB`, `amplifier off (idle)`
+             * 1.5 s later, and no `faded out`. The wait ran to its cap and
+             * s_fade_out stayed set. Fifteen seconds later Cryosleep's
+             * first sound faded in, the stale ramp ran over it, and
+             * `faded out over 3000 ms` / `fade: dropped 2627 KB of queued
+             * audio` threw its whole buffer away.
+             *
+             * fade_out_cancel() is play_file()'s answer to the same thing
+             * (it runs it before a track's first block): the ramp stops
+             * and the ring is flushed, which is what the finished ramp
+             * would have done.
+             */
+            if (fade_out_active()) {
+                ESP_LOGW(TAG, "station change: the fade did not finish "
+                              "(nothing was playing); dropping the rest");
+                fade_out_cancel();
+            }
             }
         }
 

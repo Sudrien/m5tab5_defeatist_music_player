@@ -13030,3 +13030,41 @@ starts -- player.c calls it "the line to start copying from". The
 install stays first in app_main(), so everything after it is buffered;
 its result is kept in s_console_err and logged just under the banner,
 beside 5077's stale-sdkconfig line. Not host-tested (player.c).
+
+### 5090 -- An unfinished fade is not carried to the next station
+
+5089 on the board (v0.4.0-97): `console: USB-serial-JTAG driver,
+4096-byte TX buffer` under the banner, so 5082's buffer is in and any
+cut line from here is the host.
+
+Спокойное радио, 320 kbit/s over https arriving at about 205 (`SHORT`
+throughout, one rebuffer), was left for Cryosleep mid-rebuffer:
+
+    52253 station change: fading out 514 KB over 3000 ms
+    53756 amplifier off (idle)
+    ...   (no `faded out`)
+    67456 first sound at 11429 ms          (Cryosleep)
+    70397 faded in over 3000 ms
+    70415 faded out over 3000 ms
+    70445 fade: dropped 2627 KB of queued audio
+
+The writer advances an out-ramp only over audio it plays, and a stream
+in REBUFFERING plays none, so the ramp never moved; the station-change
+wait ran to its cap (FADE_OUT_MS + FADE_WAIT_MARGIN_MS) and returned
+with s_fade_out still set. Nothing on the stream path cleared it --
+play_file() calls fade_out_cancel() before a track's first block for
+exactly this, play_stream() had no equivalent -- so the stale ramp
+waited for the next station to produce audio, ran over its first three
+seconds, and on finishing flushed the ring: Cryosleep's whole 2.6 MB
+preroll, and the listener heard it cut out right after it had faded in.
+
+Now, after the wait, a fade that is still active is cancelled with
+fade_out_cancel() -- the ramp stops and the ring is flushed, which is
+what the finished ramp would have done -- and logged as `station change:
+the fade did not finish (nothing was playing); dropping the rest`. Not
+host-tested (player.c).
+
+Also in that log, not changed: the station's artwork,
+https://i.1.creatium.io/.../196x196/favicon.png, logged `artwork filled
+the 192 KB buffer; not decoding it` -- a file far larger than its name
+suggests. RB_ART_MAX is a deliberate bound.
