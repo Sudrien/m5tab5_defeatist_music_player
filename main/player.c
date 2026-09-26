@@ -12059,6 +12059,18 @@ static track_end_t play_stream(const char *url, const char *name)
         if (net != NETSTREAM_IDLE) seen_live = true;
         const bool source_done =
             streamplan_source_done(net, seen_live, s_playing);
+        /*
+         * 5081: waiting for the network is the source still working.
+         * netstream's wait is 25 s of slices plus the probes between
+         * them, so it runs past 30 s -- 37 s on the board, a gateway
+         * silent through a radio restart -- and the stall clock ended
+         * LBC while netstream was still waiting for the radio it had
+         * asked to restart. The source's own attempt limit still ends a
+         * stream the network never comes back for.
+         */
+        if (netstream_waiting_for_net()) {
+            bufplan_note_attempt(&plan, esp_timer_get_time() / 1000);
+        }
         bufplan_in_t in = {
             .now_ms = esp_timer_get_time() / 1000,
             .buffered_ms = stream_buffered_ms(out_rate),

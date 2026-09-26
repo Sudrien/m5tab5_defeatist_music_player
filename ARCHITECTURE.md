@@ -12755,3 +12755,36 @@ under IDF.
 What to look for: after a drop within a minute of a restart, `radio
 restart held`, then `restarting the radio` at 60 s after the previous
 one.
+
+### 5081 -- Waiting for the network is not a stall
+
+Same log (v0.4.0-86). LBC dropped at 157.3 s, netstream asked for a
+radio restart and sat in its network wait, and at 217.7 s the player
+ended the stream -- `stream ended: ended, 1 rebuffers, 79465 ms
+silent` -- while netstream was still `connecting` and the radio it had
+asked for was half a minute from joining. The listener was left on an
+empty screen with the network back six seconds later.
+
+bufplan's 30 s giveup counts wall-clock time in REBUFFERING, restarted
+only by bufplan_note_attempt() on each failed attempt. netstream's
+network wait is NET_WAIT_MAX_MS (25 s) of slices plus the probes run
+between them, and here it went 158.3 -> 195.3 s, 37 s without an
+attempt. So the stall clock would have run out around 188 s regardless.
+What made it 217.7 here is that the play_stream() loop was inside
+service_station_fetch() for most of that minute -- three taps on "news",
+each a directory fetch trying two mirrors against a dead link -- and the
+first bufplan_step() after it returned found the clock long expired.
+
+Now each pass of the stream loop restarts the stall clock while
+netstream_waiting_for_net() is true, before bufplan_step(). The source's
+own limit (NETPLAN_ATTEMPTS_MAX, `N attempts failed; giving up`) still
+ends a stream whose network never returns; the plan just no longer
+pre-empts it during a wait.
+
+Not changed, and worth a patch of its own: the directory fetch runs
+synchronously inside the stream loop, so a fetch against a dead link
+freezes that loop for up to ~20 s a tap (six-second connect timeout on
+one mirror, thirteen-second DNS failure on the other). Not host-tested
+(player.c). What to look for: after a drop with a radio restart, the
+stream coming back by itself once `joined` appears, with no `stream
+ended` in between.
