@@ -105,6 +105,10 @@ FAVMATCH_BIN := favmatchtest
 # through a decoder written in the test from the format.
 FLACENC_BIN := flacenctest
 
+# The two-microphone beam (5109): sources simulated at angles to a 34 mm
+# pair, through main/beam.c as is.
+BEAM_BIN := beamtest
+
 TAIL_BIN := tailplantest
 
 # The setup portal's form parsing, HTML escaping and DNS replies: the
@@ -229,7 +233,7 @@ NETLINK_BIN := netlinktest
 # ../test_audio_files so the bytes under test are the bytes on the card.
 CUE_BIN := cuesheettest
 
-all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-addrpin run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue run-flacenc
+all: run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-addrpin run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue run-flacenc run-beam
 
 $(BIN): $(SRCS) shim.h ../main/gfx.h ../components/ark12/ark12.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LDFLAGS)
@@ -346,6 +350,14 @@ $(FLACENC_BIN): flacenctest.c ../main/flacenc.c ../main/flacenc.h
 run-flacenc: $(FLACENC_BIN)
 	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(FLACENC_BIN)
 
+$(BEAM_BIN): beamtest.c ../main/beam.c ../main/beam.h
+	$(CC) $(WARNCFLAGS) -c beamtest.c -o /dev/null
+	$(CC) $(WARNCFLAGS) -std=gnu17 -c ../main/beam.c -o /dev/null
+	$(CC) $(CFLAGS) -O2 -o $@ beamtest.c ../main/beam.c $(LDFLAGS)
+
+run-beam: $(BEAM_BIN)
+	ASAN_OPTIONS=detect_leaks=1:abort_on_error=0 ./$(BEAM_BIN)
+
 $(NETLINK_BIN): netlinktest.c ../main/netlink.h ../main/ethcfg.h
 	$(CC) $(WARNCFLAGS) -c netlinktest.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ netlinktest.c $(LDFLAGS)
@@ -392,7 +404,7 @@ run-old: $(OLD_BINS)
 	done
 
 clean:
-	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(FLACENC_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN) $(MEDIAINDEX_BIN) $(MEDIAWALK_BIN) $(MEDIASYNC_BIN) $(MENUSCROLL_BIN) $(STBJPEG_BIN) $(ADDRPIN_BIN)
+	rm -f $(BIN) $(CTRL_BIN) $(WIFI_BIN) $(CLOCK_BIN) $(FADE_BIN) $(TAIL_BIN) $(PORTAL_BIN) $(OLD_BINS) $(BRIGHT_BIN) $(SLEEP_BIN) $(SNIFF_BIN) $(ICY_BIN) $(NETPLAN_BIN) $(STATION_BIN) $(BUFPLAN_BIN) $(CODEC_BIN) $(MP3_BIN) $(FRAMEWIN_BIN) $(STREAMPLAN_BIN) $(STATIONNAV_BIN) $(RADIOBROWSER_BIN) $(LEVELHIST_BIN) $(SGAIN_BIN) $(JSONPICK_BIN) $(FAVMATCH_BIN) $(FLACENC_BIN) $(BEAM_BIN) $(NETLINK_BIN) $(CUE_BIN) $(ROTATE_BIN) $(CARDTIME_BIN) $(MEDIAINDEX_BIN) $(MEDIAWALK_BIN) $(MEDIASYNC_BIN) $(MENUSCROLL_BIN) $(STBJPEG_BIN) $(ADDRPIN_BIN)
 	rm -rf $(BIN).dSYM $(CTRL_BIN).dSYM $(WIFI_BIN).dSYM $(CLOCK_BIN).dSYM $(FADE_BIN).dSYM $(TAIL_BIN).dSYM $(PORTAL_BIN).dSYM
 	rm -rf $(addsuffix .dSYM,$(OLD_BINS))
 
@@ -528,4 +540,4 @@ check-ui:
 		$(CC) $(WARNCFLAGS) -c $$f -o /dev/null || exit 1; \
 	done
 
-.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-addrpin run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue run-flacenc clean
+.PHONY: all run-pcmfold run run-ctrl run-wifi run-clock run-rotate run-cardtime run-mediaindex run-mediawalk run-mediasync run-menuscroll run-fade run-tail run-portal run-old check-ui run-bright run-sleep run-sniff run-icy run-netplan run-stations run-pcmfold run-bufplan run-stbjpeg run-addrpin run-codec run-mp3 run-framewin run-streamplan run-stationnav run-radiobrowser run-levelhist run-favmatch run-netlink run-cue run-flacenc run-beam clean

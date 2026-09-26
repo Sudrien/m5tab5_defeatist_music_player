@@ -2,9 +2,10 @@
  * recorder -- the record button: the two built-in microphones to a FLAC
  * file on the card (5106).
  *
- * 48 kHz, 24-bit, stereo (MIC1 left, MIC2 right), exactly as the ES7210
- * delivers it: no beamforming, no mixing to mono, no gain beyond the
- * ADC's own PGA. Files go to <volume>/Recordings/, the SD card if one is
+ * 48 kHz, 24-bit. By default the beam (5109, beam.h): mono, aimed
+ * straight out of the screen. With the AUDIO tab's Microphones switch
+ * on STEREO, both microphones as the ES7210 delivers them, MIC1 left.
+ * No gain beyond the ADC's own PGA either way. Files go to <volume>/Recordings/, the SD card if one is
  * mounted and the USB drive otherwise, named for settings_now() in UTC
  * ("2026-09-26 18.04.33.flac") -- which before NTP is the build time or
  * the card's floor carried forward, so a best guess, as the README says.

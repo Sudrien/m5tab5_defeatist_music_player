@@ -157,7 +157,8 @@ static bool        s_prefs_nvs_known;
 /* And again, from 480, when the flip became four angles: the record
  * carries "screen_rotation":N as well as the old boolean, which is 21
  * more bytes. Both are written on purpose -- see the comment by fl. */
-#define SETTINGS_MAX_LINE       (504)
+/* And from 504 for "mic_stereo" (5109): 19 more bytes of key and value. */
+#define SETTINGS_MAX_LINE       (524)
 
 /*
  * The file is append-only, and this is where it stops growing.
@@ -194,6 +195,11 @@ static bool       s_rg_enabled = true;
  * way they were cut. See settings_crossfade_sec(). */
 static uint8_t    s_crossfade_sec;
 static bool       s_crossfade_album;
+/* 5109: the recorder's microphones. False is the beam, mono, aimed out of
+ * the screen; true is both microphones as they are. The beam by default:
+ * the README asks for mono by default, and it is the one aimed at whoever
+ * is in front of the screen. */
+static bool       s_mic_stereo;
 static uint8_t    s_brightness = SETTINGS_BRIGHTNESS_DEFAULT;
 /* Right way up. A player that has never been told otherwise is the one
  * on the desk in front of whoever flashed it. */
@@ -365,6 +371,16 @@ void settings_set_screen_rotation(int quarter_turns)
     const uint8_t r = (uint8_t)(((quarter_turns % 4) + 4) % 4);
     if (r == s_screen_rot) return;
     s_screen_rot = r;
+    s_dirty = true;
+    s_dirty_since = xTaskGetTickCount();
+}
+
+bool settings_mic_stereo(void) { return s_mic_stereo; }
+
+void settings_set_mic_stereo(bool on)
+{
+    if (on == s_mic_stereo) return;
+    s_mic_stereo = on;
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
 }
@@ -681,6 +697,12 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
             any = true;
         }
 
+        const cJSON *ms = cJSON_GetObjectItemCaseSensitive(root, "mic_stereo");
+        if (take_settings && cJSON_IsBool(ms)) {
+            s_mic_stereo = cJSON_IsTrue(ms);
+            any = true;
+        }
+
         const cJSON *wf = cJSON_GetObjectItemCaseSensitive(root, "wifi");
         if (take_settings && cJSON_IsBool(wf)) {
             s_wifi_enabled = cJSON_IsTrue(wf);
@@ -784,6 +806,10 @@ static bool parse_line(char *line, storage_id_t id, bool take_settings,
     }
     if (strcmp(key, "crossfade_album") == 0) {
         s_crossfade_album = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
+        return true;
+    }
+    if (strcmp(key, "mic_stereo") == 0) {
+        s_mic_stereo = !(strcmp(val, "0") == 0 || strcasecmp(val, "false") == 0);
         return true;
     }
     if (strcmp(key, "replaygain") == 0) {
@@ -913,6 +939,7 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
      */
     const char *const rg = s_rg_enabled ? "true" : "false";
     const char *const xa = s_crossfade_album ? "true" : "false";
+    const char *const ms = s_mic_stereo ? "true" : "false";
     /* Both keys. screen_flipped is what an older build reads, and it
      * can only say upright or over -- a quarter turn is written as
      * upright there, because landing on its side is worse than landing
@@ -950,11 +977,12 @@ static int record_line(storage_id_t id, char *out, size_t out_len)
                             "\"brightness\":%u,\"screen_flipped\":%s," \
                             "\"screen_rotation\":%u," \
                             "\"wifi\":%s,\"ntp\":%s," \
-                            "\"ntp_epoch\":%s,\"ntp_boot_us\":%s"
+                            "\"ntp_epoch\":%s,\"ntp_boot_us\":%s," \
+                            "\"mic_stereo\":%s"
 #define SETTINGS_FIELDS_ARGS s_volume, rg, (unsigned)s_crossfade_sec, xa, \
                              (unsigned)s_brightness, fl, \
                              (unsigned)s_screen_rot, \
-                             wf, np, nte, ntb
+                             wf, np, nte, ntb, ms
 
     if (id >= STORAGE_COUNT || !s_track[id][0]) {
         return snprintf(out, out_len, "{" SETTINGS_FIELDS_FMT "}\n",

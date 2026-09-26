@@ -237,6 +237,15 @@ bool settings_crossfade_album(void);
 void settings_set_crossfade_album(bool on);
 
 /*
+ * 5109: how the recorder uses the two microphones. False (the default):
+ * the beam, mono, aimed straight out of the screen -- see beam.h. True:
+ * both microphones as they are, stereo. Read when a recording starts,
+ * so a change applies to the next one.
+ */
+bool settings_mic_stereo(void);
+void settings_set_mic_stereo(bool on);
+
+/*
  * Whether the radio is allowed to come up at all. Off by default, and
  * that default is load-bearing.
  *

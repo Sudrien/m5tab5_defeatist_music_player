@@ -521,6 +521,21 @@ static int slider_y(void) { return rg_y() + AUDIO_SWITCH_H
                                    + AUDIO_GAP; }
 static int album_y(void)  { return slider_y() + AUDIO_SLIDER_H + AUDIO_GAP; }
 
+/* 5109: the recorder's microphones, under the album note. */
+#define MIC_NOTE_LINES      (3)
+static int mic_y(void)    { return album_y() + AUDIO_SWITCH_H
+                                   + AUDIO_NOTE_GAP
+                                   + ALBUM_NOTE_LINES * AUDIO_NOTE_STEP
+                                   + AUDIO_GAP; }
+
+static void mic_switch_box(int *x, int *y, int *w, int *h)
+{
+    *x = 0;
+    *y = mic_y();
+    *w = gfx_w();
+    *h = AUDIO_SWITCH_H;
+}
+
 static void rg_switch_box(int *x, int *y, int *w, int *h)
 {
     *x = 0;
@@ -1001,8 +1016,30 @@ static int draw_audio(void)
         "live sets, mixes, and movements that",
         "are meant to run into each other.",
     };
-    const int used = draw_note(y + bh + AUDIO_NOTE_GAP, album_note,
-                               ALBUM_NOTE_LINES);
+    draw_note(y + bh + AUDIO_NOTE_GAP, album_note, ALBUM_NOTE_LINES);
+
+    /* --- Microphones (5109) ----------------------------------------- */
+    mic_switch_box(&x, &y, &bw, &bh);
+    gfx_fill_rect(x, y, bw, bh, C_ROW);
+    gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Microphones",
+                  NAME_SCALE, 400, C_TEXT);
+    {
+        /*
+         * Wider than the ON/OFF pills: the two states are words, and
+         * "STEREO" at the name scale needs it. Lit for the beam, the
+         * default and the one doing something.
+         */
+        const bool stereo = settings_mic_stereo();
+        const int pw = 200, ph = 56;
+        draw_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
+                  stereo ? "STEREO" : "BEAM", !stereo, NAME_SCALE);
+    }
+    static const char *const mic_note[MIC_NOTE_LINES] = {
+        "Beam: mono, aimed out of the screen,",
+        "quieter to either side. Stereo: both",
+        "microphones as they are. Next recording.",
+    };
+    const int used = draw_note(y + bh + AUDIO_NOTE_GAP, mic_note, MIC_NOTE_LINES);
 
     /* See draw_net(): the check is panel_draw()'s now. */
     return used;
@@ -1363,6 +1400,16 @@ bool panel_touch(bool down, int x, int y)
             ESP_LOGI(TAG, "crossfade within an album: %s%s",
                      on ? "on" : "off",
                      settings_crossfade_sec() ? "" : " (crossfade is off)");
+            s_dirty = true;
+            return false;
+        }
+
+        mic_switch_box(&bx, &by, &bw, &bh);
+        if (y >= by && y < by + bh) {
+            const bool stereo = !settings_mic_stereo();
+            settings_set_mic_stereo(stereo);
+            ESP_LOGI(TAG, "microphones: %s (next recording)",
+                     stereo ? "stereo" : "beam");
             s_dirty = true;
             return false;
         }

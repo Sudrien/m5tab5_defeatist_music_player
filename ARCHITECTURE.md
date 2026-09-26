@@ -13740,3 +13740,79 @@ settings_now(), through gmtime_r() with a static assert that time_t is
 Not changed: the file's own FAT timestamps still come from time() via
 FatFs, so a computer will list the file as 1980 (FAT's earliest). That
 is settimeofday()'s job, which settings.h defers on purpose.
+
+### 5109 -- The beam: two microphones aimed out of the screen
+
+The two microphone holes are on the top edge, above the screen, both
+facing out of the front, 34 mm apart -- by callipers, and 34.2 mm off
+M5Stack's dimension drawing (115 px apart where 128 mm is 430). So
+"straight out of the screen" is BROADSIDE to the pair, and that decides
+what can be done:
+
+- The plain sum is already the beam: broadside arrives at both holes
+  together. It rejects the sides only where 34 mm is a useful fraction
+  of a wavelength -- fully at c/2d = 5 kHz for a source at 90 degrees,
+  hardly at all under 1 kHz -- and grows grating lobes from c/d = 10 kHz.
+- No processing of two signals can separate front from back, or above
+  from below: that whole plane reaches both holes at once. Front/back
+  comes from the case, which faces the holes forward.
+- A differential pair would aim along the holes' axis, sideways, with
+  its null straight ahead.
+
+So `main/beam.c` is a generalised sidelobe canceller: gain-match the
+channels (MEMS parts differ; 2 s power average, +/-3 dB), beam
+b = (L+R)/2 delayed 32 samples, blocking signal u = (L-R)/2, and a
+64-tap NLMS filter that learns how off-axis sound in u appears in b
+and subtracts it. It adapts only while u is within 0.3 of b in
+1-4 kHz, sustained for 10 ms: that ratio and band are the beam's width.
+Leaky (forgets in ~2 s of adaptation) and norm-bounded. Mono out.
+
+**What beamtest found, in order.** Free-field plane waves on a 34 mm
+pair, windowed-sinc fractional delays, per-microphone self-noise:
+
+1. The beam's delay line was one slot long: a front talker came out a
+   sample late and the "error" was 0 dB. Fixed; now 62 dB under the
+   talker, and the same with 1.5 dB of microphone mismatch (the gain
+   match reads 1.5 dB).
+2. White noise from the side came down only 9-11 dB, and the band split
+   says why: 21-24 dB off 1-8 kHz, but ~5 dB below 1 kHz (u has
+   nothing there) and ~7 dB at 8-12 kHz (a side source is a whole
+   wavelength across the pair near 10 kHz and vanishes from u too).
+   That is the geometry, not the tuning, so the test asserts the band
+   the canceller claims: 1-8 kHz noise at 90, -60 and 40 degrees comes
+   down 30-33 dB, against 4-5 dB for the plain sum. White noise keeps a
+   softer -8 dB bar.
+3. **A talker 9 degrees off centre lost 6.5 dB.** The first detector
+   was high-pass only, and near 10 kHz even 9 degrees puts as much in u
+   as in b, so the canceller adapted on the talker's treble. The
+   detector is 1-4 kHz now, where the ratio grows steadily with angle.
+4. At the edge of the cone the talker crossed the ratio in bursts --
+   under 1% of samples -- and still lost 0.7 dB to what those bursts
+   taught. Adaptation now needs 10 ms continuously past the ratio.
+
+Now: a talker at 0, +/-10 and +/-20 degrees never adapts, and loses
+exactly what the plain sum does (0, 0.8, 1.8 dB, all treble off axis);
+noise at 30, 60 and 90 degrees loses 27-33 dB in 1-8 kHz; a talker ahead
+with 1-8 kHz noise at 60 degrees at 0 dB SNR comes out 10.8 dB better.
+LEAK 1e-4 cost 2-3 dB of cancellation, 1e-6 gained under 1 dB and
+would take 20 s to forget; MU 0.02-0.05 were within a dB.
+
+**Cost.** 1.2 KB of code. Under qemu on rv32imafc, 49 M instructions
+per second of audio adapting on every sample (the worst case: random
+uncorrelated input), which by 5040's polyrsp calibration is about 18%
+of a core -- on rec_enc, beside flacenc's 6%. The state is 1.2 KB in
+PSRAM with the recorder's other buffers.
+
+**The switch.** AUDIO tab, under Same album: "Microphones BEAM /
+STEREO", saved as `mic_stereo` (default false, the beam, as the README's
+"mono default" asks), read when a recording starts. SETTINGS_MAX_LINE
+504 -> 524 for the key. Beam recordings are mono FLAC; the log line
+says which, and at the end `beam: canceller adapted on N% of it; MIC2
+matched to MIC1 by +x.x dB`.
+
+Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers (beam, recorder,
+settings with upstream cJSON's header, panel, audio_out, ui). Not on the
+board. What the board will say that the model cannot: the case's own
+shadowing, real capsule phase mismatch (5 us of skew is 3 degrees of
+apparent angle), and a room's reflections, which arrive from every
+direction and are what 64 taps at 48 kHz (1.3 ms) cannot follow.

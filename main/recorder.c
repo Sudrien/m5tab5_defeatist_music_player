@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -22,6 +23,7 @@
 #include "freertos/task.h"
 
 #include "audio_out.h"
+#include "beam.h"
 #include "flacenc.h"
 #include "heapmap.h"
 #include "settings.h"
@@ -70,6 +72,8 @@ static StaticStreamBuffer_t s_ring_struct;
 static uint8_t             *s_ring_storage;
 static int32_t             *s_in_buf;       /* REC_IN_FRAMES frames */
 static int32_t             *s_enc_buf;      /* REC_BLOCK frames */
+static beam_t              *s_beam;         /* 5109: ~1.2 KB, PSRAM with the rest */
+static bool                 s_use_beam;     /* this recording's choice */
 
 static FILE      *s_file;
 static flacenc_t *s_enc;
@@ -225,6 +229,8 @@ static void rec_enc_task(void *arg)
                                                 pdMS_TO_TICKS(100));
         const unsigned frames = (unsigned)(got / REC_FRAME_BYTES);
         if (frames && !s_write_failed) {
+            /* 5109: the beam, in place -- two channels in, one out. */
+            if (s_use_beam) beam_process(s_beam, s_enc_buf, s_enc_buf, frames);
             if (!flacenc_write(s_enc, s_enc_buf, frames)) s_stop = true;
             portENTER_CRITICAL(&s_mux);
             s_frames += frames;
@@ -246,6 +252,11 @@ static void rec_enc_task(void *arg)
     ESP_LOGI(TAG, "recorded %s: %" PRIu32 " s, %" PRIu64 " bytes, %" PRIu64 " ms dropped%s",
              s_path, secs, s_bytes, s_dropped_frames * 1000 / AUDIO_CAPTURE_RATE,
              s_write_failed ? ", ended by a write failure" : "");
+    if (s_use_beam) {
+        const int g = beam_gain_centi(s_beam);
+        ESP_LOGI(TAG, "beam: canceller adapted on %u%% of it; MIC2 matched to MIC1 by %s%d.%d dB",
+                 beam_adapt_pct(s_beam), g < 0 ? "-" : "+", abs(g) / 10, abs(g) % 10);
+    }
     if (!s_write_failed) {
         char body[96];
         snprintf(body, sizeof(body), "%s/%s, %" PRIu32 ":%02" PRIu32,
@@ -267,7 +278,8 @@ static bool buffers(void)
     s_ring_storage = heap_caps_malloc(REC_RING_BYTES + 1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_in_buf  = heap_caps_malloc(REC_IN_FRAMES * REC_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_enc_buf = heap_caps_malloc(REC_BLOCK * REC_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_ring_storage || !s_in_buf || !s_enc_buf) {
+    s_beam    = heap_caps_malloc(sizeof(beam_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_ring_storage || !s_in_buf || !s_enc_buf || !s_beam) {
         /* Kept for the next try rather than freed: see the rule above. */
         ESP_LOGE(TAG, "no PSRAM for the recording buffers");
         return false;
@@ -294,8 +306,11 @@ bool recorder_start(char *why, size_t why_len)
 
     s_frames = 0; s_bytes = 0; s_dropped_frames = 0;
     s_stop = false; s_in_done = false; s_write_failed = false;
-    s_enc = flacenc_open(AUDIO_CAPTURE_CHANNELS, AUDIO_CAPTURE_BITS, AUDIO_CAPTURE_RATE,
-                         REC_BLOCK, file_write, NULL);
+    /* 5109: the beam is mono; stereo is the microphones as they are. */
+    s_use_beam = !settings_mic_stereo();
+    if (s_use_beam) beam_init(s_beam);
+    s_enc = flacenc_open(s_use_beam ? 1 : AUDIO_CAPTURE_CHANNELS, AUDIO_CAPTURE_BITS,
+                         AUDIO_CAPTURE_RATE, REC_BLOCK, file_write, NULL);
     if (!s_enc) {
         storage_io_close(s_file);
         s_file = NULL;
@@ -333,7 +348,8 @@ bool recorder_start(char *why, size_t why_len)
         s_in_done = true;
         REFUSE("No memory for the recording task.");
     }
-    ESP_LOGI(TAG, "recording to %s", s_path);
+    ESP_LOGI(TAG, "recording to %s (%s)", s_path,
+             s_use_beam ? "beam, mono" : "stereo, MIC1 left");
     heapmap_log("recording started");
     return true;
 #undef REFUSE
