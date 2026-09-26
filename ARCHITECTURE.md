@@ -13267,3 +13267,43 @@ by wifi.c on a join, which a cable does not do; that is a separate gap.
 The brownout reset in the same log was the maintainer pulling the
 plug; the detector cannot tell that from a sagging supply. Not
 host-tested (player.c, panel.c, ethernet.c).
+
+### 5097 -- A heap map, and every failed allocation named
+
+5095's log: the Realtek adapter could not attach with the SD card, a
+USB drive and Wi-Fi up -- `USBH: EP Alloc error: ESP_ERR_NO_MEM` --
+while `DMA 15351 free (largest 4096)` sat beside ~40 KB of internal
+free. Most of the free internal RAM is in regions DMA cannot use
+(RETENT_RAM, RTCRAM), and something ordinary fills the DMA-capable
+L2MEM. Guessing which -- 5054's ALWAYSINTERNAL=4096 is the suspect --
+is how 5072 went wrong, so this patch only measures.
+
+main/heapmap.c:
+- heapmap_init() (right after the console line, under the banner)
+  registers heap_caps' failed-allocation hook. Every failure logs
+  `allocation failed: N bytes, caps 0x..., in <function>, task <name>
+  (#n)` -- the first 20, then one per hundred.
+- The first failure, and then at most one per HEAPMAP_GAP_MS (30 s),
+  prints the map: free / largest / min-ever / allocated / blocks for
+  internal, DMA-capable internal and PSRAM, then IDF's per-region table
+  for internal RAM (heap_caps_print_heap_info), whose addresses say
+  which region is which (the boot log's heap_init lines give the
+  ranges). If the failing task has under 3 KB of stack left the map is
+  left to heapmap_poll(), which ui_task calls every pass; from an ISR
+  nothing is printed.
+- Two baselines by heapmap_log(): `boot`, at the end of app_main()
+  with every driver, volume and task in place, and `first station
+  playing`, once per boot, at the stream's artwork request -- where
+  every DMA shortage so far has been seen.
+- Per-task totals are printed if CONFIG_HEAP_TASK_TRACKING is on. It
+  is off and stays off here: it costs bytes on every allocation in the
+  RAM that is short. Switch it on in menuconfig for one diagnostic run
+  if the region table does not settle it.
+
+Host-checked against stub IDF headers: the burst cap, the 30 s gap,
+the low-stack deferral to heapmap_poll(), and silence in an ISR. Not
+built under IDF.
+
+What to send back: a log with SD, USB drive and Wi-Fi up, a station
+playing, and the adapter plugged in -- the `boot` and `first station
+playing` maps, and whatever the failure prints.

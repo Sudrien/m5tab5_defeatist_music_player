@@ -80,6 +80,7 @@
 #include "tailplan.h"
 #include "replaygain.h"
 #include "ethernet.h"
+#include "heapmap.h"          /* 5097 */
 #include "hid.h"
 #include "panel.h"
 #include "playlist.h"
@@ -6845,6 +6846,8 @@ static void ui_task(void *arg)
         /* The media index on mount. Here because this loop runs whether
          * or not anything is playing; see medialib.h. */
         medialib_poll();
+        /* 5097: a heap map a failing task had no stack to print. */
+        heapmap_poll();
 
         /* Every track start sets this, so it only writes and logs when
          * the duty would actually change. */
@@ -12227,6 +12230,13 @@ static track_end_t play_stream(const char *url, const char *name)
                          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DMA));
                 s_stream_art_pending = false;
                 s_stream_art_want = true;
+                /* 5097: the second baseline, once per boot -- a station
+                 * playing, the point every DMA shortage so far was seen. */
+                static bool mapped;
+                if (!mapped) {
+                    mapped = true;
+                    heapmap_log("first station playing");
+                }
             }
         }
 
@@ -13394,6 +13404,7 @@ void app_main(void)
         ESP_LOGW(TAG, "console: driver not installed (%s); unbuffered",
                  esp_err_to_name(s_console_err));
     }
+    heapmap_init();     /* 5097: failed allocations say where memory went */
 #ifdef SDKCONFIG_DRIFT
     /* Keys whose value in sdkconfig differs from sdkconfig.defaults, as
      * cmake/defaults_check.cmake found them when this was configured.
@@ -13679,6 +13690,9 @@ void app_main(void)
      * the throttle assumed all along.
      */
     vTaskPrioritySet(NULL, 5);
+
+    /* 5097: the baseline, with every driver, volume and task in place. */
+    heapmap_log("boot");
 
     /* Does not return. The volumes are never unmounted from here any
      * more; storage.c owns that, and it unmounts on removal rather than
