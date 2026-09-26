@@ -17,6 +17,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <inttypes.h>
 #include <string.h>
 
 #include "driver/gpio.h"
@@ -44,6 +45,22 @@ static const char *TAG = "tab5_audio";
 #define I2S_BCLK_GPIO           (GPIO_NUM_27)
 #define I2S_LRCK_GPIO           (GPIO_NUM_29)
 #define I2S_DOUT_GPIO           (GPIO_NUM_26)   /* DSDIN: P4 -> codec */
+#define I2S_DIN_GPIO            (GPIO_NUM_28)   /* ASDOUT: ES7210 -> P4 (5106) */
+
+/* ---- ES7210, the microphone ADC (5106) ---- */
+#define ES7210_ADDR             (0x40)
+
+/*
+ * Capture DMA. The duplex pair replaces the playback channel for the
+ * length of a recording, so its buffers come out of the same internal
+ * DMA-capable RAM the playback channel's did -- and are sized so the
+ * pair together costs no more than playback alone: 8 x 480 x 4 bytes
+ * (16-bit stereo) is 15 KB for TX, and 4 x 240 x 8 (32-bit stereo) is
+ * 7.5 KB each way. 4 x 240 frames is 20 ms at 48 kHz, which the reader
+ * task drains a 5 ms buffer at a time into a PSRAM ring.
+ */
+#define CAPTURE_DMA_DESC        (4)
+#define CAPTURE_DMA_FRAMES      (240)
 
 /* ---- ES8388 ---- */
 #define ES8388_ADDR             (0x10)
@@ -120,6 +137,19 @@ static i2c_master_bus_handle_t s_bus;
 static i2c_master_dev_handle_t s_exp1;
 static i2c_master_dev_handle_t s_es8388;
 static i2s_chan_handle_t       s_tx;
+static i2s_chan_handle_t       s_rx;           /* only while capturing */
+static i2c_master_dev_handle_t s_es7210;
+
+/*
+ * 5106: who may touch s_tx. The writer holds it for each block; capture
+ * holds it while it swaps the playback channel for the duplex pair and
+ * back. While s_capturing, audio_out_write() drops what it is given --
+ * the duplex TX is clocked for 32-bit slots, and 16-bit audio written to
+ * it would reach the DAC as noise. The player holds playback paused for
+ * a recording, so what is dropped is at most the end of a fade.
+ */
+static SemaphoreHandle_t       s_i2s_lock;
+static volatile bool           s_capturing;
 
 static volatile bool s_headphones;
 static uint32_t s_rate;
@@ -373,10 +403,20 @@ static esp_err_t i2s_set_rate(uint32_t rate)
 
     i2s_std_clk_config_t clk = I2S_STD_CLK_DEFAULT_CONFIG(rate);
     clk.mclk_multiple = I2S_MCLK_MULTIPLE_256;
-    ESP_RETURN_ON_ERROR(i2s_channel_disable(s_tx), TAG, "disable");
-    ESP_RETURN_ON_ERROR(i2s_channel_reconfig_std_clock(s_tx, &clk), TAG, "reconfig");
-    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "enable");
-    return ESP_OK;
+
+    /* 5106: while capturing, the rate is only remembered (s_rate, by the
+     * caller); audio_out_capture_end() rebuilds playback at it. */
+    xSemaphoreTake(s_i2s_lock, portMAX_DELAY);
+    esp_err_t err = ESP_OK;
+    if (!s_capturing) {
+        err = i2s_channel_disable(s_tx);
+        if (err == ESP_OK) err = i2s_channel_reconfig_std_clock(s_tx, &clk);
+        const esp_err_t en = i2s_channel_enable(s_tx);
+        if (err == ESP_OK) err = en;
+    }
+    xSemaphoreGive(s_i2s_lock);
+    if (err != ESP_OK) ESP_LOGE(TAG, "rate %" PRIu32 ": %s", rate, esp_err_to_name(err));
+    return err;
 }
 
 /* ------------------------------------------------------------------ */
@@ -688,7 +728,7 @@ esp_err_t audio_out_set_format(uint32_t rate, uint8_t channels)
     return ESP_OK;
 }
 
-esp_err_t audio_out_write(const void *data, size_t len)
+static esp_err_t write_unlocked(const void *data, size_t len)
 {
     /* A plug event between blocks. Cheap enough to test every time: it
      * is a load and a compare, and the alternative is a headset that
@@ -831,6 +871,212 @@ esp_err_t audio_out_write(const void *data, size_t len)
     return ESP_OK;
 }
 
+/*
+ * 5106: the lock around every block, and the drop while capturing.
+ *
+ * The drop sleeps for the block's length so a writer that is still
+ * running -- the tail of a fade -- is paced as if the audio had gone
+ * out, rather than spinning through the ring.
+ */
+esp_err_t audio_out_write(const void *data, size_t len)
+{
+    xSemaphoreTake(s_i2s_lock, portMAX_DELAY);
+    if (s_capturing) {
+        xSemaphoreGive(s_i2s_lock);
+        const uint32_t bpf = (uint32_t)(s_channels ? s_channels : 2) * 2u;
+        const uint32_t ms = (uint32_t)(len / bpf) * 1000u / (s_rate ? s_rate : 48000u);
+        vTaskDelay(pdMS_TO_TICKS(ms ? ms : 1));
+        return ESP_OK;
+    }
+    const esp_err_t err = write_unlocked(data, len);
+    xSemaphoreGive(s_i2s_lock);
+    return err;
+}
+
+/* ------------------------------------------------------------------ */
+/* Capture: the built-in microphones (5106)                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The ES7210's setup, from M5Unified's Tab5 microphone callback with one
+ * change: SDP_INTERFACE1 (0x11) is 0x00, 24-bit I2S, where M5Unified
+ * asks for 16. MIC1 and MIC2 are the two array microphones and come out
+ * as left and right on SDOUT1; MIC3 and MIC4 are powered down. The PGA
+ * is M5Unified's 0x1B, +33 dB. MCLK is 256 x Fs, the same multiple the
+ * ES8388 already gets, which is what LRCK_DIV 0x0100 (0x04/0x05) says.
+ */
+static const uint8_t k_es7210_on[][2] = {
+    { 0x00, 0xFF },     /* RESET_CTL: reset */
+    { 0x00, 0x41 },     /* RESET_CTL: out of reset, slave */
+    { 0x01, 0x1F },     /* CLK_ON_OFF: all off while configuring */
+    { 0x06, 0x00 },     /* DIGITAL_PDN */
+    { 0x07, 0x20 },     /* ADC_OSR */
+    { 0x08, 0x10 },     /* MODE_CFG */
+    { 0x09, 0x30 },     /* TCT0_CHPINI */
+    { 0x0A, 0x30 },     /* TCT1_CHPINI */
+    { 0x20, 0x0A },     /* ADC34_HPF2 */
+    { 0x21, 0x2A },     /* ADC34_HPF1 */
+    { 0x22, 0x0A },     /* ADC12_HPF2 */
+    { 0x23, 0x2A },     /* ADC12_HPF1 */
+    { 0x02, 0xC1 },     /* MAINCLK */
+    { 0x04, 0x01 },     /* LRCK_DIVH: MCLK / 256 */
+    { 0x05, 0x00 },     /* LRCK_DIVL */
+    { 0x11, 0x00 },     /* SDP_INTERFACE1: I2S, 24-bit */
+    { 0x40, 0x42 },     /* ANALOG_SYS */
+    { 0x41, 0x70 },     /* MICBIAS12 */
+    { 0x42, 0x70 },     /* MICBIAS34 */
+    { 0x43, 0x1B },     /* MIC1_GAIN: PGA on, +33 dB */
+    { 0x44, 0x1B },     /* MIC2_GAIN */
+    { 0x45, 0x00 },     /* MIC3_GAIN */
+    { 0x46, 0x00 },     /* MIC4_GAIN */
+    { 0x47, 0x00 },     /* MIC1_LP */
+    { 0x48, 0x00 },     /* MIC2_LP */
+    { 0x49, 0x00 },     /* MIC3_LP */
+    { 0x4A, 0x00 },     /* MIC4_LP */
+    { 0x4B, 0x00 },     /* MIC12_PDN: powered */
+    { 0x4C, 0xFF },     /* MIC34_PDN: off */
+    { 0x01, 0x14 },     /* CLK_ON_OFF: running */
+};
+
+static void dma_line(const char *when)
+{
+    const uint32_t caps = MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL;
+    ESP_LOGI(TAG, "capture %s: DMA-capable internal %u free (largest %u)",
+             when, (unsigned)heap_caps_get_free_size(caps),
+             (unsigned)heap_caps_get_largest_free_block(caps));
+}
+
+static esp_err_t es7210_start(void)
+{
+    if (!s_es7210) {
+        const i2c_device_config_t cfg = {
+            .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+            .device_address = ES7210_ADDR,
+            .scl_speed_hz = 400000,
+        };
+        ESP_RETURN_ON_ERROR(i2c_master_bus_add_device(s_bus, &cfg, &s_es7210), TAG,
+                            "es7210 add");
+    }
+    for (size_t i = 0; i < sizeof(k_es7210_on) / sizeof(k_es7210_on[0]); i++) {
+        ESP_RETURN_ON_ERROR(reg_write(s_es7210, k_es7210_on[i][0], k_es7210_on[i][1]),
+                            TAG, "es7210 reg 0x%02x", k_es7210_on[i][0]);
+    }
+    return ESP_OK;
+}
+
+static void es7210_stop(void)
+{
+    if (!s_es7210) return;
+    /* Microphones and bias off, then the clocks, then held in reset. */
+    reg_write(s_es7210, 0x4B, 0xFF);
+    reg_write(s_es7210, 0x4C, 0xFF);
+    reg_write(s_es7210, 0x40, 0x80);
+    reg_write(s_es7210, 0x01, 0x7F);
+    reg_write(s_es7210, 0x06, 0x07);
+    reg_write(s_es7210, 0x00, 0xFF);
+}
+
+/* The duplex pair on I2S_NUM_0: the same MCLK, BCLK and LRCK the ES8388
+ * runs from, the ES7210's SDOUT on DIN. 32-bit slots both ways, since a
+ * duplex pair shares its clock and the ES7210's 24 bits need 32-bit
+ * slots; TX sends zeros (auto_clear) for the length of the recording. */
+static esp_err_t duplex_init(void)
+{
+    i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+    chan.dma_desc_num = CAPTURE_DMA_DESC;
+    chan.dma_frame_num = CAPTURE_DMA_FRAMES;
+    chan.auto_clear = true;
+    ESP_RETURN_ON_ERROR(i2s_new_channel(&chan, &s_tx, &s_rx), TAG, "duplex new");
+
+    i2s_std_config_t std = {
+        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_CAPTURE_RATE),
+        .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT,
+                                                        I2S_SLOT_MODE_STEREO),
+        .gpio_cfg = {
+            .mclk = I2S_MCLK_GPIO,
+            .bclk = I2S_BCLK_GPIO,
+            .ws   = I2S_LRCK_GPIO,
+            .dout = I2S_DOUT_GPIO,
+            .din  = I2S_DIN_GPIO,
+            .invert_flags = { false, false, false },
+        },
+    };
+    std.clk_cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_tx, &std), TAG, "duplex tx");
+    ESP_RETURN_ON_ERROR(i2s_channel_init_std_mode(s_rx, &std), TAG, "duplex rx");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_tx), TAG, "duplex tx enable");
+    ESP_RETURN_ON_ERROR(i2s_channel_enable(s_rx), TAG, "duplex rx enable");
+    return ESP_OK;
+}
+
+static void channels_delete(void)
+{
+    if (s_rx) { i2s_channel_disable(s_rx); i2s_del_channel(s_rx); s_rx = NULL; }
+    if (s_tx) { i2s_channel_disable(s_tx); i2s_del_channel(s_tx); s_tx = NULL; }
+}
+
+bool audio_out_capturing(void) { return s_capturing; }
+
+esp_err_t audio_out_capture_begin(void)
+{
+    if (!s_i2s_lock) return ESP_ERR_INVALID_STATE;
+    if (xSemaphoreTake(s_i2s_lock, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGE(TAG, "capture: the writer held the output for a second");
+        return ESP_ERR_TIMEOUT;
+    }
+    if (s_capturing) { xSemaphoreGive(s_i2s_lock); return ESP_ERR_INVALID_STATE; }
+
+    dma_line("before");
+    channels_delete();
+    esp_err_t err = duplex_init();
+    /* MCLK is running again from here, which the ES7210, like the
+     * ES8388, needs before it will take a configuration. */
+    if (err == ESP_OK) err = es7210_start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "capture: %s; putting playback back", esp_err_to_name(err));
+        es7210_stop();
+        channels_delete();
+        if (i2s_init(s_rate) != ESP_OK) ESP_LOGE(TAG, "capture: playback channel NOT restored");
+        xSemaphoreGive(s_i2s_lock);
+        return err;
+    }
+    s_capturing = true;
+    xSemaphoreGive(s_i2s_lock);
+    ESP_LOGI(TAG, "capture: ES7210 MIC1/MIC2, %d Hz, 24-bit, DMA %d x %d frames",
+             AUDIO_CAPTURE_RATE, CAPTURE_DMA_DESC, CAPTURE_DMA_FRAMES);
+    dma_line("running");
+    return ESP_OK;
+}
+
+size_t audio_out_capture_read(int32_t *frames, size_t max_frames, uint32_t timeout_ms)
+{
+    if (!s_capturing || !s_rx) return 0;
+    size_t got = 0;
+    const esp_err_t err = i2s_channel_read(s_rx, frames, max_frames * 2 * sizeof(int32_t),
+                                           &got, pdMS_TO_TICKS(timeout_ms));
+    if (err != ESP_OK && err != ESP_ERR_TIMEOUT) return 0;
+    const size_t n = got / (2 * sizeof(int32_t));
+    /* 24 bits at the top of each 32-bit slot, sign-extended down. */
+    for (size_t i = 0; i < n * 2; i++) frames[i] >>= 8;
+    return n;
+}
+
+void audio_out_capture_end(void)
+{
+    if (!s_i2s_lock) return;
+    xSemaphoreTake(s_i2s_lock, portMAX_DELAY);
+    if (!s_capturing) { xSemaphoreGive(s_i2s_lock); return; }
+    es7210_stop();
+    channels_delete();
+    const esp_err_t err = i2s_init(s_rate);
+    if (err != ESP_OK) ESP_LOGE(TAG, "capture end: playback channel NOT restored: %s",
+                                esp_err_to_name(err));
+    s_capturing = false;
+    xSemaphoreGive(s_i2s_lock);
+    ESP_LOGI(TAG, "capture: ended; playback channel back at %" PRIu32 " Hz", s_rate);
+    dma_line("after");
+}
+
 esp_err_t audio_out_set_volume(uint8_t percent)
 {
     if (percent > 100) percent = 100;
@@ -902,6 +1148,9 @@ esp_err_t audio_out_init(i2c_master_bus_handle_t bus,
 {
     s_bus = bus;
     s_exp1 = exp1;
+
+    s_i2s_lock = xSemaphoreCreateMutex();
+    if (!s_i2s_lock) return ESP_ERR_NO_MEM;
 
     /* MCLK must be running before the codec's DAC comes up: the ES8388
      * will not answer sensibly on I2C without it. */

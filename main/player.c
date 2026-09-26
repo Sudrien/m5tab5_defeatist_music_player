@@ -110,6 +110,7 @@
 #include "radiobrowser.h"
 #include "streamgain.h"
 #include "streamplan.h"
+#include "recorder.h"
 
 static const char *TAG = "tab5_mp3";
 
@@ -6394,6 +6395,46 @@ static void notice_post(const char *head, const char *body)
 }
 
 /*
+ * 5106: a recording in the track's place on the panel.
+ *
+ * The record icon comes from `recording`; the text rows say what is
+ * being made -- "Recording", its running length and size, its file name
+ * -- and the elapsed clock counts it. No seek, no star: neither acts on
+ * a recording. Applied before ui_touch() so the hidden star is not a
+ * live box, and again before ui_draw() because the pass in between
+ * rewrites pos_sec.
+ */
+static char s_rec_line[48];
+static char s_rec_name[40];
+
+static void recording_overlay(ui_state_t *st)
+{
+    recorder_status_t rs;
+    recorder_status(&rs);
+    st->recording = rs.active;
+    if (!rs.active) return;
+
+    const uint32_t tenths = (uint32_t)(rs.bytes / 100000u);     /* 0.1 MB */
+    if (rs.dropped_ms) {
+        snprintf(s_rec_line, sizeof(s_rec_line), "%" PRIu32 ".%" PRIu32 " MB, %" PRIu32
+                 " ms lost", tenths / 10, tenths % 10, rs.dropped_ms);
+    } else {
+        snprintf(s_rec_line, sizeof(s_rec_line), "%" PRIu32 ".%" PRIu32 " MB",
+                 tenths / 10, tenths % 10);
+    }
+    snprintf(s_rec_name, sizeof(s_rec_name), "%s", rs.name);
+    st->title = rs.stopping ? "Finishing the recording" : "Recording";
+    st->artist = s_rec_line;
+    st->album = s_rec_name;
+    st->pos_sec = rs.seconds;
+    st->len_sec = 0;
+    st->can_seek = false;
+    st->fav = UI_FAV_HIDDEN;
+    st->live = false;
+    st->strip_valid = false;
+}
+
+/*
  * The cards, drawn from the ui_task pass.
  *
  * ORDER MATTERS: the portal's card wins. It is up because somebody
@@ -6848,6 +6889,18 @@ static void ui_task(void *arg)
         medialib_poll();
         /* 5097: a heap map a failing task had no stack to print. */
         heapmap_poll();
+        /*
+         * 5106: a recording holds playback paused -- the microphones
+         * have the I2S port. Here, every pass, rather than at each place
+         * that could start playback (a chooser tap, a station, a resume),
+         * because this is the one place none of them can go around. And
+         * its cards: why it stopped, or where it went.
+         */
+        if (recorder_active()) player_force_pause();
+        {
+            char rh[40], rb[96];
+            if (recorder_take_notice(rh, sizeof(rh), rb, sizeof(rb))) notice_post(rh, rb);
+        }
 
         /* Every track start sets this, so it only writes and logs when
          * the duty would actually change. */
@@ -7466,6 +7519,7 @@ static void ui_task(void *arg)
         st.ext_power = battery_external();
 
         const bool down = bdown;
+        recording_overlay(&st);         /* 5106: before the touch, see there */
         ui_action_t act = ui_touch(&st, down, bx, by);
 
         /*
@@ -7534,6 +7588,11 @@ static void ui_task(void *arg)
             if (portal_running()) {
                 ESP_LOGI(TAG, "play refused: network setup is running");
                 player_force_pause();
+                break;
+            }
+            /* 5106: the same for a recording; its stop is the red square. */
+            if (recorder_active()) {
+                ESP_LOGI(TAG, "play refused: recording");
                 break;
             }
             /*
@@ -7748,6 +7807,22 @@ static void ui_task(void *arg)
             }
             break;
 
+        case UI_ACTION_RECORD:
+            /* 5106. Start pauses playback first, so the writer has let
+             * go of the output before audio_out_capture_begin() takes
+             * it; the pass above keeps it paused from then on. */
+            if (recorder_active()) {
+                recorder_stop();
+            } else {
+                player_force_pause();
+                char why[96];
+                if (!recorder_start(why, sizeof(why))) {
+                    ESP_LOGW(TAG, "record refused: %s", why);
+                    notice_post("Cannot record", why);
+                }
+            }
+            break;
+
         case UI_ACTION_SCREEN_OFF:
             /* The moon opens the sleep page; "Screen off" is its first
              * option, handled where the page is touched above. */
@@ -7780,6 +7855,7 @@ static void ui_task(void *arg)
         st.battery_pct = battery_pct();
         st.battery_charging = battery_charging();
         st.ext_power = battery_external();
+        recording_overlay(&st);         /* 5106: pos_sec was just rewritten */
         ui_draw(&st);
 
         /* 50 Hz under a finger, 25 Hz while the title is travelling, 10 Hz

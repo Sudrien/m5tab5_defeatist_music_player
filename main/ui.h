@@ -226,6 +226,10 @@ typedef struct {
          */
         UI_FAV_FOLDER,
     } fav;
+
+    /* 5106: the record button's state. While true the player also puts
+     * the recording's name and length where the track's text goes. */
+    bool recording;
 } ui_state_t;
 
 /* What a touch produced. The player acts on these; the UI never acts. */
@@ -262,6 +266,9 @@ typedef enum {
      * uncovering the cover and ui.c does not own that.
      */
     UI_ACTION_DISMISS_NOTICE,
+    /* 5106: the record button, row 8's fifth icon. Start or stop; the
+     * player decides which from recorder_active(), not from the icon. */
+    UI_ACTION_RECORD,
 } ui_action_kind_t;
 
 /* Name of an action, for logging. Never NULL. Lives beside the enum so a

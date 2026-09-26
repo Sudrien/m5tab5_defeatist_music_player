@@ -13638,3 +13638,73 @@ which hides putw() -- and the host file never included stdio.h at all.
 Renamed `put_wide`. The flacenc warning pass in texttest now also
 compiles the file as gnu17 with stdio.h and stdlib.h forced in, which
 reproduces the board's error on 5104 and is clean on this.
+
+### 5106 -- A record button: the built-in microphones to FLAC
+
+Row 8 has five icons now: folder, gear, star, sleep, and record. The
+pitch went from 206 to 155 px; padded hit boxes are 80 wide, so they
+still do not touch (rotatetest checks it at all four angles).
+
+Tap it and the player pauses, the microphones come up, and
+`<volume>/Recordings/<UTC time>.flac` starts filling -- SD if mounted,
+USB otherwise. The panel shows "Recording", the size so far, the file
+name, and the elapsed clock; the icon is a red disc with a stop square.
+Tap again and the file is finished (last block, final STREAMINFO) and a
+card says where it went. No beamforming, no mono mix, no settings:
+48 kHz, 24-bit, stereo, MIC1 left and MIC2 right, as the ES7210 gives
+them at its PGA's +33 dB.
+
+**The microphones take the I2S port.** They share MCLK, BCLK and LRCK
+with the ES8388 (the ES7210's SDOUT is GPIO 28, per M5Unified's Tab5
+microphone config), so capture is the playback channel replaced by a
+duplex pair on I2S_NUM_0 and put back afterwards. The pair runs 32-bit
+slots (24 bits need them, and a duplex pair shares one clock), so TX
+sends zeros and anything the writer offers is dropped under a new lock
+in audio_out.c -- dropped, and paced by its length, so a writer
+finishing a fade does not spin. A rate change asked for mid-capture is
+remembered and applied when playback comes back. ui_task holds the
+player paused every pass while recorder_active(), which covers every
+way playback could start rather than each one.
+
+**DMA.** The duplex pair is sized to cost what the playback channel did:
+4 x 240 frames of 32-bit stereo is 7.5 KB each way, against 8 x 480 of
+16-bit stereo, 15 KB, for TX alone. The swap frees one before it takes
+the other. Each capture logs `capture before/running/after:
+DMA-capable internal N free (largest M)`, and heapmap_log() prints the
+full map at `recording started` and `recording stopped` -- the numbers
+the open item under 5103 asks for, on the one new internal DMA
+consumer.
+
+**The ES7210 setup** is M5Unified's Tab5 list with SDP_INTERFACE1 (0x11)
+at 0x00, 24-bit I2S, where M5Unified asks for 16. MAINCLK 0xC1, OSR 0x20
+and LRCK_DIV 0x0100 are also Espressif's es7210 driver's coefficients
+for 12.288 MHz MCLK at 48 kHz, which is 256 x Fs, the multiple the
+ES8388 already runs at.
+
+**recorder.c.** Two tasks for the length of a recording, created and
+deleted with it: rec_in (priority 6, i2s_wr's) reads 5 ms at a time
+into a 2 s PSRAM ring and never touches the card; rec_enc (3) encodes
+4096-frame blocks with flacenc (5104) and writes them under a
+STORAGE_IO_BACKGROUND lease. A read that would not fit whole in the
+ring is dropped whole, counted, logged, and shown on the panel as "ms
+lost" -- a partial send would split a frame and swap the channels for
+the rest of the file. The ring and buffers (768 + 32 + 2 KB PSRAM) are
+allocated at the first recording and kept, netstream.c's rule. Files
+stop at 4 GB (FAT32), about 5 1/2 hours. A failed write ends the
+recording with a card; the file up to there still plays (flacenc.h).
+Names are UTC from time(), a best guess before NTP (cardtime.h).
+
+Built against ESP-IDF 5.5.1's headers with the project's sdkconfig
+generated from sdkconfig.defaults (kconfgen), -Wall -Wextra -Werror:
+audio_out.c, recorder.c, ui.c and flacenc.c clean; player.c clean
+apart from the display-driver lines whose managed-component headers
+were not available. That check reproduces 5104's putw() error, so it
+would have caught it. Not on the board: everything about the
+microphones themselves -- levels, which one is left, whether +33 dB
+clips at arm's length -- is for the first recording to say.
+
+What to look for: `capture: ES7210 MIC1/MIC2, 48000 Hz, 24-bit`, the
+three DMA lines, `recording to /sd/Recordings/...`, the two heap maps,
+`recorded ...: N s, M bytes, 0 ms dropped`, and after stopping,
+`capture: ended; playback channel back at 44100 Hz` followed by
+ordinary playback.

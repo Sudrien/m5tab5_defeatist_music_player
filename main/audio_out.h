@@ -142,6 +142,29 @@ audio_out_route_t audio_out_route(void);
 /* "speaker", "headphones", "USB audio" -- for the log. Never NULL. */
 const char *audio_out_route_name(void);
 
+/*
+ * Capture from the two built-in microphones through the ES7210 (5106).
+ *
+ * The microphones share the I2S port and its clocks with the ES8388, so
+ * a capture replaces the playback channel with a duplex pair at
+ * AUDIO_CAPTURE_RATE for its whole length. Playback written meanwhile is
+ * dropped (paced, not played); the caller is expected to hold the player
+ * paused. audio_out_capture_end() puts the playback channel back at the
+ * rate it was last asked for, including a rate asked for mid-capture.
+ *
+ * begin, read and end in sequence, never concurrently. read returns
+ * interleaved stereo frames, MIC1 left and MIC2 right, 24-bit values
+ * sign-extended in int32; 0 on a timeout or when not capturing.
+ */
+#define AUDIO_CAPTURE_RATE      (48000)
+#define AUDIO_CAPTURE_BITS      (24)
+#define AUDIO_CAPTURE_CHANNELS  (2)
+
+esp_err_t audio_out_capture_begin(void);
+size_t    audio_out_capture_read(int32_t *frames, size_t max_frames, uint32_t timeout_ms);
+void      audio_out_capture_end(void);
+bool      audio_out_capturing(void);
+
 #ifdef __cplusplus
 }
 #endif

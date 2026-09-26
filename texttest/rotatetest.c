@@ -211,20 +211,27 @@ int main(void)
                   rot * 90, k_rows[i].name, y, bar_top, bar_top + UI_SQUARE);
         }
 
-        /* The content box, and the four aux icons on one pitch. */
+        /* The content box, and the five aux icons on one pitch (5106:
+         * the record button made it five). */
         const int x0 = bar_x + BAR_PAD, x1 = bar_x + UI_SQUARE - BAR_PAD;
         CHECK(x1 - x0 == 672, "rot%d: content is %d wide, not 672", rot * 90, x1 - x0);
 
         const int ih = 26;
         const int g0 = x0 + ih, span = (x1 - ih) - g0;
-        const int apitch = span / 3, lead = (span - apitch * 3) / 2;
+        const int naux = 5;
+        const int apitch = span / (naux - 1), lead = (span - apitch * (naux - 1)) / 2;
         int prev = 0, pitch = 0;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < naux; i++) {
             const int cx = g0 + lead + apitch * i;
             CHECK(cx - ih >= x0 && cx + ih <= x1,
                   "rot%d: aux icon %d overhangs the content box", rot * 90, i);
             if (i == 1) pitch = cx - prev;
+            /* ui.c's in_box() pads by HIT_PAD_X (14) each side, so the
+             * hit boxes are 2 * (26 + 14) = 80 wide and must not touch. */
             if (i >= 1) {
+                CHECK(cx - prev > 2 * (ih + 14),
+                      "rot%d: aux hit boxes %d and %d overlap at pitch %d",
+                      rot * 90, i - 1, i, cx - prev);
                 CHECK(cx - prev == pitch,
                       "rot%d: aux pitch %d != %d between icons %d and %d",
                       rot * 90, cx - prev, pitch, i - 1, i);

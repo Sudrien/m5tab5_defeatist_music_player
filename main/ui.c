@@ -152,7 +152,7 @@ static const char *TAG = "tab5_ui";
  *   5  album
  *   6  artist
  *   7  prev, play/pause, next
- *   8  folder, gear, star, sleep -- four on one pitch
+ *   8  folder, gear, star, sleep, record -- five on one pitch (5106)
  *   9  output icon, volume, battery
  */
 #define BAR_PAD     (24)    /* square edge to content, both sides */
@@ -162,7 +162,8 @@ static const char *TAG = "tab5_ui";
 #define ALBUM_Y     (238)   /* row 5 */
 #define ARTIST_Y    (278)   /* row 6 */
 #define ROW_Y       (392)   /* row 7, transport centres */
-#define AUX_Y       (500)   /* row 8, the four icons' centres */
+#define AUX_Y       (500)   /* row 8, the five icons' centres */
+#define AUX_COUNT   (5)     /* 5106: the record button made it five */
 #define VOL_Y       (623)   /* row 9 */
 /*
  * The art overlay's inset. NOT the bar's -- the bar's text starts at
@@ -339,6 +340,7 @@ const char *ui_action_name(ui_action_kind_t k)
     case UI_ACTION_SCREEN_OFF:  return "moon (sleep page)";
     case UI_ACTION_FAVORITE:    return "star (favourite)";
     case UI_ACTION_DISMISS_NOTICE: return "notice dismissed";
+    case UI_ACTION_RECORD:      return "record";
     case UI_ACTION_SCREEN_ON:   return "wake";
     case UI_ACTION_PREV:        return "prev";
     case UI_ACTION_PREV_AGAIN:  return "prev x2";
@@ -534,9 +536,11 @@ static void next_centre(int *cx, int *cy)
  * to clear and nothing to argue: four centres, evenly spaced across the
  * content box, inset by the icon's half-width so no glyph overhangs.
  *
- * Pitch works out at (672 - 52) / 3 = 206 px, and every box is the same
- * distance from its neighbours, which is the thing the eye actually
- * checks.
+ * Pitch works out at (672 - 52) / 4 = 155 px with five (5106; it was
+ * 206 with four), and every box is the same distance from its
+ * neighbours, which is the thing the eye actually checks. Padded hit
+ * boxes are 2 * (ICON_HALF + HIT_PAD_X) = 80 wide, so 75 px of pitch is
+ * nobody's.
  */
 static void aux_centre(int idx, int *cx, int *cy)
 {
@@ -557,8 +561,8 @@ static void aux_centre(int idx, int *cx, int *cy)
      * So: an exact pitch, and the remainder spent on the leading margin
      * so the group stays centred in the box.
      */
-    const int pitch = span / 3;
-    const int lead = (span - pitch * 3) / 2;
+    const int pitch = span / (AUX_COUNT - 1);
+    const int lead = (span - pitch * (AUX_COUNT - 1)) / 2;
 
     *cx = x0 + lead + pitch * idx;
     *cy = s_bar_top + AUX_Y;
@@ -568,6 +572,7 @@ static void folder_centre(int *cx, int *cy) { aux_centre(0, cx, cy); }
 static void gear_centre(int *cx, int *cy)   { aux_centre(1, cx, cy); }
 static void star_centre(int *cx, int *cy)   { aux_centre(2, cx, cy); }
 static void moon_centre(int *cx, int *cy)   { aux_centre(3, cx, cy); }
+static void rec_centre(int *cx, int *cy)    { aux_centre(4, cx, cy); }
 
 /*
  * Row 3, both clocks, in one place because they are laid out against
@@ -786,6 +791,26 @@ static void draw_moon(void)
     moon_centre(&cx, &cy);
     gfx_fill_circle(cx, cy, ICON_HALF, C_ICON);
     gfx_fill_circle(cx + 13, cy - 10, ICON_HALF, C_BG); /* bite out the crescent */
+}
+
+/*
+ * Record (5106). Idle: a red dot in a ring, the mark every recorder
+ * uses. Recording: a solid red disc with a white stop square in it --
+ * the icon says what the device is doing, and the square says what a
+ * tap does about it, as the play toggle does.
+ */
+static void draw_rec(bool recording)
+{
+    int cx, cy;
+    rec_centre(&cx, &cy);
+    if (recording) {
+        gfx_fill_circle(cx, cy, ICON_HALF, C_FILL);
+        gfx_fill_rect(cx - 9, cy - 9, 18, 18, C_ICON);
+    } else {
+        gfx_fill_circle(cx, cy, ICON_HALF, C_ICON);
+        gfx_fill_circle(cx, cy, ICON_HALF - 4, C_BG);
+        gfx_fill_circle(cx, cy, ICON_HALF - 11, C_FILL);
+    }
 }
 
 /* A speaker is a small rectangle (the body) with a cone flaring out to the
@@ -2054,6 +2079,7 @@ void ui_draw(const ui_state_t *st)
     draw_gear();
     draw_star_btn(st->fav);
     draw_moon();
+    draw_rec(st->recording);
 
     int cx, cy;
     /* Prev is never greyed: it always does something -- restart the
@@ -2232,6 +2258,12 @@ ui_action_t ui_touch(const ui_state_t *st, bool down, int x, int y)
     moon_centre(&cx, &cy);
     if (in_box(x, y, cx, cy, ICON_HALF)) {
         act.kind = UI_ACTION_SCREEN_OFF;
+        return act;
+    }
+
+    rec_centre(&cx, &cy);
+    if (in_box(x, y, cx, cy, ICON_HALF)) {
+        act.kind = UI_ACTION_RECORD;
         return act;
     }
 
