@@ -13068,3 +13068,29 @@ Also in that log, not changed: the station's artwork,
 https://i.1.creatium.io/.../196x196/favicon.png, logged `artwork filled
 the 192 KB buffer; not decoding it` -- a file far larger than its name
 suggests. RB_ART_MAX is a deliberate bound.
+
+### 5091 -- The rate-change drain answers presses
+
+5090 on the board (v0.4.0-98): `station change: the fade did not finish
+(nothing was playing); dropping the rest`, then Cryosleep played with no
+stray fade. 5084 and 5086 seen too: `directory: pop is already being
+fetched; tap ignored`, `station change: nothing queued; no fade`.
+
+Ретро FM's server plays separate files back to back: jingles at 24 kHz
+/ 64 kbit/s, songs at 44.1 kHz. At a boundary the stream loop logged
+`stream rate 24000 -> 44100 Hz; draining` and waited for the PCM ring
+to empty, so that what was decoded at 24 kHz is heard at 24 kHz -- 29 s
+of it here. The switch itself was clean (the maintainer heard nothing)
+but the wait was a bare vTaskDelay loop that only s_pending_ready could
+break: a pause did nothing until the drain ended, and the chooser's
+list fetch, reload, stars and notices waited with it. On a station like
+this that is every jingle.
+
+The loop now services the chooser each pass, as the stream loop does,
+and a pause ends it: the rest is dropped through the writer's flush (as
+a stream pause always does), the loop waits for the writer to have
+done it so the reconfigure never meets old-rate audio, and the press
+handling takes the pause on the next pass as before. Not host-tested
+(player.c). What to look for: pause during `draining` and `stream rate
+change: paused during the drain`, then `paused during a rate change:
+dropped N KB` at once rather than half a minute later.

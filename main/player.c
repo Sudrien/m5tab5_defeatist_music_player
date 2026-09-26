@@ -11956,6 +11956,41 @@ static track_end_t play_stream(const char *url, const char *name)
                     s_stream_hold = false;
                     while (s_pcm && !xStreamBufferIsEmpty(s_pcm) &&
                            !s_pending_ready) {
+                        /*
+                         * 5091: THE DRAIN IS NOT DEAF. It lasts as long
+                         * as the ring does -- 29 s on Ретро FM, whose
+                         * server plays 24 kHz jingles between 44.1 kHz
+                         * songs -- and only a station change could
+                         * break it. A pause was ignored until it ended,
+                         * and the chooser's list fetch and star waited.
+                         *
+                         * A pause drops the rest, as a pause always
+                         * does for a stream, and waits for the writer to
+                         * have done it: the reconfigure below must not
+                         * find old-rate audio still queued. The pause
+                         * itself is then taken by the press handling
+                         * on the next pass, as ever.
+                         */
+                        if (!s_playing) {
+                            ESP_LOGI(TAG, "stream rate change: paused "
+                                          "during the drain");
+                            s_flush_why = "paused during a rate change";
+                            s_pcm_flush = true;
+                            for (int w = 0; s_pcm_flush && w < 50; w++) {
+                                vTaskDelay(pdMS_TO_TICKS(10));
+                            }
+                            break;
+                        }
+                        /* The chooser's requests, as the loop below
+                         * services them on every pass. */
+                        if (!leaving) {
+                            service_station_reload();
+                            service_station_fetch();
+                            service_favorites_load();
+                            service_favorite_toggle();
+                            service_star_toggle();
+                            service_notices();
+                        }
                         vTaskDelay(pdMS_TO_TICKS(10));
                     }
                 }
