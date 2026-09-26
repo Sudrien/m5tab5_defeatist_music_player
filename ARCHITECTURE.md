@@ -13816,3 +13816,33 @@ board. What the board will say that the model cannot: the case's own
 shadowing, real capsule phase mismatch (5 us of skew is 3 degrees of
 apparent angle), and a room's reflections, which arrive from every
 direction and are what 64 taps at 48 kHz (1.3 ms) cannot follow.
+
+### 5110 -- The system clock follows this player's time
+
+5107 named recordings from settings_now(), but the files themselves
+still came out dated 1980-01-01 on a computer: FatFs stamps every write
+from time() (ESP-IDF's diskio.c get_fattime()), time() was 1970 because
+nothing called settimeofday() before NTP, and FAT's earliest date is
+1980. The sidecars from the board say so -- mtime 315535254, 315535062,
+315536722, i.e. 1980-01-01 00:40, 00:37 and 01:05, the minutes since
+boot. Every recording, sidecar, settings file and starred list written
+before NTP had those stamps.
+
+settings.c now calls settimeofday() whenever the floor moves forward
+past the system clock: the build stamp at settings_init(), a card's
+record, cardtime.c's floor -- everything that comes through
+settings_note_ntp_time(). Forward only, and only by more than 2 s, so
+it never fights SNTP, which sets the clock itself before its callback
+reaches settings_note_ntp_reply(). One log line when it moves:
+`system clock 1970-01-01 00:00:01Z -> 2026-09-26 ...Z (this player's
+time, until NTP)`.
+
+TLS does not change: this build has CONFIG_MBEDTLS_HAVE_TIME without
+CONFIG_MBEDTLS_HAVE_TIME_DATE, so mbedTLS checks no certificate dates
+(streamprobe.c logs which). The comment in clock_follow() says what
+would change if that were turned on.
+
+Files already written keep their 1980 stamps; their sidecars record
+that mtime and still match. What to look for on the board: the clock
+line at boot, and a recording listed on a computer with today's date
+-- UTC, since there is no zone (settings.h).

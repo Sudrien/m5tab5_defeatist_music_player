@@ -10,6 +10,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <time.h>
+#include <sys/time.h>
 
 #include "esp_app_desc.h"
 #include "esp_log.h"
@@ -481,9 +482,55 @@ static bool note_time(int64_t epoch, int64_t boot_us, bool from_ntp)
     return true;
 }
 
+static void fmt_epoch(int64_t t, char *out, size_t out_len);
+
+/*
+ * 5110: the system clock follows the floor forward.
+ *
+ * Nothing set it before this, so until NTP answered, time() said 1970
+ * -- and FatFs stamps every file it writes from time() (diskio.c's
+ * get_fattime()), so every recording, sidecar and settings file came
+ * out dated 1980, FAT's earliest. The floor is this player's own belief
+ * about the time; the system clock now starts from it.
+ *
+ * FORWARD ONLY, and only by more than a couple of seconds, so it never
+ * fights SNTP: after a reply the clock is NTP's and the floor has been
+ * set from it, so there is nothing to do. The floor never runs ahead
+ * of what this player believes, so neither does this.
+ *
+ * TLS: nothing changes today. This build has CONFIG_MBEDTLS_HAVE_TIME
+ * but not CONFIG_MBEDTLS_HAVE_TIME_DATE, so mbedTLS does not check
+ * certificate dates at all (streamprobe.c logs which). If that is ever
+ * turned on, certificates before NTP are judged against this floor --
+ * late but never early -- instead of 1970, where every certificate is
+ * "not yet valid"; one that expired while the device was off would pass
+ * until NTP answers.
+ */
+static void clock_follow(void)
+{
+    const int64_t want = settings_now();
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    if ((int64_t)now.tv_sec + 2 >= want) return;
+    const struct timeval tv = { .tv_sec = (time_t)want, .tv_usec = 0 };
+    if (settimeofday(&tv, NULL) != 0) {
+        ESP_LOGW(TAG, "system clock not set (errno %d)", errno);
+        return;
+    }
+    char was[24], is[24];
+    fmt_epoch((int64_t)now.tv_sec, was, sizeof(was));
+    fmt_epoch(want, is, sizeof(is));
+    ESP_LOGI(TAG, "system clock %s -> %s (this player's time, until NTP)", was, is);
+}
+
 bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
 {
-    return note_time(epoch, boot_us, false);
+    /* NTP replies come through settings_note_ntp_reply(), and SNTP has
+     * set the clock itself by then. Everything else -- the build stamp,
+     * a card's record, cardtime.c's floor -- comes through here. */
+    const bool ok = note_time(epoch, boot_us, false);
+    if (ok) clock_follow();
+    return ok;
 }
 
 /*

@@ -382,10 +382,13 @@ int64_t settings_last_ntp_boot_us(void);
  * network still records forward progress, and each reboot's floor is the
  * later of the build time and the last write.
  *
- * NOT time(). The system clock is not set from any of this -- nothing
- * calls settimeofday() yet -- so time() still returns 1970, which is the
- * one value the floor exists to refuse. This is derived arithmetic and
- * needs no clock.
+ * Not time(), though since 5110 time() follows it: whenever this floor
+ * moves forward past the system clock (the build stamp at boot, a
+ * card's record, cardtime.c), settings.c calls settimeofday() with it,
+ * so FatFs's file stamps (and mbedTLS, which in this build does not
+ * check certificate dates) see this time before NTP rather than 1970. SNTP sets the clock itself when it answers. This is still
+ * derived arithmetic and needs no clock; callers that want the player's
+ * belief ask here.
  */
 int64_t settings_now(void);
 
