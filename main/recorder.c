@@ -24,6 +24,7 @@
 #include "audio_out.h"
 #include "flacenc.h"
 #include "heapmap.h"
+#include "settings.h"
 #include "storage.h"
 #include "storage_io.h"
 
@@ -141,7 +142,16 @@ static bool pick_path(const char *mount)
         ESP_LOGE(TAG, "mkdir %s: errno %d", dir, errno);
         return false;
     }
-    const time_t now = time(NULL);
+    /*
+     * 5107: settings_now(), not time(). Nothing sets the system clock
+     * (settings.h), so time() is 1970 on every boot; settings_now() is
+     * the player's own belief -- the last NTP reply, or failing that the
+     * build time or the card's floor, carried forward on the monotonic
+     * timer. time_t is 64 bits here, so gmtime_r() does not truncate
+     * what settings.c keeps in an int64_t.
+     */
+    _Static_assert(sizeof(time_t) == 8, "time_t must be 64-bit for settings_now()");
+    const time_t now = (time_t)settings_now();
     struct tm tm;
     gmtime_r(&now, &tm);
     char stem[24];

@@ -13708,3 +13708,35 @@ three DMA lines, `recording to /sd/Recordings/...`, the two heap maps,
 `recorded ...: N s, M bytes, 0 ms dropped`, and after stopping,
 `capture: ended; playback channel back at 44100 Hz` followed by
 ordinary playback.
+
+### 5107 -- A recording's name from settings_now(), not time()
+
+5106 on the board (v0.4.0-115, IDF 5.5.5), the first recording:
+
+    capture before: DMA-capable internal 58843 free (largest 25600)
+    capture: ES7210 MIC1/MIC2, 48000 Hz, 24-bit, DMA 4 x 240 frames
+    capture running: DMA-capable internal 58643 free (largest 25600)
+    recording to /sd/Recordings/1970-01-01 00.37.29.flac
+    ...
+    capture: ended; playback channel back at 44100 Hz
+    recorded ...: 13 s, 2420824 bytes, 0 ms dropped
+
+So the swap costs 200 bytes of DMA-capable RAM, as sized; the 10 KB
+lower `after` figure is the two task stacks, not yet deleted when it
+printed, and the `recording stopped` map shows 58887 again. 13 s came to
+2.42 MB, 1.49 Mbit/s, 65% of the raw 2.3 Mbit/s -- microphones in a
+quiet room compress better than 5104's -45 dBFS noise proxy. No audio
+dropped, and playback came back at the track's rate.
+
+The name was 1970. recorder.c took time(), and settings.h says in so
+many words that nothing calls settimeofday() and time() is 1970 on
+every boot; the player's belief about the time is settings_now() --
+the last NTP reply, or the build time or the card's floor, carried
+forward on the monotonic timer -- and that log was saying
+2026-09-26 15:32:29Z at the same boot. Now the name comes from
+settings_now(), through gmtime_r() with a static assert that time_t is
+64 bits (settings.c's reason for its own formatter is a 32-bit time_t).
+
+Not changed: the file's own FAT timestamps still come from time() via
+FatFs, so a computer will list the file as 1980 (FAT's earliest). That
+is settimeofday()'s job, which settings.h defers on purpose.

@@ -5,9 +5,9 @@
  * 48 kHz, 24-bit, stereo (MIC1 left, MIC2 right), exactly as the ES7210
  * delivers it: no beamforming, no mixing to mono, no gain beyond the
  * ADC's own PGA. Files go to <volume>/Recordings/, the SD card if one is
- * mounted and the USB drive otherwise, named for the clock's UTC time
- * ("2026-09-26 18.04.33.flac") -- which before NTP is only the card's
- * floor (cardtime.h), so a best guess, as the README says.
+ * mounted and the USB drive otherwise, named for settings_now() in UTC
+ * ("2026-09-26 18.04.33.flac") -- which before NTP is the build time or
+ * the card's floor carried forward, so a best guess, as the README says.
  *
  * Two tasks for the length of a recording, created at start and gone at
  * the end: `rec_in` reads the I2S DMA into a 2 s PSRAM ring and never
