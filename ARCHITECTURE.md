@@ -13550,3 +13550,79 @@ line either way).
 it from a sag); the ASIX's `EP 0 STALL` and 12-byte descriptor at
 enumeration (it attaches every time); `DSI underruns: 1` during heavy
 decode, once or twice a session.
+
+### 5104 -- A FLAC encoder for the recorder, and why not libFLAC
+
+The README's v0.5.0 recording target wants every capture in FLAC.
+Nothing in the tree encodes it: esp_audio_codec decodes FLAC but its
+encoders are AAC, AMR, ADPCM, G711, PCM, OPUS, ALAC, LC3, SBC and G722.
+So the choice was libFLAC or writing one, and it was measured first,
+the way 5037 measured esp_ae: cross-compiled for rv32imafc at -O2,
+instructions counted under qemu, and converted to a core with polyrsp as
+the yardstick -- 24.6 M instructions per second of 44.1 -> 48 kHz under
+qemu against 5040's 9% of a 360 MHz core on the board, so about 1.3
+cycles an instruction. One calibration point, and 5038 is the warning
+that code executing from flash can be far worse than its count.
+
+Per second of 48 kHz 24-bit stereo, the test signal being pink noise at
+-45 dBFS under the test tones (a stand-in for a microphone's floor, not
+a real capture):
+
+| | flash | heap | M instr/s | ~core | size |
+|---|---|---|---|---|---|
+| libFLAC -0 | 122 KB + 14 soft-double + 8 libm | 139 KB | 22.6 | 8% | 71.7% |
+| libFLAC -2 | same | 139 KB | 34.4 | 13% | 71.1% |
+| libFLAC -3 | same | 463 KB | 303 | 111% | 71.3% |
+| libFLAC -5, mono | same | 342 KB | 222 | 81% | 71.5% |
+| flacenc, 4096 | 6.3 KB | 108 KB | 16.8 | 6% | 71.0% |
+| flacenc, 1152 | 6.3 KB | 31 KB | 18.4 | 7% | 71.1% |
+
+**libFLAC's LPC levels cannot run here.** Its autocorrelation
+accumulates in double, and the P4's FPU is single precision: 86% of the
+-3/-5 instructions are `__muldf3`, `__adddf3` and `__extendsfdf2`.
+Patching that one kernel to float (what libFLAC did before 1.4) brought
+-5 to 66 M, still bit-exact -- but on the noise floor a microphone
+produces, LPC bought 0.3-0.5% over -2, and -3 was worse than -2. It
+earns its keep on tonal music (9.9% -> 9.3% of raw on 01's tones), not
+on captures. Other costs of vendoring it: it does not compile under
+GCC 14 without `-Wno-incompatible-pointer-types` (int32_t is `long` on
+this toolchain), the verify path links the whole decoder (23 KB), 1.5's
+threading must be kept off where pthreads exist, and it is 19 000 lines.
+
+**`main/flacenc.c` is what -0 to -2 do and nothing else**: fixed
+predictors 0-4, partitioned Rice (method 1 when a 25-bit side channel
+needs parameters over 14), CONSTANT and VERBATIM fallbacks, and all four
+stereo decorrelations chosen per block from abs-residual sums. No
+floating point. No MD5 -- the STREAMINFO signature is left zero, which
+the format defines as not computed, and in libFLAC -0 MD5 was 22% of
+the instructions. The caller owns the file and rewrites STREAMINFO at
+close; a file whose writer died first still plays, with the total
+marked unknown and every frame CRC'd.
+
+The order-choice sums are taken at 16-bit precision in 32-bit chunks of
+512 samples rather than as a 64-bit add per sample per order: they only
+choose an order, and the chunking took 27 M instructions a second to
+17 M. The orders chosen for the stereo decision are reused for the two
+subframes written, rather than searched again.
+
+Found by the host test, not by review: the stereo choice compared Rice
+estimates uncapped, so full-scale noise sometimes picked a side channel
+on a rounding difference and then stored it verbatim at one bit more
+than either input -- 2% bigger than raw. Each estimate is now capped at
+its verbatim cost.
+
+Buffers are PSRAM first (polyrsp.c's rule): 26 bytes a frame of block
+for stereo, 9 for mono. Partition scratch lives in the struct, not on
+the stack; the deepest call chain is about 300 bytes.
+
+Tested on the host (`texttest/flacenctest.c`) against a decoder written
+in the test from the format -- its own bit reader, bitwise CRCs, and a
+refusal of anything the encoder should not emit -- over silence, noise,
+opposite rails, smooth and mixed signals, 16 and 24 bits, mono and
+stereo, block sizes 16 to 4096 with and without a header code, odd last
+blocks, rates without a code, and multi-byte frame numbers. On the
+development machine the same streams also decoded bit-exact through the
+reference `flac` 1.5.0 under `-t`.
+
+Compiled into the firmware and called by nothing yet; the recorder is
+the caller. Not on the board.
