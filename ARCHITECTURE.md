@@ -12527,3 +12527,18 @@ http -> https upgrade and refuses https -> http itself, so the old rule
 https://...`, and a final status other than 200 is now `artwork: HTTP N;
 no picture` instead of nothing. Not host-tested (radiobrowser.c). What
 to look for: RFI Monde, the 301 line, then `artwork: N bytes`.
+
+### 5076 -- No "No media" card
+
+5075 on the board (v0.4.0-81): `artwork: 301 to
+https://www.rfi.fr:443/apple-touch-icon.png`, `artwork: 778 bytes`,
+`cover is 180x180 (png)`. RFI Monde has its logo.
+
+The idle loop posted a dismissible `No media -- insert a card or a USB
+drive` card whenever nothing was playing and neither volume was
+mounted. That was right when a Tab5 without storage could do nothing.
+Since 5048 (kept stations in flash), 5064 (settings in flash) and 5065
+(the chooser opening on RADIO) it is a working state, and the card sat
+over the station list saying otherwise. Removed at the maintainer's
+request, with the flag that rationed it. notice_post() and the other
+cards are untouched. Not host-tested (player.c).

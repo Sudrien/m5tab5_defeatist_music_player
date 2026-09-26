@@ -3195,9 +3195,6 @@ static volatile bool     s_repaint_art;
 static char              s_notice_head[48];
 static char              s_notice_body[96];
 static volatile bool     s_notice_pending;
-/* Said once per absence, not once per pass. Cleared when a volume
- * appears, so the next removal says it again. */
-static bool              s_notice_said_no_media;
 /* What the portal card last said, so it is redrawn only when the
  * address or the state actually changes rather than every pass -- a
  * card that re-blits 720x720 ten times a second is a cover that
@@ -12962,21 +12959,10 @@ static void player_loop(void)
                 if (s_path[0]) load_track_visuals(s_path);
                 else           ui_clear_art();
             }
-            /* Nothing is playing and no volume is mounted: say so,
-             * once. The card is dismissible because this is a state
-             * somebody can do something about -- and once dismissed it
-             * does not come back until a volume has been and gone. */
-            const bool any_media = storage_present(STORAGE_SD) ||
-                                   storage_present(STORAGE_USB);
-            if (any_media) {
-                /* Armed again by something being there. The card is
-                 * about an absence, so the absence has to end before it
-                 * is worth saying a second time. */
-                s_notice_said_no_media = false;
-            } else if (!s_notice_said_no_media) {
-                s_notice_said_no_media = true;
-                notice_post("No media", "insert a card or a USB drive");
-            }
+            /* 5076: no "No media" card here any more. With no card or
+             * drive the chooser now opens on RADIO (5065) with the kept
+             * stations in flash (5048), so no storage is a working
+             * state, not a fault to report. */
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
