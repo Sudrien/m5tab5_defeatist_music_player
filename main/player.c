@@ -13250,6 +13250,9 @@ static void player_loop(void)
     }
 }
 
+/* 5089: the console driver's install result, held for the banner. */
+static esp_err_t s_console_err = ESP_FAIL;
+
 void app_main(void)
 {
     /*
@@ -13276,17 +13279,7 @@ void app_main(void)
         if (usj_err == ESP_OK) {
             usb_serial_jtag_vfs_use_driver();
         }
-        /* 5087: said, after the switch, so the line itself goes through
-         * whichever path is now in use. A cut line in a log with this
-         * saying `4096-byte` is the host not reading, not the buffer
-         * missing. */
-        if (usj_err == ESP_OK) {
-            ESP_LOGI(TAG, "console: USB-serial-JTAG driver, %u-byte TX buffer",
-                     (unsigned)usj.tx_buffer_size);
-        } else {
-            ESP_LOGW(TAG, "console: driver not installed (%s); unbuffered",
-                     esp_err_to_name(usj_err));
-        }
+        s_console_err = usj_err;        /* 5089: said under the banner */
     }
 
     /* The SD drivers narrate every probe; let this file decide what is
@@ -13315,6 +13308,20 @@ void app_main(void)
         ESP_LOGW(TAG, "=== Defeatist Music Player === %s, IDF %s, built %s %s",
                  d ? d->version : "?", d ? d->idf_ver : "?",
                  d ? d->date : "?", d ? d->time : "?");
+    }
+    /*
+     * 5087's line, moved here by 5089. It was printed before the banner,
+     * and the banner is where a pasted log starts -- so the first board
+     * log with 5087 in it did not have the line 5087 was for. Printed
+     * after the switch either way, so it goes through whichever path is
+     * now in use. A cut line in a log that says `4096-byte` is the host
+     * not reading, not the buffer missing.
+     */
+    if (s_console_err == ESP_OK) {
+        ESP_LOGI(TAG, "console: USB-serial-JTAG driver, 4096-byte TX buffer");
+    } else {
+        ESP_LOGW(TAG, "console: driver not installed (%s); unbuffered",
+                 esp_err_to_name(s_console_err));
     }
 #ifdef SDKCONFIG_DRIFT
     /* Keys whose value in sdkconfig differs from sdkconfig.defaults, as

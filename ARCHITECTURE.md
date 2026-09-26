@@ -13016,3 +13016,17 @@ under IDF.
 New source file main/icoimg.c, added to main/CMakeLists.txt. What to look
 for: Cryosleep, `artwork: icon, ...`, then `cover is NxN (png)` and
 `cover enlarged Kx to ...`.
+
+### 5089 -- The console line under the banner
+
+5088 on the board (v0.4.0-96): Cryosleep's favicon.ico came through as
+`artwork: icon, 32x32 24-bit bitmap entry, as a 4196 byte png`, then
+`cover is 32x32 (png)` and `cover enlarged 17x to 544x544`. No
+rebuffer, DMA 20131 free at the request.
+
+The same log has no `console:` line from 5087, and could not: 5087
+printed it before the banner, and the banner is where a pasted log
+starts -- player.c calls it "the line to start copying from". The
+install stays first in app_main(), so everything after it is buffered;
+its result is kept in s_console_err and logged just under the banner,
+beside 5077's stale-sdkconfig line. Not host-tested (player.c).
