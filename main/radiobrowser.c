@@ -575,7 +575,16 @@ void radiobrowser_click(const char *uuid)
  * line, not a warning: most stations have no artwork, many have a dead
  * link, and a blank square is not a fault.
  */
-#define RB_ART_MAX      (192 * 1024)
+/*
+ * 5094: 512 KB, up from 192. The bound is about decode time, not bytes --
+ * PSRAM holds either for the moment it takes -- and a baseline JPEG of
+ * 512 KB is typically 1500 px or less, which the hardware decoder handles
+ * in well under a second. What it keeps out is the 3000 px, 2 MB kind,
+ * which takes the software path for seconds (see 5093). 192 KB refused
+ * Спокойное радио's `196x196/favicon.png`, which is evidently much larger
+ * than its name.
+ */
+#define RB_ART_MAX      (512 * 1024)
 #define RB_ART_HOPS     (3)         /* 5075: redirects followed */
 
 bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)

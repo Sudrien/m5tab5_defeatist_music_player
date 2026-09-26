@@ -13188,3 +13188,17 @@ height x 2 bytes in one PSRAM block, which put the ceiling near
 software path and seconds per track change. A baseline JPEG around
 1000x1000 decodes in hardware in well under a second. Not host-tested
 (albumart.c).
+
+### 5094 -- Station artwork up to 512 KB
+
+RB_ART_MAX goes from 192 KB to 512 KB. Спокойное радио's favicon,
+https://i.1.creatium.io/.../196x196/favicon.png, logged `artwork filled
+the 192 KB buffer; not decoding it` twice: a file much larger than its
+name. The bound is about decode time rather than memory -- the buffer is
+PSRAM, held for the length of one fetch -- and 5093's log gives the
+numbers: a 3000 px, 1.87 MB JPEG takes the software path for 5.8 s,
+while a baseline JPEG of up to 512 KB is typically 1500 px or less and
+decodes in hardware in well under a second. So 512 KB still refuses the
+kind that costs seconds, and the refusal is still whole rather than a
+truncated decode. One comment in player.c that quoted the old figure is
+corrected. Not host-tested (radiobrowser.c).
