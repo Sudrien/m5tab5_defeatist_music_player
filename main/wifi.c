@@ -378,6 +378,16 @@ static SemaphoreHandle_t s_wake;
 static volatile bool s_restart_req;
 static const char   *s_restart_why = "";
 static int64_t       s_restart_last_us;
+/* 5080: a request inside the gap is held, not dropped, and carried out
+ * when the gap is over -- if it was asked for recently enough that the
+ * link is probably still dead. */
+#define RESTART_ASK_FRESH_US (30LL * 1000 * 1000)
+static volatile int64_t s_restart_asked_us;
+
+static int64_t restart_due_us(void)
+{
+    return s_restart_last_us ? s_restart_last_us + RESTART_MIN_GAP_US : 0;
+}
 
 /* Defined below; the worker is declared here because wifi_init() has to
  * create the task before the reader exists in the file. */
@@ -828,14 +838,33 @@ static void wifi_task(void *arg)
     for (;;) {
         /* A wake is a switch press or a radio that has just come up; a
          * timeout is the retry for a player carried back into range. */
-        const bool woke = xSemaphoreTake(s_wake, pdMS_TO_TICKS(RETRY_MS)) == pdTRUE;
-        if (woke && s_restart_req) {
+        TickType_t wait = pdMS_TO_TICKS(RETRY_MS);
+        if (s_restart_req) {
+            /* 5080: a held restart wakes this at the end of the gap. */
+            const int64_t left = restart_due_us() - esp_timer_get_time();
+            if (left > 0 && left / 1000 < RETRY_MS) {
+                wait = pdMS_TO_TICKS(left / 1000) + 1;
+            } else if (left <= 0) {
+                wait = 0;
+            }
+        }
+        bool woke = xSemaphoreTake(s_wake, wait) == pdTRUE;
+        const int64_t now = esp_timer_get_time();
+        if (s_restart_req && now >= restart_due_us()) {
             /* 5069: stop and start in order, under the apply lock, so a
              * switch press cannot land in the middle; the join below
              * then runs as it does after any wake. */
             s_restart_req = false;
+            /* 5080: held through the gap, and nobody has asked since --
+             * the link may well have come back by itself. */
+            const int64_t asked_ago_ms = (now - s_restart_asked_us) / 1000;
+            const bool fresh = asked_ago_ms * 1000 <= RESTART_ASK_FRESH_US;
+            if (!fresh) {
+                ESP_LOGI(TAG, "held radio restart dropped: last asked "
+                              "%lld ms ago", (long long)asked_ago_ms);
+            }
             if (s_lock) xSemaphoreTake(s_lock, portMAX_DELAY);
-            if (s_up && !portal_running()) {
+            if (fresh && s_up && !portal_running()) {
                 ESP_LOGW(TAG, "restarting the radio: %s", s_restart_why);
                 s_restart_last_us = esp_timer_get_time();
                 wifi_stop();
@@ -843,6 +872,7 @@ static void wifi_task(void *arg)
                 if (err != ESP_OK) {
                     ESP_LOGE(TAG, "radio did not come back: %s", esp_err_to_name(err));
                 }
+                woke = true;    /* 5080: a held one arrives on a timeout */
             }
             if (s_lock) xSemaphoreGive(s_lock);
         }
@@ -854,13 +884,31 @@ static void wifi_task(void *arg)
 
 void wifi_request_restart(const char *why)
 {
-    if (!s_wake || s_restart_req) return;
-    if (s_restart_last_us &&
-        esp_timer_get_time() - s_restart_last_us < RESTART_MIN_GAP_US) {
-        return;
-    }
+    if (!s_wake) return;
+    const int64_t now = esp_timer_get_time();
+    s_restart_asked_us = now;           /* 5080: a repeat keeps it fresh */
+    if (s_restart_req) return;
     s_restart_why = why ? why : "";
     s_restart_req = true;
+    const int64_t due = restart_due_us();
+    if (due > now) {
+        /*
+         * 5080: inside the one-a-minute gap. This used to return here
+         * and drop the request without a word, and the caller logs
+         * `asking for a radio restart` whether or not anything follows:
+         * on the board a link that died 36 s after a restart sat dead
+         * for 46 s, until a later probe asked again outside the gap.
+         * Now it is held. The wake below still goes, so the worker
+         * leaves whatever wait it is in and cuts the next one to the end
+         * of the gap. What that wake runs early costs nothing:
+         * wifi_apply_settings() reconciles to the settings it already
+         * has, and connect_saved() returns at once while the link still
+         * has its address.
+         */
+        ESP_LOGW(TAG, "radio restart held %lld ms: the last was %lld ms ago",
+                 (long long)((due - now) / 1000),
+                 (long long)((now - s_restart_last_us) / 1000));
+    }
     xSemaphoreGive(s_wake);
 }
 

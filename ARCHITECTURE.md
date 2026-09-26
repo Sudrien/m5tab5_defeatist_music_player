@@ -12714,3 +12714,44 @@ artwork line's `DMA N free` a few KB higher than 15.6 (the two staging
 buffers are no longer internal), and a stream that survives the
 artwork request and a directory fetch. What would say it is wrong:
 Wi-Fi not coming up, or `Failed to read data` from eh_sdio.
+
+### 5080 -- A restart asked too soon is held, not lost
+
+Same log (v0.4.0-86). The third link death, at 157 s, came 36 s after
+the second restart had begun:
+
+    121295 restarting the radio: the gateway stopped answering
+    158280 gateway 192.168.5.1 no answer straight after a drop; asking for a radio restart
+    161283 gateway 192.168.5.1 no answer twice with an address; asking for a radio restart
+    195292 gateway 192.168.5.1 no answer after 25000 ms; trying anyway
+    204303 restarting the radio: the gateway stopped answering
+
+Both asks at 158 and 161 were inside 5069's one-a-minute gap, and
+wifi_request_restart() returned without a word -- while netstream had
+already logged `asking for a radio restart`. The link sat dead for 46 s
+until a later probe happened to ask outside the gap.
+
+Now a request inside the gap is held. It logs `radio restart held N ms:
+the last was M ms ago`, and still wakes the worker, which cuts its next
+wait to the end of the gap and restarts the radio then. That early wake
+runs wifi_apply_settings() and connect_saved(true), which cost nothing
+here: the first reconciles to settings it already has, the second
+returns at once while the link still holds its address. A held request
+is carried out only if the latest ask is at most 30 s old when the gap
+ends -- a repeat refreshes it -- and is otherwise dropped with `held
+radio restart dropped: last asked N ms ago`, because a link nobody has
+complained about for half a minute may have come back. A restart that
+lands on the timeout rather than on a wake sets `woke`, so the join
+after it runs exactly as after 5069's.
+
+The gap stays one minute, measured from the start of the last restart.
+
+Checked by lifting wifi_task() and wifi_request_restart() into a host
+simulation with a fake clock and semaphore, fed this log's times: the
+restart comes at 181.3 s instead of 204.3 s; an ask at 150 s after a
+restart at 121 s with nothing after it is dropped at 181.3 s. Not built
+under IDF.
+
+What to look for: after a drop within a minute of a restart, `radio
+restart held`, then `restarting the radio` at 60 s after the previous
+one.

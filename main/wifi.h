@@ -222,6 +222,11 @@ void wifi_request_apply(void);
  * under the same lock as wifi_request_apply(), then the saved-network
  * join it always runs after a wake. At most once a minute, and not while
  * the portal owns the radio. `why` goes in the log.
+ *
+ * 5080: a request inside that minute is held and carried out when the
+ * minute is up, not dropped -- provided the latest request is no more
+ * than 30 s old by then (`held radio restart dropped` otherwise). A
+ * repeat while one is pending only refreshes that time.
  */
 void wifi_request_restart(const char *why);
 
