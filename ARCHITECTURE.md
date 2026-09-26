@@ -13094,3 +13094,55 @@ handling takes the pause on the next pass as before. Not host-tested
 (player.c). What to look for: pause during `draining` and `stream rate
 change: paused during the drain`, then `paused during a rate change:
 dropped N KB` at once rather than half a minute later.
+
+### 5092 -- esp_hosted's packet buffers from PSRAM
+
+Two logs of the same station make the case. WNZK, 512 kbit/s AAC over
+https, on Wi-Fi with the SD card and a USB drive mounted: dozens of
+`mempool OOM` start/end pairs, RX and TX (one TX stretch 800 ms), the
+artwork request at `DMA 4135 free (largest 3328)`, internal free near
+43.7 KB, delivery 49-90% on a crowded channel. The same station
+minutes later over the Realtek USB Ethernet adapter, Wi-Fi off: no OOM
+at all, `DMA 40715 free (largest 15360)`, 491-723 kbit/s. The decoder,
+TLS and audio path keep up; what runs out is internal DMA-capable RAM
+on the esp_hosted path.
+
+What is left there after 5078 (lwIP's queued frames to PSRAM) and 5079
+(the staging buffers, through EH_HOST_PORT_DMA_PREFER_SPIRAM, which
+covers only eh_host_port_dma_alloc_aligned()) is the per-packet buffer:
+sdio_buffer_alloc() -> eh_host_port_dma_alloc(1536) ->
+heap_caps_malloc(n, MALLOC_CAP_DMA). One per received frame while it
+waits in the from-slave queue for the process task, one per frame sent.
+`mempool OOM` is that call returning NULL. At four times RFI's packet
+rate, with the USB host and two FAT volumes holding their share of
+internal RAM, it does.
+
+main/hostedwrap.c defines __wrap_eh_host_port_dma_alloc(), and
+main/CMakeLists.txt links with --wrap so esp_hosted's calls land there;
+no esp_hosted source changes, and -u pulls the wrapper in whatever the
+archive order (IDF links in a --start-group anyway). It asks for
+SPIRAM|DMA first -- IDF serves that cache-line aligned from PSRAM with
+the size rounded up (heap_align_hw.c) -- and falls back to the
+original's body, heap_caps_malloc(n, MALLOC_CAP_DMA), not
+__real_eh_host_port_dma_alloc(), so nothing reaches back into
+esp_hosted's archive. On RX in streaming mode the packet buffer is only
+a memcpy target; on TX the SDMMC host DMAs from it, in whole 512-byte
+blocks from its start, which the P4's SDMMC takes from line-aligned
+PSRAM with a cache sync -- the same terms as 5079's staging buffers,
+which have run since. The other host caller, the Wi-Fi TX copy in
+eh_host_mcu_transport_channels.c, is only ever memcpy'd from.
+eh_host_port_dma_free() is heap_caps_free(), which frees either.
+
+Logged once: `esp_hosted packet buffers from PSRAM (1536 bytes each)`,
+or a warning the first time it has to fall back.
+
+The wrap was checked on the host with gcc/ld against the same shape --
+the caller and the original in one static archive, the wrapper in
+another -- in both orders, grouped and not: the wrapper is taken every
+time. Not built under IDF.
+
+What to look for: the line above soon after the radio starts; WNZK (or
+Спокойное радио) on Wi-Fi with a USB drive mounted, and few or no
+`mempool OOM` lines, and `DMA N free` well above 4 KB at the artwork
+request. What would say it is wrong: Wi-Fi not coming up, or `Failed to
+send data` from eh_sdio -- take the two link lines out and say so.
