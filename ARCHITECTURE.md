@@ -12659,3 +12659,58 @@ test -- RFI-Afrique, a directory fetch, the artwork request -- with the
 artwork line's `DMA N free` well above 13759, `internal free` in the
 netstream lines holding steadier through the fetch, and few or no
 `mempool OOM` lines.
+
+### 5079 -- The SDIO read buffers in PSRAM
+
+5078 on the board (v0.4.0-86). It did what it was for: `mempool OOM`
+went from dozens of start/end pairs to one pair in four minutes,
+including two directory fetches and two artwork requests beside
+streams.
+
+The link still died three times, and every time the line before it was
+the other allocation in eh_sdio:
+
+    36351  artwork requested ...; DMA 15639 free (largest 6400)
+    36797  eh_sdio: dma_alloc(6656) failed; dropping read
+    42590  nothing for 5000 ms; treating as a drop  -> radio restart
+
+    112472 eh_sdio: dma_alloc(6144) failed; dropping read   (LBC connecting)
+    117274 Connection timed out before data was ready!      -> radio restart
+
+    151181 eh_sdio: dma_alloc(6144) failed; dropping read   (directory, cached)
+    157274 nothing for 5000 ms; treating as a drop          -> radio restart
+
+In streaming mode esp_hosted 3.0.8 reads each burst from the C6 into
+one of two staging buffers. sdio_rx_get_buffer() frees a buffer that is
+too small and allocates a bigger one, contiguous, with
+eh_host_port_dma_alloc_aligned(). If that fails the slot is left with no
+buffer, the read is skipped, and whatever the C6 had queued stays there
+-- one warning, then silence. 15.6 KB free and no 6.5 KB of it in one
+piece is enough to lose the link.
+
+esp_hosted's port layer has EH_HOST_PORT_DMA_PREFER_SPIRAM for exactly
+this class of chip, default off: eh_host_port_dma_alloc_aligned() tries
+SPIRAM|DMA first and falls back to internal. In IDF 5.5 that request is
+served from PSRAM with its alignment raised to the cache line
+(heap_align_hw.c drops the DMA bit for SPIRAM and aligns instead); the
+P4's SDMMC host takes a PSRAM buffer whose address and length are
+line-multiples and runs esp_cache_msync() around the transfer; and the
+host reads in 512-byte blocks (EH_HOST_PORT_SDIO_RX_BLOCK_ONLY_XFER),
+so every chunk is aligned. On this build three things come through that
+function: the two staging buffers, the TX aggregation scratch (unused --
+this C6 has no SW_AGGR), and reg_buf, the 20-byte combined register
+read. reg_buf in PSRAM is not line-sized, so sdmmc_io_rw_extended()
+bounces that read through the card's dma_aligned_buffer, which
+esp_hosted asks for (SDMMC_HOST_FLAG_ALLOC_ALIGNED_BUF): one small
+memcpy per poll, not a failure. The 1536-byte packet buffers use
+eh_host_port_dma_alloc() and stay internal.
+
+Set in sdkconfig.defaults. Not a change to esp_hosted -- a Kconfig
+choice it ships. Not host-tested and not built here.
+
+rm sdkconfig before building; 5077's boot line names the key if not.
+What to look for: no `dma_alloc(N) failed; dropping read` at all, the
+artwork line's `DMA N free` a few KB higher than 15.6 (the two staging
+buffers are no longer internal), and a stream that survives the
+artwork request and a directory fetch. What would say it is wrong:
+Wi-Fi not coming up, or `Failed to read data` from eh_sdio.

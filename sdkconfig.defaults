@@ -461,3 +461,39 @@ CONFIG_LWIP_DNS_MAX_HOST_IP=4
 # rm sdkconfig before building. Proof it took: nothing under the banner
 # (5077 names this key if the sdkconfig is stale).
 CONFIG_LWIP_L2_TO_L3_COPY=y
+
+# ---------------------------------------------------------------------------
+# 5079: THE SDIO READ BUFFERS IN PSRAM.
+#
+# 5078 on the board: `mempool OOM` down from dozens of pairs to one. But
+# each of the three link deaths in that log came straight after one line
+# of this:
+#
+#   eh_sdio: dma_alloc(6656) failed; dropping read
+#   eh_sdio: rx_get_buffer(6209) failed; skipping read
+#
+# Streaming mode reads each burst from the C6 into one of two staging
+# buffers, and a burst bigger than the buffer FREES it and asks for a
+# bigger one, one contiguous block (sdio_rx_get_buffer()). When that
+# fails the slot is left empty, the read is skipped and the C6's queue is
+# never drained; nothing after it moved. The artwork line just before
+# the first one said `DMA 15639 free (largest 6400)`: enough memory, not
+# in one piece.
+#
+# esp_hosted has an answer for P4-class chips, off by default:
+# EH_HOST_PORT_DMA_PREFER_SPIRAM makes eh_host_port_dma_alloc_aligned()
+# -- the staging buffers, and a 20-byte register buffer whose reads then
+# bounce through the SDMMC driver's aligned buffer -- try PSRAM first and
+# fall back to internal RAM. IDF turns SPIRAM|DMA into a
+# cache-line-aligned PSRAM allocation (heap_align_hw.c), the P4's SDMMC
+# host accepts PSRAM buffers that are line-aligned in address and size
+# and syncs the cache around the transfer (sdmmc_host.c,
+# sdmmc_transaction.c), and esp_hosted reads in whole 512-byte blocks,
+# which are. The per-packet 1536-byte buffers still come from internal
+# RAM; they go through eh_host_port_dma_alloc(), which this does not
+# touch.
+#
+# rm sdkconfig before building. Proof it took: nothing under the banner.
+# If Wi-Fi does not come up, or `Failed to read data` appears, this is
+# the first suspect: take the line out and say so.
+CONFIG_EH_HOST_PORT_DMA_PREFER_SPIRAM=y
