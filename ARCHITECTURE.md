@@ -13921,3 +13921,51 @@ audio in the worst case under qemu (from 49): about 27% of a core by
 Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers. Not on the
 board; the next beam recording's `adapted` figure and a beamcheck of a
 STEREO take of the same scene are the comparison.
+
+### 5112 -- One card entry cannot set the clock; the first A/B pair
+
+**The A/B pair.** A BEAM take (66 s, mono) and a STEREO take (64 s) of
+the same scene a minute apart, both checked clean by the reference
+decoder. A quiet room: -53 dBFS overall, almost all of it under 250 Hz,
+1-8 kHz at -68 to -79 dBFS -- next to the floor. tools/beamcheck on the
+STEREO take: the beam within 0.3 dB of the plain sum in every band to
+8 kHz (canceller adapted 6%), and the board's BEAM take matches the
+STEREO take's sum band for band to within about 1.5 dB. Nothing
+off-axis loud enough to cancel, and nothing made worse. A useful test
+of the canceller needs a steady source a metre or two to one side.
+
+**Both were named 2028-12-02.** That is the card-root date 5101-5103
+traced: cardtime.c offered the latest of the root entries' dates, and
+one entry dated 2028-12-02 is inside the ten-year ceiling, so every
+boot without NTP put the floor there. 5103 left it open ("if it is
+still on the card, a boot that never reaches NTP will raise the floor
+again"); this boot did not reach NTP. And since 5110 it is worse:
+
+- the system clock follows the floor, so what the player writes is
+  stamped 2028 -- including stations.m3u, favorites.m3u, starred.m3u
+  and the Recordings folder, which are root entries, which cardtime.c
+  read back at the next mount as evidence. cardtime.h called the
+  player's own files circular and harmless; that was true while they
+  were stamped 1980.
+
+Two changes:
+
+1. **Corroboration** (cardtime_pick(), header-only, in cardtimetest): a
+   candidate counts only if another lies at or below it within two
+   days; the latest such wins. A copied-on album is many entries
+   minutes apart; a stray file is alone. Given up: a card with exactly
+   one entry newer than the floor raises nothing.
+2. **The player's own root entries are skipped**: stations.m3u,
+   favorites.m3u, starred.m3u, Recordings (the dotfiles always were).
+
+The entry that used to win is now named in the log: `/sd/<name> is
+dated N days after anything else on this card; not taken as the time
+on its own`. That is the file to fix or delete.
+
+**Not undone by this:** the floor already written into this card's
+settings records (`ntp_epoch`) is 2028, and a record's floor is loaded
+at boot. One NTP reply corrects it and compacts the records (5101):
+Wi-Fi on, joined, once. Recordings already named 2028 keep their names.
+
+Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers; cardtimetest
+30 checks. Not on the board.

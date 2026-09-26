@@ -171,6 +171,57 @@ int main(void)
         CHECK(bad == 0, "%d non-monotone steps", bad);
     }
 
+    /*
+     * 5112: corroboration. One entry dated 2028-12-02 put the floor there
+     * on every boot without NTP, and after 5110 two recordings were named
+     * for it. A candidate now needs another at or below it within two
+     * days; the latest such one wins.
+     */
+    {
+        const int64_t now = BUILD + 30 * DAY;
+        const int64_t bad = BUILD + 800 * DAY;          /* ~2028-12 */
+        int at;
+
+        /* An album copied on: many entries minutes apart, and one stray. */
+        int64_t c1[] = { now, now - 600, now - 1200, bad, 0, now - 5 * DAY };
+        CHECK(cardtime_pick(c1, 6, &at) == now && at == 0,
+              "a lone future entry beat a corroborated one: got %lld", (long long)cardtime_pick(c1, 6, &at));
+
+        /* The stray alone, with nothing near it: nothing is taken. */
+        int64_t c2[] = { bad, now - 90 * DAY };
+        CHECK(cardtime_pick(c2, 2, &at) == 0 && at == -1, "a lone entry was taken");
+
+        /* Two strays together do corroborate each other -- the rule is
+         * about agreement, not about what date is plausible. The ceiling
+         * is what guards the far future. */
+        int64_t c3[] = { bad, bad - DAY, now };
+        CHECK(cardtime_pick(c3, 3, &at) == bad, "two agreeing entries were not taken");
+
+        /* Exactly the window, and one second past it. */
+        int64_t c4[] = { now, now - CARDTIME_CORROB_S };
+        CHECK(cardtime_pick(c4, 2, &at) == now, "an entry exactly two days below did not corroborate");
+        int64_t c5[] = { now, now - CARDTIME_CORROB_S - 1 };
+        CHECK(cardtime_pick(c5, 2, &at) == 0, "an entry two days and a second below corroborated");
+
+        /* A later entry does not corroborate an earlier one's claim to
+         * be the latest, but the earlier one is corroborated by it only
+         * if at or below: the later is the one taken. */
+        int64_t c6[] = { now - DAY, now };
+        CHECK(cardtime_pick(c6, 2, &at) == now && at == 1, "the pair did not give its later member");
+
+        /* Discards (0) never corroborate, and an empty scan gives 0. */
+        int64_t c7[] = { now, 0, 0 };
+        CHECK(cardtime_pick(c7, 3, &at) == 0, "a discard corroborated");
+        CHECK(cardtime_pick(c7, 0, &at) == 0 && at == -1, "an empty scan gave something");
+
+        /* The player's own root files are not evidence since 5110. */
+        CHECK(cardtime_own("stations.m3u") && cardtime_own("Recordings") &&
+              cardtime_own("STARRED.M3U") && cardtime_own("favorites.m3u"),
+              "the player's own files were not recognised");
+        CHECK(!cardtime_own("Boa") && !cardtime_own("stations.m3u.bak") &&
+              !cardtime_own("Recordings2"), "a foreign entry was taken for the player's own");
+    }
+
     printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

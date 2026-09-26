@@ -6,6 +6,7 @@
 
 #include <dirent.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -33,47 +34,71 @@ static char s_path[512];
 /* 5101: which entry gave the last candidate, so the log can name it. */
 static char s_best_name[64];
 
+/* 5112: the candidates of one scan are held (2 KB, from the heap, for
+ * the length of a scan -- once per mount) so they can be weighed against
+ * each other rather than the latest simply winning. */
+
+/* The name of the entry at a filtered value, by a second pass. Only for
+ * the log, and only when there is something to say. */
+static void name_of(const char *mount, int64_t ref, int64_t want, char *out, size_t len)
+{
+    out[0] = '\0';
+    DIR *d = opendir(mount);
+    if (!d) return;
+    const struct dirent *e;
+    int scanned = 0;
+    while ((e = readdir(d)) != NULL && scanned < CARDTIME_SCAN_MAX) {
+        if (e->d_name[0] == '.' || cardtime_own(e->d_name)) continue;
+        if (!storage_join_path(s_path, sizeof(s_path), mount, e->d_name)) continue;
+        struct stat st;
+        if (stat(s_path, &st) != 0) continue;
+        scanned++;
+        if (cardtime_filter((int64_t)st.st_mtime, ref) == want) {
+            snprintf(out, len, "%.63s", e->d_name);
+            break;
+        }
+    }
+    closedir(d);
+}
+
 int64_t cardtime_root_candidate(const char *mount, int64_t ref)
 {
     if (!mount || !*mount || ref <= 0) return 0;
+
+    int64_t *cand = calloc(CARDTIME_SCAN_MAX, sizeof(int64_t));
+    if (!cand) return 0;
 
     DIR *d = opendir(mount);
     if (!d) {
         /* A volume that reported present and will not open is the
          * storage layer's problem to log, not this one's. */
         ESP_LOGD(TAG, "%s: cannot open", mount);
+        free(cand);
         return 0;
     }
 
-    int64_t best = 0;
     int scanned = 0, rejected = 0;
     s_best_name[0] = '\0';
     const struct dirent *e;
 
     while ((e = readdir(d)) != NULL && scanned < CARDTIME_SCAN_MAX) {
         if (e->d_name[0] == '.') continue;      /* "." and ".." and hidden */
+        if (cardtime_own(e->d_name)) continue;  /* 5112: stamped from the floor */
 
         if (!storage_join_path(s_path, sizeof(s_path), mount, e->d_name)) continue;
 
         /*
          * stat() and not readdir()'s own fields: ESP-IDF's FAT VFS hands
          * back a POSIX struct dirent, which carries d_name and d_type and
-         * no timestamps. FatFs's native f_readdir fills a FILINFO with
-         * the date and time already in it, so a future reader wanting
-         * this for a whole-tree walk should go under the VFS rather than
-         * pay a stat() per file. At a volume root, bounded by
-         * CARDTIME_SCAN_MAX, the difference is not worth the layering.
+         * no timestamps. At a volume root, bounded by CARDTIME_SCAN_MAX,
+         * a stat() per entry is not worth going under the VFS for.
          */
         struct stat st;
         if (stat(s_path, &st) != 0) continue;
 
+        cand[scanned] = cardtime_filter((int64_t)st.st_mtime, ref);
         scanned++;
-
-        const int64_t cand = cardtime_filter((int64_t)st.st_mtime, ref);
-        if (cand > best) {
-            best = cand;
-            snprintf(s_best_name, sizeof(s_best_name), "%.63s", e->d_name);
-        } else if (cand == 0 && (int64_t)st.st_mtime > ref + CARDTIME_MAX_AHEAD_S) {
+        if (cand[scanned - 1] == 0 && (int64_t)st.st_mtime > ref + CARDTIME_MAX_AHEAD_S) {
             /*
              * Worth one line each. A file dated past the ceiling is the
              * thing this guard exists for, and a card carrying one will
@@ -92,6 +117,22 @@ int64_t cardtime_root_candidate(const char *mount, int64_t ref)
     if (rejected > 4) {
         ESP_LOGW(TAG, "%s: %d absurd timestamps in all", mount, rejected);
     }
+
+    int at;
+    const int64_t best = cardtime_pick(cand, scanned, &at);
+    int64_t lone = 0;                   /* the latest candidate, corroborated or not */
+    for (int i = 0; i < scanned; i++) if (cand[i] > lone) lone = cand[i];
+    free(cand);
+
+    if (lone > best) {
+        /* 5112: the one that used to win. Named, so it can be found. */
+        char nm[64];
+        name_of(mount, ref, lone, nm, sizeof(nm));
+        ESP_LOGW(TAG, "%s/%s is dated %lld days after anything else on this "
+                      "card; not taken as the time on its own",
+                 mount, nm[0] ? nm : "?", (long long)((lone - (best ? best : ref)) / 86400));
+    }
+    if (best) name_of(mount, ref, best, s_best_name, sizeof(s_best_name));
     ESP_LOGD(TAG, "%s: %d entries, best %lld", mount, scanned, (long long)best);
     return best;
 }

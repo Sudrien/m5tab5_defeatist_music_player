@@ -49,7 +49,9 @@
  */
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
+#include <strings.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -133,6 +135,71 @@ static inline int64_t cardtime_filter(int64_t mtime, int64_t ref)
     if (cand <= ref) return 0;
 
     return cand;
+}
+
+/*
+ * 5112: WHOSE CLOCK WROTE IT, AGAIN.
+ *
+ * Above, the player's own files are called circular and harmless: they
+ * were stamped from time(), which was 1970 (so FAT's 1980), and could
+ * never raise anything. Since 5110 the system clock follows the floor,
+ * so they are stamped FROM the floor -- and a floor raised by one bad
+ * file is written back onto them, and read off them at the next mount
+ * as though it were evidence. The dotfiles were always skipped; these
+ * are the rest of what the player writes at a volume root.
+ */
+static inline bool cardtime_own(const char *name)
+{
+    static const char *const own[] = {
+        "stations.m3u", "favorites.m3u", "starred.m3u", "Recordings",
+    };
+    for (unsigned i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
+        if (strcasecmp(name, own[i]) == 0) return true;
+    }
+    return false;
+}
+
+/*
+ * 5112: one entry cannot move the clock on its own.
+ *
+ * The candidates used to be combined by taking the latest, so a single
+ * root entry dated 2028-12-02 -- inside the ten-year ceiling -- put the
+ * floor there on every boot without NTP (5101, 5103, and again after
+ * 5110, when two recordings came out named 2028-12-02). A date a
+ * computer really wrote is rarely alone: copying an album on makes a
+ * folder and its neighbours minutes apart, editing stations.m3u on the
+ * same day as a copy puts two entries together. So a candidate counts
+ * only if another candidate lies at or below it within
+ * CARDTIME_CORROB_S, and the latest such candidate is the answer.
+ *
+ * What is given up: a card whose root holds exactly one entry newer
+ * than the floor raises nothing. The floor then stays at the build
+ * stamp or the last record, which is where it is anyway on a card that
+ * has not been touched.
+ *
+ * Returns the candidate, or 0, and its index in *which (-1 for none).
+ * Candidates of 0 are discards and are skipped. O(n^2) over at most
+ * CARDTIME_SCAN_MAX.
+ */
+#define CARDTIME_CORROB_S       ((int64_t)2 * 86400)
+
+static inline int64_t cardtime_pick(const int64_t *cand, int n, int *which)
+{
+    int64_t best = 0;
+    int at = -1;
+    for (int i = 0; i < n; i++) {
+        if (cand[i] <= best) continue;
+        for (int j = 0; j < n; j++) {
+            if (j == i || cand[j] <= 0) continue;
+            if (cand[j] <= cand[i] && cand[i] - cand[j] <= CARDTIME_CORROB_S) {
+                best = cand[i];
+                at = i;
+                break;
+            }
+        }
+    }
+    if (which) *which = at;
+    return best;
 }
 
 /*
