@@ -5,6 +5,7 @@
  */
 
 #include <dirent.h>
+#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 
@@ -29,6 +30,9 @@ static const char *TAG = "tab5_cardtime";
  */
 static char s_path[512];
 
+/* 5101: which entry gave the last candidate, so the log can name it. */
+static char s_best_name[64];
+
 int64_t cardtime_root_candidate(const char *mount, int64_t ref)
 {
     if (!mount || !*mount || ref <= 0) return 0;
@@ -43,6 +47,7 @@ int64_t cardtime_root_candidate(const char *mount, int64_t ref)
 
     int64_t best = 0;
     int scanned = 0, rejected = 0;
+    s_best_name[0] = '\0';
     const struct dirent *e;
 
     while ((e = readdir(d)) != NULL && scanned < CARDTIME_SCAN_MAX) {
@@ -67,6 +72,7 @@ int64_t cardtime_root_candidate(const char *mount, int64_t ref)
         const int64_t cand = cardtime_filter((int64_t)st.st_mtime, ref);
         if (cand > best) {
             best = cand;
+            snprintf(s_best_name, sizeof(s_best_name), "%s", e->d_name);
         } else if (cand == 0 && (int64_t)st.st_mtime > ref + CARDTIME_MAX_AHEAD_S) {
             /*
              * Worth one line each. A file dated past the ceiling is the
@@ -118,8 +124,14 @@ void cardtime_note_volumes(void)
         if (cand <= 0) continue;
 
         if (settings_note_ntp_time(cand, esp_timer_get_time())) {
-            ESP_LOGI(TAG, "%s raised the clock floor to %lld",
-                     mount, (long long)cand);
+            ESP_LOGI(TAG, "%s raised the clock floor to %lld (%s)",
+                     mount, (long long)cand, s_best_name);
+        } else if (cand > settings_now()) {
+            /* 5101: only NTP's time refuses a later candidate. */
+            ESP_LOGW(TAG, "%s/%s is dated %lld days after NTP's time; its "
+                          "date is wrong, and it is ignored",
+                     mount, s_best_name,
+                     (long long)((cand - settings_now()) / 86400));
         }
     }
 }

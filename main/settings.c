@@ -217,6 +217,12 @@ static bool       s_ntp_enabled = true;
 static int64_t    s_last_ntp_epoch;
 static int64_t    s_last_ntp_boot_us;
 
+/* 5101: the build stamp, the one floor nothing may go under, and
+ * whether an NTP reply has been taken this boot. Once one has, NTP is
+ * the truth and nothing from a file may claim a later time. */
+static int64_t    s_build_epoch;
+static bool       s_ntp_truth;
+
 
 /* The track that was last playing, absolute path, empty when nothing
  * has played yet on this file's volume. */
@@ -275,6 +281,11 @@ static bool s_loaded;
  * compaction without stat()ing first. Per volume, because the two files
  * fill up independently. */
 static size_t s_bytes[STORAGE_COUNT];
+
+/* 5101: a file holding a time NTP has shown to be in the future. Its
+ * next save compacts, so the bad records go and cannot raise the floor
+ * again on a boot that never reaches NTP. */
+static bool s_compact_due[STORAGE_COUNT];
 
 /* 5064: see PREFS_NVS_KEY. */
 static void prefs_nvs_load(void)
@@ -414,13 +425,21 @@ int64_t settings_now(void)
  * compiled -- so from the first boot onward there is always a floor,
  * and a device that has never reached a network still refuses 1970.
  */
-bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
+static bool note_time(int64_t epoch, int64_t boot_us, bool from_ntp)
 {
     /* Every path in comes through here, including the build-time seed.
      * A private setter that skipped the floor would be a second,
      * unaudited way for a value to reach s_last_ntp_epoch. */
     const int64_t elapsed_s = (boot_us - s_last_ntp_boot_us) / 1000000;
     const int64_t floor_s   = s_last_ntp_epoch + elapsed_s;
+
+    /* 5101: after NTP has answered, a file's time above the floor is a
+     * file dated in the future, not news. */
+    if (!from_ntp && s_ntp_truth && epoch > floor_s) {
+        ESP_LOGD(TAG, "refusing time %lld: after NTP's %lld",
+                 (long long)epoch, (long long)floor_s);
+        return false;
+    }
 
     if (epoch < floor_s) {
         /*
@@ -444,6 +463,46 @@ bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
     s_dirty = true;
     s_dirty_since = xTaskGetTickCount();
     return true;
+}
+
+bool settings_note_ntp_time(int64_t epoch, int64_t boot_us)
+{
+    return note_time(epoch, boot_us, false);
+}
+
+/*
+ * 5101: an NTP reply. The floor's one-way latch has a hole: a file
+ * dated in the future raises it (cardtime.c accepts up to ten years
+ * ahead), and from then on every true NTP reply is "earlier than
+ * already known". One card file dated 2028-12-03 did exactly that and
+ * every sync since was refused.
+ *
+ * So NTP may lower a floor, but never under the build stamp -- the one
+ * bound that is true by construction, and the one that stops the
+ * backward jump the floor exists for (to a date when a revoked
+ * certificate was valid). What is given up: a forged NTP reply could
+ * now set the stored time back as far as the build, where before it
+ * could only have been refused.
+ */
+bool settings_note_ntp_reply(int64_t epoch, int64_t boot_us)
+{
+    bool ok = note_time(epoch, boot_us, true);
+    if (!ok && s_build_epoch > 0 && epoch >= s_build_epoch) {
+        const int64_t floor_s = s_last_ntp_epoch +
+                                (boot_us - s_last_ntp_boot_us) / 1000000;
+        ESP_LOGW(TAG, "the stored time was %lld days %lld h ahead of NTP; "
+                      "NTP corrects it",
+                 (long long)((floor_s - epoch) / 86400),
+                 (long long)((floor_s - epoch) % 86400 / 3600));
+        s_last_ntp_epoch   = epoch;
+        s_last_ntp_boot_us = boot_us;
+        for (int v = 0; v < STORAGE_COUNT; v++) s_compact_due[v] = true;
+        s_dirty = true;
+        s_dirty_since = xTaskGetTickCount();
+        ok = true;
+    }
+    if (ok) s_ntp_truth = true;
+    return ok;
 }
 
 
@@ -820,7 +879,13 @@ static bool load_file(storage_id_t id, const char *name, bool take_settings,
      * prints the floor that actually resulted either way.
      */
     if (s_pending_epoch > 0) {
-        (void)settings_note_ntp_time(s_pending_epoch, esp_timer_get_time());
+        if (!settings_note_ntp_time(s_pending_epoch, esp_timer_get_time()) &&
+            s_pending_epoch > settings_now() && id < STORAGE_COUNT) {
+            /* 5101: refused for being after NTP's time. */
+            ESP_LOGW(TAG, "%s holds a time after NTP's; it will be compacted",
+                     name);
+            s_compact_due[id] = true;
+        }
         s_pending_epoch = 0;
     }
 
@@ -1062,8 +1127,8 @@ static void write_file(storage_id_t id)
     const int len = record_line(id, line, sizeof(line));
     if (len <= 0 || len >= (int)sizeof(line)) return;
 
-    if (s_bytes[id] + (size_t)len > SETTINGS_MAX_FILE_BYTES) {
-        compact_file(id);
+    if (s_compact_due[id] || s_bytes[id] + (size_t)len > SETTINGS_MAX_FILE_BYTES) {
+        if (compact_file(id)) s_compact_due[id] = false;     /* 5101 */
         return;
     }
 
@@ -1386,6 +1451,7 @@ void settings_init(void)
         const esp_app_desc_t *d = esp_app_get_description();
         const int64_t built = d ? parse_build_time(d->date, d->time) : 0;
         if (built > 0) settings_note_ntp_time(built, esp_timer_get_time());
+        s_build_epoch = built;          /* 5101 */
     }
 
     /*

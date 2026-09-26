@@ -13395,3 +13395,47 @@ descriptor lists in PSRAM` under `usb_host_install`. What to check: the
 same late plug with Wi-Fi up opens the adapter, and a USB drive's copy
 rates on the `tab5_io` lines do not drop noticeably. The Kconfig warns
 of "minor performance degradation", and the drive is where it would show.
+
+### 5101 -- NTP corrects a clock a file put in the future
+
+Every save since some session last week was stamped 2028-12-02, and
+every NTP reply since was refused: `NTP sync: 1790391399 (implausible
+vs. last known time ...)` -- a correct 2026-09-26. The first of those
+sessions says where it came from:
+
+    tab5_cardtime: /sd raised the clock floor to 1859335036
+
+2028-12-02 01:57:16Z, the day-wide timezone margin under an entry in
+the card's root dated 2028-12-03. cardtime.c accepts up to ten years
+ahead of the floor, so a file about 800 days ahead gets through. The floor is a
+one-way latch, so from then on NTP -- the thing the floor exists to
+protect -- was the thing refused, and each boot carried the bad time
+forward from the settings file's own `ntp_epoch`.
+
+The latch was right about backward jumps and wrong about who may undo a
+forward one. Now:
+
+- `settings_note_ntp_reply()` (wifi.c's sync callback) may lower the
+  floor, but never under the build stamp -- the one bound that is true
+  by construction and the one that stops a forged reply sending the
+  clock back to when a revoked certificate was valid. What is given
+  up: a forged reply can now set the stored time back as far as the
+  build, where before it was refused. The log line is `the stored time
+  was N days H h ahead of NTP; NTP corrects it`.
+- Once NTP has been taken, nothing else -- a settings record, a card's
+  root -- may raise the floor past it for the rest of the boot.
+- Every volume's settings file is compacted at its next save, since its
+  records all carry the bad `ntp_epoch` and loading takes the maximum. A
+  volume that turns up later with a future time in it says `... holds a
+  time after NTP's; it will be compacted` and is.
+- cardtime names the entry: `raised the clock floor to N (<name>)`
+  when it raises, and `/sd/<name> is dated N days after NTP's time; its
+  date is wrong, and it is ignored` when NTP has already spoken.
+
+The card entry itself is still there, so a boot that never reaches NTP
+will be raised to 2028 by it again, and the next NTP boot corrects it
+again. Fix the entry's date on a computer. The `raised ... (<name>)`
+line names it.
+
+clocktest.c's copy of the floor gains the NTP path, with a case
+reproducing this. Host tests: clocktest 80/0, cardtimetest 20/0.

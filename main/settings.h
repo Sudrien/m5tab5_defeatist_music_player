@@ -351,6 +351,15 @@ void settings_set_ntp_enabled(bool on);
  * tolerates.
  */
 bool settings_note_ntp_time(int64_t epoch, int64_t boot_us);
+
+/*
+ * 5101: the same, for an NTP reply. It may LOWER the floor, down to the
+ * build stamp and no further, because a floor above NTP came from a
+ * file dated in the future. After it has taken one, no file may raise
+ * the floor past NTP's time for the rest of the boot, and each volume's
+ * record is compacted at its next save so the bad times go.
+ */
+bool settings_note_ntp_reply(int64_t epoch, int64_t boot_us);
 int64_t settings_last_ntp_epoch(void);
 int64_t settings_last_ntp_boot_us(void);
 

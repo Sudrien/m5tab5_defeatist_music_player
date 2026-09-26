@@ -31,12 +31,15 @@
 
 static int64_t s_epoch;
 static int64_t s_boot_us;
+static int64_t s_build;         /* 5101 */
+static bool    s_truth;         /* 5101 */
 
-static bool note_time(int64_t epoch, int64_t boot_us)
+static bool note_time_src(int64_t epoch, int64_t boot_us, bool from_ntp)
 {
     const int64_t elapsed_s = (boot_us - s_boot_us) / 1000000;
     const int64_t floor_s   = s_epoch + elapsed_s;
 
+    if (!from_ntp && s_truth && epoch > floor_s) return false;
     if (epoch < floor_s) return false;
 
     s_epoch   = epoch;
@@ -44,7 +47,25 @@ static bool note_time(int64_t epoch, int64_t boot_us)
     return true;
 }
 
-static void reset_clock(void) { s_epoch = 0; s_boot_us = 0; }
+static bool note_time(int64_t epoch, int64_t boot_us)
+{
+    return note_time_src(epoch, boot_us, false);
+}
+
+/* settings_note_ntp_reply(), 5101. */
+static bool note_ntp_reply(int64_t epoch, int64_t boot_us)
+{
+    bool ok = note_time_src(epoch, boot_us, true);
+    if (!ok && s_build > 0 && epoch >= s_build) {
+        s_epoch   = epoch;
+        s_boot_us = boot_us;
+        ok = true;
+    }
+    if (ok) s_truth = true;
+    return ok;
+}
+
+static void reset_clock(void) { s_epoch = 0; s_boot_us = 0; s_build = 0; s_truth = false; }
 
 /* settings_now(): the floor as of a given monotonic reading. What gets
  * written to the file on every save. */
@@ -441,6 +462,31 @@ static void t_civil(void)
        "2024 is");
 }
 
+/* 5101: a card file dated 2028 latched the floor, and every true NTP
+ * reply after it was refused. */
+static void t_future_file(void)
+{
+    printf("NTP corrects a floor a file put in the future\n");
+    reset_clock();
+    const int64_t build = parse_build_time("Sep 25 2026", "22:54:34");
+    const int64_t ntp   = build + 4 * 3600;             /* hours later */
+    const int64_t file  = build + 798 * (int64_t)86400; /* 2028-12-02 */
+    ck(note_time(build, 0), "build seeds");
+    s_build = build;
+
+    ck(note_time(file, 1 * SEC), "before NTP, a file's time is taken");
+    ck(!note_time(ntp, 2 * SEC), "the plain path still refuses NTP's time");
+    ck(note_ntp_reply(ntp, 3 * SEC), "an NTP reply corrects it");
+    ck(now_at(3 * SEC) == ntp, "the floor is NTP's time");
+    ck(!note_time(file, 4 * SEC), "after NTP, the file cannot raise it again");
+    ck(now_at(4 * SEC) == ntp + 1, "and the floor still runs forward");
+    ck(note_time(ntp + 1, 4 * SEC), "a file at the floor is fine");
+    ck(!note_ntp_reply(build - 3600, 5 * SEC), "NTP may not go under the build");
+    ck(now_at(5 * SEC) == ntp + 2, "that refusal left the floor alone");
+    ck(note_ntp_reply(ntp + 3600, 6 * SEC), "NTP forward is taken");
+    ck(!note_time(ntp + 7200, 6 * SEC), "a file ahead of NTP is not");
+}
+
 int main(void)
 {
     t_seed();
@@ -453,6 +499,7 @@ int main(void)
     t_seed_then_card();
     t_updated_at();
     t_written_is_acceptable();
+    t_future_file();
 
     printf("\n%d checks, %d failures\n", g_checks, g_fails);
     return g_fails ? 1 : 0;

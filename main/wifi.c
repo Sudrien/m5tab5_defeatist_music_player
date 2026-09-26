@@ -308,8 +308,8 @@ static esp_err_t scan_and_log(void)
 static void on_sntp_sync(struct timeval *tv)
 {
     if (!tv) return;
-    const bool ok = settings_note_ntp_time((int64_t)tv->tv_sec,
-                                           esp_timer_get_time());
+    const bool ok = settings_note_ntp_reply((int64_t)tv->tv_sec,
+                                            esp_timer_get_time());
     if (ok) s_ntp_synced = true;
     ESP_LOGI(TAG, "NTP sync: %lld%s", (long long)(int64_t)tv->tv_sec,
              ok ? "" : " (implausible vs. last known time; system clock "
