@@ -58,6 +58,7 @@
 #include "freertos/semphr.h"
 
 #include "albumart.h"
+#include "icoimg.h"         /* 5088 */
 #include "jsonpick.h"
 #include "radiobrowser.h"
 #include "stations.h"
@@ -659,8 +660,32 @@ bool radiobrowser_art_fetch(const char *url, uint8_t **out, size_t *out_len)
                  (unsigned)(RB_ART_MAX / 1024));
         goto close;
     }
+    /*
+     * 5088: a favicon.ico, turned into a PNG here so nothing after this
+     * point has to know. See icoimg.h. The largest entry is taken; a
+     * 16 px icon still gets a picture, which albumart enlarges by whole
+     * pixels.
+     */
+    if (icoimg_is_ico(buf, got)) {
+        uint8_t *png = NULL;
+        size_t png_len = 0;
+        icoimg_info_t ii = { 0 };
+        if (!icoimg_to_png(buf, got, &png, &png_len, &ii)) {
+            ESP_LOGI(TAG, "artwork is an icon with no entry this can read; skipped");
+            goto close;
+        }
+        if (ii.was_png) {
+            ESP_LOGI(TAG, "artwork: icon, %dx%d png entry", ii.w, ii.h);
+        } else {
+            ESP_LOGI(TAG, "artwork: icon, %dx%d %d-bit bitmap entry, as a %u byte png",
+                     ii.w, ii.h, ii.bpp, (unsigned)png_len);
+        }
+        free(buf);
+        buf = png;
+        got = png_len;
+    }
     if (got < 16 || !albumart_is_supported_image(buf, got)) {
-        ESP_LOGI(TAG, "artwork is not a JPEG or PNG; skipped");
+        ESP_LOGI(TAG, "artwork is not a JPEG, PNG or icon; skipped");
         goto close;
     }
 

@@ -811,6 +811,31 @@ void albumart_forget_cover(void)
  * it never sees the JPEG -- which is what makes the second path possible
  * at all.
  */
+/*
+ * 5088: SMALL PICTURES ARE ENLARGED BY WHOLE PIXELS.
+ *
+ * A station's picture is often an icon -- 16 to 64 px from a favicon.ico,
+ * 180 px from an apple-touch-icon -- and the fit below takes it to the
+ * box by a fraction: 180 px to 560 is 3.11x, so columns alternate
+ * between three and four pixels wide and every edge in the logo wobbles.
+ * At or under ART_INT_SCALE_MAX on both sides, and where at least 2x
+ * fits, the factor is the largest whole number that fits instead, and
+ * every source pixel becomes the same k x k block. The picture is up to
+ * one factor smaller than the box (540 rather than 560 for RFI's 180 px
+ * logo), centred, and sharp. 256 is the largest size a .ico can hold.
+ * Larger pictures, which are album covers, keep the fractional fit: a
+ * 370 px cover in a 720 px box would otherwise be drawn at 1x.
+ */
+#define ART_INT_SCALE_MAX  (256)
+
+static int art_int_scale(int iw, int ih, int box_w, int box_h)
+{
+    if (iw < 1 || ih < 1 || iw > ART_INT_SCALE_MAX || ih > ART_INT_SCALE_MAX) return 0;
+    const int kx = box_w / iw, ky = box_h / ih;
+    const int k = kx < ky ? kx : ky;
+    return k >= 2 ? k : 0;
+}
+
 static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
                             int screen_w, int screen_h,
                             const uint8_t *rgb, int iw, int ih, int stride)
@@ -853,6 +878,13 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
     if (cw < 1) cw = 1;
     if (ch < 1) ch = 1;
 
+    /* 5088: whole pixels for a small picture; see art_int_scale(). */
+    const int kint = art_int_scale(iw, ih, screen_w, screen_h);
+    if (kint) {
+        cw = iw * kint;
+        ch = ih * kint;
+    }
+
     /* 16.16, rounded up so the last output pixel cannot index past the
      * last source row or column. */
     const uint32_t xstep = (uint32_t)(((uint64_t)iw << 16) / (uint32_t)cw);
@@ -860,7 +892,9 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
 
     const int dx = (screen_w - cw) / 2, dy = (screen_h - ch) / 2;
 
-    if (cw != iw || ch != ih) {
+    if (kint) {
+        ESP_LOGI(TAG, "cover enlarged %dx to %dx%d", kint, cw, ch);
+    } else if (cw != iw || ch != ih) {
         ESP_LOGI(TAG, "cover %s to %dx%d",
                  (cw > iw) ? "enlarged" : "fitted", cw, ch);
     }
@@ -894,7 +928,7 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
     const uint16_t *src = (const uint16_t *)rgb;
     for (int y = 0; y < ch; y++) {
         uint32_t syf = (uint32_t)y * ystep;
-        int srow = (int)(syf >> 16);
+        int srow = kint ? y / kint : (int)(syf >> 16);
         if (srow >= ih) srow = ih - 1;
 
         const uint16_t *row = &src[(size_t)srow * stride];
@@ -902,6 +936,11 @@ static esp_err_t blit_cover(esp_lcd_panel_handle_t panel,
 
         if (xstep == (1u << 16)) {
             memcpy(dst, row, (size_t)cw * 2);
+        } else if (kint) {
+            /* 5088: exact blocks. The 16.16 step for 1/3 is 21845, and
+             * 3 * 21845 is one short of a whole source pixel, so the
+             * stepped loop would make the first block four wide. */
+            for (int x = 0; x < cw; x++) dst[x] = row[x / kint];
         } else {
             uint32_t sxf = 0;
             for (int x = 0; x < cw; x++, sxf += xstep) {
@@ -1379,11 +1418,21 @@ static void png_on_init(pngle_t *pngle, uint32_t w, uint32_t h)
     if (c->cw < 1) c->cw = 1;
     if (c->ch < 1) c->ch = 1;
 
+    /* 5088: whole pixels for a small picture. With cw = w * k the edge
+     * map below is x * k exactly, so every block is k x k. */
+    const int kint = art_int_scale((int)w, (int)h, c->screen_w, c->screen_h);
+    if (kint) {
+        c->cw = (int)w * kint;
+        c->ch = (int)h * kint;
+    }
+
     c->dx = (c->screen_w - c->cw) / 2;
     c->dy = (c->screen_h - c->ch) / 2;
 
     ESP_LOGI(TAG, "cover is %"PRIu32"x%"PRIu32" (png)", w, h);
-    if (c->cw != (int)w || c->ch != (int)h) {
+    if (kint) {
+        ESP_LOGI(TAG, "cover enlarged %dx to %dx%d", kint, c->cw, c->ch);
+    } else if (c->cw != (int)w || c->ch != (int)h) {
         ESP_LOGI(TAG, "cover %s to %dx%d",
                  (c->cw > (int)w) ? "enlarged" : "fitted", c->cw, c->ch);
     }

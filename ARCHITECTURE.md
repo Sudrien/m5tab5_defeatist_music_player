@@ -12958,3 +12958,61 @@ TX buffer`, or a warning naming the error. If the next log has the
 first line and still cuts lines, the loss is on the host side of the
 cable -- the monitor not reading -- and no buffer size fixes it. Not
 host-tested (player.c).
+
+### 5088 -- Favicons, and small pictures by whole pixels
+
+The maintainer's request, from 5086's log: Cryosleep's only picture is
+http://www.echoesofbluemars.org/images/favicon.ico, and the fetch said
+`artwork is not a JPEG or PNG; skipped`. Many stations in the directory
+have nothing else.
+
+**A .ico, as a PNG, at the fetch (main/icoimg.c).** An .ico is a
+directory of the same icon at several sizes; each entry is either a
+whole PNG or a BMP body without its file header -- a DIB, 32-bit BGRA,
+or 24/8/4/1-bit with a 1-bit mask after the pixels and the stored height
+doubled to count it. radiobrowser_art_fetch() now recognises the
+directory (`00 00 01 00`), takes the largest entry (then the deepest),
+and hands back a PNG: a PNG entry copied out, a DIB converted to RGBA
+and written as a PNG whose deflate stream is stored blocks. Stored,
+because the miniz pngle brings has MINIZ_NO_COMPRESSION set and its
+compressor would want some 300 KB of heap besides; a 256x256 icon
+stored is 257 KB of PSRAM for as long as it takes to draw, and pngle
+inflates stored blocks like any other. Nothing after the fetch knows an
+icon was involved. A 32-bit icon whose alpha is zero throughout takes
+its transparency from the mask, as the format intends; BITFIELDS at 32
+bits is read as BGRA; 16-bit and RLE entries are refused. Every offset
+and size is checked against the bytes in hand, and entries over 256 px
+are refused. Logged as `artwork: icon, 48x48 32-bit bitmap entry, as a
+9332 byte png` or `artwork: icon, 256x256 png entry`.
+
+**Whole-pixel enlargement (albumart.c).** At the maintainer's request:
+pixel doubling, tripling and so on, not a fraction. A picture no larger
+than 256 px on either side, where at least 2x fits, is enlarged by the
+largest whole factor that fits the box, in both the JPEG blit and the
+PNG edge map, so every source pixel is the same k x k block: 16 px is
+35x in a 560 box, 48 px 11x, RFI's 180 px logo 3x (540 rather than
+560, and its edges straight where the 3.11x fit wobbled between three
+and four pixels a column). The JPEG path computes the source column as
+x / k in that case: the 16.16 step for 1/3 is 21845, and three of those
+are one short of a whole pixel, which would have made the first block
+four wide. Pictures over 256 px -- album covers -- keep the fractional
+fit, or a 370 px cover would be drawn at 1x in a 720 px box. Logged as
+`cover enlarged 3x to 540x540`.
+
+Host-tested. icoimg.c: built with ASan and UBSan, fed icons from
+Pillow (48 px 32-bit BMP entries, a 256 px PNG entry, a 256 px 32-bit
+BMP entry whose stored stream runs to five blocks) and hand-built DIBs
+at 24, 8, 4 and 1 bit with masks and odd widths, plus a top-down 32-bit
+icon with zero alpha; each output decoded by the vendored pngle and
+compared pixel for pixel with the expected image -- all match. Nine
+malformed files (truncated directory and body, offsets and sizes past
+the end, a 300 px width, an oversized header, a 100000-colour palette,
+16-bit, no entries) are all refused, and 1500 randomly corrupted icons
+ran with no sanitizer report. The two scaling paths were lifted into a
+test and checked at 16-300 px against 560x560 and 720x1000 boxes: exact
+k x k blocks at or under 256 px in both, the old fit above it. Not built
+under IDF.
+
+New source file main/icoimg.c, added to main/CMakeLists.txt. What to look
+for: Cryosleep, `artwork: icon, ...`, then `cover is NxN (png)` and
+`cover enlarged Kx to ...`.
