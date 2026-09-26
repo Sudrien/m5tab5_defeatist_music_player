@@ -425,3 +425,39 @@ CONFIG_ESP_HOSTED_HOST_SDIO_RX_STREAMING_MODE=y
 # rm sdkconfig before building. The log line that proves it took is
 # `live02.rfi.fr is 185.74.70.x (1 of 4)` -- "of 1" means a stale sdkconfig.
 CONFIG_LWIP_DNS_MAX_HOST_IP=4
+
+# ---------------------------------------------------------------------------
+# 5078: RECEIVED PACKETS WAIT IN PSRAM, NOT INTERNAL RAM.
+#
+# With a clean sdkconfig (5077 quiet under the banner, so 5072's 64K pool
+# in) RFI-Afrique still logged `mempool OOM` all through a directory fetch
+# and the artwork request saw `DMA 13759 free (largest 4864)` -- less than
+# on the 32K build. The pool is not where the memory goes.
+#
+# esp_hosted 3.0.8 does not hand its SDIO buffer to lwIP. For every Wi-Fi
+# frame, the rx task malloc()s payload_len bytes, copies the frame into
+# it, frees the SDIO buffer, and passes the copy up
+# (eh_host_bus_sdio.c, "copy_payload"). lwIP then wraps that copy without
+# copying (wlanif.c, esp_pbuf_allocate) and keeps it until the packet is
+# consumed -- in the tcpip mailbox, a socket's receive mailbox, the
+# out-of-order queue. A frame is up to 1.5 KB; since 5054 anything under
+# 4 KB is malloc'd from internal RAM first, and once the general heap is
+# full a plain malloc falls through into the reserved pool as well. So a
+# burst of queued frames spends the same DMA-capable RAM that the next
+# SDIO buffer (1536 bytes, MALLOC_CAP_DMA) needs, and the reserve cannot
+# protect it.
+#
+# L2_TO_L3_COPY makes wlanif copy each frame into a pbuf of its own and
+# free the driver's buffer on the spot. The pbuf comes from lwIP's
+# mem_malloc, which SPIRAM_TRY_ALLOCATE_WIFI_LWIP (above) sends to PSRAM
+# first. Queued packets then wait in PSRAM and internal RAM holds a frame
+# only for the length of a memcpy. One more copy of each packet, which at
+# these rates is nothing.
+#
+# This is also the condition the 0044/0045 note above set for a larger
+# TCP window ("the transport's buffers somewhere other than internal
+# RAM"). That is not done here.
+#
+# rm sdkconfig before building. Proof it took: nothing under the banner
+# (5077 names this key if the sdkconfig is stale).
+CONFIG_LWIP_L2_TO_L3_COPY=y

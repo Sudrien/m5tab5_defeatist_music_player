@@ -12610,3 +12610,52 @@ the same test as 5072 -- RFI Monde, the artwork request's `DMA N free`
 well above 15.7 KB, and a genre list fetched while it plays without
 `mempool OOM`. Built on the current sdkconfig without rm, the boot line
 should name CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL.
+
+### 5078 -- Received packets wait in PSRAM
+
+5077 on the board (v0.4.0-85), sdkconfig rebuilt: no `stale sdkconfig`
+line under the banner, so 5072's 64K pool is in. RFI Monde played; a
+"news" directory fetch beside it ran with `mempool OOM` start/end pairs
+for four seconds, TX among them. RFI-Afrique played at 96 kbit/s, and
+the artwork request logged `DMA 13759 free (largest 4864)` -- less than
+the 32K build's 15735 -- then twelve more OOM pairs over nine seconds,
+with delivery down to 78 kbit/s of 95. The link survived this time.
+
+So twice the pool bought nothing. The reason is what esp_hosted 3.0.8
+does with a received frame. The SDIO buffer is not what lwIP holds: for
+STA and AP traffic the rx task malloc()s payload_len bytes, copies the
+frame in, frees the SDIO buffer and passes the copy up. IDF's wlanif
+then wraps that copy in a custom pbuf without copying, and it stays
+allocated until the packet is consumed -- tcpip mailbox, socket receive
+mailbox, TCP out-of-order queue. Up to 1.5 KB a frame, malloc'd from
+internal RAM first because it is under 5054's 4 KB threshold, and once
+the general internal heap is full, from the reserved pool too (the pool
+admits plain allocations at its lowest priority). A few dozen queued
+frames during a TLS handshake or a directory burst take the DMA-capable
+RAM that the next 1536-byte SDIO buffer is asked for with
+MALLOC_CAP_DMA, and that is `mempool OOM`.
+
+The 0045 note in sdkconfig.defaults says the SDIO path "takes a DMA
+buffer from internal RAM per read and holds it until lwIP has taken the
+packet". For 3.0.8 that is half right: the DMA buffer is freed at once,
+and the internal-RAM copy is what is held.
+
+CONFIG_LWIP_L2_TO_L3_COPY=y. wlanif_input() then pbuf_alloc()s a
+PBUF_RAM pbuf, copies the frame, and frees the driver's buffer before
+lwIP sees the packet. PBUF_RAM comes from mem_malloc, which with
+SPIRAM_TRY_ALLOCATE_WIFI_LWIP prefers PSRAM (lwipopts.h,
+mem_clib_malloc). Internal RAM holds a frame for one memcpy. The cost is
+that memcpy, one per packet. The teardown order 5027 fixed in
+wifi_stop() stays right: with the copy no pbuf points at a driver
+buffer, and without it the order still matters.
+
+Nothing else changes -- ALWAYSINTERNAL stays at 4096, the pool at 64K,
+the TCP window where 0045 left it -- so a difference in the next log is
+this key.
+
+sdkconfig.defaults changed: rm sdkconfig before building. Proof: no
+`stale sdkconfig` line under the banner. What to look for: the same
+test -- RFI-Afrique, a directory fetch, the artwork request -- with the
+artwork line's `DMA N free` well above 13759, `internal free` in the
+netstream lines holding steadier through the fetch, and few or no
+`mempool OOM` lines.
