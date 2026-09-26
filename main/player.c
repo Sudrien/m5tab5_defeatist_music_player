@@ -13213,6 +13213,15 @@ void app_main(void)
                  d ? d->version : "?", d ? d->idf_ver : "?",
                  d ? d->date : "?", d ? d->time : "?");
     }
+#ifdef SDKCONFIG_DRIFT
+    /* Keys whose value in sdkconfig differs from sdkconfig.defaults, as
+     * cmake/defaults_check.cmake found them when this was configured.
+     * Empty on a build that took its defaults. */
+    if (SDKCONFIG_DRIFT[0]) {
+        ESP_LOGE(TAG, "stale sdkconfig -- not as sdkconfig.defaults says: %s "
+                      "(rm sdkconfig and build)", SDKCONFIG_DRIFT);
+    }
+#endif
 
     esp_log_level_set("sdmmc_common", ESP_LOG_NONE);
     esp_log_level_set("sdmmc_init", ESP_LOG_NONE);

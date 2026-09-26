@@ -77,3 +77,16 @@ if(NOT CONFIG_COMPILER_OPTIMIZATION_PERF)
         "(Compiler options -> Optimization Level)\n"
         "Ignore this if you are deliberately building for a debugger.")
 endif()
+
+# --- every other key in sdkconfig.defaults, checked the same way -------
+#
+# The check above covers one symbol. 5072's 64 KB DMA pool was judged on
+# the board (5075) from a build whose boot log said `Reserving pool of
+# 32K` -- a stale sdkconfig again, the same trap as 5033. This compares
+# every line of the defaults with the build and warns here; the list of
+# keys that differ also goes into main as SDKCONFIG_DRIFT, and player.c
+# prints it under the banner, because the boot log is what reaches a
+# bug report and a configure warning is not.
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/defaults_check.cmake)
+idf_component_get_property(main_lib main COMPONENT_LIB)
+target_compile_definitions(${main_lib} PRIVATE "SDKCONFIG_DRIFT=\"${SDKCONFIG_DRIFT}\"")

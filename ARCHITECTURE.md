@@ -12542,3 +12542,71 @@ Since 5048 (kept stations in flash), 5064 (settings in flash) and 5065
 over the station list saying otherwise. Removed at the maintainer's
 request, with the flag that rationed it. notice_post() and the other
 cards are untouched. Not host-tested (player.c).
+
+### 5077 -- The defaults are checked, all of them
+
+5076 on the board (v0.4.0-82): RFI Monde played, and its logo came
+through the 301. Then a genre list fetched beside it (`6849 bytes from
+de1.api.radio-browser.info in 10790 ms`) took the stream down with
+`mempool OOM` all through it, and Radio Navahang -- HTTPS, 128 kbit/s --
+lost the link on its own: `mempool OOM start (TX)` at 138.3 s with no
+`end` for ten seconds, the gateway silent, 5069's restart.
+
+The boot log says why, near the top:
+
+    I (1222) esp_psram: Reserving pool of 32K of internal memory for DMA/internal allocations
+
+5072 asked for 64K, and v0.4.0-82 contains 5072. The sdkconfig on the
+build machine predates it, so the pool 5072 promised was never on the
+board, and 5075's "DMA 15739 free (largest 8704) ... fits 5072's 64K
+pool" read a good run as proof of a setting that was not there. The
+figure prints `size / 1024` of CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL
+before it allocates anything (esp_psram.c), so it is the setting, not a
+shortfall. 5033 was the same trap. Anything else added to the defaults
+since that sdkconfig was made -- 5054's ALWAYSINTERNAL=4096 among them
+-- may be missing too, and nothing in the log can say which.
+
+And "mempool OOM" is 5072's failure under another name. In esp_hosted
+3.0.8 the SDIO host tests `#if EH_HOST_USE_MEMPOOL`, which nothing
+defines (Kconfig sets EH_HOST_PORT_USE_MEMPOOL), so every packet buffer
+is `heap_caps_malloc(1536, MALLOC_CAP_DMA)` and the "mempool OOM" line
+is printed when that returns NULL. An RX OOM drops a received packet
+(TCP resends); a TX OOM drops an outgoing one, ACKs included, and ten
+seconds of that is a dead link. It is the same internal DMA memory the
+reserve holds.
+
+So nothing is changed about memory here; the 64K pool is still
+untested. What changes is that it cannot go untested quietly again:
+
+- cmake/defaults_check.cmake reads every `CONFIG_` line of
+  sdkconfig.defaults after project() and compares it with the value
+  the build has. A differing value is a configure warning naming the
+  key, both values and `rm sdkconfig`.
+- It adds sdkconfig.defaults to CMAKE_CONFIGURE_DEPENDS. IDF only
+  reconfigures when sdkconfig changes, so an edit to the defaults
+  alone never reached a configure-time check on an existing build
+  directory.
+- The keys that differ go into main as SDKCONFIG_DRIFT, and player.c
+  prints them under the banner as `stale sdkconfig -- not as
+  sdkconfig.defaults says: ... (rm sdkconfig and build)`. The boot log
+  is what reaches a bug report; a configure warning scrolls past.
+- A key the build does not define at all is a separate configure
+  warning and stays out of the boot line, because `rm sdkconfig` does
+  not fix it. There is one now: CONFIG_ESP_HOSTED_SDIO_RESET_ACTIVE_LOW
+  is not a symbol in esp_hosted 3.0.8 (the reset line is GPIO 15 by
+  the Tab5 preset and HOST_RESET_GPIO; the log's `reset done pin=15`
+  shows it works without it). Left in the defaults for the maintainer
+  to remove.
+
+The CMake was run against a copy of sdkconfig.defaults with the 32K
+value and a missing symbol substituted in (both warnings, DRIFT
+naming only the value), and against a matching one (no drift); the
+quoted definition was checked through a real generator. Not built
+under IDF.
+
+What to look for: after `rm sdkconfig && idf.py build`, no drift
+warning, no `stale sdkconfig` line, `Reserving pool of 64K`, and then
+the same test as 5072 -- RFI Monde, the artwork request's `DMA N free`
+well above 15.7 KB, and a genre list fetched while it plays without
+`mempool OOM`. Built on the current sdkconfig without rm, the boot line
+should name CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL.
