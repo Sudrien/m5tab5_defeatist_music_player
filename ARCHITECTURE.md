@@ -13969,3 +13969,48 @@ Wi-Fi on, joined, once. Recordings already named 2028 keep their names.
 
 Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers; cardtimetest
 30 checks. Not on the board.
+
+### 5113 -- The first 250 ms of a capture are dropped; the side-source takes
+
+Five takes on v0.4.0-121: a 5 s BEAM, two 12 s BEAM, two 12 s STEREO,
+all checked clean by the reference decoder.
+
+**The source was not where the canceller works.** Measured on the
+STEREO takes: the scene sits at 250-1000 Hz (-42 dBFS; tones at 120
+and 504 Hz, plus 22-44 Hz), with 1-4 kHz at -70 dBFS, near the floor.
+The delay between the capsules (GCC-PHAT, 150-2000 Hz) puts it at
+about 11 and 18 degrees -- inside the beam's +/-25-degree cone. So the
+canceller adapted on 0% of every take, rightly: nothing off-axis in
+1-8 kHz. Below 1 kHz 34 mm cannot separate anything. The spectrum also
+carries steady lines at 10 and 20 kHz, near -68 dBFS: electrical, not
+the room; not chased here.
+
+**Every take starts with the hardware waking up**, beam and stereo
+alike, per 10 ms:
+
+    0-30 ms      exact zeros: the ADC not yet producing
+    30-50 ms     a thump, -24 to -34 dBFS, ~15 dB over the room
+    ~130-160 ms  a second, -26 to -30 dBFS, with L-R as loud as L+R:
+                 uncorrelated between the capsules, so electrical
+    from ~200 ms the steady scene
+
+The second thump is exactly what the canceller adapts on: the one
++2.4 dB beam peak over the plain sum (tools/beamcheck on the 16.51.12
+take) sat at 0.15 s. And the thump was the loudest thing in every file
+-- the takes' peaks were -20.5 and -20.9 dBFS; without the first
+250 ms they are -31.9 and -29.5, which is also what ReplayGain's peak
+measurement should have been seeing.
+
+rec_in now reads and drops the first 250 ms (REC_SETTLE_MS) before
+anything reaches the ring. On the same two takes cut the same way,
+beamcheck gives the beam and the plain sum identical to 0.1 dB, peak
+included. Files are 250 ms shorter at the head; the log's `microphones
+off` line says so.
+
+**The 5110 clock line** was absent from the boot before these takes.
+Likely because ESP-IDF keeps the system time across a software or
+USB-JTAG reset, so a flash-and-reset boot starts already at or past the
+floor and 5110 only logs a move. A cold power-on is the check.
+
+Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers. Not on the
+board.

@@ -40,6 +40,19 @@ static const char *TAG = "tab5_rec";
  * few hundred ms; two seconds is the margin, at 768 KB of PSRAM. */
 #define REC_RING_BYTES      (2u * AUDIO_CAPTURE_RATE * REC_FRAME_BYTES)
 
+/*
+ * 5113: the start of every capture is not audio. On the board, every
+ * take -- beam and stereo -- begins with ~30 ms of exact digital silence,
+ * a thump at 30-50 ms some 15 dB over the room, and a second at ~130-160
+ * ms in which L-R is as loud as L+R: uncorrelated between the capsules,
+ * so electrical rather than acoustic -- the ES7210 and its bias settling.
+ * It put two clicks at the head of every file, and the second is exactly
+ * what the beam's canceller adapts on (a +2.4 dB peak on one take). The
+ * steady scene is there from ~200 ms. This much is read and dropped
+ * before anything reaches the ring.
+ */
+#define REC_SETTLE_MS       (250)
+
 /* What rec_in moves per read: 5 ms, a quarter of the DMA's 20 ms. */
 #define REC_IN_FRAMES       (240)
 
@@ -196,10 +209,15 @@ static void rec_in_task(void *arg)
 {
     (void)arg;
     uint32_t reads = 0;
+    uint32_t settle = (uint32_t)AUDIO_CAPTURE_RATE * REC_SETTLE_MS / 1000u;
     while (!s_stop) {
         const size_t n = audio_out_capture_read(s_in_buf, REC_IN_FRAMES, 100);
         if (!n) continue;
         reads++;
+        if (settle) {                           /* 5113 */
+            settle = n >= settle ? 0 : settle - (uint32_t)n;
+            continue;
+        }
         /* All of a read or none of it: a partial send would split a
          * frame and swap left and right for the rest of the file. */
         const size_t want = n * REC_FRAME_BYTES;
@@ -212,7 +230,8 @@ static void rec_in_task(void *arg)
         }
     }
     audio_out_capture_end();
-    ESP_LOGI(TAG, "microphones off after %" PRIu32 " reads", reads);
+    ESP_LOGI(TAG, "microphones off after %" PRIu32 " reads (the first %d ms dropped: "
+             "the ADC settling)", reads, REC_SETTLE_MS);
     s_in_done = true;
     vTaskDelete(NULL);
 }
