@@ -21,6 +21,8 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"   /* 5093: soft_decode_begin() */
+#include "freertos/task.h"
 
 #include "jpeg_decoder.h"   /* espressif/esp_jpeg: TJpgDec */
 #include "pngle.h"
@@ -124,6 +126,37 @@ static const char *TAG = "tab5_art";
  * the int32_t quantiser tables and nothing would report it.
  */
 #define JPEG_SW_WORKBUF  (8u * 1024)
+/*
+ * 5093: THE SOFTWARE DECODES RUN AT IDLE PRIORITY.
+ *
+ * A 3000x3000 cover in a FLAC took `cover decoded in software at 1/4` 5.8 s
+ * of CPU in one blocking esp_jpeg_decode(), on the media task at priority
+ * 1, while the player filled its ring at the start of the track -- and
+ * the task watchdog fired on IDLE0: nothing below priority 1 ran on that
+ * core for five seconds. 1005 was the same shape ("ten million in a burst
+ * with nothing yielding"), and neither TJpgDec nor stb_image can be asked
+ * to yield part-way.
+ *
+ * So the calling task drops to tskIDLE_PRIORITY for the length of the
+ * decode and gets it back after. The idle tasks then share its time
+ * slices, the watchdog is fed, and everything else -- audio, the writer,
+ * the UI -- preempts it exactly as before, so the cover takes as long as
+ * spare CPU allows and costs nothing that was already running. The hardware
+ * path is untouched: hundreds of milliseconds, and it waits on an
+ * interrupt rather than spinning.
+ */
+static UBaseType_t soft_decode_begin(void)
+{
+    const UBaseType_t prio = uxTaskPriorityGet(NULL);
+    if (prio > tskIDLE_PRIORITY) vTaskPrioritySet(NULL, tskIDLE_PRIORITY);
+    return prio;
+}
+
+static void soft_decode_end(UBaseType_t prio)
+{
+    if (uxTaskPriorityGet(NULL) != prio) vTaskPrioritySet(NULL, prio);
+}
+
 static esp_err_t decode_software(const uint8_t *in, size_t jpeg_len,
                                  const jpeg_decode_picture_info_t *info,
                                  int screen_w, int screen_h,
@@ -1015,8 +1048,12 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
          * it at all, so stb_image is the only decoder asked. */
         ESP_LOGI(TAG, "cover is a progressive JPEG, %"PRIu32"x%"PRIu32"; "
                       "trying stb_image", sof_w, sof_h);
-        ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
-                         &rgb, &rgb_size, &soft_w, &soft_h);
+        {
+            const UBaseType_t prio = soft_decode_begin();    /* 5093 */
+            ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
+                             &rgb, &rgb_size, &soft_w, &soft_h);
+            soft_decode_end(prio);
+        }
         if (ret != ESP_OK) return ret;
         ret = blit_cover(panel, screen_w, screen_h, rgb, soft_w, soft_h, soft_w);
         if (ret == ESP_OK &&
@@ -1186,6 +1223,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
          * where 1005's watchdog fired, so `esp_jpeg_decode()` being
          * blocking is the thing to watch on the first board run.
          */
+        const UBaseType_t prio = soft_decode_begin();        /* 5093 */
         ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
                               &rgb, &rgb_size, &soft_w, &soft_h);
         if (ret == ESP_FAIL) {
@@ -1194,6 +1232,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
             ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
                              &rgb, &rgb_size, &soft_w, &soft_h);
         }
+        soft_decode_end(prio);
         if (ret != ESP_OK) goto cleanup;
         soft = true;
         goto have_pixels;
@@ -1254,6 +1293,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
             free(rgb);
             rgb = NULL;
             rgb_size = 0;
+            const UBaseType_t prio = soft_decode_begin();    /* 5093 */
             ret = decode_software(in, jpeg_len, &info, screen_w, screen_h,
                                   &rgb, &rgb_size, &soft_w, &soft_h);
             if (ret == ESP_FAIL) {
@@ -1263,6 +1303,7 @@ esp_err_t albumart_draw(esp_lcd_panel_handle_t panel, int screen_w, int screen_h
                 ret = decode_stb(jpeg, jpeg_len, screen_w, screen_h,
                                  &rgb, &rgb_size, &soft_w, &soft_h);
             }
+            soft_decode_end(prio);
             if (ret != ESP_OK) goto cleanup;
             soft = true;
             goto have_pixels;

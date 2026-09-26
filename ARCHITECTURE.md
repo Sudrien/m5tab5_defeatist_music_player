@@ -13146,3 +13146,45 @@ What to look for: the line above soon after the radio starts; WNZK (or
 `mempool OOM` lines, and `DMA N free` well above 4 KB at the artwork
 request. What would say it is wrong: Wi-Fi not coming up, or `Failed to
 send data` from eh_sdio -- take the two link lines out and say so.
+
+### 5093 -- Software cover decodes at idle priority
+
+5092 on the board (v0.4.0-100): `esp_hosted packet buffers from PSRAM
+(1536 bytes each)`, and WNZK at 512 kbit/s on Wi-Fi with the SD card and
+a USB drive mounted played 90 s at 455-617 kbit/s with no `mempool OOM`
+at all.
+
+The same build, playing a FLAC from the USB drive whose embedded cover
+is 3000x3000 (1.87 MB):
+
+    23365 W cover needs 17672 KB of PSRAM in one block, largest free is 13824 KB
+    28068 E task_wdt: Task watchdog got triggered ... IDLE0 (CPU 0)
+    29134 cover decoded in software at 1/4: 750x750, 1098 KB
+
+5.8 s in one blocking esp_jpeg_decode() on the media task, priority 1,
+while the player filled its ring for the new track -- and nothing at
+priority 0 ran on core 0 for five seconds. The backtrace lands in
+pcmfold_24_to_16() only because that is what the main task happened to
+be doing. This is 1005's shape again: a long burst with nothing
+yielding, and TJpgDec and stb_image cannot be asked to yield part-way.
+The note written with the software path (above) predicted exactly this
+and said to stop doing it if it tripped.
+
+This keeps doing it, at a priority that cannot starve anything:
+soft_decode_begin() drops the calling task to tskIDLE_PRIORITY around
+all three software-decode sites (progressive via stb_image, the
+cannot-allocate branch, the hardware-refused branch) and
+soft_decode_end() restores it before the blit. The idle tasks share its
+time slices, so the watchdog is fed; audio, the writer and the UI
+preempt it as they always did. The cover arrives when there is spare
+CPU. The hardware path is untouched. If this is not enough, the
+fallback the old note named -- refusing the software path above some
+size and leaving the format card up -- is still there to take.
+
+Guidance from the same log, for covers you embed yourself: the art box
+is 560 px (720 wide in portrait); the hardware decoder needs width x
+height x 2 bytes in one PSRAM block, which put the ceiling near
+2600x2600 on this run; above it, or for any progressive JPEG, it is the
+software path and seconds per track change. A baseline JPEG around
+1000x1000 decodes in hardware in well under a second. Not host-tested
+(albumart.c).
