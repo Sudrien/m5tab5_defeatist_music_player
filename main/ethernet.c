@@ -79,6 +79,14 @@ bool net_online(void)
     return wifi_connected() || ethernet_connected();
 }
 
+bool ethernet_link(void)                    /* 5096 */
+{
+    for (int k = 0; k < IF_COUNT; k++) {
+        if (s_if[k].state.link) return true;
+    }
+    return false;
+}
+
 void net_route_describe(char *out, size_t out_size)
 {
     if (!out || !out_size) return;

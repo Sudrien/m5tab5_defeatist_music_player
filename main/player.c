@@ -6233,6 +6233,20 @@ static volatile int s_fetch_busy_row = -1;
 
 static void station_fetch_run(void);
 
+/*
+ * 5096: A NETWORK IS ON ITS WAY. Both waits below -- the directory's
+ * (5067) and a held station's (5074) -- used to ask only whether Wi-Fi
+ * was switched on. With Wi-Fi off and a USB Ethernet adapter plugged in,
+ * a tap in the seconds before DHCP answered got `no Wi-Fi; cannot reach
+ * the directory` at once: on the board the cable had link at 4.5 s, the
+ * tap came at 8.4 s and the address at 14.0 s. A cable with link counts
+ * now, as the radio switched on always did.
+ */
+static bool net_expected(void)
+{
+    return settings_wifi_enabled() || ethernet_link();
+}
+
 static void service_station_fetch(void)
 {
     const int row = s_fetch_row;
@@ -6247,7 +6261,7 @@ static void station_fetch_run(void)
     const int row = s_fetch_row;
     if (row < 0) return;
 
-    if (!net_online() && settings_wifi_enabled()) {
+    if (!net_online() && net_expected()) {        /* 5096 */
         const int64_t now = esp_timer_get_time();
         if (!s_fetch_wait_since) {
             s_fetch_wait_since = now;
@@ -6280,8 +6294,8 @@ static void station_fetch_run(void)
          * directory being down. Wi-Fi being off is the commonest reason
          * this cannot work and the only one the listener can fix.
          */
-        ESP_LOGW(TAG, "no Wi-Fi; cannot reach the directory");
-        browser_set_radio_status("no Wi-Fi - the directory needs a connection");
+        ESP_LOGW(TAG, "no network; cannot reach the directory");
+        browser_set_radio_status("no network - the directory needs Wi-Fi or a cable");
         return;
     }
 
@@ -7071,7 +7085,7 @@ static void ui_task(void *arg)
                  * after STATION_NET_WAIT_MS and says why, still on the
                  * list. A second tap replaces the first; cancel drops it.
                  */
-                if (!net_online() && settings_wifi_enabled()) {
+                if (!net_online() && net_expected()) {        /* 5096 */
                     station_t held;
                     char line[96];
                     snprintf(line, sizeof(line), "waiting for the network to play %s",
@@ -7206,7 +7220,7 @@ static void ui_task(void *arg)
                              (long long)held_ms);
                     s_held_station = -1;
                     browser_set_radio_busy(false);
-                    browser_set_radio_status("no network - check Wi-Fi, then tap again");
+                    browser_set_radio_status("no network - check Wi-Fi or the cable, then tap again");
                 } else if (net_online()) {
                     const int idx = s_held_station;
                     s_held_station = -1;

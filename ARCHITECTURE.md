@@ -13236,3 +13236,34 @@ Also in that log, not changed here:
 - After the reset, with Wi-Fi switched off and the cable still getting
   its address, "ambient" said `no Wi-Fi; cannot reach the directory`
   instead of waiting for the wired network.
+
+### 5096 -- A cable is a network too
+
+5095's log again. After the reset, with Wi-Fi switched off and the
+Realtek adapter in:
+
+    4530 tab5_eth: ecm: cable connected
+    8449 W no Wi-Fi; cannot reach the directory      (the "ambient" tap)
+   14041 tab5_eth: ecm: wired network up; it is the default route
+
+The directory's wait (5067) and a held station's (5074) both waited
+only when `settings_wifi_enabled()` -- a cable getting its address was
+"no network", said at once. Both now wait when a network is on its way:
+Wi-Fi switched on, or any adapter with link (ethernet_link(), new in
+ethernet.c: the per-adapter `link` flag that netlink already keeps,
+without the address). The 25 s bound is unchanged.
+
+The words that meant "network" and said "Wi-Fi" follow, at the
+maintainer's request: the directory's `no network - the directory needs
+Wi-Fi or a cable`, the held station's `no network - check Wi-Fi or the
+cable, then tap again`, and the log line. The NET tab's Benchmark row
+was greyed and said `Needs Wi-Fi.` whenever the radio was switched off,
+though the benchmark reads a station over whatever route there is; it
+is enabled by `wifi || net_online()` now and says `Needs a network:
+Wi-Fi or a cable.` The Wi-Fi switch, setup ("Same Wi-Fi as the player")
+and NTP rows are about the radio and keep their words -- NTP is started
+by wifi.c on a join, which a cable does not do; that is a separate gap.
+
+The brownout reset in the same log was the maintainer pulling the
+plug; the detector cannot tell that from a sagging supply. Not
+host-tested (player.c, panel.c, ethernet.c).

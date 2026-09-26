@@ -51,6 +51,13 @@ bool ethernet_ip(char *out, size_t out_size);
 bool net_online(void);
 
 /*
+ * 5096: an adapter has link -- a cable is in -- whether or not it has an
+ * address yet. With net_online() false this is "the wired network is on
+ * its way", which is worth waiting for.
+ */
+bool ethernet_link(void);
+
+/*
  * Which interface a connection opened now would leave by, as text:
  * "cable (asix) 192.168.1.124", "Wi-Fi 192.168.5.62", or "no route".
  * That is lwIP's default netif, which is how every socket here picks its

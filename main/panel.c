@@ -18,6 +18,7 @@
 
 #include "audio_out.h"
 #include "bench.h"
+#include "ethernet.h"     /* 5096: net_online() */
 #include "gfx.h"
 #include "medialib.h"
 #include "menuscroll.h"
@@ -647,8 +648,8 @@ static void bench_lines(const bench_result_t *b, bool wifi,
 {
     for (int i = 0; i < NET_BENCH_NOTE_LINES; i++) l[i][0] = '\0';
 
-    if (!wifi) {
-        snprintf(l[0], 64, "Needs Wi-Fi.");
+    if (!wifi) {    /* 5096: `wifi` is any network here, cable included */
+        snprintf(l[0], 64, "Needs a network: Wi-Fi or a cable.");
         return;
     }
     if (b->running) {
@@ -787,6 +788,9 @@ static int draw_net(void)
     const int w = gfx_w();
     int x, y, bw, bh;
     const bool wifi = settings_wifi_enabled();
+    /* 5096: the benchmark reads a station over whatever route there is,
+     * so a cable enables it as well as the radio does. */
+    const bool netok = wifi || net_online();
 
     /* --- Wi-Fi ------------------------------------------------------ */
     wifi_switch_box(&x, &y, &bw, &bh);
@@ -858,15 +862,15 @@ static int draw_net(void)
     bench_box(&x, &y, &bw, &bh);
     gfx_fill_rect(x, y, bw, bh, C_ROW);
     gfx_draw_text(24, y + (bh - GFX_GLYPH_H(NAME_SCALE)) / 2, "Benchmark",
-                  NAME_SCALE, 400, wifi ? C_TEXT : C_DISABLED);
+                  NAME_SCALE, 400, netok ? C_TEXT : C_DISABLED);
     {
         const int pw = 132, ph = 56;
         draw_state_pill(w - 24 - pw, y + (bh - ph) / 2, pw, ph,
-                        bs.running ? "BUSY" : "RUN", bs.running, wifi,
+                        bs.running ? "BUSY" : "RUN", bs.running, netok,
                         NAME_SCALE);
     }
     char blines[NET_BENCH_NOTE_LINES][64];
-    bench_lines(&bs, wifi, blines);
+    bench_lines(&bs, netok, blines);
     const char *bench_note[NET_BENCH_NOTE_LINES] = { blines[0], blines[1],
                                                      blines[2] };
     const int ntp_used = draw_note(y + bh + AUDIO_NOTE_GAP, bench_note,
