@@ -13338,3 +13338,24 @@ netstream lines should not fall more than about 16 KB from 5096's
 ~76-80 KB -- if the USB Ethernet driver's frames are not copied into
 PSRAM pbufs, the window is paid for in internal RAM, and this is where
 it shows.
+
+### 5099 -- NTP on a cable
+
+SNTP was started from one place, Wi-Fi's got-IP event. A session on the
+USB Ethernet adapter alone -- the first log after 5096 -- never asked
+anyone the time: no `SNTP started` line, and the settings record went
+on being stamped with whatever the floor said.
+
+wifi.c exports `wifi_ntp_start()`, a wrapper round the existing
+`sntp_start()` (setting-checked, idempotent). ethernet.c calls it on the
+same edge as `streamprobe_kick()`: a cable interface that has just
+become usable. `wifi_stop()` no longer tears SNTP down while
+`ethernet_link()` is true -- lwIP's SNTP follows the default route, so
+turning Wi-Fi off under a cable should not cost the clock.
+
+Proof: a cable-only boot prints `tab5_wifi: SNTP started (3 servers)`
+right after `wired network up`, and an `NTP sync:` line follows.
+
+That line will, on this card, say `implausible vs. last known time`:
+the stored floor is 2028-12-02, two years ahead, and the floor only
+moves forward. That is not this patch; see the report with it.

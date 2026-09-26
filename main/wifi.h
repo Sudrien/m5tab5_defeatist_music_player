@@ -344,6 +344,13 @@ bool wifi_connected(void);
  */
 bool wifi_ntp_synced(void);
 
+/*
+ * 5099: start SNTP now, if the setting allows and it is not running.
+ * For a network that is not Wi-Fi -- ethernet.c calls it when a cable
+ * gets an address. Idempotent; runs on the event task.
+ */
+void wifi_ntp_start(void);
+
 /* The joined network's SSID, copied out. False and "" when not joined. */
 bool wifi_sta_ssid(char *out, size_t out_size);
 

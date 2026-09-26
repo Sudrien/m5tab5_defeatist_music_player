@@ -25,6 +25,7 @@
 #include "esp_hosted_transport_config.h"
 
 #include "settings.h"
+#include "ethernet.h"
 #include <time.h>
 #include "wifi.h"
 #include "wifistore.h"
@@ -355,6 +356,8 @@ static void sntp_start(void)
 
     ESP_LOGI(TAG, "SNTP started (%d servers)", NTP_SERVER_COUNT);
 }
+
+void wifi_ntp_start(void) { sntp_start(); }
 
 static i2c_master_dev_handle_t s_exp2;
 
@@ -986,7 +989,9 @@ esp_err_t wifi_stop(void)
     s_ap_on = false;
     s_ap_clients = 0;
 
-    if (s_sntp_started) {
+    /* 5099: a cable still up keeps it; lwIP's SNTP follows the default
+     * route, not an interface. */
+    if (s_sntp_started && !ethernet_link()) {
         esp_netif_sntp_deinit();
         s_sntp_started = false;
     }

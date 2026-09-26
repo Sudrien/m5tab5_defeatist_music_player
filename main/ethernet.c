@@ -292,6 +292,7 @@ static void on_event(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (rose) {
         ESP_LOGI(TAG, "%s: wired network up; it is the default route", i->name);
         streamprobe_kick();         /* once per boot; see streamprobe.h */
+        wifi_ntp_start();           /* 5099: NTP on a cable too */
     } else if (was && !netlink_eth_usable(&s)) {
         ESP_LOGI(TAG, "%s: wired network down%s", i->name,
                  wifi_connected() ? "; falling back to Wi-Fi" : "");
