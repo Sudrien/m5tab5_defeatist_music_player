@@ -12873,3 +12873,33 @@ any number. Not built under IDF.
 The five seconds per silent member is CONNECT_TIMEOUT_MS and is left
 alone: a slow but live server is worth the wait more than a silent one
 is worth skipping faster.
+
+### 5084 -- A second tap on a list being fetched is ignored
+
+5083 on the board (v0.4.0-91). Clean: eight directory fetches in forty
+seconds beside RFI Afrique, no OOM, no drop. One wasted turn:
+
+    293467 button: row 6 (station) "rock"
+    294376 button: row 6 (station) "rock"
+    295097 6820 bytes from de1.api.radio-browser.info in 1614 ms
+    295108 cached: https://de1.api.radio-browser.info/m3u/...tag=rock...
+    295131 radio: 50 stations
+    295362 radio: 50 stations
+
+The chooser keeps the menu up while a list is fetched (so it can say
+`fetching rock...`), and the second tap landed on the same row. The
+handler set s_fetch_row again, and the moment the first fetch returned
+the player task serviced the second from the cache and rebuilt the
+list a second time. Harmless here; on a slow link, where the first
+fetch is the one taking twelve seconds, it would be a second request
+queued behind it for no reason.
+
+service_station_fetch() now records the row it is servicing in
+s_fetch_busy_row for as long as it runs (the old body is
+station_fetch_run(), unchanged -- the one restructure in this patch, a
+wrapper so the flag is cleared on every one of its early returns). The
+BROWSER_FETCH_STATIONS handler ignores a tap on that same row with
+`directory: NAME is already being fetched; tap ignored`. A different
+row is still a new request, as before, and a tap during 5067's
+wait-for-network sets the same row it already holds, which was always
+harmless. Not host-tested (player.c).

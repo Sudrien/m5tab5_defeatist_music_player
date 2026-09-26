@@ -6215,7 +6215,27 @@ static int      s_held_station = -1;
 static int64_t  s_held_since;
 static int64_t s_fetch_wait_since;      /* 0 when not waiting */
 
+/*
+ * 5084: the menu row whose fetch is being serviced right now, or -1.
+ * Written by the player task around station_fetch_run(); read by the
+ * chooser's handler, which ignores a second tap on the same row while
+ * the first is still in flight. On the board a double tap on "rock"
+ * 900 ms apart fetched the list and then built it a second time.
+ */
+static volatile int s_fetch_busy_row = -1;
+
+static void station_fetch_run(void);
+
 static void service_station_fetch(void)
+{
+    const int row = s_fetch_row;
+    if (row < 0) return;
+    s_fetch_busy_row = row;
+    station_fetch_run();
+    s_fetch_busy_row = -1;
+}
+
+static void station_fetch_run(void)
 {
     const int row = s_fetch_row;
     if (row < 0) return;
@@ -7090,6 +7110,13 @@ static void ui_task(void *arg)
                  * and ui_task is the task drawing the row that says so.
                  * The chooser stays open and keeps the rows it has.
                  */
+                if (r.index == s_fetch_busy_row) {
+                    /* 5084: the same row again while its list is still
+                     * on the way -- a double tap, not a second request. */
+                    ESP_LOGI(TAG, "directory: %s is already being fetched; "
+                                  "tap ignored", radiobrowser_menu_label(r.index));
+                    break;
+                }
                 s_fetch_row = r.index;
                 break;
             case BROWSER_ADD_STATION:
