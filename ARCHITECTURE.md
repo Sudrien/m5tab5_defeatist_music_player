@@ -12914,3 +12914,29 @@ this station:` with which of the two cases it was -- the directory had
 none (or did not answer: radiobrowser_favicon() does not tell those
 apart), or the station has no directory id to ask with, the ordinary
 case for a hand-written stations.m3u entry. Not host-tested (player.c).
+
+### 5086 -- A station picked while paused does not fade
+
+5084-5085 on the board (v0.4.0-93). 5085 did its job:
+`no picture for this station: no icy-logo, and none from the
+directory` for Enigmatic 3.
+
+RFI Monde paused at 374.2 s (`dropped 2627 KB of queued audio`), and
+Cryosleep picked from the ambient list at 390.6 s:
+
+    390620 station change: fading out 0 KB over 3000 ms
+    390631 amplifier on
+    394199 stream ended: ended, ...
+    394317 W fade: the ring emptied before the ramp finished
+
+The pause had already dropped the ring. The station-change path started
+the out-ramp regardless, which switched the amplifier on, and the writer
+only ends a ramp when a receive comes back empty -- it did not, for the
+length of the wait loop's cap (FADE_OUT_MS plus the margin). 3.6 s of
+amplifier and silence before Cryosleep was even asked for.
+
+Now an empty PCM ring changes station straight away with `station
+change: nothing queued; no fade`. The fade body is unchanged and left
+at its indentation inside the new else, so the diff is the guard. Not
+host-tested (player.c). What to look for: pause, pick another station,
+and `stream requested` within a few tens of milliseconds of the tap.

@@ -11681,6 +11681,23 @@ static track_end_t play_stream(const char *url, const char *name)
              * returns early with it, which is the common case for a
              * station whose buffer is thin.
              */
+            /*
+             * 5086: NOTHING QUEUED, NOTHING TO FADE. A station picked
+             * while paused arrives with the ring already dropped by the
+             * pause. The ramp was started anyway, the amplifier came on
+             * for it, and the writer -- with no chunk to apply it to --
+             * did not end it until the wait had run to its cap:
+             *
+             *   station change: fading out 0 KB over 3000 ms
+             *   amplifier on
+             *   W fade: the ring emptied before the ramp finished  (+3.7 s)
+             *
+             * Three and a half seconds of a switched-on amplifier and
+             * no station. An empty ring changes straight over.
+             */
+            if (xStreamBufferBytesAvailable(s_pcm) == 0) {
+                ESP_LOGI(TAG, "station change: nothing queued; no fade");
+            } else {
             fade_out_begin(audio_out_rate());
             ESP_LOGI(TAG, "station change: fading out %u KB over %" PRIu32
                           " ms",
@@ -11690,6 +11707,7 @@ static track_end_t play_stream(const char *url, const char *name)
                                  waited < FADE_OUT_MS + FADE_WAIT_MARGIN_MS;
                  waited += FADE_WAIT_SLICE_MS) {
                 vTaskDelay(pdMS_TO_TICKS(FADE_WAIT_SLICE_MS));
+            }
             }
         }
 
