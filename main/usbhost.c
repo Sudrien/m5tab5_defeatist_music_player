@@ -182,6 +182,10 @@ static esp_err_t bring_up(void)
 #endif
     };
     ESP_RETURN_ON_ERROR(usb_host_install(&host_cfg), TAG, "usb_host_install");
+#ifdef CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM
+    /* 5100: the proof the sdkconfig took. */
+    ESP_LOGI(TAG, "USB transfer buffers and descriptor lists in PSRAM");
+#endif
 
     if (xTaskCreate(usb_lib_task, "usb_lib", 4096, NULL, 5, NULL) != pdPASS) {
         return ESP_ERR_NO_MEM;

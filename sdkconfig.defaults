@@ -177,6 +177,27 @@ CONFIG_USB_HOST_HUB_MULTI_LEVEL=y
 # sdkconfig only after `rm sdkconfig`.
 CONFIG_USB_HOST_ENABLE_ENUM_FILTER_CALLBACK=y
 
+# 5100: USB host DMA memory in PSRAM. With Wi-Fi up and a station
+# playing, the Realtek adapter plugged in late failed to open:
+#
+#   tab5_heap: allocation failed: 256 bytes, caps 0x00080808, in
+#              heap_caps_aligned_alloc, task usbh_cdc (#1)
+#   USBH: EP Alloc error: ESP_ERR_NO_MEM
+#
+# 0x80808 is DMA | INTERNAL | CACHE_ALIGNED: hcd_dwc.c's per-endpoint
+# transfer descriptor list, XFER_DESC_LIST_CAPS. The same option moves
+# usb_private.c's DATA_BUFFER_CAPS -- every usb_host_transfer_alloc(),
+# so the drive's, the headset's and the adapter's buffers -- to PSRAM.
+# The P4's USB-DWC DMA can reach PSRAM, and heap_align_hw rounds both
+# address and size to the cache line for SPIRAM|DMA requests, so the
+# Kconfig's IDF-11368 note (aligned sizes) is covered. hcd_dwc.c's frame
+# list stays internal; it is allocated once, at install.
+#
+# rm sdkconfig before building. Proof it took: `tab5_usbhost: USB
+# transfer buffers and descriptor lists in PSRAM` before the class
+# driver lines.
+CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM=y
+
 # esp_log_level_set() is a no-op without this on IDF v6.
 CONFIG_LOG_DYNAMIC_LEVEL_CONTROL=y
 

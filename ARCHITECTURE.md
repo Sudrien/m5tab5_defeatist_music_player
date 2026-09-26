@@ -13359,3 +13359,39 @@ right after `wired network up`, and an `NTP sync:` line follows.
 That line will, on this card, say `implausible vs. last known time`:
 the stored floor is 2028-12-02, two years ahead, and the floor only
 moves forward. That is not this patch; see the report with it.
+
+### 5100 -- USB host buffers in PSRAM
+
+5097's first board log caught it. Wi-Fi up, EuroDance 90 playing at
+128 kbit/s, and the Realtek adapter plugged in at 84 s:
+
+    tab5_heap: allocation failed: 256 bytes, caps 0x00080808, in heap_caps_aligned_alloc, task usbh_cdc (#1)
+    USBH: EP Alloc error: ESP_ERR_NO_MEM
+    USBH_CDC: usbh_cdc_port_open(842): Could not claim interface
+
+Caps 0x80808 is DMA | INTERNAL | CACHE_ALIGNED. In IDF v5.5.5 that is
+exactly hcd_dwc.c's per-endpoint transfer descriptor list
+(`XFER_DESC_LIST_CAPS`). The same adapter, plugged in again after Wi-Fi
+was switched off, opened first time.
+
+The two heap maps say where the room went. DMA-capable free was 63.5 KB
+at boot and 15.6 KB (largest 9216) at the first station, with 190 more
+blocks. The 64 KB reserve pool (the region at 0x4ff46140) went from
+37.8 KB free to 227 bytes. The 32 KB at 0x50108xxx (LP RAM) and 7.7 KB
+at 0x30100xxx (TCM) sat untouched throughout: "internal free 55187" was
+under 16 KB of memory the USB controller could use. That is Wi-Fi's
+cost, and the map does not say which of its allocations to move.
+
+The USB side can move, though. `CONFIG_USB_HOST_DWC_DMA_CAP_MEMORY_IN_PSRAM`
+(P4 only, off by default) puts the descriptor lists and every
+`usb_host_transfer_alloc()` data buffer in PSRAM. That covers the
+adapter's bulk buffers, the drive's and the headset's. The DWC's DMA can
+reach PSRAM, and `esp_heap_adjust_alignment_to_hw()` rounds size as well
+as address to the cache line, which is what the option's IDF-11368 TODO
+is about. The frame list stays internal; it is allocated once, at install.
+
+rm sdkconfig before building. Proof: `USB transfer buffers and
+descriptor lists in PSRAM` under `usb_host_install`. What to check: the
+same late plug with Wi-Fi up opens the adapter, and a USB drive's copy
+rates on the `tab5_io` lines do not drop noticeably. The Kconfig warns
+of "minor performance degradation", and the drive is where it would show.
