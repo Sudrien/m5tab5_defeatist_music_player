@@ -36,8 +36,10 @@
  *      them. Leaky, with its norm bounded, so a mistake decays instead
  *      of accumulating. The +/-25 degrees is the beam's width; see
  *      ADAPT_RATIO in beam.c.
- * The canceller works where u has energy: above about 1 kHz. Below that
- * the output is the plain sum, i.e. omnidirectional.
+ * The canceller works where u has energy: above about 1 kHz. Since
+ * 5111 it is confined there: b and u are both band-passed to 1-8 kHz for
+ * the filter, and only that band of the output is replaced; below 1 kHz
+ * and above 8 kHz the output is the plain sum, i.e. omnidirectional.
  *
  * Mono out. Float, one instance, not thread-safe; the recorder runs it
  * on rec_enc between the ring and flacenc.
@@ -61,7 +63,18 @@ extern "C" {
 #define BEAM_TAPS           (64)    /* canceller length */
 #define BEAM_DELAY          (32)    /* beam delay: the filter's look-ahead */
 
+/* One second-order section, transposed direct form II. */
+typedef struct { float b0, b1, b2, a1, a2, z1, z2; } beam_bq_t;
+
 typedef struct {
+    /* 5111: the canceller's band. u goes through the band-pass once for
+     * the output's reference and again for adaptation; b once, for
+     * adaptation. Same filter everywhere, so the relation the weights
+     * learn is the one the output applies. */
+    beam_bq_t bhp, blp, uhp, ulp, vhp, vlp;
+    float bf[BEAM_DELAY];           /* the band-limited beam, delayed like b */
+    float v[2 * BEAM_TAPS];         /* u band-passed twice: the adaptation reference */
+    float vnorm;
     /* the canceller */
     float w[BEAM_TAPS];
     float u[2 * BEAM_TAPS];         /* blocking history, doubled: no modulo in the MACs */

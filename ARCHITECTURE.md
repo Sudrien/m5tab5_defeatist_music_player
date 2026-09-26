@@ -13846,3 +13846,78 @@ Files already written keep their 1980 stamps; their sidecars record
 that mtime and still match. What to look for on the board: the clock
 line at boot, and a recording listed on a computer with today's date
 -- UTC, since there is no zone (settings.h).
+
+### 5111 -- The beam, confined to its band; what the first recordings measure
+
+The board's three recordings (two stereo, 13 s and 5 s; one beam, 42 s,
+the tablet turned about) decoded clean through the reference `flac -t`,
+and were measured on the host.
+
+**Levels -- the question of the microphone gain.**
+
+| take | rms | peak | quietest 10% (100 ms) | loudest 5% |
+|---|---|---|---|---|
+| 13 s stereo | -25 dBFS | -7.5 | -55 | -20 |
+| 5 s stereo | -38 dBFS | -14.2 | -51 | -33 |
+| 42 s beam | -42 dBFS | -12.6 | -59 | -37 |
+
+The 13 s take peaked at -7.5 dBFS at the ES7210's +33 dB, so more gain
+would clip that scene; the low LUFS figures (-23 to -42) are sparse,
+quiet rooms, not a quiet input. The gain stays. The two capsules differ
+by 0.8-0.9 dB (MIC2 lower) with correlation 0.987, and the beam's gain
+match read 0.9-1.1 dB on the same files.
+
+**Where the energy is.** 99% under 1 kHz on the 13 s take (67% under
+250 Hz: the fridge, and handling), 90% on the 5 s one -- the band the
+beam cannot act on at 34 mm. In 1-4 kHz, L-R sat only 4 dB under L+R:
+diffuse room noise and capsule noise, largely uncorrelated between the
+two, right at the detector's ratio.
+
+**The fault.** Run offline over the stereo takes, 5109's beam came out
+LOUDER than the plain sum: on the 13 s take peak +4.6 dB, 4-8 kHz
++2.4 dB, 8-16 kHz +4.6 dB. It adapted on 3% of the take, and in those
+moments the error it chased was the hum, which u cannot model at any
+weight; the weights went to their bound, and between times they
+carried u -- mostly uncorrelated noise -- into the output. beamtest's
+flat-spectrum sources could not show this.
+
+**The fix, in two parts.**
+
+1. The canceller is confined to 1-8 kHz. The reference is u band-passed
+   (second-order Butterworth each side); the output is the delayed sum
+   minus the filter on that, so nothing outside the band can be put
+   back. Adaptation minimises the output's error in the band,
+   BP(b) - w * BP(BP(u)): b band-passed once, u twice, the
+   filtered-reference form. A first attempt replaced the sum's band with
+   the residual instead; a recursive band-pass is not phase-complementary
+   to the raw signal, and in-band cancellation fell from 30 dB to 9.
+2. While not adapting, the weights relax to zero over ~3 s (applied
+   every 16 samples). Kept weights add u's noise and are wrong after
+   the tablet turns -- the stale-weights point raised after 5109's run.
+
+On the board's takes now (tools/beamcheck.c, the sum at the beam's own
+gain match): 1-4 kHz -1.5 dB on both, 4-8 kHz -1.2 and +0.4 dB (the
+latter at -68 dBFS), everything else within 0.3 dB, peaks -0.5 and
++0.8 dB. In beamtest: 1-8 kHz side noise -26 to -28 dB (from 30-33:
+the band edges), the cone unchanged, a talker ahead with side noise
+14.1 dB better in 1-8 kHz, weights 20 dB down after 2.5 s of quiet.
+White noise now comes down only by the band's share (-5 dB, 2 dB beyond
+the sum): above 8 kHz is the plain sum, by design.
+
+**The model that did not reproduce it.** A hum from one side, bursts
+from the other, uncorrelated noise at -46 dBFS: 5109 failed it on some
+noise draws (+1.1 dB in 1-4 kHz) and passed on others. It stays in
+beamtest as a guard -- never louder than the sum in any band, or at the
+peak -- and says it is not a reproduction.
+
+**tools/beamcheck.c** is: beam.c over a decoded STEREO recording,
+against the plain sum, by band. Built and run on the host; its header
+has the flac command. The recordings themselves are not in the tree.
+
+**Cost.** 2.0 KB of code (from 1.2). 74 M instructions per second of
+audio in the worst case under qemu (from 49): about 27% of a core by
+5040's calibration, on rec_enc.
+
+Compiled at -O2 -Werror against ESP-IDF 5.5.1 headers. Not on the
+board; the next beam recording's `adapted` figure and a beamcheck of a
+STEREO take of the same scene are the comparison.

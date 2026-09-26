@@ -58,16 +58,27 @@ static double gauss(void)
 
 /* A source signal: white noise, or band-passed by a one-pole low-pass
  * and a one-pole high-pass. */
-enum { WHITE, SPEECH, MIDBAND };
+enum { WHITE, SPEECH, MIDBAND, LOWHUM };
 static void make_source(double *x, int n, int kind, double rms)
 {
-    double lp = 0, hp_y = 0, hp_x = 0, e = 0;
+    double lp = 0, lp2 = 0, lp3 = 0, hp_y = 0, hp_x = 0, e = 0;
     /* SPEECH ~300 Hz-4 kHz; MIDBAND ~1-8 kHz, a TV or a second voice
      * where the canceller claims to work. */
-    const double la = kind == SPEECH ? 0.42 : 0.65, ha = kind == SPEECH ? 0.96 : 0.88;
+    /* LOWHUM: ~20-300 Hz, a fridge or handling, where the board's
+     * recordings put 67-99% of their energy. */
+    const double la = kind == SPEECH ? 0.42 : kind == LOWHUM ? 0.04 : 0.65;
+    const double ha = kind == SPEECH ? 0.96 : kind == LOWHUM ? 0.997 : 0.88;
     for (int i = 0; i < n; i++) {
         double v = gauss();
-        if (kind != WHITE) {
+        if (kind == LOWHUM) {
+            /* Three poles, so that above 1 kHz it is under the
+             * microphones' own noise -- the board's case: L-R in 1-4 kHz
+             * was self-noise, as loud as L+R there, while the hum
+             * dominated below. That is what made the first canceller
+             * adapt at all while the hum was on. */
+            lp += la * (v - lp); lp2 += la * (lp - lp2); lp3 += la * (lp2 - lp3);
+            v = lp3;
+        } else if (kind != WHITE) {
             lp += la * (v - lp);
             const double y = ha * (hp_y + lp - hp_x);
             hp_y = y; hp_x = lp;
@@ -111,12 +122,14 @@ static void add_source(const double *src, int n, double deg, double rgain,
     free(a); free(b);
 }
 
+static double s_self_noise = 3e-5;     /* ~-90 dBFS unless a test raises it */
+
 static void to_frames(const double *ml, const double *mr, int n, int32_t *fr)
 {
     s_seed ^= 0x9e3779b9u;
     for (int i = 0; i < n; i++) {
-        /* self-noise near -90 dBFS, independent per microphone */
-        const double l = ml[i] + 3e-5 * gauss(), r = mr[i] + 3e-5 * gauss();
+        /* self-noise, independent per microphone */
+        const double l = ml[i] + s_self_noise * gauss(), r = mr[i] + s_self_noise * gauss();
         fr[2 * i]     = (int32_t)lrint(fmax(-1, fmin(1, l)) * 8388607.0);
         fr[2 * i + 1] = (int32_t)lrint(fmax(-1, fmin(1, r)) * 8388607.0);
     }
@@ -148,6 +161,26 @@ static void bp_init(void)
         s_bp[k] = h * (0.5 - 0.5 * cos(2 * M_PI * (k + 0.5) / BP_TAPS));
     }
 }
+/* Power between f1 and f2, for any band (a fresh set of taps). */
+static double band_pow_f(const int32_t *x, int from, int to, int stride, int off,
+                         double f1, double f2)
+{
+    double h[BP_TAPS];
+    const double a = f1 / FS, b = f2 / FS;
+    for (int k = 0; k < BP_TAPS; k++) {
+        const double t = k - (BP_TAPS - 1) / 2.0;
+        h[k] = (t == 0 ? 2 * (b - a) : (sin(2 * M_PI * b * t) - sin(2 * M_PI * a * t)) / (M_PI * t))
+             * (0.5 - 0.5 * cos(2 * M_PI * (k + 0.5) / BP_TAPS));
+    }
+    double e = 0;
+    for (int i = from; i < to; i++) {
+        double acc = 0;
+        for (int k = 0; k < BP_TAPS; k++) acc += h[k] * (x[(i - k) * stride + off] / 8388608.0);
+        e += acc * acc;
+    }
+    return e / (to - from);
+}
+
 static double band_pow(const int32_t *x, int from, int to, int stride, int off)
 {
     double e = 0;
@@ -202,15 +235,16 @@ int main(void)
      * something to work with where L-R has energy: above ~1 kHz, and not
      * near c/d = 10 kHz where a side source is a whole wavelength across
      * the pair and vanishes from L-R too. 1-8 kHz is the band it claims,
-     * and gets the hard number; white noise, with half its power above
-     * 8 kHz, gets a softer one. Measured on the board-free model: 21-24
-     * dB off 1-8 kHz, about 5 dB below 1 kHz, 7 dB at 8-12 kHz.
+     * and gets the hard number. Since 5111 the canceller is confined to
+     * that band, so white noise -- two thirds of its power outside it --
+     * only comes down by the band's share, a couple of dB beyond the sum.
      */
     printf("  noise from the side\n");
     for (int a = 0; a < 6; a++) {
         const double deg = (a % 3) == 0 ? 90 : (a % 3) == 1 ? -60 : 40;
         const int kind = a < 3 ? MIDBAND : WHITE;
-        const double want = kind == MIDBAND ? -15 : -8;
+        const double want = kind == MIDBAND ? -15 : -4;
+        const double better = kind == MIDBAND ? 5 : 1.5;
         make_source(nse, N, kind, 0.05);
         memset(ml, 0, sizeof(double) * N); memset(mr, 0, sizeof(double) * N);
         add_source(nse, N, deg, 1.0, ml, mr);
@@ -231,7 +265,7 @@ int main(void)
                kind == MIDBAND ? "1-8 kHz" : "white  ", deg, db(fixed / in), db(gsc / in),
                beam_adapt_pct(&bs));
         CHECK(db(gsc / in) < want, "%+.0f deg: canceller only %.1f dB", deg, db(gsc / in));
-        CHECK(db(gsc / fixed) < -5, "%+.0f deg: canceller %.1f dB better than the sum only",
+        CHECK(db(gsc / fixed) < -better, "%+.0f deg: canceller %.1f dB better than the sum only",
               deg, -db(gsc / fixed));
         CHECK(beam_adapt_pct(&bs) > 50, "%+.0f deg: adapted only %u%%", deg, beam_adapt_pct(&bs));
     }
@@ -262,10 +296,12 @@ int main(void)
         int32_t *yt = malloc(sizeof(int32_t) * N), *yn = malloc(sizeof(int32_t) * N);
         beam_process(&t, ft, yt, N);
         beam_process(&z, fn, yn, N);
-        const double tin = pow_i32(ft, FS, N, 2, 0), nin = pow_i32(fn, FS, N, 2, 0);
-        const double tout = pow_i32(yt, FS, N, 1, 0), nout = pow_i32(yn, FS, N, 1, 0);
+        /* In the canceller's band: the noise's out-of-band part passes
+         * as the plain sum, by design (5111). */
+        const double tin = band_pow(ft, FS, N, 2, 0), nin = band_pow(fn, FS, N, 2, 0);
+        const double tout = band_pow(yt, FS, N, 1, 0), nout = band_pow(yn, FS, N, 1, 0);
         const double gain_t = db(tout / tin), gain_n = db(nout / nin);
-        printf("    talker %+.1f dB, noise %+.1f dB: SNR up %.1f dB, adapted %u%% of the mix\n",
+        printf("    in 1-8 kHz: talker %+.1f dB, noise %+.1f dB: SNR up %.1f dB, adapted %u%% of the mix\n",
                gain_t, gain_n, gain_t - gain_n, pct);
         CHECK(fabs(gain_t) < 1.0, "the talker changed by %.1f dB", gain_t);
         CHECK(gain_t - gain_n > 6.0, "SNR improved only %.1f dB", gain_t - gain_n);
@@ -313,6 +349,79 @@ int main(void)
         const double g = db(band_pow(y, 3 * FS, N, 1, 0) / band_pow(fr, 3 * FS, N, 2, 0));
         printf("    noise  %+3d deg: %+.1f dB in 1-8 kHz\n", -deg, g);
         CHECK(g < -15, "noise at %d deg only %.1f dB", -deg, g);
+    }
+
+    /*
+     * 5111, from the board. Its recordings were 67-99% under 1 kHz -- a
+     * fridge, handling -- and in 1-4 kHz L-R sat only 4 dB under L+R:
+     * the room's diffuse noise and the capsules' own, largely
+     * uncorrelated between them, right at the detector's ratio. So the
+     * first canceller adapted now and then while the hum filled b,
+     * chased a low end u cannot model, and put u back into the output:
+     * on the board's 13 s take, run offline, +4.1 dB in 8-16 kHz and a
+     * peak 4.6 dB over the plain sum's. Modelled here: a steady hum from
+     * one side, short bursts from the other, and uncorrelated noise at
+     * -46 dBFS. The beam must never be louder than the plain sum in any
+     * band, or at its peak.
+     *
+     * A guard, not a reproduction: the 5109 canceller failed this model
+     * on some noise draws (1.1 dB over in 1-4 kHz) and passed on others.
+     * The reproduction is the board's own recording, through
+     * tools/beamcheck.c -- which is where this was found.
+     */
+    printf("  hum, side bursts, diffuse noise: never louder than the sum\n");
+    {
+        const int M = FS * 8;
+        double *hum = malloc(sizeof(double) * M), *bur = malloc(sizeof(double) * M);
+        double *hl = calloc(M, sizeof(double)), *hr = calloc(M, sizeof(double));
+        int32_t *hf = malloc(sizeof(int32_t) * 2 * M);
+        int32_t *ys = malloc(sizeof(int32_t) * M), *yb = malloc(sizeof(int32_t) * M);
+        make_source(hum, M, LOWHUM, 0.05);
+        make_source(bur, M, MIDBAND, 0.01);
+        for (int i = 0; i < M; i++) if ((i % FS) > FS / 5) bur[i] = 0;    /* 200 ms a second */
+        add_source(hum, M, 60, 1.0, hl, hr);
+        add_source(bur, M, -70, 1.0, hl, hr);
+        s_self_noise = 5e-3;                    /* ~-46 dBFS, uncorrelated */
+        to_frames(hl, hr, M, hf);
+        s_self_noise = 3e-5;
+        beam_init(&bs); beam_freeze(&bs, true); beam_process(&bs, hf, ys, M);
+        beam_init(&bs); beam_process(&bs, hf, yb, M);
+        int32_t ps = 0, py = 0;
+        for (int i = FS; i < M; i++) {
+            if (abs(ys[i]) > ps) ps = abs(ys[i]);
+            if (abs(yb[i]) > py) py = abs(yb[i]);
+        }
+        const double whole = db(pow_i32(yb, FS, M, 1, 0) / pow_i32(ys, FS, M, 1, 0));
+        const double peak = 20 * log10((double)py / ps);
+        printf("    beam vs sum: whole %+.2f dB, peak %+.2f dB", whole, peak);
+        CHECK(whole < 0.5, "louder than the sum overall by %.2f dB", whole);
+        CHECK(peak < 1.0, "peak %.2f dB over the sum's", peak);
+        static const double edges[4] = { 1000, 4000, 8000, 16000 };
+        for (int k = 0; k < 3; k++) {
+            const double d = db(band_pow_f(yb, FS, M, 1, 0, edges[k], edges[k + 1]) /
+                                band_pow_f(ys, FS, M, 1, 0, edges[k], edges[k + 1]));
+            printf(", %.0f-%.0f kHz %+.2f", edges[k] / 1000, edges[k + 1] / 1000, d);
+            CHECK(d < 0.5, "%.0f-%.0f Hz: %.2f dB louder than the sum", edges[k], edges[k + 1], d);
+        }
+        printf("\n");
+        free(hum); free(bur); free(hl); free(hr); free(hf); free(ys); free(yb);
+    }
+
+    /* 5111: and after the side source stops, the weights let go. */
+    printf("  a side source that stops is forgotten\n");
+    {
+        make_source(nse, N, MIDBAND, 0.05);
+        memset(ml, 0, sizeof(double) * N); memset(mr, 0, sizeof(double) * N);
+        add_source(nse, N / 2, 90, 1.0, ml, mr);   /* first half only */
+        to_frames(ml, mr, N, fr);
+        beam_init(&bs);
+        beam_process(&bs, fr, y, N / 2);
+        float w0 = 0; for (int i = 0; i < BEAM_TAPS; i++) w0 += bs.w[i] * bs.w[i];
+        beam_process(&bs, fr + N, y, N / 2);        /* 2.5 s of quiet */
+        float w1 = 0; for (int i = 0; i < BEAM_TAPS; i++) w1 += bs.w[i] * bs.w[i];
+        printf("    |w|^2 %.3f while it played, %.4f after 2.5 s of quiet (%.1f dB)\n",
+               w0, w1, 10 * log10(w1 / w0));
+        CHECK(10 * log10(w1 / w0) < -6, "weights only %.1f dB down after 2.5 s", 10 * log10(w1 / w0));
     }
 
     printf("  a talker alone does not teach it anything\n");
