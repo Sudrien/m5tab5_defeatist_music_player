@@ -13272,8 +13272,20 @@ void app_main(void)
     {
         usb_serial_jtag_driver_config_t usj = USB_SERIAL_JTAG_DRIVER_CONFIG_DEFAULT();
         usj.tx_buffer_size = 4096;
-        if (usb_serial_jtag_driver_install(&usj) == ESP_OK) {
+        const esp_err_t usj_err = usb_serial_jtag_driver_install(&usj);
+        if (usj_err == ESP_OK) {
             usb_serial_jtag_vfs_use_driver();
+        }
+        /* 5087: said, after the switch, so the line itself goes through
+         * whichever path is now in use. A cut line in a log with this
+         * saying `4096-byte` is the host not reading, not the buffer
+         * missing. */
+        if (usj_err == ESP_OK) {
+            ESP_LOGI(TAG, "console: USB-serial-JTAG driver, %u-byte TX buffer",
+                     (unsigned)usj.tx_buffer_size);
+        } else {
+            ESP_LOGW(TAG, "console: driver not installed (%s); unbuffered",
+                     esp_err_to_name(usj_err));
         }
     }
 

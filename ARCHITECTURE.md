@@ -12940,3 +12940,21 @@ change: nothing queued; no fade`. The fade body is unchanged and left
 at its indentation inside the new else, so the diff is the guard. Not
 host-tested (player.c). What to look for: pause, pick another station,
 and `stream requested` within a few tens of milliseconds of the tap.
+
+### 5087 -- The console says which path it is on
+
+Same log, line 197:
+
+    ... audio 30.37s, stalled 6I (233043) tab5_mp3: levelling: ...
+
+A line cut short again, on a build with 5082's 4 KB TX ring -- or
+without it: 5082 installs the driver and switches the console to it
+only if the install returns ESP_OK, and says nothing either way, so
+the log cannot tell a failed install from a host that stopped reading
+for 50 ms (the driver path drops too, once a write has waited that long
+without room). The install result is now logged just after the
+switch, before the banner: `console: USB-serial-JTAG driver, 4096-byte
+TX buffer`, or a warning naming the error. If the next log has the
+first line and still cuts lines, the loss is on the host side of the
+cable -- the monitor not reading -- and no buffer size fixes it. Not
+host-tested (player.c).
