@@ -340,6 +340,7 @@ run-favmatch: $(FAVMATCH_BIN)
 $(FLACENC_BIN): flacenctest.c ../main/flacenc.c ../main/flacenc.h
 	$(CC) $(WARNCFLAGS) -c flacenctest.c -o /dev/null
 	$(CC) $(WARNCFLAGS) -c ../main/flacenc.c -o /dev/null
+	$(CC) $(WARNCFLAGS) -std=gnu17 -include stdio.h -include stdlib.h -c ../main/flacenc.c -o /dev/null
 	$(CC) $(CFLAGS) -o $@ flacenctest.c ../main/flacenc.c $(LDFLAGS)
 
 run-flacenc: $(FLACENC_BIN)

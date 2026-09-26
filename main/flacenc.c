@@ -52,7 +52,7 @@ static inline void put(bw_t *w, uint32_t v, unsigned n)     /* 1..24 bits */
     }
 }
 
-static void putw(bw_t *w, uint32_t v, unsigned n)           /* 0..32 bits */
+static void put_wide(bw_t *w, uint32_t v, unsigned n)           /* 0..32 bits */
 {
     if (n > 24) { put(w, v >> 16, n - 16); put(w, v & 0xffff, 16); }
     else if (n) put(w, v, n);
@@ -186,7 +186,7 @@ static void subframe(flacenc_t *e, bw_t *w, const int32_t *x, unsigned n, unsign
     while (i < n && x[i] == x[0]) i++;
     if (i == n) {                                   /* CONSTANT */
         put(w, 0x00, 8);
-        putw(w, (uint32_t)x[0] & mask, sbps);
+        put_wide(w, (uint32_t)x[0] & mask, sbps);
         return;
     }
 
@@ -231,12 +231,12 @@ static void subframe(flacenc_t *e, bw_t *w, const int32_t *x, unsigned n, unsign
 
     if (best + 6 + (uint64_t)o * sbps >= (uint64_t)n * sbps) { /* VERBATIM */
         put(w, 0x02, 8);
-        for (i = 0; i < n; i++) putw(w, (uint32_t)x[i] & mask, sbps);
+        for (i = 0; i < n; i++) put_wide(w, (uint32_t)x[i] & mask, sbps);
         return;
     }
 
     put(w, (0x08 | o) << 1, 8);                     /* FIXED, order o */
-    for (i = 0; i < o; i++) putw(w, (uint32_t)x[i] & mask, sbps);
+    for (i = 0; i < o; i++) put_wide(w, (uint32_t)x[i] & mask, sbps);
     put(w, best_meth, 2);
     put(w, best_p, 4);
     const unsigned np = 1u << best_p, sz = n >> best_p;
@@ -254,7 +254,7 @@ static void subframe(flacenc_t *e, bw_t *w, const int32_t *x, unsigned n, unsign
             } else {
                 zeros(w, q);
                 put(w, 1, 1);
-                putw(w, u & km, k);
+                put_wide(w, u & km, k);
             }
         }
     }
@@ -357,7 +357,7 @@ static void streaminfo(const flacenc_t *e, uint8_t *o)
     put(&w, e->ch - 1, 3);
     put(&w, e->bps - 1, 5);
     put(&w, (uint32_t)(e->total >> 32) & 0xF, 4);
-    putw(&w, (uint32_t)e->total, 32);
+    put_wide(&w, (uint32_t)e->total, 32);
     memset(w.p, 0, 16);                             /* MD5 not computed */
 }
 

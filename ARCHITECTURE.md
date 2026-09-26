@@ -13626,3 +13626,15 @@ reference `flac` 1.5.0 under `-t`.
 
 Compiled into the firmware and called by nothing yet; the recorder is
 the caller. Not on the board.
+
+### 5105 -- putw() is newlib's
+
+5104 did not build: flacenc.c's 32-bit bit writer was called `putw`,
+and newlib's stdio.h declares `int putw(int, FILE *)`. The firmware
+compiles as gnu17 and stdio.h arrives through esp_heap_caps.h ->
+esp_err.h. The host suite missed it because it compiles `-std=c11`,
+which hides putw() -- and the host file never included stdio.h at all.
+
+Renamed `put_wide`. The flacenc warning pass in texttest now also
+compiles the file as gnu17 with stdio.h and stdlib.h forced in, which
+reproduces the board's error on 5104 and is clean on this.
