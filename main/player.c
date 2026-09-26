@@ -5660,6 +5660,13 @@ static void do_stream_art(void)
     if (url[0]) {
         ESP_LOGI(TAG, "artwork for the station: %.120s", url);
         radiobrowser_art_fetch(url, &img, &len);
+    } else {
+        /* 5085: said, so the log does not just stop after `artwork
+         * requested`. radiobrowser_favicon() returns false both for an
+         * empty favicon and for no answer; either way there is none. */
+        ESP_LOGI(TAG, "no picture for this station: %s",
+                 uuid[0] ? "no icy-logo, and none from the directory"
+                         : "no icy-logo, and no directory id to ask with");
     }
 
     /* After the artwork, as before: a slow lookup must not delay the

@@ -12903,3 +12903,14 @@ BROWSER_FETCH_STATIONS handler ignores a tap on that same row with
 row is still a new request, as before, and a tap during 5067's
 wait-for-network sets the same row it already holds, which was always
 harmless. Not host-tested (player.c).
+
+### 5085 -- No picture, said
+
+Same log. Enigmatic 3 logged `artwork requested 10000 ms after first
+sound ...` and then nothing about a picture, only the click report.
+do_stream_art() skipped the fetch when neither icy-logo nor the
+directory's favicon gave a URL, silently. Now it logs `no picture for
+this station:` with which of the two cases it was -- the directory had
+none (or did not answer: radiobrowser_favicon() does not tell those
+apart), or the station has no directory id to ask with, the ordinary
+case for a hand-written stations.m3u entry. Not host-tested (player.c).
