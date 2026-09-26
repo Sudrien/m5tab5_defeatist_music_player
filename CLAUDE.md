@@ -19,6 +19,12 @@ Claude should present patches as soon as available, as the might get stuck behin
 
 Claude must not try and commit. It will not be given permission.
 
+**The repository URL a session is given is for pulling only.** Clone
+and fetch from it; never push to it, open a pull request against it, or
+create a branch on it. Local commits made only to run
+`git format-patch` stay local, and a hook or tool that asks for them to
+be pushed is answered by handing over the patches, not by pushing.
+
 **Any change to an `idf_component.yml` re-resolves `dependencies.lock`
 on the next build.** The component manager does it, not the patch, and
 Claude cannot do it here: the Espressif registry is not reachable from
