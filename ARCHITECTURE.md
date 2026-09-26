@@ -13471,3 +13471,82 @@ fetch. The decode is at idle priority, so the cover appears whenever
 spare CPU allows, and it is repeated each time the settings panel closes
 and the cover is redrawn. If either is too slow, the cap goes back
 down, and the numbers will say how far.
+
+### 5077-5103 on the board, and what is open
+
+Where one session's series ended (v0.4.0-111, pushed through 5103). Each
+line is what the board log showed, not what the patch intended.
+
+**Confirmed on hardware**
+
+- *sdkconfig took* (5077's drift check silent on every build since):
+  64K reserve pool, L2_TO_L3_COPY, PSRAM staging (5078, 5079), TCP
+  window 16384 (5098, on the `ready:` line), USB DMA in PSRAM (5100,
+  its own line at install).
+- *Wi-Fi transport*: no `mempool OOM`, no `dma_alloc` failure, no link
+  death since 5079 + 5092 (`esp_hosted packet buffers from PSRAM`),
+  including 320 and 512 kbit/s streams.
+- *Far stations* (5098): Спокойное радио, 320 kbit/s from Russia, 257-274
+  kbit/s before on a 100 Mbit cable, 100% after with peaks of 420; Radio
+  ROKS (Ukraine) 99-101% on Wi-Fi and both adapters, peaks 436/523.
+- *Networks* (5096, 5099, 5100): the directory and the stream wait for
+  a cable as well as Wi-Fi; SNTP starts on `wired network up`; the
+  Realtek RTL8152 (CDC-ECM) attaches with Wi-Fi up and a station
+  playing. Live handoffs, all inaudible: Wi-Fi to Realtek with 15.2 s in
+  hand, Realtek pulled and back to Wi-Fi in 2.5 s, ASIX plugged and
+  taken over; each reconnect spliced the server's repeat (21-25 KB).
+  **The Realtek path is now on hardware**, which the v0.4.0 notes above
+  said it was not.
+- *Clock* (5101, 5102): the 2028-12-02 floor came from a card-root entry
+  via cardtime.c. The first NTP reply after 5101 corrected it and the
+  settings file compacted. Records and syncs have read 2026-09-26 since.
+- *Artwork* (5088, 5093-5095, 5103): favicons (ICO 64x64 at 8x, PNG
+  32x32 at 17x); Спокойное радио's 1.37 MB logo, which is a 32x32 PNG
+  with a 1,367,586-byte iCCP chunk and 1,655 bytes of picture, fetched
+  in 17 s beside the stream at 99-101% and decoded in 251 ms; the
+  Firmament FLAC's 3000x3000 JPEG in software at 1/4 in 9.9 s at idle
+  priority, no watchdog, audio uninterrupted (5.8 s and an IDLE0
+  watchdog before 5093). Same-hash covers come from the kept frame.
+- *UI*: double taps on a fetching row ignored (5084); `no picture for
+  this station` (5085); a station picked while paused does not fade
+  (5086); an unfinished fade is cancelled at a station change (5090).
+- *5097* named the one allocation failure seen (the USB descriptor
+  list) and has printed nothing since: 0 failures in every log after
+  5100.
+
+**Not exercised**: 5091 (pause during a rate-change drain -- needs a
+file-to-file sample-rate change with a pause inside the drain), and
+5099's other half (Wi-Fi off keeps SNTP while a cable has link; no log
+line either way).
+
+**Open**
+
+- *DMA-capable RAM with Wi-Fi up is thin, and Wi-Fi is why.* The heap
+  maps: 63.7 KB DMA-capable free at boot, 15.6-18 KB (largest 8-9 KB) at
+  the first station on Wi-Fi, with the 64K reserve pool down to ~230
+  bytes; 50.7 KB on a cable with Wi-Fi off. Nothing fails now that USB
+  is out of it, but the next internal DMA consumer will find the same
+  wall. `CONFIG_HEAP_TASK_TRACKING` for one diagnostic run would say whose
+  it is (5097 prints per-task totals when it is on).
+- *netstream's `internal free` misleads*: it counts 31.8 KB of LP RAM and
+  7.7 KB of TCM, which no DMA can use. The DMA-capable figure (as on the
+  artwork line) is the one that has predicted every failure.
+- *Cable DHCP is slow*: link to address took 9.5-10 s on both adapters,
+  every time. A stream dropped while waiting for a cable waits that long;
+  whether it is the router or the stack is not known.
+- *The card entry dated 2028* was never named in a log (5101's
+  `raised ... (<name>)` line came after it stopped firing). If it is
+  still on the card, a boot that never reaches NTP will raise the floor
+  again, and the next NTP reply will correct it.
+- *An MP3 with no Xing header and no sidecar* opens by reading the whole
+  file: Frostpunk's 320 kbps track, 9.7 MB, 2846 ms to first sound. A
+  sidecar was written afterwards; whether the second open uses it for
+  the index is unchecked.
+- Carried from before, not touched here: the directory fetch blocks the
+  stream loop; a radio restart waits 5-10 s on RPC timeouts; the
+  amplifier blips on during a paused station change.
+
+**Not bugs**: the brownout trace at a plug pull (the supply cannot tell
+it from a sag); the ASIX's `EP 0 STALL` and 12-byte descriptor at
+enumeration (it attaches every time); `DSI underruns: 1` during heavy
+decode, once or twice a session.
