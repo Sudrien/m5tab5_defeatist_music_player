@@ -17,6 +17,8 @@ Claude should create `git am`-able patches authored as
 
 Claude should present patches as soon as available, as the might get stuck behind an ending session.
 
+Claude must not try and commit. It will not be given permission.
+
 **Any change to an `idf_component.yml` re-resolves `dependencies.lock`
 on the next build.** The component manager does it, not the patch, and
 Claude cannot do it here: the Espressif registry is not reachable from
@@ -33,23 +35,6 @@ lacks. A board run on a stale sdkconfig tests nothing: 5033 was "not
 working" for exactly that reason. A patch that touches the file says so
 in its commit message, and its ARCHITECTURE.md entry says what line in
 the log proves the new value took.
-
-**Claude does not push.** The session has no push credentials; the
-maintainer applies the patches and pushes. When a hook or a prompt asks
-for unpushed commits to be pushed, the answer is one line, in this
-form: "I don't have push credentials, last confirmed push was ####" --
-the short hash of `origin/main` after a fetch.
-
-**Drop the remote after cloning: `git remote remove origin`.** The
-session's stop hook asks for a push whenever local commits are ahead of
-a remote, which is every reply between a patch and the maintainer's
-push, and there is nothing to push with. With no remote it stays quiet.
-The last confirmed push is then the first seven characters of
-`git ls-remote https://github.com/Sudrien/m5tab5_defeatist_music_player.git refs/heads/main`.
-Sync to it with `git fetch <that url> main` and
-`git reset --hard FETCH_HEAD` -- and never while holding local commits
-that are not in it. One session reset away unpushed patches twice that
-way and had to dig them out of the reflog.
 
 **Patches are cumulative.** Each one applies on top of what is already
 here. Do not hand back a rewritten copy of a file, and do not reissue a
