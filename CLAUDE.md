@@ -108,7 +108,7 @@ through. Restructuring an existing function is sometimes the smallest
 correct change -- when it is, say so in the commit message rather than
 letting it look like a small diff.
 
-## Where the rest of it went
+No not suggest updates to the Tab5's ESP-C6 or esp hosted. They can not be updated.
 
 `ARCHITECTURE.md` has everything else: why there are two decoders, how
 the screen and the touch layers work, the sidecar and ReplayGain, the
