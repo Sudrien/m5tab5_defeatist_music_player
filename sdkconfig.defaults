@@ -510,3 +510,30 @@ CONFIG_LWIP_L2_TO_L3_COPY=y
 # If Wi-Fi does not come up, or `Failed to read data` appears, this is
 # the first suspect: take the line out and say so.
 CONFIG_EH_HOST_PORT_DMA_PREFER_SPIRAM=y
+
+# ---------------------------------------------------------------------------
+# 5098: A TCP WINDOW FOR FAR-AWAY STATIONS.
+#
+# lwIP's default receive window is 5760 bytes, four segments. A TCP
+# connection cannot move more than one window per round trip, so the
+# ceiling is 5760 * 8 / RTT: about 720 kbit/s to a server 64 ms away,
+# 270 kbit/s to one 170 ms away. The board has shown both. WNZK peaked
+# at 723 on the cable; Спокойное радио (listen9.myradio24.com, a 320
+# kbit/s stream from Russia) ran at 257-274 kbit/s on a 100 Mbit cable
+# for a minute, including through the server's 64 KB connect burst,
+# and the queue went from 15 s to 8 s. The link was idle; the window
+# was the limit.
+#
+# The note above says why 0044's 64 KB window was taken out, and the
+# condition for trying again: the transport's buffers somewhere other
+# than internal RAM. 5078 (L2_TO_L3_COPY: queued frames are PSRAM
+# pbufs), 5079 (SDIO staging buffers in PSRAM) and 5092 (packet buffers
+# in PSRAM, zero mempool OOM at 512 kbit/s) are that. This is a quarter
+# of 0044's window -- 16 KB covers 320 kbit/s to 400 ms of round trip
+# and 512 kbit/s to 250 ms -- and a quarter of its mailbox, sized so the
+# window's eleven segments can all be queued for the reader.
+#
+# rm sdkconfig before building. Proof it took: netstream's `ready:` line
+# ends `TCP window 16384`.
+CONFIG_LWIP_TCP_WND_DEFAULT=16384
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=16

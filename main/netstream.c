@@ -1630,9 +1630,10 @@ bool netstream_init(void)
      * experiment it came from. A number that has to be inferred from
      * the binary is not evidence. */
     ESP_LOGI(TAG, "ready: %d KB ring + %u byte working set in PSRAM, "
-                  "%d byte reads, internal free %u",
+                  "%d byte reads, internal free %u, TCP window %d",
              NETSTREAM_RING_BYTES / 1024, (unsigned)work, READ_CHUNK,
-             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+             (int)CONFIG_LWIP_TCP_WND_DEFAULT);
     return true;
 }
 

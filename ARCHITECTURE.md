@@ -13307,3 +13307,34 @@ built under IDF.
 What to send back: a log with SD, USB drive and Wi-Fi up, a station
 playing, and the adapter plugged in -- the `boot` and `first station
 playing` maps, and whatever the failure prints.
+
+### 5098 -- A TCP window for far-away stations
+
+The board log after 5096: Спокойное радио, 320 kbit/s from
+listen9.myradio24.com, over the Realtek adapter on a 100 Mbit cable,
+ran at 257-274 kbit/s (80-85%) from the first second to the last, and
+the queue fell from 15 s to 8 s in a minute. Nothing else was busy and
+there were no allocation failures. The server's 64 KB connect burst
+(`icy-burst: 64000`) arrived at the same rate as everything else, which
+a slow server would not do and a window limit would.
+
+lwIP's default receive window is 5760 bytes. One window per round trip
+gives 5760 * 8 / RTT: 723 kbit/s is WNZK's cable peak (about 64 ms
+away), 270 kbit/s is 170 ms, which is Russia from here. Earlier in this
+series the window was set aside as an explanation because WNZK kept up
+at 512 kbit/s; WNZK is near, so it could, and that proved nothing about
+a far server.
+
+sdkconfig.defaults: `CONFIG_LWIP_TCP_WND_DEFAULT=16384`,
+`CONFIG_LWIP_TCP_RECVMBOX_SIZE=16`. The 0044/0045 note sets the
+condition for a larger window -- the transport's buffers out of
+internal RAM -- and 5078, 5079 and 5092 met it. 16 KB, a quarter of
+0044's, covers 320 kbit/s to 400 ms and 512 kbit/s to 250 ms.
+
+netstream's `ready:` line gains `TCP window N`: 16384 is the proof it
+took (`rm sdkconfig` first). What to watch: the same station over the
+cable should read at or above 100%, and `internal free` on the
+netstream lines should not fall more than about 16 KB from 5096's
+~76-80 KB -- if the USB Ethernet driver's frames are not copied into
+PSRAM pbufs, the window is paid for in internal RAM, and this is where
+it shows.
