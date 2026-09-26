@@ -13439,3 +13439,10 @@ line names it.
 
 clocktest.c's copy of the floor gains the NTP path, with a case
 reproducing this. Host tests: clocktest 80/0, cardtimetest 20/0.
+
+### 5102 -- The entry name cut to fit, said so to the compiler
+
+5101 did not build: `snprintf(s_best_name, 64, "%s", e->d_name)` is
+`-Werror=format-truncation` against dirent's 256-byte d_name. The name
+is for a log line, so a long one is cut at 63 bytes, and `%.63s` tells
+GCC so.

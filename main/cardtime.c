@@ -72,7 +72,7 @@ int64_t cardtime_root_candidate(const char *mount, int64_t ref)
         const int64_t cand = cardtime_filter((int64_t)st.st_mtime, ref);
         if (cand > best) {
             best = cand;
-            snprintf(s_best_name, sizeof(s_best_name), "%s", e->d_name);
+            snprintf(s_best_name, sizeof(s_best_name), "%.63s", e->d_name);
         } else if (cand == 0 && (int64_t)st.st_mtime > ref + CARDTIME_MAX_AHEAD_S) {
             /*
              * Worth one line each. A file dated past the ceiling is the
